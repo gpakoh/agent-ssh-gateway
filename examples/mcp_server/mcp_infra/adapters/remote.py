@@ -22,6 +22,7 @@ from typing import Any
 import httpx
 from tool_results import tool_error, tool_success, validate_pagination
 
+from examples.mcp_client_remote.fleet.gitea_client import GiteaMutationOutcomeUnknown
 from examples.mcp_client_remote.fleet.github_client import (
     normalize_list_response,
 )
@@ -377,6 +378,79 @@ async def _gitea_pr_branch_tracking(
     return tracking
 
 
+_MERGE_RECONCILE_ATTEMPTS = 3
+_MERGE_RECONCILE_DELAY_SECONDS = 0.05
+
+
+def _valid_commit_sha(value: Any) -> str | None:
+    text = str(value or "").strip().lower()
+    if len(text) != 40 or any(ch not in "0123456789abcdef" for ch in text):
+        return None
+    return text
+
+
+def _merge_exception_is_ambiguous(exc: BaseException) -> bool:
+    """Return whether a failed merge request may still have mutated Gitea."""
+    if isinstance(
+        exc,
+        (GiteaMutationOutcomeUnknown, asyncio.CancelledError, httpx.TransportError, TimeoutError),
+    ):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        response = exc.response
+        return response is not None and response.status_code >= 500
+    return False
+
+
+async def _reconcile_merge_postcondition(
+    client: Any,
+    owner: str,
+    repo: str,
+    pull_number: int,
+    *,
+    expected_head_sha: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Boundedly prove a merge after crossing the irreversible mutation boundary."""
+    last_observed: dict[str, Any] = {}
+    last_read_error_class: str | None = None
+    attempts = 0
+    for attempt in range(_MERGE_RECONCILE_ATTEMPTS):
+        attempts = attempt + 1
+        try:
+            pr = await client.get_pull_request(owner, repo, pull_number)
+        except Exception as exc:
+            last_read_error_class = type(exc).__name__
+        else:
+            head = pr.get("head") or {}
+            observed_head_sha = _valid_commit_sha(head.get("sha"))
+            merge_commit_sha = _valid_commit_sha(pr.get("merge_commit_sha"))
+            last_observed = {
+                "state": pr.get("state"),
+                "merged": pr.get("merged"),
+                "head_sha": observed_head_sha,
+                "merge_commit_sha": merge_commit_sha,
+            }
+            if (
+                pr.get("merged") is True
+                and observed_head_sha == expected_head_sha
+                and merge_commit_sha is not None
+            ):
+                return pr, {
+                    "reconciliation_attempts": attempts,
+                    "observed": last_observed,
+                }
+        if attempt + 1 < _MERGE_RECONCILE_ATTEMPTS:
+            await asyncio.sleep(_MERGE_RECONCILE_DELAY_SECONDS)
+
+    details: dict[str, Any] = {
+        "reconciliation_attempts": attempts,
+        "observed": last_observed,
+    }
+    if last_read_error_class:
+        details["last_read_error_class"] = last_read_error_class
+    return None, details
+
+
 def _minimize_github_repo(data: dict[str, Any]) -> dict[str, Any]:
     """Trim a GitHub repo payload to non-PII fields (mirrors _minimize_gitea_repo)."""
     owner = data.get("owner") or {}
@@ -594,6 +668,9 @@ async def gitea_get_pull_request(owner: str, repo: str, pull_number: int) -> dic
         async with _server_gitea_client()(token) as client:
             raw = await client.get_pull_request(owner, repo, pull_number)
             data = minimize_issue_payload(raw, provider="gitea")
+            data["merged"] = raw.get("merged")
+            data["merge_commit_sha"] = _valid_commit_sha(raw.get("merge_commit_sha"))
+            data["mergeable"] = raw.get("mergeable")
             data["branch_tracking"] = await _gitea_pr_branch_tracking(
                 client,
                 owner,
@@ -862,33 +939,77 @@ async def gitea_merge_pull_request(
                     source="gitea",
                 )
 
-            await client.merge_pull_request(
+            mutation_error: BaseException | None = None
+            try:
+                await client.merge_pull_request(
+                    owner,
+                    repo,
+                    pull_number,
+                    expected_head_sha=expected_head_sha,
+                    method=method,
+                )
+            except asyncio.CancelledError as exc:
+                # Cancellation after entering the POST await is an ambiguous
+                # mutation outcome, not evidence that the write did not happen.
+                # Consume this delivered cancellation so bounded postcondition
+                # reconciliation can run; a later cancellation request may still
+                # interrupt normally.
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    current_task.uncancel()
+                mutation_error = exc
+            except Exception as exc:
+                if not _merge_exception_is_ambiguous(exc):
+                    raise
+                mutation_error = exc
+
+            merged_pr, reconciliation = await _reconcile_merge_postcondition(
+                client,
                 owner,
                 repo,
                 pull_number,
                 expected_head_sha=expected_head_sha,
-                method=method,
             )
-            merged_pr = await client.get_pull_request(owner, repo, pull_number)
-            if merged_pr.get("merged") is not True:
+            if merged_pr is None:
+                details: dict[str, Any] = {
+                    "expected_head_sha": expected_head_sha,
+                    "base_ref": base_ref,
+                    "base_sha": actual_base_sha,
+                    "method": method,
+                    "mutation_started": True,
+                    **reconciliation,
+                }
+                if mutation_error is not None:
+                    details["mutation_error_class"] = type(mutation_error).__name__
+                    if isinstance(mutation_error, httpx.HTTPStatusError):
+                        details["mutation_http_status"] = mutation_error.response.status_code
                 return tool_error(
                     tool="gitea_merge_pull_request",
-                    code="MERGE_NOT_CONFIRMED",
-                    message="Gitea accepted the merge request but merged=true was not observed",
-                    retryable=True,
+                    code="MUTATION_OUTCOME_UNKNOWN",
+                    message="merge mutation was attempted but its server-side outcome could not be proven",
+                    retryable=False,
+                    hint="Do not retry the merge mutation. Re-read the pull request until merged state and merge_commit_sha are authoritative, then reconcile from that state.",
+                    details=details,
                     source="gitea",
                 )
+
+            merge_commit_sha = _valid_commit_sha(merged_pr.get("merge_commit_sha"))
+            assert merge_commit_sha is not None
             data = {
                 "number": pull_number,
                 "merged": True,
+                "outcome": "completed_after_ambiguous_response"
+                if mutation_error is not None
+                else "completed",
                 "head_sha": expected_head_sha,
                 "base": base_ref,
                 "base_sha": actual_base_sha,
                 "method": method,
                 "branch_tracking": branch_tracking,
                 "outdated_base_accepted": branch_tracking["branch_is_current"] is not True,
-                "merge_commit_sha": merged_pr.get("merge_commit_sha"),
+                "merge_commit_sha": merge_commit_sha,
                 "html_url": merged_pr.get("html_url"),
+                "reconciliation_attempts": reconciliation["reconciliation_attempts"],
             }
     except Exception as exc:
         return _remote_api_error("gitea_merge_pull_request", "gitea", exc)
