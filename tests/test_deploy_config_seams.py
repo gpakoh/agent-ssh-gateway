@@ -1124,8 +1124,12 @@ class TestHostSmokeCheckoutIsGiteaLocal:
         assert self._single_line(lines, 'gitea_token="$GITEA_TOKEN"') < self._single_line(
             lines, "unset GITEA_TOKEN"
         )
+        # A safe fixed PATH must be in place before the credential is derived.
+        assert self._single_line(lines, 'export PATH="/usr/local/sbin') < self._single_line(
+            lines, 'auth_header="Authorization: Basic $('
+        )
         token_done = self._single_line(lines, "unset gitea_token")
-        for marker in ("compgen -e", "mktemp -d", "grep -qxE", "python3 - \"$REPO_URL\"", "git init -q"):
+        for marker in ("compgen -e", "mktemp -d", "grep -qxE", 'python3 -I -S - "$REPO_URL"', "git init -q"):
             assert token_done < self._single_line(lines, marker), (
                 f"raw token must be cleared before the first unrelated child ({marker})"
             )
@@ -1139,12 +1143,17 @@ class TestHostSmokeCheckoutIsGiteaLocal:
         )
         assert self._single_line(lines, "unset gitea_token") < self._single_line(lines, "compgen -e")
         assert self._single_line(lines, "git fetch") < self._single_line(lines, 'auth_header=""')
+        assert self._single_line(lines, 'auth_header=""') < self._single_line(
+            lines, "unset auth_header"
+        ), "the raw header must be unset promptly, right after the scoped fetch"
 
     def test_auth_header_is_complete_basic_authorization_header(self):
         run = self._checkout_run()
         assert 'auth_header="Authorization: Basic $(' in run
         assert "x-access-token:${gitea_token}" in run
         assert "base64" in run
+        assert 'tr -d \'\\r\\n\'' in run, "portable base64 must strip CR/LF"
+        assert "base64 -w0" not in run, "base64 -w0 is a GNU-ism; strip CR/LF with tr instead"
         assert run.count("Authorization: Basic ") == 1
         assert 'GIT_CONFIG_VALUE_0="$auth_header"' in run, (
             "the header must be passed to git by variable, never written literally"
@@ -1153,7 +1162,7 @@ class TestHostSmokeCheckoutIsGiteaLocal:
     def test_inherited_git_xdg_and_proxy_influences_neutralized_by_name_only(self):
         run = self._checkout_run()
         assert "for var_name in $(compgen -e); do" in run
-        assert "GIT_*|XDG_CONFIG_HOME|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|FTP_PROXY|NO_PROXY|http_proxy|https_proxy|all_proxy|ftp_proxy|no_proxy" in run
+        assert "GIT_*|XDG_CONFIG_HOME|SSH_ASKPASS|SSH_ASKPASS_REQUIRE|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|FTP_PROXY|NO_PROXY|http_proxy|https_proxy|all_proxy|ftp_proxy|no_proxy" in run
         assert 'unset "$var_name"' in run
         assert "printenv" not in run
         assert "env |" not in run and "env>" not in run and "/usr/bin/env" not in run
@@ -1164,6 +1173,9 @@ class TestHostSmokeCheckoutIsGiteaLocal:
         assert 'private_home="$(mktemp -d)"' in run
         assert 'chmod 700 "$private_home"' in run
         assert 'mkdir -p "$private_home/git-template"' in run
+        assert 'chmod 700 "$private_home/git-template"' in run, (
+            "the private template dir must be chmod-700 under the private HOME"
+        )
         assert 'export HOME="$private_home"' in run
         assert 'export GIT_TEMPLATE_DIR="$private_home/git-template"' in run
         assert "export GIT_CONFIG_GLOBAL=/dev/null" in run
@@ -1183,6 +1195,9 @@ class TestHostSmokeCheckoutIsGiteaLocal:
                 assert "$GITHUB_WORKSPACE/.git" in line or "$private_home" in line, (
                     "rm -rf is allowed only on the exact .git target and the private home"
                 )
+        assert self._single_line(lines, '[ -z "${GITHUB_WORKSPACE:-}" ]') < purge, (
+            "GITHUB_WORKSPACE must be validated as set/non-root before its .git is purged"
+        )
         assert purge < self._single_line(lines, "git init -q")
         assert self._single_line(lines, "git init -q") < self._single_line(lines, "git remote add origin")
         assert self._single_line(lines, "git remote add origin") < self._single_line(lines, "git fetch")
@@ -1204,6 +1219,8 @@ class TestHostSmokeCheckoutIsGiteaLocal:
             "https://gitea.example.com/org/repo.git?x=1",
             "https://gitea.example.com/org/repo.git#frag",
             "https://gitea.example.com",
+            "https://gitea.example.com/",
+            "https://gitea.example.com//",
             "https://gitea.example.com:abc/org/repo.git",
             "https://gitea.example.com:0/org/repo.git",
             "https://gitea.example.com:65536/org/repo.git",
@@ -1215,7 +1232,10 @@ class TestHostSmokeCheckoutIsGiteaLocal:
 
     def test_run_body_embeds_stdlib_only_no_network_url_validator(self):
         run = self._checkout_run()
-        assert 'python3 - "$REPO_URL" <<' in run
+        assert 'python3 -I -S - "$REPO_URL" <<' in run
+        assert "python3 - \"$REPO_URL\" <<" not in run, (
+            "the URL validator must run isolated (python3 -I -S), not from inherited env/site state"
+        )
         body = self._validator_module()
         assert "validate" in body and "urlsplit" in body["validate"].__code__.co_names
 
@@ -1232,7 +1252,7 @@ class TestHostSmokeCheckoutIsGiteaLocal:
         assert self._single_line(lines, "export GIT_CONFIG_COUNT=2") < fetch_idx < close_idx
         assert 'export GIT_CONFIG_KEY_0="http.${REPO_URL}.extraHeader"' in run
         assert 'export GIT_CONFIG_VALUE_0="$auth_header"' in run
-        assert 'export GIT_CONFIG_KEY_1="http.redirect"' in run
+        assert 'export GIT_CONFIG_KEY_1="http.${REPO_URL}.followRedirects"' in run
         assert 'export GIT_CONFIG_VALUE_1="false"' in run
         assert run.count("GIT_CONFIG_COUNT") == 1 and run.count("git fetch") == 1
 
