@@ -1191,6 +1191,101 @@ class TestAgentTaskStatus:
         assert result["next"]["job_status"] == {"job_id": "job-1"}
         assert "inspect_agent_task" not in result["next"]
 
+    def test_proxy_startup_rotation_snapshot_is_typed_not_running(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: running\n", encoding="utf-8")
+        (td / "attempt-state.json").write_text(
+            json.dumps(
+                {"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}
+            ),
+            encoding="utf-8",
+        )
+        (td / "agent-heartbeat.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "state": "running",
+                    "phase": "loop",
+                    "updated_at": "2026-09-03T12:00:00Z",
+                    "updated_epoch": now - 5,
+                    "runner_pid": 123,
+                    "exit_code": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (td / "proxy-status.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "provider_kind": "configured_provider",
+                    "attempt": 1,
+                    "max_attempts": 4,
+                    "last_error_class": "startup_stalled",
+                    "final_outcome": "rotating",
+                    "started_at": "2026-09-03T11:59:50Z",
+                    "updated_at": "2026-09-03T11:59:59Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (td / "agent-report.md").write_text("", encoding="utf-8")
+        for child in td.iterdir():
+            os.utime(child, (now - 10, now - 10))
+        os.utime(td / "agent-heartbeat.json", (now - 5, now - 5))
+        os.utime(td / "proxy-status.json", (now - 1, now - 1))
+
+        result = agent_task_status(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            now_epoch=now,
+            job_status=lambda job_id: {"job_id": job_id, "status": "running"},
+        )
+
+        assert result["verdict"] == "startup_stalled"
+        assert result["startup"]["phase"] == "startup"
+        assert result["startup"]["useful_agent_activity_seen"] is False
+        assert result["startup"]["proxy_rotation"]["attempt"] == 1
+        assert result["startup"]["proxy_rotation"]["max_attempts"] == 4
+        assert result["likely_hung"] is False
+        assert result["log_included"] is False
+        assert result["next"]["inspect_agent_task"]["task_id"] == task_id
+
+    def test_startup_timeout_snapshot_preserves_typed_verdict(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text(
+            "Status: startup-timeout\n", encoding="utf-8"
+        )
+        os.utime(td / "agent-status.md", (now - 10, now - 10))
+
+        result = agent_task_status(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            now_epoch=now,
+        )
+
+        assert result["terminal"] is True
+        assert result["verdict"] == "startup_timeout"
+        assert result["startup"]["startup_timeout"] is True
+        assert result["startup"]["phase"] == "startup"
+        assert result["log_included"] is False
+        assert result["next"]["inspect_agent_task"]["task_id"] == task_id
+        assert result["next"]["read_agent_report"]["task_id"] == task_id
+
     def test_likely_hung_snapshot_escalates_without_tail_call(self):
         now = 2_000
         calls: list[str] = []

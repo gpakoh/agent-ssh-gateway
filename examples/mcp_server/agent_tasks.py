@@ -2552,17 +2552,31 @@ def agent_task_status(
         semantic_activity=semantic_activity,
         runner_heartbeat_fresh=runner_heartbeat_fresh,
     )
+    startup = _agent_startup_diagnostics(
+        status=status_token,
+        status_text=status_text if status_text != "(not found)" else "",
+        log_stdout="",
+        files=files,
+        active=active,
+        now_epoch=now,
+        proxy_status=proxy_status,
+        failure=failure,
+    )
     likely_hung = bool(active and not terminal and isinstance(semantic_age, int) and semantic_age >= stale_after_seconds)
     if reconciliation.get("state") is not None:
         likely_hung = True
 
     failure_reason = failure.get("reason") if failure.get("valid") is True else None
-    if terminal and isinstance(failure_reason, str):
+    if startup.get("startup_timeout"):
+        verdict = "startup_timeout"
+    elif terminal and isinstance(failure_reason, str):
         verdict = failure_reason
     elif terminal:
         verdict = "finished"
     elif reconciliation.get("state") is not None:
         verdict = str(reconciliation["state"])
+    elif startup.get("dead_time_kind") == "opencode_startup":
+        verdict = "startup_stalled"
     elif likely_hung:
         verdict = "likely_hung"
     elif active:
@@ -2579,7 +2593,16 @@ def agent_task_status(
             "purpose": "cheap polling without log tail",
         },
     }
-    if verdict in {"lost_after_restart", "orphaned_attempt", "artifact_incomplete", "likely_hung", "needs_attention", "unknown"}:
+    if verdict in {
+        "lost_after_restart",
+        "orphaned_attempt",
+        "artifact_incomplete",
+        "startup_timeout",
+        "startup_stalled",
+        "likely_hung",
+        "needs_attention",
+        "unknown",
+    }:
         next_actions["inspect_agent_task"] = {
             "project": project,
             "task_id": task_id,
@@ -2608,6 +2631,7 @@ def agent_task_status(
         "proxy_status": proxy_status,
         "failure": failure,
         "acceptance": gate_ledger,
+        "startup": startup,
         "stale_after_seconds": stale_after_seconds,
         "terminal": terminal,
         "likely_hung": likely_hung,
