@@ -918,8 +918,9 @@ def gateway_git_commit(
     expected_branch: str | None = None,
     expected_head: str | None = None,
     expected_status_sha256: str | None = None,
+    expected_index_sha256: str | None = None,
 ) -> dict[str, Any]:
-    """Commit staged changes with optional branch/HEAD/status lease guards."""
+    """Commit staged changes with optional content-bound Git lease guards."""
     return run_tool(
         tool="git_commit",
         title="git commit",
@@ -930,6 +931,7 @@ def gateway_git_commit(
             expected_branch=expected_branch,
             expected_head=expected_head,
             expected_status_sha256=expected_status_sha256,
+            expected_index_sha256=expected_index_sha256,
         ),
         success_text="Committed changes.",
     )

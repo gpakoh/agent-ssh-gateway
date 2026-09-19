@@ -1418,6 +1418,25 @@ def _local_git_output(resolved: Path, args: list[str]) -> str | None:
             ["git", "-c", f"safe.directory={resolved}", *args],
             cwd=str(resolved),
             text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout
+
+
+def _local_git_bytes(resolved: Path, args: list[str]) -> bytes | None:
+    """Run a fixed read-only Git query and preserve stdout byte-for-byte."""
+    try:
+        completed = subprocess.run(
+            ["git", "-c", f"safe.directory={resolved}", *args],
+            cwd=str(resolved),
             capture_output=True,
             timeout=10,
             check=False,
@@ -1430,19 +1449,29 @@ def _local_git_output(resolved: Path, args: list[str]) -> str | None:
 
 
 def _project_git_state(resolved: Path) -> dict[str, Any]:
-    """Return host-path-free branch/HEAD/dirty metadata for lease-style guards."""
+    """Return host-path-free Git state plus a content-bound index lease digest.
+
+    ``status_sha256`` intentionally remains the porcelain-shape digest for
+    backwards-compatible diagnostics. ``index_sha256`` hashes Git's canonical
+    index listing (mode, blob object id, stage and exact path), so staged byte,
+    mode or rename-target changes alter the lease even when porcelain status
+    letters remain unchanged. ``git ls-files`` is read-only and creates no Git
+    objects, unlike ``git write-tree``.
+    """
     if not _is_real_git_repo(resolved):
         return {"available": False, "reason": "not_git_repo"}
 
     branch_raw = _local_git_output(resolved, ["rev-parse", "--abbrev-ref", "HEAD"])
     head_raw = _local_git_output(resolved, ["rev-parse", "HEAD"])
     status = _local_git_output(resolved, ["status", "--porcelain=v1"])
-    if branch_raw is None or head_raw is None or status is None:
+    index = _local_git_bytes(resolved, ["ls-files", "--stage", "-z"])
+    if branch_raw is None or head_raw is None or status is None or index is None:
         return {"available": False, "reason": "git_state_unavailable"}
 
     branch = branch_raw.strip()
     head = head_raw.strip().lower()
-    status_sha256 = hashlib.sha256(status.encode("utf-8")).hexdigest()
+    status_sha256 = hashlib.sha256(status.encode("utf-8", "surrogateescape")).hexdigest()
+    index_sha256 = hashlib.sha256(index).hexdigest()
     return {
         "available": True,
         "branch": branch,
@@ -1450,6 +1479,7 @@ def _project_git_state(resolved: Path) -> dict[str, Any]:
         "head": head,
         "dirty": bool(status.strip()),
         "status_sha256": status_sha256,
+        "index_sha256": index_sha256,
         "status_entries": len([line for line in status.splitlines() if line.strip()]),
     }
 
@@ -1460,6 +1490,7 @@ def _workspace_guard_mismatches(
     expected_branch: str | None,
     expected_head: str | None,
     expected_status_sha256: str | None,
+    expected_index_sha256: str | None,
 ) -> list[dict[str, Any]]:
     mismatches: list[dict[str, Any]] = []
     checks = (
@@ -1469,6 +1500,11 @@ def _workspace_guard_mismatches(
             "status_sha256",
             expected_status_sha256.lower() if expected_status_sha256 else None,
             state.get("status_sha256"),
+        ),
+        (
+            "index_sha256",
+            expected_index_sha256.lower() if expected_index_sha256 else None,
+            state.get("index_sha256"),
         ),
     )
     for field, expected, actual in checks:
@@ -1487,7 +1523,7 @@ def _guarded_git_commit_error(
         code="WORKSPACE_CONTENDED",
         message="Project workspace changed since the caller's expected git state snapshot",
         retryable=True,
-        hint="Refresh info(project), review git_status/show_changes, then retry with the new expected_branch, expected_head, and expected_status_sha256.",
+        hint="Refresh info(project), review git_status/git_diff_cached, then retry with the new expected_branch, expected_head, expected_status_sha256, and expected_index_sha256.",
         details={
             "project": project,
             "mismatches": mismatches,
@@ -1496,6 +1532,7 @@ def _guarded_git_commit_error(
                 "head": state.get("head"),
                 "dirty": state.get("dirty"),
                 "status_sha256": state.get("status_sha256"),
+                "index_sha256": state.get("index_sha256"),
                 "status_entries": state.get("status_entries"),
             },
         },
@@ -1816,6 +1853,165 @@ def git_add(
     )
 
 
+def _guarded_git_commit_script(
+    *,
+    message: str,
+    expected_branch: str | None,
+    expected_head: str | None,
+    expected_status_sha256: str | None,
+    expected_index_sha256: str,
+) -> str:
+    """Build one target-plane critical section for a content-bound commit.
+
+    The reviewed index digest is checked against a private snapshot while the
+    real index lock is held. The commit then reads that exact snapshot through
+    ``GIT_INDEX_FILE``. This closes the check/commit TOCTOU where another
+    ``git add`` could previously replace staged bytes after lease validation.
+
+    Repository hooks are disabled for this trusted automated commit: a hook
+    that stages files would otherwise mutate the private index after its digest
+    was verified and defeat the content lease.
+    """
+    expected_branch_q = shlex.quote(expected_branch) if expected_branch is not None else ""
+    expected_head_q = shlex.quote(expected_head.lower()) if expected_head is not None else ""
+    expected_status_q = (
+        shlex.quote(expected_status_sha256.lower())
+        if expected_status_sha256 is not None
+        else ""
+    )
+    expected_index_q = shlex.quote(expected_index_sha256.lower())
+    message_q = shlex.quote(message)
+    return "\n".join(
+        [
+            "set -eu",
+            "MCP_GIT_GUARD=1",
+            'INDEX_PATH="$(git rev-parse --git-path index)" || exit 98',
+            'INDEX_LOCK="${INDEX_PATH}.lock"',
+            'SNAPSHOT="$(mktemp \"${TMPDIR:-/tmp}/mcp-git-index.XXXXXX\")" || exit 98',
+            'INDEX_LISTING="$(mktemp \"${TMPDIR:-/tmp}/mcp-git-index-listing.XXXXXX\")" || { rm -f "$SNAPSHOT"; exit 98; }',
+            'STATUS_FILE="$(mktemp \"${TMPDIR:-/tmp}/mcp-git-status.XXXXXX\")" || { rm -f "$SNAPSHOT" "$INDEX_LISTING"; exit 98; }',
+            "LOCK_OWNED=0",
+            'cleanup() { rm -f "$SNAPSHOT" "$INDEX_LISTING" "$STATUS_FILE"; if [ "$LOCK_OWNED" = "1" ]; then LOCK_OWNED=0; rm -f "$INDEX_LOCK"; fi; }',
+            "trap cleanup EXIT",
+            "trap 'cleanup; exit 99' HUP INT TERM",
+            'if ( set -C; : > "$INDEX_LOCK" ) 2>/dev/null; then LOCK_OWNED=1; else printf "MCP_GIT_GUARD_BUSY=index\\n"; exit 96; fi',
+            'cp "$INDEX_PATH" "$SNAPSHOT" || { printf "MCP_GIT_GUARD_ERROR=index_snapshot\\n"; exit 98; }',
+            'BRANCH="$(git rev-parse --abbrev-ref HEAD)" || { printf "MCP_GIT_GUARD_ERROR=branch\\n"; exit 98; }',
+            'HEAD_SHA="$(git rev-parse HEAD)" || { printf "MCP_GIT_GUARD_ERROR=head\\n"; exit 98; }',
+            'GIT_OPTIONAL_LOCKS=0 git status --porcelain=v1 > "$STATUS_FILE" || { printf "MCP_GIT_GUARD_ERROR=status\\n"; exit 98; }',
+            'GIT_INDEX_FILE="$SNAPSHOT" git ls-files --stage -z > "$INDEX_LISTING" || { printf "MCP_GIT_GUARD_ERROR=index_listing\\n"; exit 98; }',
+            'STATUS_SHA="$(sha256sum "$STATUS_FILE" | awk \'{print $1}\')" || { printf "MCP_GIT_GUARD_ERROR=status_digest\\n"; exit 98; }',
+            'INDEX_SHA="$(sha256sum "$INDEX_LISTING" | awk \'{print $1}\')" || { printf "MCP_GIT_GUARD_ERROR=index_digest\\n"; exit 98; }',
+            f"EXPECTED_BRANCH={expected_branch_q}" if expected_branch is not None else "EXPECTED_BRANCH=",
+            f"EXPECTED_HEAD={expected_head_q}" if expected_head is not None else "EXPECTED_HEAD=",
+            f"EXPECTED_STATUS={expected_status_q}" if expected_status_sha256 is not None else "EXPECTED_STATUS=",
+            f"EXPECTED_INDEX={expected_index_q}",
+            'if [ -n "$EXPECTED_BRANCH" ] && [ "$BRANCH" != "$EXPECTED_BRANCH" ]; then printf "MCP_GIT_GUARD_MISMATCH=branch\\nMCP_GIT_GUARD_ACTUAL=%s\\n" "$BRANCH"; exit 97; fi',
+            'if [ -n "$EXPECTED_HEAD" ] && [ "$HEAD_SHA" != "$EXPECTED_HEAD" ]; then printf "MCP_GIT_GUARD_MISMATCH=head\\nMCP_GIT_GUARD_ACTUAL=%s\\n" "$HEAD_SHA"; exit 97; fi',
+            'if [ -n "$EXPECTED_STATUS" ] && [ "$STATUS_SHA" != "$EXPECTED_STATUS" ]; then printf "MCP_GIT_GUARD_MISMATCH=status_sha256\\nMCP_GIT_GUARD_ACTUAL=%s\\n" "$STATUS_SHA"; exit 97; fi',
+            'if [ "$INDEX_SHA" != "$EXPECTED_INDEX" ]; then printf "MCP_GIT_GUARD_MISMATCH=index_sha256\\nMCP_GIT_GUARD_ACTUAL=%s\\n" "$INDEX_SHA"; exit 97; fi',
+            (
+                'GIT_INDEX_FILE="$SNAPSHOT" git '
+                "-c core.hooksPath=/dev/null "
+                f"-c user.name={shlex.quote('MCP Gateway')} "
+                f"-c user.email={shlex.quote('mcp-gateway@gateway.invalid')} "
+                f"commit --no-verify -m {message_q}"
+            ),
+        ]
+    )
+
+
+def _guarded_git_commit_result(
+    client: GatewayClient,
+    project: str,
+    *,
+    message: str,
+    expected_branch: str | None,
+    expected_head: str | None,
+    expected_status_sha256: str | None,
+    expected_index_sha256: str,
+) -> dict[str, Any]:
+    script = _guarded_git_commit_script(
+        message=message,
+        expected_branch=expected_branch,
+        expected_head=expected_head,
+        expected_status_sha256=expected_status_sha256,
+        expected_index_sha256=expected_index_sha256,
+    )
+    raw = client.execute_project_script(project, script, timeout_s=60)
+    project_root = str(_resolve_project(project))
+    stdout = _redact_project_root(
+        str(raw.get("stdout") or raw.get("output", "")), project_root
+    )
+    stderr = _redact_project_root(str(raw.get("stderr", "")), project_root)
+    exit_code = int(raw.get("exit_code", -1))
+
+    if exit_code == 97:
+        field = None
+        actual = None
+        for line in stdout.splitlines():
+            if line.startswith("MCP_GIT_GUARD_MISMATCH="):
+                field = line.split("=", 1)[1].strip()
+            elif line.startswith("MCP_GIT_GUARD_ACTUAL="):
+                actual = line.split("=", 1)[1].strip()
+        expected_by_field = {
+            "branch": expected_branch,
+            "head": expected_head.lower() if expected_head else None,
+            "status_sha256": (
+                expected_status_sha256.lower() if expected_status_sha256 else None
+            ),
+            "index_sha256": expected_index_sha256.lower(),
+        }
+        mismatch = {
+            "field": field or "unknown",
+            "expected": expected_by_field.get(field or ""),
+            "actual": actual,
+        }
+        return tool_error(
+            tool="git_commit",
+            code="WORKSPACE_CONTENDED",
+            message="Project workspace changed after review; refusing guarded commit",
+            retryable=True,
+            hint="Refresh info(project), review git_status/git_diff_cached, then retry with fresh lease values.",
+            details={
+                "project": project,
+                "mismatches": [mismatch],
+                "mutation_occurred": False,
+            },
+            source="gateway",
+        )
+    if exit_code == 96:
+        return tool_error(
+            tool="git_commit",
+            code="WORKSPACE_CONTENDED",
+            message="Git index is already locked by another operation; refusing guarded commit",
+            retryable=True,
+            hint="Wait for the current Git mutation to finish, refresh info(project), and review the staged diff again before retrying.",
+            details={"project": project, "mutation_occurred": False},
+            source="gateway",
+        )
+    if exit_code in {98, 99}:
+        return tool_error(
+            tool="git_commit",
+            code="CHECK_FAILED",
+            message="Could not establish the guarded Git commit critical section",
+            retryable=True,
+            hint="Refresh info(project) and git_write_capabilities before retrying; no commit was attempted.",
+            details={"project": project, "mutation_occurred": False},
+            source="gateway",
+        )
+
+    return build_command_result(
+        outcome="passed" if exit_code == 0 else "failed",
+        exit_code=exit_code,
+        stdout=stdout,
+        stderr=stderr,
+        execution_duration_ms=_execution_duration_ms(raw),
+        job_id=raw.get("job_id"),
+        cwd=".",
+    )
+
+
 def git_commit(
     client: GatewayClient,
     project: str,
@@ -1823,10 +2019,38 @@ def git_commit(
     expected_branch: str | None = None,
     expected_head: str | None = None,
     expected_status_sha256: str | None = None,
+    expected_index_sha256: str | None = None,
 ) -> dict[str, Any]:
-    """Commit staged changes, optionally guarded by an info(project) git snapshot."""
-    if expected_branch or expected_head or expected_status_sha256:
-        project = _validate_project(project)
+    """Commit staged changes, optionally guarded by an info(project) Git snapshot.
+
+    Any guarded commit requires ``expected_index_sha256`` so a reviewed lease is
+    bound to staged blob bytes/modes/paths, not only porcelain status shape.
+    """
+    project = _validate_project(project)
+    lease_requested = any(
+        value is not None
+        for value in (
+            expected_branch,
+            expected_head,
+            expected_status_sha256,
+            expected_index_sha256,
+        )
+    )
+    if lease_requested and expected_index_sha256 is None:
+        return tool_error(
+            tool="git_commit",
+            code="INVALID_INPUT",
+            message="Guarded git_commit requires expected_index_sha256 from info(project)",
+            retryable=True,
+            hint="Refresh info(project), review git_diff_cached, and retry with the current index_sha256.",
+            details={"project": project, "mutation_occurred": False},
+        )
+    if expected_index_sha256 is not None and not re.fullmatch(
+        r"[0-9a-fA-F]{64}", expected_index_sha256
+    ):
+        raise ValueError("INVALID_INPUT: expected_index_sha256 must be a 64-character hex SHA-256")
+
+    if lease_requested:
         state = _project_git_state(_resolve_project(project))
         if not state.get("available"):
             return tool_error(
@@ -1842,6 +2066,7 @@ def git_commit(
             expected_branch=expected_branch,
             expected_head=expected_head,
             expected_status_sha256=expected_status_sha256,
+            expected_index_sha256=expected_index_sha256,
         )
         if mismatches:
             return _guarded_git_commit_error(project, state, mismatches)
@@ -1860,14 +2085,33 @@ def git_commit(
     )
     if preflight_error is not None:
         return preflight_error
-    result = run_project_command(
-        client,
-        project,
-        "git "
-        f"-c user.name={shlex.quote('MCP Gateway')} "
-        f"-c user.email={shlex.quote('mcp-gateway@gateway.invalid')} "
-        f"commit -m {shlex.quote(message)}",
-    )
+    if lease_requested:
+        # The guarded-input validation above fails closed unless this lease is
+        # present; keep that runtime invariant explicit for type checking too.
+        assert expected_index_sha256 is not None
+        # Re-check and commit on the same execution plane while the real index
+        # is locked. The Python-side snapshot above remains a cheap early
+        # rejection; this target-side critical section is authoritative.
+        result = _guarded_git_commit_result(
+            client,
+            project,
+            message=message,
+            expected_branch=expected_branch,
+            expected_head=expected_head,
+            expected_status_sha256=expected_status_sha256,
+            expected_index_sha256=expected_index_sha256,
+        )
+        if result.get("ok") is False:
+            return result
+    else:
+        result = run_project_command(
+            client,
+            project,
+            "git "
+            f"-c user.name={shlex.quote('MCP Gateway')} "
+            f"-c user.email={shlex.quote('mcp-gateway@gateway.invalid')} "
+            f"commit -m {shlex.quote(message)}",
+        )
     return _git_mutation_result(
         tool_name="git_commit",
         project=project,
