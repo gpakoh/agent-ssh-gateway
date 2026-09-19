@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import contextlib
+import enum
 import fcntl
 import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import stat
 import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -30,7 +32,10 @@ from examples.mcp_server.git_trust import with_scoped_safe_directories
 from examples.mcp_server.managed_git import _minimal_git_env
 from examples.mcp_server.project_registry_control import (
     ProjectRegistrationError,
+    ProjectUnregistrationResult,
+    project_registry_mutation_lock,
     register_project,
+    unregister_project_exact,
 )
 from examples.mcp_server.registered_source_clone import (
     RegisteredSourceCloneError,
@@ -40,12 +45,14 @@ from examples.mcp_server.source_publication_policy import classify_source_failur
 
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,160}$")
 _REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@+-]{0,200}$")
+_PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _PROTECTED_BRANCHES = frozenset({"master", "main"})
 _METADATA_FILENAME = "mcp-candidate-clone.json"
 _CANDIDATE_CLONES_DIRNAME = ".mcp-candidate-clones"
 _LINEAGE_LOCKS_DIRNAME = ".locks"
 _LINEAGE_LOCK_TIMEOUT_S = 30.0
 _LINEAGE_LOCK_POLL_S = 0.05
+_CLEANUP_TOMBSTONE_MAX_BYTES = 64 * 1024
 _DEFAULT_GIT_NAME = "MCP Control Plane"
 _DEFAULT_GIT_EMAIL = "control-plane@gateway.invalid"
 _GIT_DIAGNOSTIC_LIMIT = 1200
@@ -99,6 +106,32 @@ class CandidateCloneReceipt:
             "clean": self.clean,
             "git_identity": self.git_identity,
             "recovery_policy": self.recovery_policy,
+        }
+
+
+@dataclass(frozen=True)
+class CandidateCleanupReceipt:
+    project_id: str
+    source_project: str
+    branch: str
+    head: str
+    preserved_ref: str
+    registry_removed: bool
+    directory_removed: bool
+    already_cleaned: bool
+    tombstone_id: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "project_id": self.project_id,
+            "source_project": self.source_project,
+            "branch": self.branch,
+            "head": self.head,
+            "preserved_ref": self.preserved_ref,
+            "registry_removed": self.registry_removed,
+            "directory_removed": self.directory_removed,
+            "already_cleaned": self.already_cleaned,
+            "tombstone_id": self.tombstone_id,
         }
 
 
@@ -347,22 +380,44 @@ def _local_commit_or_none(source_root: Path, ref: str) -> str | None:
     return resolved if re.fullmatch(r"[0-9a-f]{40}", resolved) else None
 
 
-def _remote_ref_sha(source_root: Path, base_ref: str) -> str | None:
+class RemoteRefStatus(enum.StrEnum):
+    """Strict trusted-remote ref probe outcome."""
+
+    FOUND = "found"
+    ABSENT = "absent"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class RemoteRefProbe:
+    status: RemoteRefStatus
+    sha: str | None = None
+
+
+def _probe_remote_ref(source_root: Path, ref: str) -> RemoteRefProbe:
+    """Resolve one ref through the trusted remote with strict outcomes.
+
+    FOUND means the ref definitively exists and resolved to a SHA, ABSENT
+    means the remote definitively reported no matching ref, and UNKNOWN
+    means the remote state could not be proven (networking, authentication,
+    or protocol errors). Cleanup only proceeds on an ABSENT delivery branch
+    and fails closed retryably on UNKNOWN.
+    """
     try:
         clone_url, token = _resolve_trusted_remote(source_root)
     except ManagedSourceBundleError:
-        return None
-    if re.fullmatch(r"[0-9a-f]{40}", base_ref):
-        return base_ref.lower()
-    if base_ref.startswith("refs/"):
-        patterns = [base_ref]
-        if base_ref.startswith("refs/tags/"):
-            patterns.append(base_ref + "^{}")
+        return RemoteRefProbe(RemoteRefStatus.UNKNOWN)
+    if re.fullmatch(r"[0-9a-f]{40}", ref):
+        return RemoteRefProbe(RemoteRefStatus.FOUND, ref.lower())
+    if ref.startswith("refs/"):
+        patterns = [ref]
+        if ref.startswith("refs/tags/"):
+            patterns.append(ref + "^{}")
     else:
         patterns = [
-            f"refs/heads/{base_ref}",
-            f"refs/tags/{base_ref}",
-            f"refs/tags/{base_ref}^{{}}",
+            f"refs/heads/{ref}",
+            f"refs/tags/{ref}",
+            f"refs/tags/{ref}^{{}}",
         ]
     env = _minimal_git_env("_", token)
     try:
@@ -375,9 +430,11 @@ def _remote_ref_sha(source_root: Path, base_ref: str) -> str | None:
             env=env,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return None
+        return RemoteRefProbe(RemoteRefStatus.UNKNOWN)
+    if result.returncode == 2:
+        return RemoteRefProbe(RemoteRefStatus.ABSENT)
     if result.returncode != 0:
-        return None
+        return RemoteRefProbe(RemoteRefStatus.UNKNOWN)
     candidates: list[tuple[str, str]] = []
     for line in result.stdout.splitlines():
         parts = line.strip().split(maxsplit=1)
@@ -389,11 +446,18 @@ def _remote_ref_sha(source_root: Path, base_ref: str) -> str | None:
             candidates.append((refname, sha))
     peeled = [sha for refname, sha in candidates if refname.endswith("^{}")]
     if peeled:
-        return peeled[0]
-    exact_heads = [sha for refname, sha in candidates if refname == f"refs/heads/{base_ref}"]
+        return RemoteRefProbe(RemoteRefStatus.FOUND, peeled[0])
+    exact_heads = [sha for refname, sha in candidates if refname == f"refs/heads/{ref}"]
     if exact_heads:
-        return exact_heads[0]
-    return candidates[0][1] if candidates else None
+        return RemoteRefProbe(RemoteRefStatus.FOUND, exact_heads[0])
+    if candidates:
+        return RemoteRefProbe(RemoteRefStatus.FOUND, candidates[0][1])
+    return RemoteRefProbe(RemoteRefStatus.UNKNOWN)
+
+
+def _remote_ref_sha(source_root: Path, base_ref: str) -> str | None:
+    probe = _probe_remote_ref(source_root, base_ref)
+    return probe.sha if probe.status is RemoteRefStatus.FOUND else None
 
 
 def _status_state(repo: Path) -> tuple[bool, str, int]:
@@ -491,6 +555,409 @@ def _write_metadata(path: Path, data: dict[str, Any]) -> None:
         tmp.replace(path)
     except OSError as exc:
         raise _fail("TOOL_EXECUTION_FAILED", "candidate clone metadata could not be written") from exc
+
+
+def _read_metadata(candidate_root: Path) -> dict[str, Any]:
+    git_dir = candidate_root / ".git"
+    metadata_path = _metadata_path(candidate_root)
+    try:
+        git_stat = git_dir.lstat()
+        metadata_stat = metadata_path.lstat()
+    except OSError as exc:
+        raise _fail("WORKSPACE_CONTENDED", "candidate clone metadata is unavailable or invalid") from exc
+    if stat.S_ISLNK(git_stat.st_mode) or not stat.S_ISDIR(git_stat.st_mode):
+        raise _fail("WORKSPACE_CONTENDED", "candidate clone is not a safe git worktree")
+    if stat.S_ISLNK(metadata_stat.st_mode) or not stat.S_ISREG(metadata_stat.st_mode):
+        raise _fail("WORKSPACE_CONTENDED", "candidate clone metadata is unsafe")
+    try:
+        data = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise _fail("WORKSPACE_CONTENDED", "candidate clone metadata is unavailable or invalid") from exc
+    if not isinstance(data, dict):
+        raise _fail("WORKSPACE_CONTENDED", "candidate clone metadata is unavailable or invalid")
+    return data
+
+
+def _cleanup_tombstone_path(journal_root: Path, project_id: str) -> tuple[Path, str]:
+    tombstone_id = hashlib.sha256(f"candidate-cleanup\0{project_id}".encode()).hexdigest()
+    return journal_root / "candidate-cleanup" / f"{tombstone_id}.json", tombstone_id
+
+
+@contextlib.contextmanager
+def _cleanup_journal_dir(path: Path, *, create: bool) -> Iterator[int | None]:
+    """Open the cleanup journal directory without following symlinks."""
+    journal_root = path.parent.parent
+    if path.parent.name != "candidate-cleanup":
+        raise _fail("POLICY_DENIED", "candidate cleanup tombstone path is outside its journal area")
+
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    odirectory = getattr(os, "O_DIRECTORY", None)
+    if nofollow is None or odirectory is None:
+        raise _fail(
+            "POLICY_DENIED",
+            "secure candidate cleanup journal access is unavailable",
+        )
+    flags = os.O_RDONLY | nofollow | odirectory | getattr(os, "O_CLOEXEC", 0)
+
+    if create:
+        try:
+            journal_root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise _fail(
+                "TOOL_EXECUTION_FAILED",
+                "candidate cleanup journal root could not be prepared",
+            ) from exc
+    elif not journal_root.exists():
+        yield None
+        return
+
+    root_fd: int | None = None
+    cleanup_fd: int | None = None
+    try:
+        root_fd = os.open(journal_root, flags)
+        if create:
+            try:
+                os.mkdir("candidate-cleanup", 0o700, dir_fd=root_fd)
+            except FileExistsError:
+                pass
+        try:
+            cleanup_fd = os.open("candidate-cleanup", flags, dir_fd=root_fd)
+        except FileNotFoundError:
+            if not create:
+                yield None
+                return
+            raise
+        metadata = os.fstat(cleanup_fd)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise _fail("WORKSPACE_CONTENDED", "candidate cleanup journal directory is invalid")
+        yield cleanup_fd
+    except CandidateCloneError:
+        raise
+    except OSError as exc:
+        raise _fail(
+            "WORKSPACE_CONTENDED",
+            "candidate cleanup journal directory is unsafe or unavailable",
+        ) from exc
+    finally:
+        if cleanup_fd is not None:
+            os.close(cleanup_fd)
+        if root_fd is not None:
+            os.close(root_fd)
+
+
+def _read_cleanup_tombstone(path: Path) -> dict[str, Any] | None:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise _fail("POLICY_DENIED", "secure candidate cleanup tombstone reads are unavailable")
+    flags = os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
+
+    with _cleanup_journal_dir(path, create=False) as cleanup_fd:
+        if cleanup_fd is None:
+            return None
+        try:
+            fd = os.open(path.name, flags, dir_fd=cleanup_fd)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise _fail("WORKSPACE_CONTENDED", "candidate cleanup tombstone is unsafe") from exc
+        try:
+            metadata = os.fstat(fd)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or metadata.st_size > _CLEANUP_TOMBSTONE_MAX_BYTES
+            ):
+                raise _fail("WORKSPACE_CONTENDED", "candidate cleanup tombstone is invalid")
+            remaining = _CLEANUP_TOMBSTONE_MAX_BYTES + 1
+            chunks: list[bytes] = []
+            while remaining > 0:
+                chunk = os.read(fd, min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            raw = b"".join(chunks)
+            if len(raw) > _CLEANUP_TOMBSTONE_MAX_BYTES:
+                raise _fail("WORKSPACE_CONTENDED", "candidate cleanup tombstone is invalid")
+        finally:
+            os.close(fd)
+
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise _fail("WORKSPACE_CONTENDED", "candidate cleanup tombstone is invalid") from exc
+    if not isinstance(data, dict):
+        raise _fail("WORKSPACE_CONTENDED", "candidate cleanup tombstone is invalid")
+    return data
+
+
+def _write_cleanup_tombstone(path: Path, data: dict[str, Any]) -> None:
+    encoded = (json.dumps(data, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    if len(encoded) > _CLEANUP_TOMBSTONE_MAX_BYTES:
+        raise _fail("TOOL_EXECUTION_FAILED", "candidate cleanup tombstone is too large")
+
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise _fail("POLICY_DENIED", "secure candidate cleanup tombstone writes are unavailable")
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | nofollow
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+
+    with _cleanup_journal_dir(path, create=True) as cleanup_fd:
+        assert cleanup_fd is not None
+        try:
+            existing = os.stat(path.name, dir_fd=cleanup_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        except OSError as exc:
+            raise _fail("WORKSPACE_CONTENDED", "candidate cleanup tombstone is unsafe") from exc
+        if existing is not None and (
+            not stat.S_ISREG(existing.st_mode) or existing.st_nlink != 1
+        ):
+            raise _fail("WORKSPACE_CONTENDED", "candidate cleanup tombstone is unsafe")
+
+        tmp_name: str | None = None
+        tmp_fd: int | None = None
+        try:
+            for _ in range(16):
+                candidate = f".{path.name}.{secrets.token_hex(12)}.tmp"
+                try:
+                    tmp_fd = os.open(candidate, flags, 0o600, dir_fd=cleanup_fd)
+                except FileExistsError:
+                    continue
+                tmp_name = candidate
+                break
+            if tmp_fd is None or tmp_name is None:
+                raise _fail(
+                    "TOOL_EXECUTION_FAILED",
+                    "candidate cleanup tombstone temporary file could not be allocated",
+                )
+
+            view = memoryview(encoded)
+            while view:
+                written = os.write(tmp_fd, view)
+                if written <= 0:
+                    raise OSError("short write")
+                view = view[written:]
+            os.fsync(tmp_fd)
+            os.close(tmp_fd)
+            tmp_fd = None
+            os.replace(
+                tmp_name,
+                path.name,
+                src_dir_fd=cleanup_fd,
+                dst_dir_fd=cleanup_fd,
+            )
+            tmp_name = None
+            os.fsync(cleanup_fd)
+        except CandidateCloneError:
+            raise
+        except OSError as exc:
+            raise _fail(
+                "TOOL_EXECUTION_FAILED",
+                "candidate cleanup tombstone could not be persisted",
+            ) from exc
+        finally:
+            if tmp_fd is not None:
+                os.close(tmp_fd)
+            if tmp_name is not None:
+                try:
+                    os.unlink(tmp_name, dir_fd=cleanup_fd)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
+
+
+def _candidate_has_active_evidence(candidate_root: Path) -> bool:
+    bridge = candidate_root / ".ai-bridge"
+    if (bridge / "current-plan.md").exists():
+        return True
+    tasks = bridge / "tasks"
+    try:
+        return tasks.is_dir() and any(tasks.iterdir())
+    except OSError as exc:
+        raise _fail("TOOL_EXECUTION_FAILED", "candidate task evidence could not be inspected") from exc
+
+
+def _validate_candidate_root(candidate_root: Path, candidates_root: Path) -> tuple[int, int]:
+    if candidate_root.is_symlink() or candidates_root.is_symlink():
+        raise _fail("POLICY_DENIED", "candidate cleanup refuses symlinked roots")
+    try:
+        resolved_candidates = candidates_root.resolve(strict=True)
+        resolved_candidate = candidate_root.resolve(strict=True)
+    except OSError as exc:
+        raise _fail("WORKSPACE_CONTENDED", "candidate clone root is unavailable") from exc
+    if resolved_candidate.parent != resolved_candidates:
+        raise _fail("POLICY_DENIED", "candidate clone root escapes the server-owned candidate area")
+    if not resolved_candidate.is_dir():
+        raise _fail("WORKSPACE_CONTENDED", "candidate clone root is unavailable")
+    stat = resolved_candidate.stat()
+    return stat.st_dev, stat.st_ino
+
+
+def _reject_symlinked_git_dir(candidate_root: Path) -> None:
+    git_dir = candidate_root / ".git"
+    try:
+        git_stat = git_dir.lstat()
+    except OSError as exc:
+        raise _fail("WORKSPACE_CONTENDED", "candidate clone is not a git worktree") from exc
+    if stat.S_ISLNK(git_stat.st_mode) or not stat.S_ISDIR(git_stat.st_mode):
+        raise _fail("WORKSPACE_CONTENDED", "candidate clone is not a git worktree")
+
+
+def _verify_candidate_clean(
+    candidate_root: Path,
+    *,
+    project_id: str,
+    source_project: str,
+    branch: str,
+    head_sha: str,
+    expected_registry_root: str,
+) -> None:
+    _reject_symlinked_git_dir(candidate_root)
+    metadata = _read_metadata(candidate_root)
+    for key, value in {
+        "project_id": project_id,
+        "source_project": source_project,
+        "branch": branch,
+        "root": expected_registry_root,
+    }.items():
+        if metadata.get(key) != value:
+            raise _fail("WORKSPACE_CONTENDED", "candidate clone metadata identity mismatch")
+    dirty, _status_sha, _status_entries = _status_state(candidate_root)
+    current_branch = _run_git(
+        candidate_root,
+        ["rev-parse", "--abbrev-ref", "HEAD"],
+        operation="read candidate branch",
+    )
+    current_head = _run_git(
+        candidate_root,
+        ["rev-parse", "HEAD"],
+        operation="read candidate head",
+    ).lower()
+    if dirty or current_branch != branch or current_head != head_sha:
+        raise _fail(
+            "WORKSPACE_CONTENDED",
+            "candidate git state does not match cleanup expectations",
+            details={
+                "project_id": project_id,
+                "branch": current_branch,
+                "head": current_head,
+                "dirty": dirty,
+            },
+        )
+    if _candidate_has_active_evidence(candidate_root):
+        raise _fail(
+            "WORKSPACE_CONTENDED",
+            "candidate clone still has active task or delivery evidence",
+        )
+
+
+def _require_preserved_head(
+    source_root: Path,
+    preserved_ref: str,
+    expected_head_sha: str,
+    *,
+    context: str,
+) -> None:
+    probe = _probe_remote_ref(source_root, preserved_ref)
+    if probe.status is not RemoteRefStatus.FOUND or probe.sha != expected_head_sha:
+        raise _fail(
+            "CHECK_FAILED",
+            f"candidate head is not proven at the requested preservation ref ({context})",
+            retryable=True,
+        )
+
+
+def _require_delivery_branch_absent(
+    source_root: Path,
+    branch: str,
+    *,
+    context: str,
+) -> None:
+    probe = _probe_remote_ref(source_root, branch)
+    if probe.status is RemoteRefStatus.FOUND:
+        raise _fail(
+            "WORKSPACE_CONTENDED",
+            f"candidate delivery branch is still published remotely ({context})",
+        )
+    if probe.status is RemoteRefStatus.UNKNOWN:
+        raise _fail(
+            "CHECK_FAILED",
+            f"candidate delivery branch remote state is unknown ({context})",
+            retryable=True,
+        )
+
+
+def _enforce_reference_guard(reference_guard: Callable[[], None]) -> None:
+    if not callable(reference_guard):
+        raise _fail(
+            "INVALID_INPUT",
+            "reference_guard must be a callable that raises on blocking active references",
+        )
+    try:
+        reference_guard()
+    except CandidateCloneError:
+        raise
+    except Exception as exc:
+        raise _fail(
+            "WORKSPACE_CONTENDED",
+            "active reference guard blocked candidate cleanup",
+            retryable=False,
+            details={"guard_error": type(exc).__name__},
+        ) from exc
+
+
+def _unregister_candidate(
+    *,
+    config_dir: Path,
+    journal_root: Path,
+    project_id: str,
+    root: str,
+) -> ProjectUnregistrationResult:
+    try:
+        return unregister_project_exact(
+            config_dir=config_dir,
+            journal_root=journal_root,
+            project_id=project_id,
+            expected_root=root,
+            expected_type="candidate-clone",
+        )
+    except ProjectRegistrationError as exc:
+        raise _fail(exc.code, exc.message) from exc
+
+
+def _registry_store_paths(config_dir: Path) -> list[Path]:
+    paths = [config_dir / "projects.yaml"]
+    runtime = resolve_runtime_registry_path(config_dir / "projects.yaml")
+    if runtime is not None:
+        paths.append(runtime)
+    return paths
+
+
+def _registry_has_candidate(config_dir: Path, project_id: str) -> bool:
+    """Return whether any raw source/runtime registry store still lists the id."""
+    for path in _registry_store_paths(config_dir):
+        if not path.exists():
+            continue
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, yaml.YAMLError) as exc:
+            raise _fail("TOOL_EXECUTION_FAILED", "workspace registry cannot be read") from exc
+        if not isinstance(data, dict):
+            continue
+        projects = data.get("projects")
+        if not isinstance(projects, dict):
+            continue
+        entry = projects.get(project_id)
+        if isinstance(entry, dict) and entry:
+            return True
+    return False
 
 
 def _register_candidate(
@@ -1026,4 +1493,273 @@ def prepare_candidate_clone(
         )
 
 
-__all__ = ["CandidateCloneError", "CandidateCloneReceipt", "prepare_candidate_clone"]
+def candidate_cleanup(
+    project_id: str,
+    expected_head_sha: str,
+    expected_branch: str,
+    expected_source_project: str,
+    preserved_ref: str,
+    *,
+    config_dir: Path,
+    journal_root: Path,
+    reference_guard: Callable[[], None],
+) -> CandidateCleanupReceipt:
+    """Remove one exactly identified, remotely preserved candidate clone.
+
+    The injected ``reference_guard`` is REQUIRED and fail-closed: there is no
+    permissive default, so this core cannot be called unguarded. It is invoked
+    before the registry unregister and again immediately before the destructive
+    filesystem removal; it must raise whenever an active/open reference (open
+    PR, external task-job-delivery refs, etc.) still needs the clone.
+
+    Cleanup holds the same source-project+branch lineage lock used by
+    ``prepare_candidate_clone`` across remote identity checks, the registry CAS
+    unregister, and the filesystem delete.
+    """
+    if not isinstance(project_id, str) or not _PROJECT_ID_RE.fullmatch(project_id):
+        raise _fail("INVALID_INPUT", "project_id has an invalid format")
+    if not isinstance(expected_head_sha, str) or not re.fullmatch(
+        r"[0-9a-fA-F]{40}", expected_head_sha.strip()
+    ):
+        raise _fail("INVALID_INPUT", "expected_head_sha must be a full commit SHA")
+    expected_head_sha = expected_head_sha.strip().lower()
+    expected_branch = _validate_branch(expected_branch)
+    if not isinstance(expected_source_project, str) or not expected_source_project.strip():
+        raise _fail("INVALID_INPUT", "expected_source_project must be non-empty")
+    expected_source_project = expected_source_project.strip()
+    validated_preserved_ref = _validate_ref(preserved_ref)
+    if validated_preserved_ref is None or not validated_preserved_ref.startswith(
+        "archive/candidate-"
+    ):
+        raise _fail(
+            "INVALID_INPUT",
+            "preserved_ref must be an explicit archive/candidate-* remote branch",
+        )
+    preserved_ref = validated_preserved_ref
+    if not callable(reference_guard):
+        raise _fail("INVALID_INPUT", "reference_guard must be callable and is required")
+
+    config_dir = config_dir.resolve()
+    journal_root = journal_root.resolve()
+    workspace_root = _workspace_root(config_dir)
+    source_root = _source_root(config_dir, expected_source_project, workspace_root=workspace_root)
+    candidates_root = _candidate_clones_root(workspace_root)
+    candidate_root = candidates_root / project_id
+    expected_registry_root = f".mcp-candidate-clones/{project_id}"
+    tombstone_path, tombstone_id = _cleanup_tombstone_path(journal_root, project_id)
+    expected_identity = {
+        "version": 1,
+        "project_id": project_id,
+        "source_project": expected_source_project,
+        "branch": expected_branch,
+        "head": expected_head_sha,
+        "preserved_ref": preserved_ref,
+        "registry_root": expected_registry_root,
+    }
+
+    with _lineage_lock(workspace_root, expected_source_project, expected_branch):
+        with project_registry_mutation_lock(journal_root):
+            return _cleanup_candidate_locked(
+                project_id=project_id,
+                expected_head_sha=expected_head_sha,
+                expected_branch=expected_branch,
+                expected_source_project=expected_source_project,
+                preserved_ref=preserved_ref,
+                config_dir=config_dir,
+                journal_root=journal_root,
+                source_root=source_root,
+                candidates_root=candidates_root,
+                candidate_root=candidate_root,
+                expected_registry_root=expected_registry_root,
+                expected_identity=expected_identity,
+                tombstone_path=tombstone_path,
+                tombstone_id=tombstone_id,
+                reference_guard=reference_guard,
+            )
+
+
+def _cleanup_candidate_locked(
+    *,
+    project_id: str,
+    expected_head_sha: str,
+    expected_branch: str,
+    expected_source_project: str,
+    preserved_ref: str,
+    config_dir: Path,
+    journal_root: Path,
+    source_root: Path,
+    candidates_root: Path,
+    candidate_root: Path,
+    expected_registry_root: str,
+    expected_identity: dict[str, Any],
+    tombstone_path: Path,
+    tombstone_id: str,
+    reference_guard: Callable[[], None],
+) -> CandidateCleanupReceipt:
+    tombstone = _read_cleanup_tombstone(tombstone_path)
+    if tombstone is not None:
+        for key, value in expected_identity.items():
+            if tombstone.get(key) != value:
+                raise _fail("WORKSPACE_CONTENDED", "candidate cleanup tombstone identity mismatch")
+        phase_value = tombstone.get("phase")
+        if phase_value not in {"prepared", "registry_removed", "complete"}:
+            raise _fail("WORKSPACE_CONTENDED", "candidate cleanup tombstone phase is invalid")
+
+    _require_preserved_head(
+        source_root,
+        preserved_ref,
+        expected_head_sha,
+        context="before existence check",
+    )
+    _require_delivery_branch_absent(
+        source_root,
+        expected_branch,
+        context="before existence check",
+    )
+
+    candidate_exists = candidate_root.exists() or candidate_root.is_symlink()
+    phase = str(tombstone.get("phase")) if tombstone is not None else None
+    if not candidate_exists:
+        registry_present = _registry_has_candidate(config_dir, project_id)
+        if phase == "complete" and not registry_present:
+            return CandidateCleanupReceipt(
+                project_id=project_id,
+                source_project=expected_source_project,
+                branch=expected_branch,
+                head=expected_head_sha,
+                preserved_ref=preserved_ref,
+                registry_removed=False,
+                directory_removed=False,
+                already_cleaned=True,
+                tombstone_id=tombstone_id,
+            )
+        if tombstone is None and not registry_present:
+            raise _fail("PROJECT_NOT_FOUND", "candidate clone does not exist")
+        _enforce_reference_guard(reference_guard)
+        if tombstone is None:
+            tombstone = {
+                **expected_identity,
+                "phase": "prepared",
+            }
+            _write_cleanup_tombstone(tombstone_path, tombstone)
+        unregister_result = _unregister_candidate(
+            config_dir=config_dir,
+            journal_root=journal_root,
+            project_id=project_id,
+            root=expected_registry_root,
+        )
+        reset_registry()
+        completed = dict(expected_identity)
+        completed["phase"] = "complete"
+        _write_cleanup_tombstone(tombstone_path, completed)
+        return CandidateCleanupReceipt(
+            project_id=project_id,
+            source_project=expected_source_project,
+            branch=expected_branch,
+            head=expected_head_sha,
+            preserved_ref=preserved_ref,
+            registry_removed=not unregister_result.already_absent,
+            directory_removed=False,
+            already_cleaned=unregister_result.already_absent,
+            tombstone_id=tombstone_id,
+        )
+
+    root_dev, root_ino = _validate_candidate_root(candidate_root, candidates_root)
+    if tombstone is not None:
+        if tombstone.get("root_dev") != root_dev or tombstone.get("root_ino") != root_ino:
+            raise _fail("WORKSPACE_CONTENDED", "candidate directory identity changed during cleanup")
+
+    _verify_candidate_clean(
+        candidate_root,
+        project_id=project_id,
+        source_project=expected_source_project,
+        branch=expected_branch,
+        head_sha=expected_head_sha,
+        expected_registry_root=expected_registry_root,
+    )
+
+    _enforce_reference_guard(reference_guard)
+    if tombstone is None:
+        tombstone = {
+            **expected_identity,
+            "phase": "prepared",
+            "root_dev": root_dev,
+            "root_ino": root_ino,
+        }
+        _write_cleanup_tombstone(tombstone_path, tombstone)
+
+    unregister_result = _unregister_candidate(
+        config_dir=config_dir,
+        journal_root=journal_root,
+        project_id=project_id,
+        root=expected_registry_root,
+    )
+    reset_registry()
+    tombstone = dict(tombstone)
+    tombstone["phase"] = "registry_removed"
+    _write_cleanup_tombstone(tombstone_path, tombstone)
+
+    if candidate_root.exists() or candidate_root.is_symlink():
+        current_dev, current_ino = _validate_candidate_root(candidate_root, candidates_root)
+        if current_dev != root_dev or current_ino != root_ino:
+            raise _fail("WORKSPACE_CONTENDED", "candidate directory identity changed during cleanup")
+        _require_preserved_head(
+            source_root,
+            preserved_ref,
+            expected_head_sha,
+            context="before filesystem removal",
+        )
+        _require_delivery_branch_absent(
+            source_root,
+            expected_branch,
+            context="before filesystem removal",
+        )
+        _verify_candidate_clean(
+            candidate_root,
+            project_id=project_id,
+            source_project=expected_source_project,
+            branch=expected_branch,
+            head_sha=expected_head_sha,
+            expected_registry_root=expected_registry_root,
+        )
+        _enforce_reference_guard(reference_guard)
+        try:
+            shutil.rmtree(candidate_root)
+        except OSError as exc:
+            raise _fail(
+                "TOOL_EXECUTION_FAILED",
+                "candidate directory removal did not complete",
+                retryable=True,
+            ) from exc
+        if candidate_root.exists() or candidate_root.is_symlink():
+            raise _fail(
+                "TOOL_EXECUTION_FAILED",
+                "candidate directory removal could not be verified",
+                retryable=True,
+            )
+        directory_removed = True
+    else:
+        directory_removed = False
+
+    tombstone["phase"] = "complete"
+    _write_cleanup_tombstone(tombstone_path, tombstone)
+    return CandidateCleanupReceipt(
+        project_id=project_id,
+        source_project=expected_source_project,
+        branch=expected_branch,
+        head=expected_head_sha,
+        preserved_ref=preserved_ref,
+        registry_removed=not unregister_result.already_absent,
+        directory_removed=directory_removed,
+        already_cleaned=False,
+        tombstone_id=tombstone_id,
+    )
+
+
+__all__ = [
+    "CandidateCleanupReceipt",
+    "CandidateCloneError",
+    "CandidateCloneReceipt",
+    "candidate_cleanup",
+    "prepare_candidate_clone",
+]

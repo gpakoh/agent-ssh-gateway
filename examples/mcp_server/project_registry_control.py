@@ -7,10 +7,16 @@ adapter.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
 import re
+import stat
+import threading
+import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,6 +27,11 @@ from app.workspace.registry import resolve_runtime_registry_path
 from examples.mcp_server.supervisor_integration import integrate_file
 
 _PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_REGISTRY_LOCK_FILENAME = ".project-registry.lock"
+_REGISTRY_LOCK_TIMEOUT_S = 30.0
+_REGISTRY_LOCK_POLL_S = 0.05
+_REGISTRY_PROCESS_LOCK = threading.RLock()
+_REGISTRY_LOCK_STATE = threading.local()
 
 
 class ProjectRegistrationError(ValueError):
@@ -44,8 +55,85 @@ class ProjectRegistrationResult:
     storage: str
 
 
+@dataclass(frozen=True)
+class ProjectUnregistrationResult:
+    project_id: str
+    root: str
+    project_type: str
+    registry_hash: str | None
+    storage: str | None
+    already_absent: bool
+
+
 def _error(code: str, message: str) -> ProjectRegistrationError:
     return ProjectRegistrationError(code, message)
+
+
+@contextlib.contextmanager
+def project_registry_mutation_lock(journal_root: Path) -> Iterator[None]:
+    """Serialize registry mutations across threads and processes."""
+    if not _REGISTRY_PROCESS_LOCK.acquire(timeout=_REGISTRY_LOCK_TIMEOUT_S):
+        raise _error("WORKSPACE_CONTENDED", "Registry mutation lock is busy.")
+    try:
+        depth = int(getattr(_REGISTRY_LOCK_STATE, "depth", 0))
+        if depth > 0:
+            _REGISTRY_LOCK_STATE.depth = depth + 1
+            try:
+                yield
+            finally:
+                _REGISTRY_LOCK_STATE.depth = depth
+            return
+
+        try:
+            journal_root.mkdir(parents=True, exist_ok=True)
+            root_stat = journal_root.lstat()
+        except OSError as exc:
+            raise _error("TOOL_EXECUTION_FAILED", "Registry mutation lock root is unavailable.") from exc
+        if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode):
+            raise _error("POLICY_DENIED", "Registry mutation lock root is unsafe.")
+
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        if nofollow is None:
+            raise _error("POLICY_DENIED", "Secure registry mutation locking is unavailable.")
+        flags = os.O_RDWR | os.O_CREAT | nofollow | getattr(os, "O_CLOEXEC", 0)
+        lock_path = journal_root / _REGISTRY_LOCK_FILENAME
+        try:
+            fd = os.open(lock_path, flags, 0o600)
+        except OSError as exc:
+            raise _error("TOOL_EXECUTION_FAILED", "Registry mutation lock cannot be opened.") from exc
+
+        locked = False
+        try:
+            metadata = os.fstat(fd)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise _error("POLICY_DENIED", "Registry mutation lock file is unsafe.")
+            os.fchmod(fd, 0o600)
+
+            deadline = time.monotonic() + _REGISTRY_LOCK_TIMEOUT_S
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked = True
+                    break
+                except BlockingIOError as exc:
+                    if time.monotonic() >= deadline:
+                        raise _error(
+                            "WORKSPACE_CONTENDED",
+                            "Registry mutation lock is busy.",
+                        ) from exc
+                    time.sleep(_REGISTRY_LOCK_POLL_S)
+
+            _REGISTRY_LOCK_STATE.depth = 1
+            try:
+                yield
+            finally:
+                _REGISTRY_LOCK_STATE.depth = 0
+        finally:
+            if locked:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+    finally:
+        _REGISTRY_PROCESS_LOCK.release()
 
 
 def _normalize_metadata(
@@ -258,6 +346,31 @@ def _runtime_registry_seed() -> bytes:
     return b"version: 1\nprojects:\n"
 
 
+def _remove_entry(original: bytes, *, project_id: str) -> bytes:
+    """Remove one control-plane project block without reserializing the registry."""
+    marker = f"  {project_id}:"
+    lines = original.decode("utf-8").splitlines(keepends=True)
+    starts = [idx for idx, line in enumerate(lines) if line.rstrip("\r\n") == marker]
+    if len(starts) != 1:
+        raise _error("TOOL_EXECUTION_FAILED", "Project registry entry cannot be removed safely.")
+    start = starts[0]
+    end = start + 1
+    while end < len(lines):
+        line = lines[end]
+        if line.strip() and not line.startswith("    "):
+            break
+        end += 1
+    del lines[start:end]
+    while (
+        start > 0
+        and start < len(lines)
+        and not lines[start - 1].strip()
+        and not lines[start].strip()
+    ):
+        del lines[start]
+    return "".join(lines).encode("utf-8")
+
+
 def _read_or_create_runtime_registry(path: Path) -> bytes:
     if path.exists() and not path.is_file():
         raise _error("TOOL_EXECUTION_FAILED", "Runtime project registry overlay is not a file.")
@@ -312,7 +425,7 @@ def _merged_registry_data(
     return merged
 
 
-def register_project(
+def _register_project_unlocked(
     *,
     config_dir: Path,
     journal_root: Path,
@@ -391,3 +504,160 @@ def register_project(
         registry_hash=persisted.new_hash,
         storage=storage,
     )
+
+
+def register_project(
+    *,
+    config_dir: Path,
+    journal_root: Path,
+    project_id: str,
+    root: str,
+    project_type: str = "unknown",
+    description: str = "",
+    tags: list[str] | None = None,
+    parent: str | None = None,
+    persist_to_source: bool = False,
+) -> ProjectRegistrationResult:
+    """Serialize and register one validated project entry."""
+    with project_registry_mutation_lock(journal_root):
+        return _register_project_unlocked(
+            config_dir=config_dir,
+            journal_root=journal_root,
+            project_id=project_id,
+            root=root,
+            project_type=project_type,
+            description=description,
+            tags=tags,
+            parent=parent,
+            persist_to_source=persist_to_source,
+        )
+
+
+def _unregister_project_exact_unlocked(
+    *,
+    config_dir: Path,
+    journal_root: Path,
+    project_id: str,
+    expected_root: str,
+    expected_type: str,
+) -> ProjectUnregistrationResult:
+    """CAS-remove one exact project entry after identity and descendant checks."""
+    config_dir = config_dir.resolve()
+    if not isinstance(project_id, str) or not _PROJECT_ID_RE.fullmatch(project_id):
+        raise _error("INVALID_INPUT", "project_id has an invalid format.")
+    if (
+        not isinstance(expected_root, str)
+        or not expected_root.strip()
+        or os.path.isabs(expected_root)
+        or "\\" in expected_root
+        or ".." in Path(expected_root).parts
+    ):
+        raise _error("INVALID_INPUT", "expected_root must be a safe relative path.")
+    expected_root = expected_root.strip().rstrip("/")
+    if not isinstance(expected_type, str) or not expected_type.strip():
+        raise _error("INVALID_INPUT", "expected_type is invalid.")
+    expected_type = expected_type.strip()
+
+    source_original, source_data, _workspace_root = _load_registry(config_dir)
+    source_projects = source_data.get("projects", {})
+    if not isinstance(source_projects, dict):
+        raise _error("TOOL_EXECUTION_FAILED", "Workspace registry is malformed.")
+
+    runtime_path = resolve_runtime_registry_path(config_dir / "projects.yaml")
+    runtime_original: bytes | None = None
+    runtime_data: dict[str, Any] = {"version": 1, "projects": {}}
+    if runtime_path is not None and runtime_path.exists():
+        try:
+            runtime_original = runtime_path.read_bytes()
+            loaded = yaml.safe_load(runtime_original) or {}
+        except (OSError, UnicodeError, yaml.YAMLError) as exc:
+            raise _error("TOOL_EXECUTION_FAILED", "Runtime project registry overlay cannot be read.") from exc
+        if not isinstance(loaded, dict) or not isinstance(loaded.get("projects", {}), dict):
+            raise _error("TOOL_EXECUTION_FAILED", "Runtime project registry overlay is malformed.")
+        runtime_data = loaded
+    runtime_projects = runtime_data.get("projects", {})
+    assert isinstance(runtime_projects, dict)
+
+    source_entry = source_projects.get(project_id)
+    runtime_entry = runtime_projects.get(project_id)
+    if source_entry is not None and runtime_entry is not None:
+        raise _error("WORKSPACE_CONTENDED", "Project is registered in multiple registry stores.")
+    entry = runtime_entry if runtime_entry is not None else source_entry
+    if entry is None:
+        return ProjectUnregistrationResult(
+            project_id=project_id,
+            root=expected_root,
+            project_type=expected_type,
+            registry_hash=None,
+            storage=None,
+            already_absent=True,
+        )
+    if not isinstance(entry, dict):
+        raise _error("TOOL_EXECUTION_FAILED", "Project registry entry is malformed.")
+    if entry.get("root") != expected_root or entry.get("type") != expected_type:
+        raise _error(
+            "WORKSPACE_CONTENDED",
+            "Project registry identity does not match cleanup expectations.",
+        )
+
+    merged_projects = {**source_projects, **runtime_projects}
+    descendant_prefix = expected_root + "/"
+    for other_id, other_entry in merged_projects.items():
+        if other_id == project_id:
+            continue
+        if not isinstance(other_entry, dict):
+            raise _error("TOOL_EXECUTION_FAILED", "Project registry entry is malformed.")
+        if other_entry.get("parent") == project_id:
+            raise _error("WORKSPACE_CONTENDED", "Candidate project still has registered descendants.")
+        other_root = other_entry.get("root")
+        if isinstance(other_root, str) and other_root.startswith(descendant_prefix):
+            raise _error("WORKSPACE_CONTENDED", "Candidate project still has registered descendants.")
+
+    if runtime_entry is not None:
+        if runtime_path is None or runtime_original is None:
+            raise _error("TOOL_EXECUTION_FAILED", "Runtime project registry overlay is unavailable.")
+        target_root = runtime_path.parent
+        target_relative = runtime_path.name
+        target_original = runtime_original
+        storage = "runtime_overlay"
+    else:
+        target_root = config_dir
+        target_relative = "projects.yaml"
+        target_original = source_original
+        storage = "source_registry"
+
+    updated = _remove_entry(target_original, project_id=project_id)
+    expected_hash = "sha256:" + hashlib.sha256(target_original).hexdigest()
+    persisted = integrate_file(
+        target_root,
+        target_relative,
+        expected_hash,
+        updated,
+        journal_root,
+    )
+    return ProjectUnregistrationResult(
+        project_id=project_id,
+        root=expected_root,
+        project_type=expected_type,
+        registry_hash=persisted.new_hash,
+        storage=storage,
+        already_absent=False,
+    )
+
+def unregister_project_exact(
+    *,
+    config_dir: Path,
+    journal_root: Path,
+    project_id: str,
+    expected_root: str,
+    expected_type: str,
+) -> ProjectUnregistrationResult:
+    """Serialize and CAS-remove one exact project entry."""
+    with project_registry_mutation_lock(journal_root):
+        return _unregister_project_exact_unlocked(
+            config_dir=config_dir,
+            journal_root=journal_root,
+            project_id=project_id,
+            expected_root=expected_root,
+            expected_type=expected_type,
+        )
