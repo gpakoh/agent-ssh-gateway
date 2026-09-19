@@ -11,8 +11,10 @@ content can.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1015,8 +1017,10 @@ class TestHostSmokeCheckoutIsGiteaLocal:
     SHA instead of actions/checkout@v7 -- the self-hosted runner pool has no
     github.com egress for the action download, and the authoritative gate must
     prove the exact deployed commit, never the runner's mutable working tree.
-    GITEA_TOKEN reaches git only via a chmod-700 GIT_ASKPASS helper, so the
-    credential never appears in the URL, argv, git config, stdout, or any file.
+    The GITEA_TOKEN secret is de-exported immediately, folded into a Basic
+    Authorization extraHeader scoped to the exact full REPO_URL, and the raw
+    token is cleared before any unrelated child process -- so the credential
+    never appears in the URL, argv, git config, stdout, or any file.
     """
 
     @staticmethod
@@ -1031,6 +1035,29 @@ class TestHostSmokeCheckoutIsGiteaLocal:
         raise AssertionError(
             "host-smoke has no 'Checkout exact deployed commit from Gitea' step"
         )
+
+    @staticmethod
+    def _checkout_run() -> str:
+        return TestHostSmokeCheckoutIsGiteaLocal._checkout_step()["run"]
+
+    @staticmethod
+    def _single_line(lines: list[str], fragment: str) -> int:
+        hits = [idx for idx, line in enumerate(lines) if fragment in line]
+        assert len(hits) == 1, f"expected exactly one line containing {fragment!r}, got {hits}"
+        return hits[0]
+
+    @classmethod
+    def _validator_module(cls) -> dict:
+        run = cls._checkout_run()
+        match = re.search(r"<<'PY'\n(?P<body>.*?)\nPY", run, re.DOTALL)
+        assert match is not None, "checkout run must embed a <<'PY' URL validator heredoc"
+        namespace: dict = {"__name__": "embedded_url_validator"}
+        exec(compile(match.group("body"), "<embedded-url-validator>", "exec"), namespace)
+        return namespace
+
+    @classmethod
+    def _validate(cls, raw_url: str) -> str:
+        return cls._validator_module()["validate"](raw_url)
 
     def test_host_smoke_has_zero_actions_checkout_dependency(self):
         steps = self._job()["steps"]
@@ -1065,8 +1092,11 @@ class TestHostSmokeCheckoutIsGiteaLocal:
         ]
 
     def test_repo_url_is_token_free_server_and_repository(self):
-        run = self._checkout_step()["run"]
+        run = self._checkout_run()
         assert 'REPO_URL="${{ github.server_url }}/${{ github.repository }}.git"' in run
+        assert "github.server_url" not in run.replace(
+            'REPO_URL="${{ github.server_url }}/${{ github.repository }}.git"', ""
+        ), "REPO_URL is the only place the server_url expression may be used"
 
     def test_gitea_token_comes_only_from_secrets_in_step_env(self):
         step = self._checkout_step()
@@ -1075,42 +1105,150 @@ class TestHostSmokeCheckoutIsGiteaLocal:
             "token must live in step env, never interpolated into the run body"
         )
 
-    def test_run_body_has_no_credential_url_or_token_leak(self):
-        run = self._checkout_step()["run"]
-        assert "://" not in run, (
-            "no literal URL scheme -- REPO_URL stays a token-free github.server_url expression"
-        )
+    def test_run_body_has_no_literal_url_and_no_masking_or_failure_swallowing(self):
+        step = self._checkout_step()
+        run = step["run"]
+        assert "://" not in run, "no literal URL scheme anywhere in the run body"
         assert "@" not in run, "no userinfo@host credential URL"
-        assert run.count("GITEA_TOKEN") == 1, (
-            "GITEA_TOKEN may be referenced only once, inside the GIT_ASKPASS helper"
+        assert "add-mask" not in run and "::add-mask" not in run
+        assert "|| true" not in run
+        assert "set +e" not in run
+        assert "continue-on-error" not in step
+
+    def test_run_body_deexports_secret_and_demotes_xtrace_before_unrelated_children(self):
+        run = self._checkout_run()
+        lines = run.splitlines()
+        assert lines[0] == "set -euo pipefail"
+        assert "set +x" in run
+        assert "set -x" not in run
+        assert self._single_line(lines, 'gitea_token="$GITEA_TOKEN"') < self._single_line(
+            lines, "unset GITEA_TOKEN"
+        )
+        token_done = self._single_line(lines, "unset gitea_token")
+        for marker in ("compgen -e", "mktemp -d", "grep -qxE", "python3 - \"$REPO_URL\"", "git init -q"):
+            assert token_done < self._single_line(lines, marker), (
+                f"raw token must be cleared before the first unrelated child ({marker})"
+            )
+        assert self._single_line(lines, "compgen -e") < self._single_line(lines, "mktemp -d")
+
+    def test_gitea_token_is_cleared_before_compgen_and_header_cleared_after_fetch(self):
+        run = self._checkout_run()
+        lines = run.splitlines()
+        assert self._single_line(lines, 'gitea_token=""') < self._single_line(
+            lines, "unset gitea_token"
+        )
+        assert self._single_line(lines, "unset gitea_token") < self._single_line(lines, "compgen -e")
+        assert self._single_line(lines, "git fetch") < self._single_line(lines, 'auth_header=""')
+
+    def test_auth_header_is_complete_basic_authorization_header(self):
+        run = self._checkout_run()
+        assert 'auth_header="Authorization: Basic $(' in run
+        assert "x-access-token:${gitea_token}" in run
+        assert "base64" in run
+        assert run.count("Authorization: Basic ") == 1
+        assert 'GIT_CONFIG_VALUE_0="$auth_header"' in run, (
+            "the header must be passed to git by variable, never written literally"
         )
 
-    def test_run_body_protects_token_with_chmod700_askpass_and_trap(self):
-        run = self._checkout_step()["run"]
-        assert "mktemp -d" in run
-        assert "chmod 700" in run
-        assert "GIT_ASKPASS" in run
-        assert "GIT_TERMINAL_PROMPT=0" in run
-        assert "trap" in run and "EXIT" in run and "rm -rf" in run
+    def test_inherited_git_xdg_and_proxy_influences_neutralized_by_name_only(self):
+        run = self._checkout_run()
+        assert "for var_name in $(compgen -e); do" in run
+        assert "GIT_*|XDG_CONFIG_HOME|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|FTP_PROXY|NO_PROXY|http_proxy|https_proxy|all_proxy|ftp_proxy|no_proxy" in run
+        assert 'unset "$var_name"' in run
+        assert "printenv" not in run
+        assert "env |" not in run and "env>" not in run and "/usr/bin/env" not in run
+        assert " cut " not in run and "cut -" not in run
 
-    def test_run_body_validates_expected_sha_lowercase_40_hex(self):
-        run = self._checkout_step()["run"]
+    def test_private_home_private_template_dir_and_global_config_disabled(self):
+        run = self._checkout_run()
+        assert 'private_home="$(mktemp -d)"' in run
+        assert 'chmod 700 "$private_home"' in run
+        assert 'mkdir -p "$private_home/git-template"' in run
+        assert 'export HOME="$private_home"' in run
+        assert 'export GIT_TEMPLATE_DIR="$private_home/git-template"' in run
+        assert "export GIT_CONFIG_GLOBAL=/dev/null" in run
+        assert "export GIT_CONFIG_NOSYSTEM=1" in run
+        assert "export GIT_TERMINAL_PROMPT=0" in run
+        assert "GIT_ASKPASS" not in run, "askpass helper must be gone; use extraHeader only"
+        assert "GIT_CONFIG_SYSTEM" not in run and "GIT_CONFIG_NOSYSTEM=1" in run
+
+    def test_stale_workspace_git_purged_exactly_before_fresh_init(self):
+        run = self._checkout_run()
+        lines = run.splitlines()
+        purge = self._single_line(lines, 'rm -rf -- "$GITHUB_WORKSPACE/.git"')
+        assert "--" in run
+        assert 'rm -rf -- "$GITHUB_WORKSPACE/.git"' in run
+        for line in lines:
+            if "rm -rf" in line:
+                assert "$GITHUB_WORKSPACE/.git" in line or "$private_home" in line, (
+                    "rm -rf is allowed only on the exact .git target and the private home"
+                )
+        assert purge < self._single_line(lines, "git init -q")
+        assert self._single_line(lines, "git init -q") < self._single_line(lines, "git remote add origin")
+        assert self._single_line(lines, "git remote add origin") < self._single_line(lines, "git fetch")
+
+    def test_url_validator_accepts_gitea_path_prefix_and_valid_ports(self):
+        assert self._validate("https://gitea.example.com/org/repo.git") == "https://gitea.example.com/org/repo.git"
+        assert self._validate("http://gitea.example.com/org/repo.git") == "http://gitea.example.com/org/repo.git"
+        assert self._validate("http://gitea.example.com:3000/org/repo.git") == "http://gitea.example.com:3000/org/repo.git"
+        assert self._validate("https://gitea.example.com/team/project/repo.git") == "https://gitea.example.com/team/project/repo.git"
+        assert self._validate("http://gitea.example.com:1/org/repo.git") == "http://gitea.example.com:1/org/repo.git"
+        assert self._validate("https://gitea.example.com:65535/org/repo.git") == "https://gitea.example.com:65535/org/repo.git"
+
+    def test_url_validator_rejects_malformed_and_forbidden_urls(self):
+        for bad in (
+            "ftp://gitea.example.com/org/repo.git",
+            "ssh://gitea.example.com/org/repo.git",
+            "https:///org/repo.git",
+            "https://user:pass@gitea.example.com/org/repo.git",
+            "https://gitea.example.com/org/repo.git?x=1",
+            "https://gitea.example.com/org/repo.git#frag",
+            "https://gitea.example.com",
+            "https://gitea.example.com:abc/org/repo.git",
+            "https://gitea.example.com:0/org/repo.git",
+            "https://gitea.example.com:65536/org/repo.git",
+            "https://gitea.example.com/org/repo\u00a0.git",
+            "https://gitea.example.com/org/repo\u007f.git",
+        ):
+            with pytest.raises(ValueError):
+                self._validate(bad)
+
+    def test_run_body_embeds_stdlib_only_no_network_url_validator(self):
+        run = self._checkout_run()
+        assert 'python3 - "$REPO_URL" <<' in run
+        body = self._validator_module()
+        assert "validate" in body and "urlsplit" in body["validate"].__code__.co_names
+
+    def test_fetch_credential_scoped_to_exact_repourl_single_fetch_redirects_off(self):
+        run = self._checkout_run()
+        lines = run.splitlines()
+        assert lines.index("(") < lines.index(")")
+        assert run.count("git fetch") == 1
+        assert 'git fetch -q --no-tags --depth=1 origin "$EXPECTED_SHA"' in run
+        open_idx = lines.index("(")
+        close_idx = lines.index(")")
+        fetch_idx = self._single_line(lines, "git fetch")
+        assert open_idx < fetch_idx < close_idx, "the single fetch must live inside one subshell"
+        assert self._single_line(lines, "export GIT_CONFIG_COUNT=2") < fetch_idx < close_idx
+        assert 'export GIT_CONFIG_KEY_0="http.${REPO_URL}.extraHeader"' in run
+        assert 'export GIT_CONFIG_VALUE_0="$auth_header"' in run
+        assert 'export GIT_CONFIG_KEY_1="http.redirect"' in run
+        assert 'export GIT_CONFIG_VALUE_1="false"' in run
+        assert run.count("GIT_CONFIG_COUNT") == 1 and run.count("git fetch") == 1
+
+    def test_expected_sha_lowercase_40_hex_prefetch(self):
+        run = self._checkout_run()
         assert "EXPECTED_SHA" in run
         assert "[0-9a-f]{40}" in run
         assert "lowercase 40-hex sha" in run
 
-    def test_run_body_fetches_exact_sha_and_verifies_fetch_head_before_checkout(self):
-        run = self._checkout_step()["run"]
-        assert "--no-tags" in run
-        assert "--depth=1" in run
-        assert "FETCH_HEAD" in run
-        assert "fetched commit" in run
+    def test_fetch_head_head_and_clean_tree_verified_before_and_after_checkout(self):
+        run = self._checkout_run()
+        assert "--no-tags" in run and "--depth=1" in run
+        assert "FETCH_HEAD" in run and "rev-parse FETCH_HEAD" in run
         assert run.index("fetched commit") < run.index("git checkout"), (
             "FETCH_HEAD must be verified exact BEFORE the detached force checkout"
         )
-
-    def test_run_body_force_detaches_and_verifies_head_and_clean_status(self):
-        run = self._checkout_step()["run"]
         assert "git checkout" in run and "--detach" in run and "-f" in run
         assert run.index("git checkout") < run.index("git clean")
         assert "rev-parse HEAD" in run

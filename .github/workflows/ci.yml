@@ -719,41 +719,110 @@ jobs:
           GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
         run: |
           set -euo pipefail
+          set +x
 
           # Smoke the exact commit that was deployed, never whatever the
           # runner's mutable working tree happens to be. Check out straight
           # from this Gitea server (no actions/checkout, no github.com
-          # dependency). The token reaches git only through a chmod-700
-          # GIT_ASKPASS helper so it never lands in the URL, argv, git
-          # config, stdout, or any file.
+          # dependency). The credential rides only in an extraHeader scoped
+          # to the exact full REPO_URL inside one narrow subshell, so the
+          # token never lands in the URL, argv, git config, stdout, or any
+          # file. Secret handling runs ahead of every unrelated child.
+          if [ -z "${GITEA_TOKEN:-}" ]; then
+            echo "::error::GITEA_TOKEN is unset or empty" >&2
+            exit 1
+          fi
+          gitea_token="$GITEA_TOKEN"
+          unset GITEA_TOKEN
+          auth_header="Authorization: Basic $(printf '%s' "x-access-token:${gitea_token}" | base64 -w0)"
+          gitea_token=""
+          unset gitea_token
+
           EXPECTED_SHA="${{ github.sha }}"
           if ! printf '%s' "$EXPECTED_SHA" | grep -qxE '[0-9a-f]{40}'; then
             echo "::error::EXPECTED_SHA is not a lowercase 40-hex sha" >&2
             exit 1
           fi
 
-          REPO_URL="${{ github.server_url }}/${{ github.repository }}.git"
+          # Neutralize every inherited exported GIT_* plus XDG_CONFIG_HOME
+          # and the proxy variables by NAME ONLY -- never enumerate values.
+          for var_name in $(compgen -e); do
+            case "$var_name" in
+              GIT_*|XDG_CONFIG_HOME|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|FTP_PROXY|NO_PROXY|http_proxy|https_proxy|all_proxy|ftp_proxy|no_proxy)
+                unset "$var_name"
+                ;;
+            esac
+          done
 
-          askpass_dir="$(mktemp -d)"
-          chmod 700 "$askpass_dir"
-          trap 'rm -rf "$askpass_dir"' EXIT
-          askpass_file="$askpass_dir/git-askpass.sh"
-          cat > "$askpass_file" <<'ASKPASS'
-          #!/bin/sh
-          printf %s "$GITEA_TOKEN"
-          ASKPASS
-          chmod 700 "$askpass_file"
-          export GIT_ASKPASS="$askpass_file"
+          # Isolated chmod-700 HOME with a real private template dir, and
+          # global/system git config disabled so nothing inherited can leak.
+          private_home="$(mktemp -d)"
+          chmod 700 "$private_home"
+          mkdir -p "$private_home/git-template"
+          trap 'rm -rf -- "$private_home"' EXIT
+          export HOME="$private_home"
+          export GIT_TEMPLATE_DIR="$private_home/git-template"
+          export GIT_CONFIG_GLOBAL=/dev/null
+          export GIT_CONFIG_NOSYSTEM=1
           export GIT_TERMINAL_PROMPT=0
 
+          REPO_URL="${{ github.server_url }}/${{ github.repository }}.git"
+
+          # Fail-closed stdlib-only URL validation: http/https scheme,
+          # hostname, optional port in 1..65535, no userinfo/query/fragment,
+          # non-empty repository path, and no control or whitespace character
+          # (covers NBSP and DEL). No network access.
+          python3 - "$REPO_URL" <<'PY'
+          import sys
+          import urllib.parse
+
+          def validate(raw: str) -> str:
+              if any(ord(c) < 0x20 or ord(c) == 0x7F or c.isspace() for c in raw):
+                  raise ValueError("contains a forbidden control or whitespace character")
+              parts = urllib.parse.urlsplit(raw)
+              if parts.scheme not in ("http", "https"):
+                  raise ValueError(f"scheme must be http or https, not {parts.scheme!r}")
+              if not parts.hostname:
+                  raise ValueError("missing hostname")
+              if parts.username is not None or parts.password is not None:
+                  raise ValueError("userinfo is not allowed")
+              if parts.query or parts.fragment:
+                  raise ValueError("query/fragment is not allowed")
+              if not parts.path:
+                  raise ValueError("empty repository path")
+              port = parts.port
+              if port is not None and not (1 <= port <= 65535):
+                  raise ValueError(f"port {port} is outside 1..65535")
+              return raw
+
+          if __name__ == "__main__":
+              try:
+                  validate(sys.argv[1])
+              except ValueError as exc:
+                  sys.stderr.write(f"::error::REPO_URL {sys.argv[1]!r}: {exc}")
+                  raise SystemExit(1) from None
+          PY
+
+          # Self-hosted stale-repository defense: purge ONLY the runner
+          # workspace .git (never any other path), then init fresh; any
+          # failure aborts the step.
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
           git init -q "$GITHUB_WORKSPACE"
           cd "$GITHUB_WORKSPACE"
-          if git remote get-url origin >/dev/null 2>&1; then
-            git remote set-url origin "$REPO_URL"
-          else
-            git remote add origin "$REPO_URL"
-          fi
-          git -c protocol.version=2 fetch -q --no-tags --depth=1 origin "$EXPECTED_SHA"
+          git remote add origin "$REPO_URL"
+
+          # Credential config exists only for this single exact-SHA fetch,
+          # in one narrow subshell, scoped to the exact full REPO_URL, with
+          # redirects disabled. The header is cleared immediately after.
+          (
+            export GIT_CONFIG_COUNT=2
+            export GIT_CONFIG_KEY_0="http.${REPO_URL}.extraHeader"
+            export GIT_CONFIG_VALUE_0="$auth_header"
+            export GIT_CONFIG_KEY_1="http.redirect"
+            export GIT_CONFIG_VALUE_1="false"
+            git fetch -q --no-tags --depth=1 origin "$EXPECTED_SHA"
+          )
+          auth_header=""
 
           fetched="$(git rev-parse FETCH_HEAD)"
           if [ "$fetched" != "$EXPECTED_SHA" ]; then
