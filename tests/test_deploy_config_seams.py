@@ -1196,8 +1196,23 @@ class TestHostSmokeCheckoutIsGiteaLocal:
                     "rm -rf is allowed only on the exact .git target and the private home"
                 )
         assert self._single_line(lines, '[ -z "${GITHUB_WORKSPACE:-}" ]') < purge, (
-            "GITHUB_WORKSPACE must be validated as set/non-root before its .git is purged"
+            "GITHUB_WORKSPACE must be validated as set/non-empty before its .git is purged"
         )
+        # The fail-closed shell-builtin-only guard must sit before the exact
+        # .git purge and keep a visible marker for every rejection class:
+        # absolute-path validation, all-slashes/root rejection, `..`-traversal
+        # rejection, symlink rejection, and the existing-directory requirement.
+        guarded = "\n".join(lines[:purge])
+        for marker in (
+            "not an absolute path",
+            "all-slashes filesystem root",
+            '"/../"',
+            '[ -L "$GITHUB_WORKSPACE" ]',
+            '[ ! -d "$GITHUB_WORKSPACE" ]',
+        ):
+            assert marker in guarded, (
+                f"workspace guard marker {marker!r} must appear before the .git purge"
+            )
         assert purge < self._single_line(lines, "git init -q")
         assert self._single_line(lines, "git init -q") < self._single_line(lines, "git remote add origin")
         assert self._single_line(lines, "git remote add origin") < self._single_line(lines, "git fetch")

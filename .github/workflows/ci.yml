@@ -813,11 +813,34 @@ jobs:
           PY
 
           # Self-hosted stale-repository defense: fail closed on an unusable
-          # GITHUB_WORKSPACE (unset or a filesystem root), then purge ONLY
-          # the runner workspace .git (never any other path) and init fresh;
-          # any failure aborts the step.
-          if [ -z "${GITHUB_WORKSPACE:-}" ] || [ "$GITHUB_WORKSPACE" = "/" ] || [ "$GITHUB_WORKSPACE" = "//" ]; then
-            echo "::error::GITHUB_WORKSPACE is unset or a filesystem root" >&2
+          # GITHUB_WORKSPACE, then purge ONLY the runner workspace .git
+          # (never any other path) and init fresh; any failure aborts the step.
+          # The guard uses only shell builtins (case / [ ] / parameter
+          # expansion), never realpath/readlink/find/python, and rejects empty,
+          # non-absolute, all-slashes/root, or traversal ("..") paths as well
+          # as a symlink or missing/non-directory workspace, so the exact .git
+          # deletion can never escape to a path outside the runner workspace.
+          if [ -z "${GITHUB_WORKSPACE:-}" ]; then
+            echo "::error::GITHUB_WORKSPACE is unset or empty" >&2
+            exit 1
+          fi
+          case "$GITHUB_WORKSPACE" in
+            /*) ;;
+            *) echo "::error::GITHUB_WORKSPACE is not an absolute path" >&2; exit 1 ;;
+          esac
+          case "$GITHUB_WORKSPACE" in
+            *[!/]*) ;;
+            *) echo "::error::GITHUB_WORKSPACE is an all-slashes filesystem root" >&2; exit 1 ;;
+          esac
+          case "/$GITHUB_WORKSPACE/" in
+            *"/../"*) echo "::error::GITHUB_WORKSPACE contains a .. path segment" >&2; exit 1 ;;
+          esac
+          if [ -L "$GITHUB_WORKSPACE" ]; then
+            echo "::error::GITHUB_WORKSPACE is a symlink" >&2
+            exit 1
+          fi
+          if [ ! -d "$GITHUB_WORKSPACE" ]; then
+            echo "::error::GITHUB_WORKSPACE is not an existing directory" >&2
             exit 1
           fi
           rm -rf -- "$GITHUB_WORKSPACE/.git"
