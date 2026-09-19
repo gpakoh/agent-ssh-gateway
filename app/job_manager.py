@@ -261,6 +261,34 @@ class JobRecord:
                     self._listeners.remove(q)
 
 
+def _classify_cancelled_stream_outcome(job: JobRecord) -> None:
+    """Classify a started execution whose stream ended after cancellation.
+
+    A factual non-negative remote exit (``recv_exit_status() >= 0``) proves
+    the remote command completed and wins a concurrent/late cancel request:
+    exit 0 is completed, a positive exit is failed. A synthetic ``-1`` — or a
+    stream that ended with no exit observed — comes from a local
+    ``channel.close()`` after cancellation and cannot prove that remote side
+    effects stopped, so the outcome is terminal ``ambiguous`` with explicit
+    diagnostics. Shared by the durable and legacy non-durable paths so the
+    epistemic rule is identical.
+    """
+    if job.exit_code is not None and job.exit_code >= 0:
+        job.status = "completed" if job.exit_code == 0 else "failed"
+        if job.status == "failed":
+            job.error_message = f"Exit code: {job.exit_code}"
+        return
+    if job.exit_code is None:
+        job.exit_code = -1
+    job.status = "ambiguous"
+    job.error_message = (
+        "Local SSH channel interrupted after cancellation; "
+        "remote command outcome is unproven"
+    )
+    job.progress["cancellation_outcome"] = "ambiguous"
+    job.progress["locally_interrupted"] = True
+
+
 # ---------------------------------------------------------------------------
 # Job Manager
 # ---------------------------------------------------------------------------
@@ -1069,32 +1097,12 @@ class JobManager:
                         job.command_finished_at_mono = time.monotonic()
                         await job.notify_listeners({"type": "exit", "exit_code": job.exit_code})
 
-                if is_durable and job.cancel_event.is_set():
-                    # A non-negative recv_exit_status() is factual remote
-                    # completion and wins a concurrent/late cancel request.
-                    # The -1 sentinel from SSHSessionManager.execute_stream()
-                    # is synthetic after local channel.close(), so it cannot
-                    # prove that remote side effects stopped.
-                    if job.exit_code is not None and job.exit_code >= 0:
-                        job.status = "completed" if job.exit_code == 0 else "failed"
-                        if job.status == "failed":
-                            job.error_message = f"Exit code: {job.exit_code}"
-                    else:
-                        job.status = "ambiguous"
-                        if job.exit_code is None:
-                            job.exit_code = -1
-                        job.error_message = (
-                            "Local SSH channel interrupted after cancellation; "
-                            "remote command outcome is unproven"
-                        )
-                        job.progress["cancellation_outcome"] = "ambiguous"
-                        job.progress["locally_interrupted"] = True
-                elif job.cancel_event.is_set():
-                    # Preserve legacy best-effort semantics for unkeyed jobs.
-                    job.status = "cancelled"
-                    if job.exit_code is None:
-                        job.exit_code = -1
-                    job.error_message = None
+                if job.cancel_event.is_set():
+                    # A started job whose stream ended after cancellation is
+                    # never called cancelled: the -1 sentinel (or absent exit)
+                    # from a local channel.close() cannot prove the remote
+                    # process stopped. Factual non-negative remote exits win.
+                    _classify_cancelled_stream_outcome(job)
                 else:
                     job.status = "completed" if (job.exit_code == 0) else "failed"
                     if job.status == "failed" and job.exit_code != 0:
