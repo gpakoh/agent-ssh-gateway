@@ -1,6 +1,5 @@
 """Code intelligence for smart code search and generation."""
 
-import asyncio
 import logging
 import os
 import re
@@ -305,27 +304,23 @@ Code:"""
             logger.warning("OPENCODE_ADAPTER_URL is not set, skipping adapter code generation")
             return ""
 
-        # Делаем до 3 попыток с задержкой
-        for attempt in range(3):
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        f"{adapter_url}/api/generate",
-                        json={"model": "openrouter/auto", "prompt": prompt, "stream": False},
-                        timeout=aiohttp.ClientTimeout(total=180),
-                    ) as response:
-                        if response.status == 200:
-                            data = await response.json()
-                            generated = data.get("response", "").strip()
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Irreversible boundary: once this POST starts, the adapter/provider may
+                # execute the user task even if the response is lost. Never replay the
+                # same generation request automatically after this point.
+                async with session.post(
+                    f"{adapter_url}/api/generate",
+                    json={"model": "openrouter/auto", "prompt": prompt, "stream": False},
+                    timeout=aiohttp.ClientTimeout(total=180),
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        generated = data.get("response", "").strip()
 
-                            # Проверяем на ошибку от адаптера
-                            if generated.startswith("Error:"):
-                                logger.warning(
-                                    f"⚠️ Attempt {attempt + 1}: Adapter error: {generated}, waiting..."
-                                )
-                                await asyncio.sleep(5 * (attempt + 1))
-                                continue
-
+                        if generated.startswith("Error:"):
+                            logger.warning("Adapter returned an error response; not replaying")
+                        else:
                             # Clean Up Markdown Code Blocks
                             if generated.startswith("```"):
                                 lines = generated.split("\n")
@@ -336,43 +331,27 @@ Code:"""
                                 generated = "\n".join(lines).strip()
 
                             if generated and len(generated) > 50:
-                                logger.info(
-                                    "✅ Code generated via OpenRouter (attempt %s)", attempt + 1
-                                )
+                                logger.info("✅ Code generated via OpenRouter")
                                 return generated
-                            else:
-                                logger.warning(
-                                    "⚠️ Attempt %s: Empty or short response from adapter",
-                                    attempt + 1,
-                                )
-                                if attempt < 2:
-                                    await asyncio.sleep(3)
-                                    continue
-                        else:
-                            text = await response.text()
-                            logger.warning(
-                                "⚠️ Attempt %s: Adapter returned %s: %s",
-                                attempt + 1,
-                                response.status,
-                                text,
-                            )
-                            if attempt < 2:
-                                await asyncio.sleep(3)
-                                continue
 
-            except TimeoutError:
-                logger.warning("⏱️ Attempt %s: Timeout waiting for adapter", attempt + 1)
-                if attempt < 2:
-                    await asyncio.sleep(5)
-                    continue
-            except Exception as exc:
-                logger.warning("❌ Attempt %s: Adapter request failed: %s", attempt + 1, exc)
-                if attempt < 2:
-                    await asyncio.sleep(3)
-                    continue
+                            logger.warning(
+                                "Adapter returned an empty or short response; not replaying"
+                            )
+                    else:
+                        text = await response.text()
+                        logger.warning(
+                            "Adapter returned %s: %s; not replaying",
+                            response.status,
+                            text,
+                        )
+
+        except TimeoutError:
+            logger.warning("Timeout waiting for adapter; not replaying")
+        except Exception as exc:
+            logger.warning("Adapter request failed: %s; not replaying", exc)
 
         # Fallback To Template Generation
-        logger.info("🔄 Using Fallback Code Generation After All Attempts Failed")
+        logger.info("🔄 Using Fallback Code Generation After Adapter Failure")
         return self._generate_fallback(instruction, language)
 
     def _generate_fallback(self, instruction: str, language: str) -> str:
