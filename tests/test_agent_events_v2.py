@@ -799,7 +799,7 @@ async def test_cancelled_event_emitted_exactly_once_across_paths(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_running_cancellation_records_cancelled_type(monkeypatch):
+async def test_running_cancellation_records_ambiguous_type(monkeypatch):
     monkeypatch.setattr(_settings, "heartbeat_interval", 0.02)
     emitter, pg = _wire_state_emitter(monkeypatch)
     started = asyncio.Event()
@@ -819,9 +819,11 @@ async def test_running_cancellation_records_cancelled_type(monkeypatch):
     await jm.cancel_job(job_id)  # running -> cancelling
     release.set()
     await asyncio.wait_for(job.completed_event.wait(), timeout=5)
-    assert job.status == "cancelled"
+    assert job.status == "ambiguous"
     types = [c[1] for c in pg.calls if c[0] == "insert"]
-    assert types[-1] == "cancelled"
+    assert types[-1] == "ambiguous"
+    assert "cancelled" not in types
+    assert "completed" not in types
 
 
 @pytest.mark.asyncio
@@ -886,8 +888,9 @@ async def test_pending_cancel_pg_row_has_null_attempt_id(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_running_cancellation_pg_row_has_real_attempt_id(monkeypatch):
-    """Running cancellation carries the real execution attempt_id."""
+async def test_running_ambiguous_pg_row_has_real_attempt_id(monkeypatch):
+    """A running cancellation with a synthetic -1 exit becomes ambiguous
+    and still carries the real execution attempt_id in the PG row."""
     monkeypatch.setattr(_settings, "heartbeat_interval", 0.02)
     emitter, pg = _wire_state_emitter(monkeypatch)
     started = asyncio.Event()
@@ -909,8 +912,8 @@ async def test_running_cancellation_pg_row_has_real_attempt_id(monkeypatch):
     release.set()
     await asyncio.wait_for(job.completed_event.wait(), timeout=5)
     types = [c[1] for c in pg.calls if c[0] == "insert"]
-    assert types[-1] == "cancelled"
-    idx = types.index("cancelled")
+    assert types[-1] == "ambiguous"
+    idx = types.index("ambiguous")
     assert pg.ok_attempt_ids[idx] == job.attempt_id, (
         "running cancellation must carry real attempt_id"
     )
@@ -1760,22 +1763,24 @@ async def test_slow_pg_emit_does_not_block_manager_operations(monkeypatch):
         assert cancel_ret in {"cancelled", "cancelling"}
 
         # Terminal convergence has its own explicit bound (separate from the
-        # manager-operation latency budget).
+        # manager-operation latency budget). A job cancelled while still
+        # pending is terminal "cancelled"; a started job whose stream ended
+        # with no factual remote exit is terminal "ambiguous".
         if cancel_ret == "cancelling":
             await asyncio.wait_for(got.completed_event.wait(), timeout=5)
 
-        assert got.status == "cancelled"
+        assert got.status in {"cancelled", "ambiguous"}
     finally:
         await jm.stop_supervisor_task()
 
 
 @pytest.mark.asyncio
-async def test_cancel_on_running_job_reaches_terminal(monkeypatch):
+async def test_cancel_on_running_job_reaches_ambiguous_terminal(monkeypatch):
     """Deterministically prove the pending vs running race: block
     execute_stream until cancel_event, ensuring the job is in 'running'
     when cancel_job is called.  cancel_job returns 'cancelling' (not
-    'cancelled').  The old synchronous assertion would immediately RED;
-    the corrected path reaches terminal 'cancelled' via completed_event."""
+    'cancelled').  A running stream cancelled without a factual remote
+    exit is terminal 'ambiguous', not 'cancelled'."""
     emitter, pg = _wire_state_emitter(monkeypatch)
 
     async def blocking_stream(*_args, cancel_event=None, **_kwargs):
@@ -1803,12 +1808,13 @@ async def test_cancel_on_running_job_reaches_terminal(monkeypatch):
     # cancel_job on a running job returns "cancelling", never "cancelled".
     cancel_ret = await asyncio.wait_for(jm.cancel_job(j2), timeout=2)
     assert cancel_ret == "cancelling"
-    # Old broken assertion: assert got.status == "cancelled"  — would RED here.
-
-    # The corrected path: _run_job detects cancel_event and transitions
-    # the job to terminal "cancelled", signaling completed_event.
+    # A started job whose local SSH stream ended without a factual remote
+    # exit is terminal "ambiguous" — its remote outcome is unproven.
     await asyncio.wait_for(got.completed_event.wait(), timeout=5)
-    assert got.status == "cancelled"
+    assert got.status == "ambiguous"
+    assert got.exit_code == -1
+    assert got.progress["cancellation_outcome"] == "ambiguous"
+    assert got.progress["locally_interrupted"] is True
 
 
 class _FakeMixedOwnerStore(_FakeQueryStore):
