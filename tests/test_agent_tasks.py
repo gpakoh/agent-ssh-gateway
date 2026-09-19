@@ -1644,7 +1644,7 @@ class TestAgentTaskStatus:
         assert result["next"]["read_agent_report"] == {"project": "my-proj", "task_id": task_id}
         assert result["next"]["read_agent_diff"] == {"project": "my-proj", "task_id": task_id}
 
-    def test_ambiguous_gateway_job_is_terminal_despite_fresh_heartbeat(
+    def test_ambiguous_gateway_job_with_fresh_running_heartbeat_keeps_lifecycle_live(
         self, tmp_path, monkeypatch
     ):
         monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
@@ -1674,6 +1674,56 @@ class TestAgentTaskStatus:
             encoding="utf-8",
         )
         for child in td.iterdir():
+            os.utime(child, (now - 5, now - 5))
+
+        result = agent_task_status(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            now_epoch=now,
+            job_status=lambda job_id: {"job_id": job_id, "status": "ambiguous"},
+        )
+
+        assert result["job"]["status"] == "ambiguous"
+        assert result["runner_heartbeat_fresh"] is True
+        assert result["terminal"] is False
+        assert result["acceptance"]["runner_lifecycle_completed"] is False
+        assert result["verdict"] == "starting"
+        assert result["next"]["job_status"] == {"job_id": "job-1"}
+        assert "read_agent_report" not in result["next"]
+        assert "read_agent_diff" not in result["next"]
+
+    def test_ambiguous_gateway_job_with_strict_final_heartbeat_proves_lifecycle(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: running\n", encoding="utf-8")
+        (td / "attempt-state.json").write_text(
+            json.dumps(
+                {"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}
+            ),
+            encoding="utf-8",
+        )
+        (td / "agent-heartbeat.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "state": "finished",
+                    "phase": "final",
+                    "updated_at": "2026-09-03T12:00:00Z",
+                    "updated_epoch": now - 5,
+                    "runner_pid": 123,
+                    "exit_code": 0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        for child in td.iterdir():
             os.utime(child, (now - 700, now - 700))
         os.utime(td / "agent-heartbeat.json", (now - 5, now - 5))
 
@@ -1687,11 +1737,10 @@ class TestAgentTaskStatus:
         )
 
         assert result["job"]["status"] == "ambiguous"
-        assert result["runner_heartbeat_fresh"] is True
+        assert result["runner_heartbeat_fresh"] is False
         assert result["terminal"] is True
-        assert result["likely_hung"] is False
+        assert result["acceptance"]["runner_lifecycle_completed"] is True
         assert result["verdict"] == "finished"
-        assert "job_status" not in result["next"]
         assert result["next"]["read_agent_report"] == {
             "project": "my-proj",
             "task_id": task_id,
@@ -1700,6 +1749,116 @@ class TestAgentTaskStatus:
             "project": "my-proj",
             "task_id": task_id,
         }
+        assert "job_status" not in result["next"]
+
+    def test_stale_final_heartbeat_predating_attempt_state_does_not_prove_current_lifecycle(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: running\n", encoding="utf-8")
+        (td / "attempt-state.json").write_text(
+            json.dumps(
+                {"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}
+            ),
+            encoding="utf-8",
+        )
+        (td / "agent-heartbeat.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "state": "finished",
+                    "phase": "final",
+                    "updated_at": "2026-09-03T11:55:00Z",
+                    "updated_epoch": now - 700,
+                    "runner_pid": 123,
+                    "exit_code": 0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        for child in td.iterdir():
+            os.utime(child, (now - 5, now - 5))
+        os.utime(td / "agent-heartbeat.json", (now - 700, now - 700))
+
+        result = agent_task_status(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            now_epoch=now,
+            job_status=lambda job_id: {"job_id": job_id, "status": "ambiguous"},
+        )
+
+        assert result["job"]["status"] == "ambiguous"
+        assert result["terminal"] is False
+        assert result["acceptance"]["runner_lifecycle_completed"] is False
+        assert result["verdict"] != "finished"
+        assert result["next"]["job_status"] == {"job_id": "job-1"}
+
+    @pytest.mark.parametrize(
+        "heartbeat",
+        [
+            {
+                "version": 1,
+                "state": "finished",
+                "phase": "loop",
+                "updated_at": "2026-09-03T12:00:00Z",
+                "updated_epoch": 1_995,
+                "runner_pid": 123,
+                "exit_code": 0,
+            },
+            {
+                "version": 1,
+                "state": "finished",
+                "phase": "final",
+                "updated_at": "2026-09-03T12:00:00Z",
+                "updated_epoch": 1_995,
+                "runner_pid": 123,
+                "exit_code": None,
+            },
+        ],
+    )
+    def test_malformed_or_non_final_heartbeat_does_not_prove_lifecycle_completion(
+        self, tmp_path, monkeypatch, heartbeat
+    ):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: running\n", encoding="utf-8")
+        (td / "attempt-state.json").write_text(
+            json.dumps(
+                {"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}
+            ),
+            encoding="utf-8",
+        )
+        (td / "agent-heartbeat.json").write_text(
+            json.dumps(heartbeat),
+            encoding="utf-8",
+        )
+        for child in td.iterdir():
+            os.utime(child, (now - 700, now - 700))
+        os.utime(td / "agent-heartbeat.json", (now - 5, now - 5))
+
+        result = agent_task_status(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            now_epoch=now,
+            job_status=lambda job_id: {"job_id": job_id, "status": "ambiguous"},
+        )
+
+        assert result["job"]["status"] == "ambiguous"
+        assert result["terminal"] is False
+        assert result["acceptance"]["runner_lifecycle_completed"] is False
+        assert result["verdict"] != "finished"
+        assert result["next"]["job_status"] == {"job_id": "job-1"}
 
 
 class TestAgentStartupDiagnostics:
@@ -2980,7 +3139,9 @@ class TestInspectAgentHeartbeat:
         assert result["runner_heartbeat"]["exit_code"] == 0
         assert result["runner_heartbeat_fresh"] is False
 
-    def test_ambiguous_gateway_job_is_finished_not_running(self, tmp_path, monkeypatch):
+    def test_ambiguous_gateway_job_with_fresh_running_heartbeat_keeps_lifecycle_live(
+        self, tmp_path, monkeypatch
+    ):
         monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
         task_id = "a12345678901"
         now = 2_000
@@ -3012,6 +3173,61 @@ class TestInspectAgentHeartbeat:
             encoding="utf-8",
         )
         for child in td.iterdir():
+            os.utime(child, (now - 5, now - 5))
+
+        result = inspect_agent_task(
+            TestInspectAgentTask._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            now_epoch=now,
+            job_status=lambda job_id: {"job_id": job_id, "status": "ambiguous"},
+        )
+
+        assert result["status"] == "running"
+        assert result["job"]["status"] == "ambiguous"
+        assert result["runner_heartbeat_fresh"] is True
+        assert result["terminal"] is False
+        assert result["acceptance"]["runner_lifecycle_completed"] is False
+        assert result["verdict"] == "starting"
+        assert result["verdict"] != "finished"
+        assert "recovery" not in result
+        assert "finished" not in result.get("next", {})
+
+    def test_ambiguous_gateway_job_with_strict_final_heartbeat_proves_lifecycle(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: running\n", encoding="utf-8")
+        (td / "opencode-output.log").write_text(
+            "final message\n",
+            encoding="utf-8",
+        )
+        (td / "attempt-state.json").write_text(
+            json.dumps(
+                {"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}
+            ),
+            encoding="utf-8",
+        )
+        (td / "agent-heartbeat.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "state": "finished",
+                    "phase": "final",
+                    "updated_at": "2026-09-03T12:00:00Z",
+                    "updated_epoch": now - 5,
+                    "runner_pid": 123,
+                    "exit_code": 0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        for child in td.iterdir():
             os.utime(child, (now - 700, now - 700))
         os.utime(td / "agent-heartbeat.json", (now - 5, now - 5))
 
@@ -3026,10 +3242,129 @@ class TestInspectAgentHeartbeat:
 
         assert result["status"] == "running"
         assert result["job"]["status"] == "ambiguous"
-        assert result["runner_heartbeat_fresh"] is True
         assert result["terminal"] is True
-        assert result["likely_hung"] is False
+        assert result["acceptance"]["runner_lifecycle_completed"] is True
         assert result["verdict"] == "finished"
+        assert "recovery" not in result
+
+    def test_stale_final_heartbeat_predating_attempt_state_does_not_prove_current_lifecycle(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: running\n", encoding="utf-8")
+        (td / "opencode-output.log").write_text(
+            "still printing keepalive\n",
+            encoding="utf-8",
+        )
+        (td / "attempt-state.json").write_text(
+            json.dumps(
+                {"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}
+            ),
+            encoding="utf-8",
+        )
+        (td / "agent-heartbeat.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "state": "finished",
+                    "phase": "final",
+                    "updated_at": "2026-09-03T11:55:00Z",
+                    "updated_epoch": now - 700,
+                    "runner_pid": 123,
+                    "exit_code": 0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        for child in td.iterdir():
+            os.utime(child, (now - 5, now - 5))
+        os.utime(td / "agent-heartbeat.json", (now - 700, now - 700))
+
+        result = inspect_agent_task(
+            TestInspectAgentTask._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            now_epoch=now,
+            job_status=lambda job_id: {"job_id": job_id, "status": "ambiguous"},
+        )
+
+        assert result["status"] == "running"
+        assert result["job"]["status"] == "ambiguous"
+        assert result["terminal"] is False
+        assert result["acceptance"]["runner_lifecycle_completed"] is False
+        assert result["verdict"] == "starting"
+        assert result["verdict"] != "finished"
+        assert "recovery" not in result
+
+    @pytest.mark.parametrize(
+        "heartbeat",
+        [
+            {
+                "version": 1,
+                "state": "finished",
+                "phase": "loop",
+                "updated_at": "2026-09-03T12:00:00Z",
+                "updated_epoch": 1_995,
+                "runner_pid": 123,
+                "exit_code": 0,
+            },
+            {
+                "version": 1,
+                "state": "finished",
+                "phase": "final",
+                "updated_at": "2026-09-03T12:00:00Z",
+                "updated_epoch": 1_995,
+                "runner_pid": 123,
+                "exit_code": None,
+            },
+        ],
+    )
+    def test_malformed_or_non_final_heartbeat_does_not_prove_lifecycle_completion(
+        self, tmp_path, monkeypatch, heartbeat
+    ):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: running\n", encoding="utf-8")
+        (td / "opencode-output.log").write_text(
+            "still printing keepalive\n",
+            encoding="utf-8",
+        )
+        (td / "attempt-state.json").write_text(
+            json.dumps(
+                {"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}
+            ),
+            encoding="utf-8",
+        )
+        (td / "agent-heartbeat.json").write_text(
+            json.dumps(heartbeat),
+            encoding="utf-8",
+        )
+        for child in td.iterdir():
+            os.utime(child, (now - 700, now - 700))
+        os.utime(td / "agent-heartbeat.json", (now - 5, now - 5))
+
+        result = inspect_agent_task(
+            TestInspectAgentTask._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            now_epoch=now,
+            job_status=lambda job_id: {"job_id": job_id, "status": "ambiguous"},
+        )
+
+        assert result["status"] == "running"
+        assert result["job"]["status"] == "ambiguous"
+        assert result["terminal"] is False
+        assert result["acceptance"]["runner_lifecycle_completed"] is False
+        assert result["verdict"] != "finished"
         assert "recovery" not in result
 
 

@@ -1273,7 +1273,6 @@ _AGENT_TERMINAL_STATUSES = frozenset(
         "supervisor-failed",
         "failed",
         "completed",
-        "ambiguous",
         "cancelled",
     }
 )
@@ -2017,11 +2016,94 @@ def _gateway_job_absent(job: dict[str, Any] | None) -> bool:
 
 
 def _gateway_job_terminal_proven(job: dict[str, Any] | None) -> bool:
-    """Return true only for authoritative known-terminal Gateway state."""
+    """Return true only for authoritative known-terminal Gateway state.
+
+    Gateway outcome ambiguity is deliberately NOT terminal proof: a job whose
+    remote outcome is ambiguous proves only control-plane uncertainty, never
+    that the runner-owned wrapper process has exited.
+    """
     return bool(
         job
         and job.get("known") is True
         and _job_status_token(job) in _AGENT_TERMINAL_STATUSES
+    )
+
+
+def _runner_heartbeat_proves_completion(
+    *,
+    heartbeat: dict[str, Any],
+    heartbeat_mtime: int | None,
+    attempt_state_mtime: int | None,
+) -> bool:
+    """Return True only when the runner heartbeat is a strict final record.
+
+    A runner-owned heartbeat proves lifecycle completion only as a strict
+    final artifact OWNED BY THE CURRENT ATTEMPT: valid JSON with
+    state="finished", phase="final" and an integer ``exit_code``, whose file is
+    not older than the durable attempt-state evidence. A fresh state="running"
+    heartbeat keeps the lifecycle live; anything malformed or non-final proves
+    nothing.
+    """
+    if heartbeat.get("valid") is not True:
+        return False
+    if heartbeat.get("state") != "finished" or heartbeat.get("phase") != "final":
+        return False
+    exit_code = heartbeat.get("exit_code")
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+        return False
+    if not isinstance(attempt_state_mtime, int):
+        return False
+    if not isinstance(heartbeat_mtime, int):
+        return False
+    return heartbeat_mtime >= attempt_state_mtime
+
+
+def _runner_lifecycle_completed(
+    *,
+    job: dict[str, Any] | None,
+    gate_ledger_valid: bool,
+    heartbeat: dict[str, Any],
+    heartbeat_mtime: int | None,
+    attempt_state_mtime: int | None,
+) -> bool:
+    """Return True only when the runner lifecycle is provably complete.
+
+    Completion proof comes from either an authoritative known-terminal Gateway
+    state backed by a valid gate ledger, or from a strict final current-attempt
+    runner heartbeat. Gateway outcome ambiguity alone proves nothing.
+    """
+    return bool(
+        (gate_ledger_valid and _gateway_job_terminal_proven(job))
+        or _runner_heartbeat_proves_completion(
+            heartbeat=heartbeat,
+            heartbeat_mtime=heartbeat_mtime,
+            attempt_state_mtime=attempt_state_mtime,
+        )
+    )
+
+
+def _agent_task_terminal(
+    *,
+    status_token: str | None,
+    job: dict[str, Any] | None,
+    heartbeat: dict[str, Any],
+    heartbeat_mtime: int | None,
+    attempt_state_mtime: int | None,
+) -> bool:
+    """Judge wrapper-lifecycle terminality through the shared proof helpers.
+
+    A terminal agent-status token, an authoritative known-terminal Gateway
+    state, or a strict final current-attempt runner heartbeat all prove
+    terminality. A fresh state="running" heartbeat keeps the lifecycle live.
+    """
+    return bool(
+        status_token in _AGENT_TERMINAL_STATUSES
+        or _gateway_job_terminal_proven(job)
+        or _runner_heartbeat_proves_completion(
+            heartbeat=heartbeat,
+            heartbeat_mtime=heartbeat_mtime,
+            attempt_state_mtime=attempt_state_mtime,
+        )
     )
 
 
@@ -2636,16 +2718,26 @@ def agent_task_status(
         }
         semantic_age = None
 
-    terminal = bool(status_token in _AGENT_TERMINAL_STATUSES or job_token in _AGENT_TERMINAL_STATUSES)
     active = bool(status_token in _AGENT_ACTIVE_STATUSES or job_token in _AGENT_ACTIVE_STATUSES)
     gate_ledger = _read_agent_gate_ledger(
         run_cmd, project=project, task_id=task_id
     )
-    gate_ledger["runner_lifecycle_completed"] = bool(
-        gate_ledger.get("valid") is True
-        and _gateway_job_terminal_proven(job)
+    runner_lifecycle_completed = _runner_lifecycle_completed(
+        job=job,
+        gate_ledger_valid=gate_ledger.get("valid") is True,
+        heartbeat=heartbeat,
+        heartbeat_mtime=(files.get("heartbeat") or {}).get("mtime_epoch"),
+        attempt_state_mtime=(files.get("attempt_state") or {}).get("mtime_epoch"),
     )
+    gate_ledger["runner_lifecycle_completed"] = runner_lifecycle_completed
     gate_ledger["authoritative"] = False
+    terminal = _agent_task_terminal(
+        status_token=status_token,
+        job=job,
+        heartbeat=heartbeat,
+        heartbeat_mtime=(files.get("heartbeat") or {}).get("mtime_epoch"),
+        attempt_state_mtime=(files.get("attempt_state") or {}).get("mtime_epoch"),
+    )
     reconciliation = _agent_reconciliation_diagnostics(
         attempt=attempt,
         job=job,
@@ -2893,16 +2985,26 @@ def inspect_agent_task(
         }
         semantic_age = None
 
-    terminal = bool(status_token in _AGENT_TERMINAL_STATUSES or job_token in _AGENT_TERMINAL_STATUSES)
     active = bool(status_token in _AGENT_ACTIVE_STATUSES or job_token in _AGENT_ACTIVE_STATUSES)
     gate_ledger = _read_agent_gate_ledger(
         run_cmd, project=project, task_id=task_id
     )
-    gate_ledger["runner_lifecycle_completed"] = bool(
-        gate_ledger.get("valid") is True
-        and _gateway_job_terminal_proven(job)
+    runner_lifecycle_completed = _runner_lifecycle_completed(
+        job=job,
+        gate_ledger_valid=gate_ledger.get("valid") is True,
+        heartbeat=heartbeat,
+        heartbeat_mtime=(files.get("heartbeat") or {}).get("mtime_epoch"),
+        attempt_state_mtime=(files.get("attempt_state") or {}).get("mtime_epoch"),
     )
+    gate_ledger["runner_lifecycle_completed"] = runner_lifecycle_completed
     gate_ledger["authoritative"] = False
+    terminal = _agent_task_terminal(
+        status_token=status_token,
+        job=job,
+        heartbeat=heartbeat,
+        heartbeat_mtime=(files.get("heartbeat") or {}).get("mtime_epoch"),
+        attempt_state_mtime=(files.get("attempt_state") or {}).get("mtime_epoch"),
+    )
     reconciliation = _agent_reconciliation_diagnostics(
         attempt=attempt,
         job=job,
