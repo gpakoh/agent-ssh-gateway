@@ -38,6 +38,7 @@ from examples.mcp_server.agent_sources import (
     validate_bundle_digest,
 )
 from examples.mcp_server.agent_tasks import (
+    AGENT_RUNTIME_STATUS_FILENAME,
     AttemptConflictError,
     AttemptStateError,
     build_gate_specs,
@@ -1240,6 +1241,21 @@ def _agent_heartbeat_script_lines(interval_seconds: int = 30) -> list[str]:
     ]
 
 
+def _agent_runtime_status_script_lines() -> list[str]:
+    """Return runner-only first-useful-activity marker helpers."""
+    return [
+        "AGENT_RUNTIME_STARTED=0",
+        "mark_agent_runtime_started() {",
+        '  if [ "${AGENT_RUNTIME_STARTED:-0}" = "1" ]; then return 0; fi',
+        "  AGENT_RUNTIME_STARTED=1",
+        '  _runtime_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)',
+        '  _runtime_epoch=$(date -u +%s)',
+        '  _runtime_payload=$(printf \'{"version":1,"phase":"runtime","source":"private_output_classifier","started_at":"%s","started_epoch":%s,"runner_pid":%s}\' "$_runtime_ts" "$_runtime_epoch" "$$")',
+        f'  runner_artifact_write_line "$td/{AGENT_RUNTIME_STATUS_FILENAME}" "$_runtime_payload"',
+        "}",
+    ]
+
+
 def _opencode_startup_watchdog_script_lines(
     opencode_flags: str,
     startup_timeout_seconds: int,
@@ -1364,6 +1380,7 @@ def _opencode_startup_watchdog_script_lines(
         "raise SystemExit(1)",
         "OPENCODEPROGRESS_EOF",
         "    then",
+        "      mark_agent_runtime_started",
         '      if command -v write_proxy_status >/dev/null 2>&1; then write_proxy_status running "" 0; fi',
         '      OPENCODE_RUNTIME_STARTED=$(date +%s)',
         '      while kill -0 "$OPENCODE_PID" 2>/dev/null; do',
@@ -2112,6 +2129,8 @@ def _build_opencode_script(
     parts.append("OPCODE_BIN=$(command -v opencode 2>/dev/null || echo '/root/.opencode/bin/opencode')")
     parts.extend(_runner_artifact_io_script_lines())
     parts.append('runner_artifact_verify_dir "$td"')
+    parts.extend(_agent_runtime_status_script_lines())
+    parts.append(f'runner_artifact_remove "$td/{AGENT_RUNTIME_STATUS_FILENAME}"')
     parts.append('runner_artifact_write_line "$td/agent-status.md" "Status: running"')
     parts.extend(_agent_heartbeat_script_lines())
     if project_root and worktree_path and not managed_clone:

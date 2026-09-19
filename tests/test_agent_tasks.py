@@ -1138,7 +1138,7 @@ class TestAgentTaskStatus:
         assert result["reconciliation"]["worker_termination_proven"] is False
         assert result["next"]["inspect_agent_task"]["task_id"] == task_id
 
-    def test_running_snapshot_omits_log_tail(self, tmp_path, monkeypatch):
+    def test_pre_useful_snapshot_is_starting_without_log_tail(self, tmp_path, monkeypatch):
         monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
         task_id = "a12345678901"
         now = 2_000
@@ -1155,7 +1155,7 @@ class TestAgentTaskStatus:
                 {
                     "version": 1,
                     "state": "running",
-                    "phase": "loop",
+                    "phase": "runtime",
                     "updated_at": "2026-09-03T12:00:00Z",
                     "updated_epoch": now - 5,
                     "runner_pid": 123,
@@ -1180,7 +1180,11 @@ class TestAgentTaskStatus:
         assert result["exists"] is True
         assert result["status"] == "running"
         assert result["job"]["status"] == "running"
-        assert result["verdict"] == "running"
+        assert result["verdict"] == "starting"
+        assert result["startup"]["phase"] == "startup"
+        assert result["startup"]["useful_agent_activity_seen"] is False
+        assert result["runner_heartbeat"]["phase"] == "runtime"
+        assert result["runtime_status"]["exists"] is False
         assert result["terminal"] is False
         assert result["likely_hung"] is False
         assert result["log_included"] is False
@@ -1190,6 +1194,111 @@ class TestAgentTaskStatus:
         assert result["next"]["agent_status"]["task_id"] == task_id
         assert result["next"]["job_status"] == {"job_id": "job-1"}
         assert "inspect_agent_task" not in result["next"]
+
+    def test_runtime_marker_proves_useful_activity_without_proxy_or_log_tail(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: running\n", encoding="utf-8")
+        (td / "opencode-output.log").write_text(
+            "token=runtime-log-must-not-be-read\n", encoding="utf-8"
+        )
+        (td / "attempt-state.json").write_text(
+            json.dumps(
+                {"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}
+            ),
+            encoding="utf-8",
+        )
+        (td / "agent-heartbeat.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "state": "running",
+                    "phase": "loop",
+                    "updated_at": "2026-09-03T12:00:00Z",
+                    "updated_epoch": now - 5,
+                    "runner_pid": 123,
+                    "exit_code": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (td / "agent-runtime.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "phase": "runtime",
+                    "source": "private_output_classifier",
+                    "started_at": "2026-09-03T12:00:00Z",
+                    "started_epoch": now - 5,
+                    "runner_pid": 123,
+                }
+            ),
+            encoding="utf-8",
+        )
+        for child in td.iterdir():
+            os.utime(child, (now - 10, now - 10))
+        os.utime(td / "agent-heartbeat.json", (now - 5, now - 5))
+        os.utime(td / "agent-runtime.json", (now - 5, now - 5))
+
+        result = agent_task_status(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            now_epoch=now,
+            job_status=lambda job_id: {"job_id": job_id, "status": "running"},
+        )
+
+        assert result["verdict"] == "running"
+        assert result["startup"]["phase"] is None
+        assert result["startup"]["useful_agent_activity_seen"] is True
+        assert result["runtime_status"]["valid"] is True
+        assert result["runtime_status"]["source"] == "private_output_classifier"
+        assert result["last_useful_activity"]["source"] == "runtime_status"
+        assert result["proxy_status"]["exists"] is False
+        assert result["log_included"] is False
+        assert "runtime-log-must-not-be-read" not in str(result)
+        assert "inspect_agent_task" not in result["next"]
+
+    def test_oversized_runtime_marker_does_not_mask_stale_semantic_progress(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: running\n", encoding="utf-8")
+        (td / "attempt-state.json").write_text(
+            json.dumps(
+                {"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}
+            ),
+            encoding="utf-8",
+        )
+        (td / "agent-runtime.json").write_text("x" * 5000, encoding="utf-8")
+        for child in td.iterdir():
+            os.utime(child, (now - 700, now - 700))
+        os.utime(td / "agent-runtime.json", (now - 1, now - 1))
+
+        result = agent_task_status(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            now_epoch=now,
+            job_status=lambda job_id: {"job_id": job_id, "status": "running"},
+        )
+
+        assert result["runtime_status"]["valid"] is False
+        assert result["runtime_status"]["error"] == "runtime status exceeds maximum size"
+        assert result["last_useful_activity"]["age_seconds"] == 700
+        assert result["likely_hung"] is True
+        assert result["verdict"] == "likely_hung"
 
     def test_proxy_startup_rotation_snapshot_is_typed_not_running(
         self, tmp_path, monkeypatch
@@ -1292,8 +1401,10 @@ class TestAgentTaskStatus:
 
         def fake_run_cmd(project: str, command: str) -> dict:
             calls.append(command)
-            if command.startswith("tail -c "):
+            if command.startswith("tail -c ") and "opencode-output.log" in command:
                 raise AssertionError("agent_status must not read log tails")
+            if command.startswith("tail -c ") and "agent-runtime.json" in command:
+                return {"stdout": "", "stderr": "not found", "exit_code": 1}
             if command.startswith("ls -ld -- "):
                 return {"stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": "", "exit_code": 0}
             if command.startswith("cat ") and "agent-status.md" in command:
@@ -1325,7 +1436,9 @@ class TestAgentTaskStatus:
         assert result["likely_hung"] is True
         assert result["log_included"] is False
         assert result["next"]["inspect_agent_task"]["task_id"] == "a12345678901"
-        assert not any(command.startswith("tail -c ") for command in calls)
+        assert not any(
+            command.startswith("tail -c ") and "opencode-output.log" in command for command in calls
+        )
 
     def test_fresh_log_and_heartbeat_cannot_mask_stale_semantic_progress(
         self, tmp_path, monkeypatch
@@ -1357,13 +1470,26 @@ class TestAgentTaskStatus:
             ),
             encoding="utf-8",
         )
+        (td / "agent-runtime.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "phase": "runtime",
+                    "source": "worker_spoof",
+                    "started_epoch": now - 1,
+                    "runner_pid": 123,
+                }
+            ),
+            encoding="utf-8",
+        )
         for child in td.iterdir():
             os.utime(child, (now - 700, now - 700))
-        # Only log/heartbeat bookkeeping and attempt-state are fresh. Semantic
-        # progress is stale, so the lightweight surface must still flag hung.
+        # Only log/heartbeat bookkeeping, attempt-state, and an invalid runtime
+        # marker are fresh. Semantic progress is stale, so status must flag hung.
         os.utime(td / "opencode-output.log", (now - 1, now - 1))
         os.utime(td / "agent-heartbeat.json", (now - 5, now - 5))
         os.utime(td / "attempt-state.json", (now - 5, now - 5))
+        os.utime(td / "agent-runtime.json", (now - 1, now - 1))
 
         result = agent_task_status(
             self._shell_runner(tmp_path),
@@ -1375,6 +1501,8 @@ class TestAgentTaskStatus:
         )
 
         assert result["runner_heartbeat_fresh"] is True
+        assert result["runtime_status"]["valid"] is False
+        assert result["runtime_status"]["error"] == "runtime status source is not recognized"
         assert result["last_useful_activity"]["age_seconds"] == 700
         assert result["likely_hung"] is True
         assert result["verdict"] == "likely_hung"
@@ -1609,10 +1737,11 @@ class TestAgentStartupDiagnostics:
         assert result["opencode_startup_stalled"] is False
         assert result["useful_agent_activity_seen"] is False
         assert result["dead_time_kind"] is None
+        assert result["phase"] == "startup"
         assert result["proxy_rotation"]["observed"] is True
         assert result["proxy_rotation"]["sidecar"] is True
 
-    def test_running_proxy_outcome_is_explicit_useful_runtime_evidence(self):
+    def test_running_proxy_outcome_alone_does_not_replace_classifier_marker(self):
         result = self._diagnose(
             proxy_status={
                 "exists": True,
@@ -1624,8 +1753,9 @@ class TestAgentStartupDiagnostics:
         )
 
         assert result["opencode_startup_stalled"] is False
-        assert result["useful_agent_activity_seen"] is True
+        assert result["useful_agent_activity_seen"] is False
         assert result["dead_time_kind"] is None
+        assert result["phase"] == "startup"
 
     def test_single_attempt_upstream_error_exhaustion_remains_startup_dead_time(self):
         result = self._diagnose(
@@ -1785,7 +1915,7 @@ class TestInspectAgentTask:
         assert result["likely_hung"] is True
         assert result["verdict"] == "likely_hung"
 
-    def test_fresh_semantic_progress_stays_running(self, tmp_path, monkeypatch):
+    def test_fresh_control_plane_progress_prevents_hung_but_stays_starting(self, tmp_path, monkeypatch):
         monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
         task_id = "a12345678901"
         now = 2_000
@@ -1816,7 +1946,9 @@ class TestInspectAgentTask:
 
         assert result["last_useful_activity"]["age_seconds"] == 5
         assert result["likely_hung"] is False
-        assert result["verdict"] == "running"
+        assert result["verdict"] == "starting"
+        assert result["startup"]["phase"] == "startup"
+        assert result["startup"]["useful_agent_activity_seen"] is False
 
     def test_job_not_found_for_stale_running_task_is_lost_after_restart_not_worker_terminated(
         self, tmp_path, monkeypatch
@@ -2378,7 +2510,7 @@ class TestInspectAgentTask:
             is True
         )
 
-    def test_recent_progress_artifact_suppresses_reasoning_loop(self, tmp_path, monkeypatch):
+    def test_recent_progress_artifact_suppresses_reasoning_loop_but_not_startup(self, tmp_path, monkeypatch):
         monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
         task_id = "a12345678901"
         now = 2_000
@@ -2407,7 +2539,9 @@ class TestInspectAgentTask:
             job_status=lambda job_id: {"job_id": job_id, "status": "running"},
         )
 
-        assert result["verdict"] == "running"
+        assert result["verdict"] == "starting"
+        assert result["startup"]["phase"] == "startup"
+        assert result["startup"]["useful_agent_activity_seen"] is False
         assert result["reasoning_loop"]["detected"] is False
         assert "recovery" not in result
 

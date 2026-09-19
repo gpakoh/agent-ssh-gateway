@@ -458,6 +458,10 @@ class TestProjectRunAgentAsyncSubmit:
         assert "agent-heartbeat.json" in script
         assert "agent_heartbeat_loop >/dev/null 2>&1 &" in script
         assert "write_agent_heartbeat running starting" in script
+        assert "write_agent_heartbeat running runtime" not in script
+        assert "agent-runtime.json" in script
+        assert "mark_agent_runtime_started() {" in script
+        assert 'runner_artifact_remove "$td/agent-runtime.json"' in script
         assert "finish_agent_heartbeat" in script
         assert "write_agent_heartbeat exited trap" in script
         assert "AGENT_HEARTBEAT_FINALIZED=1" in script

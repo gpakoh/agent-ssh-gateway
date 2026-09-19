@@ -16,6 +16,7 @@ import os
 import shlex
 import subprocess
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -204,6 +205,109 @@ class TestBuildOpencodeScriptProxy:
 
         assert "agent_heartbeat_loop >/dev/null 2>&1 &" in script
         assert "agent_heartbeat_loop &" not in script
+        assert "mark_agent_runtime_started() {" in script
+        assert "agent-runtime.json" in script
+        assert 'runner_artifact_remove "$td/agent-runtime.json"' in script
+        assert 'write_agent_heartbeat running runtime' not in script
+
+    def test_no_proxy_private_classifier_publishes_runtime_marker(
+        self, tmp_path, monkeypatch
+    ):
+        source = tmp_path / "runtime-source"
+        source.mkdir()
+        _init_git_repo(source)
+        artifacts = tmp_path / "runtime-artifacts"
+        artifacts.mkdir()
+        (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+        runtime_path = artifacts / "agent-runtime.json"
+        runtime_path.write_text('{"version":1,"phase":"runtime","source":"stale"}\n', encoding="utf-8")
+
+        fake_bin = tmp_path / "runtime-bin"
+        fake_bin.mkdir()
+        activity_trigger = tmp_path / "emit-useful-activity"
+        exit_trigger = tmp_path / "finish-opencode"
+        fake = fake_bin / "opencode"
+        fake.write_text(
+            "#!/bin/sh\n"
+            'printf "\\033[0m\\n> build · big-pickle\\n\\033[0m"\n'
+            'while [ ! -f "$ACTIVITY_TRIGGER" ]; do sleep 0.05; done\n'
+            'printf "→ Read current-plan.md\\n"\n'
+            'while [ ! -f "$EXIT_TRIGGER" ]; do sleep 0.05; done\n'
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+        monkeypatch.setenv("ACTIVITY_TRIGGER", str(activity_trigger))
+        monkeypatch.setenv("EXIT_TRIGGER", str(exit_trigger))
+        monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
+        monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "false")
+        monkeypatch.setenv("OPENCODE_STARTUP_RESERVE_BYTES", "0")
+        monkeypatch.setenv("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "10")
+        monkeypatch.setenv("OPENCODE_RUN_TIMEOUT_SECONDS", "10")
+
+        script = _build_opencode_script(
+            str(artifacts), TASK_ID, None, project_root=str(source)
+        )
+        process = subprocess.Popen(
+            ["sh", "-c", script],
+            cwd=source,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        heartbeat_path = artifacts / "agent-heartbeat.json"
+
+        def wait_for_heartbeat_loop() -> dict:
+            deadline = time.monotonic() + 8
+            last: dict = {}
+            while time.monotonic() < deadline:
+                if heartbeat_path.exists():
+                    try:
+                        last = json.loads(heartbeat_path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        last = {}
+                    if last.get("phase") == "loop":
+                        return last
+                time.sleep(0.05)
+            pytest.fail(f"heartbeat never reached loop; last={last!r}")
+
+        def wait_for_runtime_marker() -> dict:
+            deadline = time.monotonic() + 8
+            last: dict = {}
+            while time.monotonic() < deadline:
+                if runtime_path.exists():
+                    try:
+                        last = json.loads(runtime_path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        last = {}
+                    if last.get("source") == "private_output_classifier":
+                        return last
+                time.sleep(0.05)
+            pytest.fail(f"runtime marker never appeared; last={last!r}")
+
+        try:
+            heartbeat = wait_for_heartbeat_loop()
+            assert heartbeat["state"] == "running"
+            assert not runtime_path.exists()
+            assert not (artifacts / "proxy-status.json").exists()
+
+            activity_trigger.write_text("go\n", encoding="utf-8")
+            runtime = wait_for_runtime_marker()
+            assert runtime["version"] == 1
+            assert runtime["phase"] == "runtime"
+            assert isinstance(runtime["started_epoch"], int)
+            assert isinstance(runtime["runner_pid"], int)
+            assert json.loads(heartbeat_path.read_text(encoding="utf-8"))["phase"] == "loop"
+            assert not (artifacts / "proxy-status.json").exists()
+
+            exit_trigger.write_text("done\n", encoding="utf-8")
+            stdout, stderr = process.communicate(timeout=RUNNER_HARNESS_TIMEOUT_SECONDS)
+            assert process.returncode == 0, stderr or stdout
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
 
     def test_managed_source_cleanup_preserves_heartbeat_exit_trap(self, monkeypatch):
         monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)

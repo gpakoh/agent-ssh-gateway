@@ -28,6 +28,8 @@ ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 BASE_REF_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 AGENT_LOG_FILENAME = "opencode-output.log"
 AGENT_HEARTBEAT_FILENAME = "agent-heartbeat.json"
+AGENT_RUNTIME_STATUS_FILENAME = "agent-runtime.json"
+AGENT_RUNTIME_STATUS_MAX_BYTES = 4 * 1024
 AGENT_PROXY_STATUS_FILENAME = "proxy-status.json"
 AGENT_FAILURE_STATUS_FILENAME = "failure-status.json"
 GATES_MD_FILENAME = "GATES.md"
@@ -1600,6 +1602,64 @@ def _read_agent_heartbeat(
     return summary
 
 
+def _read_agent_runtime_status(
+    run_cmd,
+    *,
+    project: str,
+    task_id: str,
+    now_epoch: int,
+) -> dict[str, Any]:
+    """Read the runner's first-useful-activity marker."""
+    validate_task_id(task_id)
+    path = f"{task_dir(project, task_id)}/{AGENT_RUNTIME_STATUS_FILENAME}"
+    if not _readonly_path_is_safe(run_cmd, project=project, path=path):
+        return {"exists": False}
+    result = run_cmd(
+        project,
+        f"tail -c {AGENT_RUNTIME_STATUS_MAX_BYTES + 1} -- {shlex.quote(path)}",
+    )
+    if result.get("exit_code") != 0:
+        return {"exists": False}
+    text = str(result.get("stdout", ""))
+    if len(text.encode("utf-8", errors="replace")) > AGENT_RUNTIME_STATUS_MAX_BYTES:
+        return {
+            "exists": True,
+            "valid": False,
+            "error": "runtime status exceeds maximum size",
+        }
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return {"exists": True, "valid": False, "error": "runtime status is not valid JSON"}
+    if not isinstance(data, dict):
+        return {"exists": True, "valid": False, "error": "runtime status is not a JSON object"}
+    if data.get("version") != 1:
+        return {"exists": True, "valid": False, "error": "runtime status version is not recognized"}
+    if data.get("phase") != "runtime":
+        return {"exists": True, "valid": False, "error": "runtime status phase is not recognized"}
+    if data.get("source") != "private_output_classifier":
+        return {"exists": True, "valid": False, "error": "runtime status source is not recognized"}
+    started_epoch = data.get("started_epoch")
+    runner_pid = data.get("runner_pid")
+    if isinstance(started_epoch, bool) or not isinstance(started_epoch, int) or started_epoch < 0:
+        return {"exists": True, "valid": False, "error": "runtime status epoch is invalid"}
+    if isinstance(runner_pid, bool) or not isinstance(runner_pid, int) or runner_pid <= 0:
+        return {"exists": True, "valid": False, "error": "runtime status runner pid is invalid"}
+    summary: dict[str, Any] = {
+        "exists": True,
+        "valid": True,
+        "phase": "runtime",
+        "source": "private_output_classifier",
+        "started_epoch": started_epoch,
+        "runner_pid": runner_pid,
+        "age_seconds": max(0, now_epoch - started_epoch),
+    }
+    started_at = data.get("started_at")
+    if isinstance(started_at, str) and started_at:
+        summary["started_at"] = _sanitize_agent_diagnostic_text(started_at, max_chars=120)
+    return summary
+
+
 _DIAGNOSTIC_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s)\]}>\"']+")
 _DIAGNOSTIC_SECRET_RE = re.compile(
     r"(?i)(\b(?:token|password|passwd|secret|api[_-]?key|proxy[_-]?url)\b\s*[:=]\s*)[^\s,;]+"
@@ -2035,9 +2095,11 @@ def _agent_startup_diagnostics(
     active: bool,
     now_epoch: int,
     proxy_status: dict[str, Any],
+    runtime_status: dict[str, Any] | None = None,
     failure: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Classify OpenCode startup/proxy dead time separately from useful work."""
+    runtime_status = runtime_status or {}
     combined = f"{status_text}\n{log_stdout}"
     stalled_matches = list(_STARTUP_STALLED_RE.finditer(combined))
     server_retry_matches = list(_PRE_USEFUL_SERVER_RETRY_RE.finditer(combined))
@@ -2062,10 +2124,15 @@ def _agent_startup_diagnostics(
     startup_timeout = status == "startup-timeout" or "opencode-startup-timeout" in combined
     report_size = (files.get("report") or {}).get("size_bytes")
     diff_size = (files.get("diff") or {}).get("size_bytes")
+    runtime_classifier_seen = bool(
+        runtime_status.get("exists")
+        and runtime_status.get("valid")
+        and runtime_status.get("source") == "private_output_classifier"
+    )
     useful_agent_activity_seen = bool(
         (isinstance(report_size, int) and report_size > 0)
         or (isinstance(diff_size, int) and diff_size > 0)
-        or proxy_outcome == "running"
+        or runtime_classifier_seen
         or _OPENCODE_TOOL_ACTIVITY_RE.search(combined) is not None
         or any(marker in combined for marker in _USEFUL_AGENT_ACTIVITY_MARKERS)
     )
@@ -2081,11 +2148,15 @@ def _agent_startup_diagnostics(
     dead_time_kind = None
     if active and opencode_startup_stalled and not useful_agent_activity_seen:
         dead_time_kind = "opencode_startup"
-    phase = "startup" if startup_timeout or dead_time_kind == "opencode_startup" else None
+    phase = (
+        "startup"
+        if startup_timeout or dead_time_kind == "opencode_startup" or (active and not useful_agent_activity_seen)
+        else None
+    )
     elapsed_seconds = _elapsed_since_earliest_artifact(
         files,
         now_epoch,
-        ("status", "log", "heartbeat", "attempt_state", "proxy_status"),
+        ("status", "log", "heartbeat", "runtime_status", "attempt_state", "proxy_status"),
     )
     last_message = _last_startup_message(combined)
     if last_message is None:
@@ -2239,7 +2310,7 @@ def _progress_artifact_activity(files: dict[str, dict[str, Any]], now_epoch: int
     # is job bookkeeping, not agent progress. Runner-created evidence files can
     # also exist as zero-byte placeholders before the worker does useful work,
     # so their mtime alone must not reset semantic-stall timers.
-    ignored = {"log", "heartbeat", "proxy_status", "failure_status", "attempt_state"}
+    ignored = {"log", "heartbeat", "runtime_status", "proxy_status", "failure_status", "attempt_state"}
     content_required = {"report", "diff", "worker_status", "required_checks"}
     useful: dict[str, dict[str, Any]] = {}
     for name, meta in files.items():
@@ -2251,6 +2322,28 @@ def _progress_artifact_activity(files: dict[str, dict[str, Any]], now_epoch: int
                 continue
         useful[name] = meta
     return _latest_activity(useful, now_epoch)
+
+
+def _merge_valid_runtime_activity(
+    semantic_activity: dict[str, Any],
+    *,
+    files: dict[str, dict[str, Any]],
+    runtime_status: dict[str, Any],
+    now_epoch: int,
+) -> dict[str, Any]:
+    """Count the runtime marker only after its schema has validated."""
+    if runtime_status.get("valid") is not True:
+        return semantic_activity
+    runtime_activity = _latest_activity(
+        {"runtime_status": files.get("runtime_status") or {}}, now_epoch
+    )
+    runtime_mtime = runtime_activity.get("mtime_epoch")
+    semantic_mtime = semantic_activity.get("mtime_epoch")
+    if isinstance(runtime_mtime, int) and (
+        not isinstance(semantic_mtime, int) or runtime_mtime > semantic_mtime
+    ):
+        return runtime_activity
+    return semantic_activity
 
 
 def _detect_agent_reasoning_loop(
@@ -2483,6 +2576,9 @@ def agent_task_status(
         "heartbeat": _task_file_stat(
             run_cmd, project=project, task_id=task_id, filename=AGENT_HEARTBEAT_FILENAME
         ),
+        "runtime_status": _task_file_stat(
+            run_cmd, project=project, task_id=task_id, filename=AGENT_RUNTIME_STATUS_FILENAME
+        ),
         "proxy_status": _task_file_stat(
             run_cmd, project=project, task_id=task_id, filename=AGENT_PROXY_STATUS_FILENAME
         ),
@@ -2508,7 +2604,6 @@ def agent_task_status(
         {name: meta for name, meta in files.items() if name not in {"heartbeat", "proxy_status"}}, now
     )
     semantic_activity = _progress_artifact_activity(files, now)
-    semantic_age = semantic_activity.get("age_seconds")
     heartbeat = _read_agent_heartbeat(run_cmd, project=project, task_id=task_id, now_epoch=now)
     heartbeat_age = heartbeat.get("age_seconds")
     runner_heartbeat_fresh = bool(
@@ -2516,6 +2611,16 @@ def agent_task_status(
         and isinstance(heartbeat_age, int)
         and heartbeat_age < stale_after_seconds
     )
+    runtime_status = _read_agent_runtime_status(
+        run_cmd, project=project, task_id=task_id, now_epoch=now
+    )
+    semantic_activity = _merge_valid_runtime_activity(
+        semantic_activity,
+        files=files,
+        runtime_status=runtime_status,
+        now_epoch=now,
+    )
+    semantic_age = semantic_activity.get("age_seconds")
     proxy_status = _read_agent_proxy_status(
         run_cmd, project=project, task_id=task_id, now_epoch=now
     )
@@ -2560,6 +2665,7 @@ def agent_task_status(
         active=active,
         now_epoch=now,
         proxy_status=proxy_status,
+        runtime_status=runtime_status,
         failure=failure,
     )
     likely_hung = bool(active and not terminal and isinstance(semantic_age, int) and semantic_age >= stale_after_seconds)
@@ -2579,8 +2685,10 @@ def agent_task_status(
         verdict = "startup_stalled"
     elif likely_hung:
         verdict = "likely_hung"
-    elif active:
+    elif active and startup.get("useful_agent_activity_seen"):
         verdict = "running"
+    elif active:
+        verdict = "starting"
     elif status_token is None and job is None and attempt_error is None:
         verdict = "unknown"
     else:
@@ -2628,6 +2736,7 @@ def agent_task_status(
         "reconciliation": reconciliation,
         "runner_heartbeat": heartbeat,
         "runner_heartbeat_fresh": runner_heartbeat_fresh,
+        "runtime_status": runtime_status,
         "proxy_status": proxy_status,
         "failure": failure,
         "acceptance": gate_ledger,
@@ -2733,6 +2842,7 @@ def inspect_agent_task(
         "status": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="agent-status.md"),
         "log": _task_file_stat(run_cmd, project=project, task_id=task_id, filename=AGENT_LOG_FILENAME),
         "heartbeat": _task_file_stat(run_cmd, project=project, task_id=task_id, filename=AGENT_HEARTBEAT_FILENAME),
+        "runtime_status": _task_file_stat(run_cmd, project=project, task_id=task_id, filename=AGENT_RUNTIME_STATUS_FILENAME),
         "proxy_status": _task_file_stat(run_cmd, project=project, task_id=task_id, filename=AGENT_PROXY_STATUS_FILENAME),
         "failure_status": _task_file_stat(run_cmd, project=project, task_id=task_id, filename=AGENT_FAILURE_STATUS_FILENAME),
         "report": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="agent-report.md"),
@@ -2749,7 +2859,6 @@ def inspect_agent_task(
         {name: meta for name, meta in files.items() if name not in {"heartbeat", "proxy_status"}}, now
     )
     semantic_activity = _progress_artifact_activity(files, now)
-    semantic_age = semantic_activity.get("age_seconds")
     heartbeat = _read_agent_heartbeat(
         run_cmd, project=project, task_id=task_id, now_epoch=now
     )
@@ -2759,6 +2868,16 @@ def inspect_agent_task(
         and isinstance(heartbeat_age, int)
         and heartbeat_age < stale_after_seconds
     )
+    runtime_status = _read_agent_runtime_status(
+        run_cmd, project=project, task_id=task_id, now_epoch=now
+    )
+    semantic_activity = _merge_valid_runtime_activity(
+        semantic_activity,
+        files=files,
+        runtime_status=runtime_status,
+        now_epoch=now,
+    )
+    semantic_age = semantic_activity.get("age_seconds")
     proxy_status = _read_agent_proxy_status(
         run_cmd, project=project, task_id=task_id, now_epoch=now
     )
@@ -2808,6 +2927,7 @@ def inspect_agent_task(
         active=active,
         now_epoch=now,
         proxy_status=proxy_status,
+        runtime_status=runtime_status,
         failure=failure,
     )
     reasoning_loop = _detect_agent_reasoning_loop(
@@ -2858,8 +2978,10 @@ def inspect_agent_task(
         likely_hung = True
     elif likely_hung:
         verdict = "likely_hung"
-    elif active:
+    elif active and startup.get("useful_agent_activity_seen"):
         verdict = "running"
+    elif active:
+        verdict = "starting"
     elif status_token is None and job is None and attempt_error is None:
         verdict = "unknown"
     else:
@@ -2879,6 +3001,7 @@ def inspect_agent_task(
         "reconciliation": reconciliation,
         "runner_heartbeat": heartbeat,
         "runner_heartbeat_fresh": runner_heartbeat_fresh,
+        "runtime_status": runtime_status,
         "proxy_status": proxy_status,
         "failure": failure,
         "acceptance": gate_ledger,
