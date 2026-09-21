@@ -373,10 +373,17 @@ jobs:
       - name: Stop Selenium Chromium sidecar
         if: always() && github.server_url != 'https://github.com'
         run: |
-          set -euo pipefail
+          set +e
           if [ -n "${E2E_SELENIUM_CONTAINER:-}" ]; then
-            docker rm -f "$E2E_SELENIUM_CONTAINER" >/dev/null
+            docker stop --time 5 "$E2E_SELENIUM_CONTAINER" >/dev/null 2>&1
+            stop_status=$?
+            docker rm -f "$E2E_SELENIUM_CONTAINER" >/dev/null 2>&1
+            rm_status=$?
+            if [ "$stop_status" -ne 0 ] || [ "$rm_status" -ne 0 ]; then
+              echo "::warning::Selenium Chromium sidecar cleanup failed (docker stop=$stop_status, docker rm -f=$rm_status); teardown is non-fatal"
+            fi
           fi
+          exit 0
 
   build-and-push:
     # Runs the build+smoke-test steps on BOTH a real push to master AND a
@@ -711,12 +718,176 @@ jobs:
     if: github.ref_name == 'master' && github.event_name == 'push' && github.server_url != 'https://github.com'
     runs-on: host-smoke-ci
     timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v7
-        with:
+      - name: Checkout exact deployed commit from Gitea
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+        run: |
+          set -euo pipefail
+          set +x
+
           # Smoke the exact commit that was deployed, never whatever the
-          # runner's mutable working tree happens to be.
-          ref: ${{ github.sha }}
+          # runner's mutable working tree happens to be. Check out straight
+          # from this Gitea server (no actions/checkout, no github.com
+          # dependency). The credential rides only in an extraHeader scoped
+          # to the exact full REPO_URL inside one narrow subshell, so the
+          # token never lands in the URL, argv, git config, stdout, or any
+          # file. Secret handling runs ahead of every unrelated child. The
+          # PATH is fixed to a known-safe standard value FIRST, so no
+          # inherited entry can shadow the tools this step derives and uses
+          # its credential with.
+          export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          if [ -z "${GITEA_TOKEN:-}" ]; then
+            echo "::error::GITEA_TOKEN is unset or empty" >&2
+            exit 1
+          fi
+          gitea_token="$GITEA_TOKEN"
+          unset GITEA_TOKEN
+          # base64 without -w0 for portability; strip any CR/LF it emits.
+          auth_header="Authorization: Basic $(printf '%s' "x-access-token:${gitea_token}" | base64 | tr -d '\r\n')"
+          gitea_token=""
+          unset gitea_token
+
+          EXPECTED_SHA="${{ github.sha }}"
+          if ! printf '%s' "$EXPECTED_SHA" | grep -qxE '[0-9a-f]{40}'; then
+            echo "::error::EXPECTED_SHA is not a lowercase 40-hex sha" >&2
+            exit 1
+          fi
+
+          # Neutralize every inherited exported GIT_*, SSH askpass, XDG_CONFIG_HOME
+          # and proxy variable by NAME ONLY -- never enumerate values.
+          for var_name in $(compgen -e); do
+            case "$var_name" in
+              GIT_*|XDG_CONFIG_HOME|SSH_ASKPASS|SSH_ASKPASS_REQUIRE|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|FTP_PROXY|NO_PROXY|http_proxy|https_proxy|all_proxy|ftp_proxy|no_proxy)
+                unset "$var_name"
+                ;;
+            esac
+          done
+
+          # Isolated chmod-700 HOME with a real private template dir (also
+          # chmod-700), and global/system git config disabled so nothing
+          # inherited can leak.
+          private_home="$(mktemp -d)"
+          chmod 700 "$private_home"
+          mkdir -p "$private_home/git-template"
+          chmod 700 "$private_home/git-template"
+          trap 'rm -rf -- "$private_home"' EXIT
+          export HOME="$private_home"
+          export GIT_TEMPLATE_DIR="$private_home/git-template"
+          export GIT_CONFIG_GLOBAL=/dev/null
+          export GIT_CONFIG_NOSYSTEM=1
+          export GIT_TERMINAL_PROMPT=0
+
+          REPO_URL="${{ github.server_url }}/${{ github.repository }}.git"
+
+          # Fail-closed stdlib-only URL validation: http/https scheme,
+          # hostname, optional port in 1..65535, no userinfo/query/fragment,
+          # non-empty non-root-only repository path, and no control or
+          # whitespace character (covers NBSP and DEL). Runs in an isolated
+          # interpreter (python3 -I -S) so no site/user packages or env can
+          # influence it. No network access.
+          python3 -I -S - "$REPO_URL" <<'PY'
+          import sys
+          import urllib.parse
+
+          def validate(raw: str) -> str:
+              if any(ord(c) < 0x20 or ord(c) == 0x7F or c.isspace() for c in raw):
+                  raise ValueError("contains a forbidden control or whitespace character")
+              parts = urllib.parse.urlsplit(raw)
+              if parts.scheme not in ("http", "https"):
+                  raise ValueError(f"scheme must be http or https, not {parts.scheme!r}")
+              if not parts.hostname:
+                  raise ValueError("missing hostname")
+              if parts.username is not None or parts.password is not None:
+                  raise ValueError("userinfo is not allowed")
+              if parts.query or parts.fragment:
+                  raise ValueError("query/fragment is not allowed")
+              if not parts.path or not parts.path.rstrip("/"):
+                  raise ValueError("repository path must not be empty or root-only")
+              port = parts.port
+              if port is not None and not (1 <= port <= 65535):
+                  raise ValueError(f"port {port} is outside 1..65535")
+              return raw
+
+          if __name__ == "__main__":
+              try:
+                  validate(sys.argv[1])
+              except ValueError as exc:
+                  sys.stderr.write(f"::error::REPO_URL {sys.argv[1]!r}: {exc}")
+                  raise SystemExit(1) from None
+          PY
+
+          # Self-hosted stale-repository defense: fail closed on an unusable
+          # GITHUB_WORKSPACE, then purge ONLY the runner workspace .git
+          # (never any other path) and init fresh; any failure aborts the step.
+          # The guard uses only shell builtins (case / [ ] / parameter
+          # expansion), never realpath/readlink/find/python, and rejects empty,
+          # non-absolute, all-slashes/root, or traversal ("..") paths as well
+          # as a symlink or missing/non-directory workspace, so the exact .git
+          # deletion can never escape to a path outside the runner workspace.
+          if [ -z "${GITHUB_WORKSPACE:-}" ]; then
+            echo "::error::GITHUB_WORKSPACE is unset or empty" >&2
+            exit 1
+          fi
+          case "$GITHUB_WORKSPACE" in
+            /*) ;;
+            *) echo "::error::GITHUB_WORKSPACE is not an absolute path" >&2; exit 1 ;;
+          esac
+          case "$GITHUB_WORKSPACE" in
+            *[!/]*) ;;
+            *) echo "::error::GITHUB_WORKSPACE is an all-slashes filesystem root" >&2; exit 1 ;;
+          esac
+          case "/$GITHUB_WORKSPACE/" in
+            *"/../"*) echo "::error::GITHUB_WORKSPACE contains a .. path segment" >&2; exit 1 ;;
+          esac
+          if [ -L "$GITHUB_WORKSPACE" ]; then
+            echo "::error::GITHUB_WORKSPACE is a symlink" >&2
+            exit 1
+          fi
+          if [ ! -d "$GITHUB_WORKSPACE" ]; then
+            echo "::error::GITHUB_WORKSPACE is not an existing directory" >&2
+            exit 1
+          fi
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+          git init -q "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git remote add origin "$REPO_URL"
+
+          # Credential config exists only for this single exact-SHA fetch,
+          # in one narrow subshell, scoped to the exact full REPO_URL, with
+          # redirects disabled. The header is cleared immediately after.
+          (
+            export GIT_CONFIG_COUNT=2
+            export GIT_CONFIG_KEY_0="http.${REPO_URL}.extraHeader"
+            export GIT_CONFIG_VALUE_0="$auth_header"
+            export GIT_CONFIG_KEY_1="http.${REPO_URL}.followRedirects"
+            export GIT_CONFIG_VALUE_1="false"
+            git fetch -q --no-tags --depth=1 origin "$EXPECTED_SHA"
+          )
+          auth_header=""
+          unset auth_header
+
+          fetched="$(git rev-parse FETCH_HEAD)"
+          if [ "$fetched" != "$EXPECTED_SHA" ]; then
+            echo "::error::fetched commit $fetched != expected $EXPECTED_SHA" >&2
+            exit 1
+          fi
+
+          git checkout -q -f --detach "$fetched"
+          git clean -fdx
+
+          head_sha="$(git rev-parse HEAD)"
+          if [ "$head_sha" != "$EXPECTED_SHA" ]; then
+            echo "::error::HEAD $head_sha != expected $EXPECTED_SHA" >&2
+            exit 1
+          fi
+
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::worktree is not clean after checkout" >&2
+            exit 1
+          fi
 
       - name: Set up Python
         run: |
