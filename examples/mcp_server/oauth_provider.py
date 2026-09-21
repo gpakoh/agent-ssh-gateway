@@ -316,12 +316,17 @@ class GatewayOAuthProvider:
         """Durably revoke the old refresh and persist the replacement pair.
 
         Performed before any in-memory mutation so a persistence failure
-        cannot leave the provider with credentials it never stored.
+        cannot leave the provider with credentials it never stored. When
+        the durable store has no non-revoked record matching
+        *revoke_hash* — the refresh was already rotated or never
+        persisted — a generic ``invalid_grant`` is raised before any
+        in-memory mutation or credential return so a replayed or
+        concurrent refresh never yields a replacement.
         """
         if self._token_store is None:
             return
         now = time.time()
-        self._token_store.rotate(
+        revoked = self._token_store.rotate(
             revoke_hash,
             [
                 StoredTokenEntry(
@@ -349,6 +354,11 @@ class GatewayOAuthProvider:
             ],
             compact_oauth_now=now,
         )
+        if revoked is None:
+            raise TokenError(
+                error="invalid_grant",
+                error_description="refresh token is invalid",
+            )
 
     # --- Client Registration ---
 

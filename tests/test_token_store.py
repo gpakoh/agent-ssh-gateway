@@ -730,3 +730,188 @@ def test_rotate_with_oauth_compaction_never_writes_raw_tokens(store_path):
     content = Path(store_path).read_text()
     assert raw not in content
     assert hash_token(raw) not in content  # the revoked old refresh was compacted
+
+
+# ── Rotate no-match is zero-write / no append (replay race) ─────
+
+
+def test_rotate_no_match_returns_none_and_writes_nothing(store_path):
+    """Rotating a hash with no non-revoked record mutates nothing.
+
+    A replayed refresh (hash already rotated/compacted, or never
+    persisted) must return ``None`` without appending a replacement pair
+    or touching the store file at all.
+    """
+    store = TokenStore(store_path)
+    store.add_many(
+        [
+            _oauth_entry("oauth-existing", expires_at="2099-12-31T23:59:59Z"),
+            _non_oauth_entry(
+                "operator-revoked",
+                revoked_at="2026-06-01T00:00:00Z",
+            ),
+        ]
+    )
+    before = Path(store_path).read_bytes()
+
+    result = store.rotate(
+        "sha256:no-such-hash",
+        [
+            _oauth_entry("oauth-missing-at", expires_at="2099-12-31T23:59:59Z"),
+            _oauth_entry(
+                "oauth-missing-rt",
+                expires_at="2099-12-31T23:59:59Z",
+                token_type="refresh",
+            ),
+        ],
+        compact_oauth_now=COMPACTION_NOW,
+    )
+
+    assert result is None
+    assert Path(store_path).read_bytes() == before
+    assert [e.id for e in store.load()] == ["oauth-existing", "operator-revoked"]
+
+
+def test_rotate_no_match_on_empty_store_writes_no_file(tmp_path):
+    """No-match rotate against an empty store creates no file state."""
+    store_path = tmp_path / "tokens.json"
+    store = TokenStore(str(store_path))
+
+    result = store.rotate(
+        "sha256:nope",
+        [
+            _oauth_entry("oauth-new-at", expires_at="2099-12-31T23:59:59Z"),
+            _oauth_entry(
+                "oauth-new-rt",
+                expires_at="2099-12-31T23:59:59Z",
+                token_type="refresh",
+            ),
+        ],
+        compact_oauth_now=COMPACTION_NOW,
+    )
+
+    assert result is None
+    assert not store_path.exists()
+    assert store.load() == []
+
+
+def test_rotate_already_revoked_hash_is_no_match_and_writes_nothing(store_path):
+    """A fully-rotated (revoked) refresh is treated as a no-match.
+
+    Even when the hash still exists in the store but is revoked, rotate
+    must return ``None`` without appending a replacement pair; otherwise
+    a concurrent replay of one refresh would leave multiple unexpired
+    replacement pairs behind.
+    """
+    store = TokenStore(store_path)
+    store.add_many(
+        [
+            _oauth_entry(
+                "oauth-already-revoked",
+                expires_at="2099-12-31T23:59:59Z",
+                revoked_at="2026-06-01T00:00:00Z",
+                token_type="refresh",
+            )
+        ]
+    )
+    before = Path(store_path).read_bytes()
+
+    result = store.rotate(
+        "sha256:oauth-already-revoked",
+        [
+            _oauth_entry("oauth-replay-at", expires_at="2099-12-31T23:59:59Z"),
+            _oauth_entry(
+                "oauth-replay-rt",
+                expires_at="2099-12-31T23:59:59Z",
+                token_type="refresh",
+            ),
+        ],
+        compact_oauth_now=COMPACTION_NOW,
+    )
+
+    assert result is None
+    assert Path(store_path).read_bytes() == before
+    assert [e.id for e in store.load()] == ["oauth-already-revoked"]
+
+
+def test_rotate_no_match_without_compaction_still_no_write(store_path):
+    """No-match is zero-write regardless of the compaction flag."""
+    store = TokenStore(store_path)
+    store.add_many([_oauth_entry("oauth-existing", expires_at="2099-12-31T23:59:59Z")])
+    before = Path(store_path).read_bytes()
+
+    result = store.rotate(
+        "sha256:no-such-hash",
+        [_oauth_entry("oauth-new-at", expires_at="2099-12-31T23:59:59Z")],
+    )
+
+    assert result is None
+    assert Path(store_path).read_bytes() == before
+    assert [e.id for e in store.load()] == ["oauth-existing"]
+
+
+def test_same_refresh_concurrent_rotate_exactly_one_winner_and_pair(store_path):
+    """Two processes racing to rotate the same refresh produce one winner.
+
+    Rotation serialises on the single flock, so exactly one process may
+    revoke the old refresh and persist its replacement pair; the loser
+    observes no non-revoked record and performs a zero-write no-match.
+    Only one replacement pair can ever survive a same-refresh replay.
+    """
+    import multiprocessing
+
+    def worker_rotate(store_path_arg, pair_prefix, start, out):
+        store = TokenStore(store_path_arg)
+        if not start.wait(timeout=30):
+            raise TimeoutError("rotate start barrier timeout")
+        result = store.rotate(
+            "sha256:race-old-rt",
+            [
+                _oauth_entry(f"{pair_prefix}-at", expires_at="2099-12-31T23:59:59Z"),
+                _oauth_entry(
+                    f"{pair_prefix}-rt",
+                    expires_at="2099-12-31T23:59:59Z",
+                    token_type="refresh",
+                ),
+            ],
+            compact_oauth_now=COMPACTION_NOW,
+        )
+        out.put(result is not None)
+
+    store = TokenStore(store_path)
+    store.add_many(
+        [
+            _oauth_entry(
+                "race-old-rt",
+                expires_at="2099-12-31T23:59:59Z",
+                token_type="refresh",
+            )
+        ]
+    )
+
+    start = multiprocessing.Event()
+    out_a = multiprocessing.Queue()
+    out_b = multiprocessing.Queue()
+    p_a = multiprocessing.Process(
+        target=worker_rotate, args=(store_path, "race-pair-a", start, out_a)
+    )
+    p_b = multiprocessing.Process(
+        target=worker_rotate, args=(store_path, "race-pair-b", start, out_b)
+    )
+    p_a.start()
+    p_b.start()
+    start.set()
+    p_a.join(timeout=30)
+    p_b.join(timeout=30)
+    assert p_a.exitcode == 0
+    assert p_b.exitcode == 0
+
+    results = [out_a.get(timeout=10), out_b.get(timeout=10)]
+    assert results.count(True) == 1, f"expected exactly one winner, got {results}"
+    assert results.count(False) == 1
+
+    loaded = TokenStore(store_path).load()
+    oauth = [e for e in loaded if e.profile == "oauth"]
+    assert len(oauth) == 2  # exactly one replacement pair, never two
+    assert all(e.revoked_at is None for e in oauth)
+    assert all(e.token_hash != "sha256:race-old-rt" for e in oauth)

@@ -220,7 +220,9 @@ class TokenStore:
         transaction so revoked refresh history cannot accumulate during
         a long-lived process; every unexpired OAuth access token and all
         non-OAuth records are preserved. Returns the revoked entry, or
-        ``None`` when no non-revoked entry matched.
+        ``None`` when no non-revoked entry matched — in which case no
+        mutation is performed and nothing is written, so a replayed or
+        already-rotated refresh can never append a replacement pair.
         """
         with self._locked():
             entries = self.load()
@@ -230,6 +232,8 @@ class TokenStore:
                     e.revoked_at = _iso_now()
                     revoked = e
                     break
+            if revoked is None:
+                return None
             if compact_oauth_now is not None:
                 entries = self._filter_stale_oauth(entries, compact_oauth_now)
             entries.extend(new_entries)

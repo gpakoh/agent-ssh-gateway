@@ -302,6 +302,42 @@ def test_refresh_fails_closed_when_rotation_persistence_fails(
     assert stored is not None
 
 
+def test_refresh_with_stale_memory_but_rotated_durable_record_raises_invalid_grant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A provider holding an already-rotated refresh must not mint a replacement.
+
+    When the durable store no longer has a non-revoked record for the
+    in-memory refresh (e.g. another process already rotated it durably),
+    the provider raises a generic ``invalid_grant`` before any in-memory
+    mutation and leaves both durable and memory state unchanged.
+    """
+    clock = _FakeClock()
+    monkeypatch.setattr("examples.mcp_server.oauth_provider.time.time", clock)
+
+    store_path = tmp_path / "tokens.json"
+    stale_provider = _provider(store_path)
+    client_id = "lifecycle-stale-memory"
+    tokens = _issue_tokens(stale_provider, client_id)
+
+    # A concurrent process already rotated this refresh durably: a second
+    # provider loads the same grant and consumes it in rotation.
+    winner = _provider(store_path)
+    winner.load_tokens()
+    clock.advance(60)
+    winner.refresh_access_token(client_id, tokens["refresh_token"])
+
+    memory_before = dict(stale_provider._tokens)
+    durable_before = store_path.read_bytes()
+
+    with pytest.raises(TokenError) as exc_info:
+        stale_provider.refresh_access_token(client_id, tokens["refresh_token"])
+    assert exc_info.value.error == "invalid_grant"
+
+    assert dict(stale_provider._tokens) == memory_before
+    assert store_path.read_bytes() == durable_before
+
+
 # ── Retention: expired-token eviction and bounded memory ─────────
 
 
