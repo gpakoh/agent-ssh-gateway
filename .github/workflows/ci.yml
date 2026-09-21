@@ -166,10 +166,14 @@ jobs:
         # the "Install package" step above) directly, with no project_path
         # and no fresh pip-based resolution; -s osv sends the vulnerability
         # lookups to Google's OSV API instead of pypi.org's. Still retries
-        # on a network-exception signature as a backstop; a real
-        # vulnerability finding is a clean, structured pip-audit failure
-        # with no such traceback and still fails on the first attempt, no
-        # retry.
+        # on a network-exception signature as a backstop, and also treats
+        # HTTP 5xx as a transient external-service failure: osv.dev answered
+        # `HTTPError: 501 Server Error: Not Implemented` on PR #344 (run
+        # #11810), and requests renders ANY 5xx as "<code> Server Error:
+        # <reason> for url: ...". The grep matches only that 5xx "Server
+        # Error" class -- 4xx ("Client Error") and a real vulnerability
+        # finding are clean, structured pip-audit failures with no such
+        # signature and still fail on the first attempt, no retry.
         run: |
           set +e
           max_attempts=5
@@ -181,14 +185,14 @@ jobs:
             if [ $status -eq 0 ]; then
               exit 0
             fi
-            if echo "$output" | grep -qE "ReadTimeout|ConnectTimeout|ConnectionError|Read timed out|Connection reset|Temporary failure in name resolution|Network is unreachable|TimeoutError|SSLError|ProxyError|RemoteDisconnected|handshake operation timed out"; then
+            if echo "$output" | grep -qE "ReadTimeout|ConnectTimeout|ConnectionError|Read timed out|Connection reset|Temporary failure in name resolution|Network is unreachable|TimeoutError|SSLError|ProxyError|RemoteDisconnected|handshake operation timed out|HTTPError: 5[0-9]{2} Server Error"; then
               if [ "$attempt" -lt "$max_attempts" ]; then
                 delay=$((attempt * 10))
-                echo "::warning::pip-audit attempt ${attempt}/${max_attempts} failed with a network error, retrying in ${delay}s..."
+                echo "::warning::pip-audit attempt ${attempt}/${max_attempts} failed with a transient network or service error, retrying in ${delay}s..."
                 sleep "$delay"
                 continue
               fi
-              echo "::error::pip-audit failed after ${max_attempts} attempts due to persistent network errors"
+              echo "::error::pip-audit failed after ${max_attempts} attempts due to persistent network or service errors"
               exit 1
             fi
             exit $status
