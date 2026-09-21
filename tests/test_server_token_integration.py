@@ -1,5 +1,7 @@
 """Integration tests: GatewayOAuthProvider + TokenStore."""
 
+import time
+
 import pytest
 
 from examples.mcp_server.oauth_provider import GatewayOAuthProvider, hash_token
@@ -177,3 +179,92 @@ def test_revoke_client_token_syncs_to_store(store_path):
     entry = store2.find_by_hash(h)
     assert entry is not None
     assert entry.revoked_at is not None
+
+
+# ── Startup filtering + durable compaction integration ──────────
+
+
+def test_load_tokens_skips_expired_persisted(store_path):
+    store = TokenStore(store_path)
+    store.add(
+        StoredTokenEntry(
+            id="tok_expired",
+            token_hash=hash_token("mcp_expired_persisted"),
+            name="expired",
+            profile="full",
+            scopes=["mcp:read"],
+            created_at="2026-06-26T12:00:00Z",
+            expires_at="2025-06-26T12:00:00Z",
+        )
+    )
+
+    provider = GatewayOAuthProvider()
+    provider.set_token_store(TokenStore(store_path))
+    assert provider.load_tokens() == 0
+
+    assert provider.verify_access_token("mcp_expired_persisted") is None
+
+
+def test_load_tokens_restores_unexpired_with_exact_expiry(store_path):
+    store = TokenStore(store_path)
+    store.add(
+        StoredTokenEntry(
+            id="tok_near_expiry",
+            token_hash=hash_token("mcp_near_expiry_persisted"),
+            name="near-expiry",
+            profile="full",
+            scopes=["mcp:read"],
+            created_at="2026-06-26T12:00:00Z",
+            expires_at="2099-12-31T23:59:59Z",
+        )
+    )
+
+    provider = GatewayOAuthProvider()
+    provider.set_token_store(TokenStore(store_path))
+    assert provider.load_tokens() == 1
+
+    restored = provider.verify_access_token("mcp_near_expiry_persisted")
+    assert restored is not None
+
+
+def test_load_tokens_skips_revoked_and_expired_then_compaction_removes_oauth(
+    tmp_path,
+):
+    store_path = str(tmp_path / "tokens.json")
+    store = TokenStore(store_path)
+    store.add_many(
+        [
+            StoredTokenEntry(
+                id="oauth_expired",
+                token_hash=hash_token("mcp_oauth_expired"),
+                name="oauth",
+                profile="oauth",
+                scopes=["mcp:read"],
+                created_at="2026-06-26T12:00:00Z",
+                client_id="mcp_client_1",
+                type="refresh",
+                expires_at="2025-06-26T12:00:00Z",
+            ),
+            StoredTokenEntry(
+                id="profile_revoked",
+                token_hash=hash_token("mcp_profile_revoked"),
+                name="operator",
+                profile="operator",
+                scopes=["mcp:read"],
+                created_at="2026-06-26T12:00:00Z",
+                revoked_at="2026-06-27T12:00:00Z",
+            ),
+        ]
+    )
+
+    provider = GatewayOAuthProvider()
+    provider.set_token_store(TokenStore(store_path))
+    assert provider.load_tokens() == 0
+
+    removed = store.compact_expired_oauth(time.time())
+
+    assert removed == 1
+    remaining = {
+        e.id for e in TokenStore(store_path).load()
+    }
+    assert remaining == {"profile_revoked"}

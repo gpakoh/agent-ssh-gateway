@@ -295,3 +295,131 @@ def test_refresh_fails_closed_when_rotation_persistence_fails(
     assert set(provider._tokens) == all_hashes_before
     stored = provider.verify_access_token(tokens["access_token"])
     assert stored is not None
+
+
+# ── Retention: expired-token eviction and bounded memory ─────────
+
+
+def test_verify_access_token_evicts_expired_access_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sync verification rejects and evicts an expired access token."""
+    clock = _FakeClock()
+    monkeypatch.setattr("examples.mcp_server.oauth_provider.time.time", clock)
+
+    store_path = tmp_path / "tokens.json"
+    provider = _provider(store_path)
+    tokens = _issue_tokens(provider, "lifecycle-sync-eviction")
+    at_hash = hash_token(tokens["access_token"])
+    assert at_hash in provider._tokens
+
+    clock.advance(ACCESS_LIFETIME + 1)
+
+    assert provider.verify_access_token(tokens["access_token"]) is None
+    assert at_hash not in provider._tokens
+
+
+@pytest.mark.anyio
+async def test_load_access_token_evicts_expired_access_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Async loader rejects and evicts an expired access token."""
+    clock = _FakeClock()
+    monkeypatch.setattr("examples.mcp_server.oauth_provider.time.time", clock)
+
+    store_path = tmp_path / "tokens.json"
+    provider = _provider(store_path)
+    tokens = _issue_tokens(provider, "lifecycle-async-eviction")
+    at_hash = hash_token(tokens["access_token"])
+    assert at_hash in provider._tokens
+
+    clock.advance(ACCESS_LIFETIME + 1)
+
+    loaded = await provider.load_access_token(tokens["access_token"])
+    assert loaded is None
+    assert at_hash not in provider._tokens
+
+
+def test_refresh_evicts_expired_refresh_token_from_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refresh of an expired refresh token evicts it from memory."""
+    clock = _FakeClock()
+    monkeypatch.setattr("examples.mcp_server.oauth_provider.time.time", clock)
+
+    store_path = tmp_path / "tokens.json"
+    provider = _provider(store_path)
+    client_id = "lifecycle-refresh-eviction"
+    tokens = _issue_tokens(provider, client_id)
+    rt_hash = hash_token(tokens["refresh_token"])
+    assert rt_hash in provider._tokens
+
+    clock.advance(60 * 60 * 24 * 8)  # refresh TTL (604800s) has passed
+
+    with pytest.raises(TokenError) as exc_info:
+        provider.refresh_access_token(client_id, tokens["refresh_token"])
+    assert exc_info.value.error == "invalid_grant"
+
+    assert rt_hash not in provider._tokens
+
+
+def test_previous_unexpired_access_remains_valid_after_refresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refresh must not revoke/remove the previous, still-unexpired access."""
+    clock = _FakeClock()
+    monkeypatch.setattr("examples.mcp_server.oauth_provider.time.time", clock)
+
+    store_path = tmp_path / "tokens.json"
+    provider = _provider(store_path)
+    client_id = "lifecycle-old-access"
+    tokens = _issue_tokens(provider, client_id)
+    old_at_hash = hash_token(tokens["access_token"])
+
+    clock.advance(60)
+    refreshed = provider.refresh_access_token(client_id, tokens["refresh_token"])
+
+    stored = provider.verify_access_token(tokens["access_token"])
+    assert stored is not None
+    assert stored.client_id == client_id
+    assert old_at_hash in provider._tokens
+
+    entries = TokenStore(str(store_path)).load()
+    old_access = next(e for e in entries if e.token_hash == old_at_hash)
+    assert old_access.revoked_at is None
+    new_access = next(
+        e
+        for e in entries
+        if e.token_hash == hash_token(refreshed["access_token"])
+    )
+    assert new_access.revoked_at is None
+
+
+def test_repeated_refresh_memory_bounded_by_access_ttl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repeated refresh never accumulates expired grants beyond the TTL."""
+    clock = _FakeClock()
+    monkeypatch.setattr("examples.mcp_server.oauth_provider.time.time", clock)
+
+    store_path = tmp_path / "tokens.json"
+    provider = _provider(store_path)
+    client_id = "lifecycle-bounded-memory"
+    tokens = _issue_tokens(provider, client_id)
+
+    for _ in range(10):
+        clock.advance(ACCESS_LIFETIME + 1)
+        old_access = tokens["access_token"]
+        tokens = provider.refresh_access_token(client_id, tokens["refresh_token"])
+        # The superseded access expired during the TTL advance: verification
+        # rejects and evicts it on sight instead of letting it linger.
+        assert provider.verify_access_token(old_access) is None
+        refresh_count = sum(
+            1 for t in provider._tokens.values() if t.type == "refresh"
+        )
+        assert refresh_count == 1
+
+    # Only the live access + live refresh remain in memory: memory stays
+    # bounded by the TTL rather than growing with every refresh.
+    assert len(provider._tokens) == 2
+    assert provider.verify_access_token(tokens["access_token"]) is not None

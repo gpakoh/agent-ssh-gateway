@@ -191,19 +191,25 @@ class GatewayOAuthProvider:
         return count
 
     def load_tokens(self) -> int:
-        """Load non-revoked tokens from the attached TokenStore.
+        """Load non-revoked, unexpired tokens from the attached TokenStore.
 
-        Reads all non-revoked entries from the store and registers
-        each as a hashed token. Returns the count of tokens loaded.
+        Reads all non-revoked entries from the store, skipping any whose
+        persisted ``expires_at`` has already passed, and registers each
+        remaining entry as a hashed token. One ``now`` is captured
+        up front so the whole load filters against a single clock stamp.
+        Returns the count of tokens loaded.
         """
         if not self._token_store:
             return 0
+        now = time.time()
         entries = self._token_store.load()
         count = 0
         for entry in entries:
             if entry.revoked_at is not None:
                 continue
             expires = _parse_persisted_expiry(entry.expires_at)
+            if expires is not None and now > expires:
+                continue
             self.register_hashed_token(
                 token_hash=entry.token_hash,
                 profile=entry.profile,
@@ -511,6 +517,7 @@ class GatewayOAuthProvider:
                 error_description="refresh token is invalid",
             )
         if time.time() > stored.expires_at:
+            self._tokens.pop(rt_hash, None)
             raise TokenError(
                 error="invalid_grant",
                 error_description="refresh token has expired",
@@ -675,7 +682,11 @@ class GatewayOAuthProvider:
     # --- Internal helpers (used by token-mode code + tests) ---
 
     def verify_access_token(self, token_str: str) -> StoredToken | None:
-        """Verify and return access token using hash lookup."""
+        """Verify and return access token using hash lookup.
+
+        An expired access token is evicted from memory on sight so stale
+        grants do not accumulate beyond their TTL.
+        """
         token_hash = hash_token(token_str)
         stored = self._tokens.get(token_hash)
         if not stored:
@@ -683,11 +694,15 @@ class GatewayOAuthProvider:
         if stored.type != "access":
             return None
         if time.time() > stored.expires_at:
+            self._tokens.pop(token_hash, None)
             return None
         return stored
 
     async def load_access_token(self, token_str: str) -> AccessToken | None:
-        """Async token loader for FastMCP ProviderTokenVerifier (hash lookup)."""
+        """Async token loader for FastMCP ProviderTokenVerifier (hash lookup).
+
+        An expired access token is evicted from memory on sight.
+        """
         token_hash = hash_token(token_str)
         stored = self._tokens.get(token_hash)
         if not stored:
@@ -695,6 +710,7 @@ class GatewayOAuthProvider:
         if stored.type != "access":
             return None
         if time.time() > stored.expires_at:
+            self._tokens.pop(token_hash, None)
             return None
         expires_at = int(stored.expires_at) if stored.expires_at != float("inf") else 2**63 - 1
         return AccessToken(

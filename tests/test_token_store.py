@@ -3,10 +3,12 @@
 import json
 import os
 import stat
+from pathlib import Path
 
 import pytest
 
 from examples.mcp_server import token_store as token_store_module
+from examples.mcp_server.oauth_provider import hash_token
 from examples.mcp_server.token_store import TOKEN_STORE_VERSION, StoredTokenEntry, TokenStore
 
 
@@ -293,3 +295,277 @@ def test_token_store_add_revoke_race_no_resurrection(store_path):
     assert len(revoked) == 1
     assert revoked[0].revoked_at is not None
     assert any(e.id == "tok_add_race" for e in loaded)
+
+
+# ── Retention compaction (profile=oauth only) ───────────────────
+
+COMPACTION_NOW = 1_800_000_000.0
+
+
+def _oauth_entry(
+    id_,
+    expires_at,
+    revoked_at=None,
+    client_id="mcp_client_1",
+    token_type="access",
+):
+    return StoredTokenEntry(
+        id=id_,
+        token_hash=f"sha256:{id_}",
+        name="oauth-grant",
+        profile="oauth",
+        scopes=["mcp:read"],
+        created_at="2026-01-01T00:00:00Z",
+        client_id=client_id,
+        type=token_type,
+        expires_at=expires_at,
+        revoked_at=revoked_at,
+    )
+
+
+def _non_oauth_entry(id_, profile="operator", revoked_at=None, expires_at=None):
+    return StoredTokenEntry(
+        id=id_,
+        token_hash=f"sha256:{id_}",
+        name=f"{profile}-record",
+        profile=profile,
+        scopes=["mcp:read"],
+        created_at="2026-01-01T00:00:00Z",
+        client_id="mcp_static",
+        type="access",
+        expires_at=expires_at,
+        revoked_at=revoked_at,
+    )
+
+
+def test_compact_expired_oauth_removes_expired_and_revoked_oauth_records(
+    store_path,
+):
+    store = TokenStore(store_path)
+    store.add_many(
+        [
+            _oauth_entry(
+                "oauth-expired",
+                expires_at="2025-01-01T00:00:00Z",
+            ),
+            _oauth_entry(
+                "oauth-revoked",
+                expires_at="2099-12-31T23:59:59Z",
+                revoked_at="2026-01-01T00:00:00Z",
+                token_type="refresh",
+            ),
+            _oauth_entry(
+                "oauth-unparseable-expiry",
+                expires_at="not-a-real-date",
+            ),
+        ]
+    )
+
+    removed = store.compact_expired_oauth(COMPACTION_NOW)
+
+    assert removed == 3
+    assert store.load() == []
+
+
+def test_compact_skips_unexpired_oauth_records(store_path):
+    store = TokenStore(store_path)
+    store.add_many(
+        [
+            _oauth_entry(
+                "oauth-live-access",
+                expires_at="2099-12-31T23:59:59Z",
+            ),
+            _oauth_entry(
+                "oauth-live-refresh",
+                expires_at="2099-12-31T23:59:59Z",
+                token_type="refresh",
+            ),
+            _oauth_entry(
+                "oauth-no-expiry",
+                expires_at=None,
+            ),
+        ]
+    )
+    before = [e.id for e in store.load()]
+
+    removed = store.compact_expired_oauth(COMPACTION_NOW)
+
+    assert removed == 0
+    assert [e.id for e in store.load()] == before
+
+
+def test_compact_expired_oauth_noop_writes_no_store(tmp_path):
+    store_path = tmp_path / "tokens.json"
+    store = TokenStore(str(store_path))
+
+    assert store.compact_expired_oauth(COMPACTION_NOW) == 0
+    assert not store_path.exists()
+
+
+def test_compact_preserves_non_oauth_records_and_revoked_history(store_path):
+    """Static/profile/admin records — including revoked audit history — survive."""
+    store = TokenStore(store_path)
+    store.add_many(
+        [
+            _oauth_entry("oauth-expired", expires_at="2025-01-01T00:00:00Z"),
+            _non_oauth_entry(
+                "operator-revoked",
+                profile="operator",
+                revoked_at="2026-06-01T00:00:00Z",
+            ),
+            _non_oauth_entry(
+                "admin-live",
+                profile="admin",
+                expires_at="2099-12-31T23:59:59Z",
+            ),
+            _non_oauth_entry(
+                "viewer-revoked-no-expiry",
+                profile="viewer",
+                revoked_at="2026-06-01T00:00:00Z",
+            ),
+        ]
+    )
+
+    removed = store.compact_expired_oauth(COMPACTION_NOW)
+
+    assert removed == 1
+    loaded = store.load()
+    remaining = {e.id for e in loaded}
+    assert remaining == {
+        "operator-revoked",
+        "admin-live",
+        "viewer-revoked-no-expiry",
+    }
+    operator_revoked = next(e for e in loaded if e.id == "operator-revoked")
+    assert operator_revoked.revoked_at == "2026-06-01T00:00:00Z"
+    viewer_revoked = next(e for e in loaded if e.id == "viewer-revoked-no-expiry")
+    assert viewer_revoked.revoked_at == "2026-06-01T00:00:00Z"
+
+
+def test_compact_expired_oauth_never_writes_raw_tokens(store_path):
+    raw = "mcp_compaction_raw_secret"
+    store = TokenStore(store_path)
+    store.add_many(
+        [
+            StoredTokenEntry(
+                id="oauth-live",
+                token_hash=hash_token(raw),
+                name="oauth-grant",
+                profile="oauth",
+                scopes=["mcp:read"],
+                created_at="2026-01-01T00:00:00Z",
+                client_id="mcp_client_1",
+                type="refresh",
+                expires_at="2099-12-31T23:59:59Z",
+            ),
+            StoredTokenEntry(
+                id="oauth-expired",
+                token_hash="sha256:oauth-expired-hash",
+                name="oauth-grant",
+                profile="oauth",
+                scopes=["mcp:read"],
+                created_at="2026-01-01T00:00:00Z",
+                client_id="mcp_client_1",
+                type="access",
+                expires_at="2025-01-01T00:00:00Z",
+            ),
+            _non_oauth_entry(
+                "operator-revoked",
+                revoked_at="2026-06-01T00:00:00Z",
+            ),
+        ]
+    )
+
+    store.compact_expired_oauth(COMPACTION_NOW)
+
+    content = Path(store_path).read_text()
+    assert raw not in content
+    assert hash_token(raw) in content  # only the hash is ever serialized
+
+
+def test_prepare_durable_storage_auto_compacts_expired_oauth(tmp_path):
+    """Durable startup preparation sweeps expired/revoked OAuth records."""
+    store_path = tmp_path / "tokens.json"
+    store = TokenStore(str(store_path))
+    store.add_many(
+        [
+            _oauth_entry("oauth-expired", expires_at="2025-01-01T00:00:00Z"),
+            _oauth_entry(
+                "oauth-revoked",
+                expires_at="2099-12-31T23:59:59Z",
+                revoked_at="2026-01-01T00:00:00Z",
+                token_type="refresh",
+            ),
+            _oauth_entry("oauth-live", expires_at="2099-12-31T23:59:59Z"),
+            _non_oauth_entry("static-revoked", revoked_at="2026-06-01T00:00:00Z"),
+        ]
+    )
+
+    store.prepare_durable_storage()
+
+    loaded = TokenStore(str(store_path)).load()
+    remaining = {e.id for e in loaded}
+    assert remaining == {"oauth-live", "static-revoked"}
+    static_revoked = next(e for e in loaded if e.id == "static-revoked")
+    assert static_revoked.revoked_at == "2026-06-01T00:00:00Z"
+
+
+def test_compact_oauth_race_no_entries_lost(store_path):
+    """Compaction holds the flock across its read-modify-write window.
+
+    A concurrent revoke landing while compaction is between load and write
+    must be preserved, never clobbered by a stale compacted write.
+    """
+    import multiprocessing
+
+    def worker_compact(store_path, released, proceed):
+        store = TokenStore(store_path)
+        orig_load = TokenStore.load
+
+        def slow_load(self):
+            data = orig_load(self)
+            released.set()
+            if not proceed.wait(timeout=15):
+                raise TimeoutError("compact barrier timeout")
+            return data
+
+        TokenStore.load = slow_load
+        store.compact_expired_oauth(COMPACTION_NOW)
+
+    def worker_revoke(store_path):
+        TokenStore(store_path).revoke("oauth-live")
+
+    store = TokenStore(store_path)
+    store.add_many(
+        [
+            _oauth_entry("oauth-expired", expires_at="2025-01-01T00:00:00Z"),
+            _oauth_entry("oauth-live", expires_at="2099-12-31T23:59:59Z"),
+            _non_oauth_entry("static-revoked", revoked_at="2026-06-01T00:00:00Z"),
+        ]
+    )
+
+    released = multiprocessing.Event()
+    proceed = multiprocessing.Event()
+    p_compact = multiprocessing.Process(
+        target=worker_compact, args=(store_path, released, proceed)
+    )
+    p_compact.start()
+    assert released.wait(timeout=15), "compact worker never read the store"
+
+    p_revoke = multiprocessing.Process(target=worker_revoke, args=(store_path,))
+    p_revoke.start()
+    proceed.set()
+    p_compact.join(timeout=15)
+    p_revoke.join(timeout=15)
+    assert p_compact.exitcode == 0
+    assert p_revoke.exitcode == 0
+
+    store2 = TokenStore(store_path)
+    loaded = store2.load()
+    assert all(e.id != "oauth-expired" for e in loaded)
+    live = [e for e in loaded if e.id == "oauth-live"]
+    assert len(live) == 1
+    assert live[0].revoked_at is not None
+    static = [e for e in loaded if e.id == "static-revoked"]
+    assert len(static) == 1
+    assert static[0].revoked_at == "2026-06-01T00:00:00Z"
