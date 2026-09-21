@@ -569,3 +569,164 @@ def test_compact_oauth_race_no_entries_lost(store_path):
     static = [e for e in loaded if e.id == "static-revoked"]
     assert len(static) == 1
     assert static[0].revoked_at == "2026-06-01T00:00:00Z"
+
+
+# ── In-transaction compaction during add_many / rotate ──────────
+
+
+def test_add_many_without_oauth_compaction_keeps_append_only(store_path):
+    """Generic add_many (no oauth now) keeps the previous append-only behaviour."""
+    store = TokenStore(store_path)
+    store.add_many([_oauth_entry("oauth-expired", expires_at="2025-01-01T00:00:00Z")])
+
+    store.add_many([_oauth_entry("oauth-new", expires_at="2099-12-31T23:59:59Z")])
+
+    remaining = {e.id for e in store.load()}
+    assert remaining == {"oauth-expired", "oauth-new"}
+
+
+def test_add_many_with_oauth_compaction_filters_stale_oauth_records(store_path):
+    """OAuth issuance compacts stale OAuth history in the same transaction."""
+    store = TokenStore(store_path)
+    store.add_many(
+        [
+            _oauth_entry("oauth-expired", expires_at="2025-01-01T00:00:00Z"),
+            _oauth_entry(
+                "oauth-revoked",
+                expires_at="2099-12-31T23:59:59Z",
+                revoked_at="2026-01-01T00:00:00Z",
+                token_type="refresh",
+            ),
+            _oauth_entry("oauth-live", expires_at="2099-12-31T23:59:59Z"),
+            _non_oauth_entry("operator-revoked", revoked_at="2026-06-01T00:00:00Z"),
+        ]
+    )
+
+    store.add_many(
+        [_oauth_entry("oauth-new-at", expires_at="2099-12-31T23:59:59Z")],
+        compact_oauth_now=COMPACTION_NOW,
+    )
+
+    remaining = {e.id for e in store.load()}
+    assert remaining == {"oauth-live", "operator-revoked", "oauth-new-at"}
+    operator_revoked = next(e for e in store.load() if e.id == "operator-revoked")
+    assert operator_revoked.revoked_at == "2026-06-01T00:00:00Z"
+
+
+def test_rotate_without_oauth_compaction_keeps_revoked_old_refresh(store_path):
+    """Generic rotate (no oauth now) keeps the old revoked refresh in place."""
+    store = TokenStore(store_path)
+    old_rt_hash = "sha256:oauth-old-rt"
+    store.add_many(
+        [
+            _oauth_entry(
+                "oauth-old-rt",
+                expires_at="2099-12-31T23:59:59Z",
+                token_type="refresh",
+            ),
+            _oauth_entry("oauth-stale", expires_at="2025-01-01T00:00:00Z"),
+        ]
+    )
+
+    store.rotate(
+        old_rt_hash,
+        [
+            _oauth_entry("oauth-new-at", expires_at="2099-12-31T23:59:59Z"),
+            _oauth_entry(
+                "oauth-new-rt",
+                expires_at="2099-12-31T23:59:59Z",
+                token_type="refresh",
+            ),
+        ],
+    )
+
+    loaded = store.load()
+    old_rt = next(e for e in loaded if e.id == "oauth-old-rt")
+    assert old_rt.revoked_at is not None
+    assert any(e.id == "oauth-stale" for e in loaded)
+    assert any(e.id == "oauth-new-at" and e.revoked_at is None for e in loaded)
+
+
+def test_rotate_with_oauth_compaction_removes_revoked_old_refresh_and_stale(store_path):
+    """Rotation compacts stale OAuth history including the old refresh it revokes."""
+    old_rt_hash = "sha256:oauth-old-rt"
+    store = TokenStore(store_path)
+    store.add_many(
+        [
+            _oauth_entry("oauth-expired-access", expires_at="2025-01-01T00:00:00Z"),
+            _oauth_entry(
+                "oauth-old-rt",
+                expires_at="2099-12-31T23:59:59Z",
+                token_type="refresh",
+            ),
+            _oauth_entry("oauth-live-access", expires_at="2099-12-31T23:59:59Z"),
+            _non_oauth_entry("operator-revoked", revoked_at="2026-06-01T00:00:00Z"),
+        ]
+    )
+
+    store.rotate(
+        old_rt_hash,
+        [
+            _oauth_entry("oauth-new-at", expires_at="2099-12-31T23:59:59Z"),
+            _oauth_entry(
+                "oauth-new-rt",
+                expires_at="2099-12-31T23:59:59Z",
+                token_type="refresh",
+            ),
+        ],
+        compact_oauth_now=COMPACTION_NOW,
+    )
+
+    loaded = store.load()
+    remaining = {e.id for e in loaded}
+    assert remaining == {
+        "oauth-live-access",
+        "oauth-new-at",
+        "oauth-new-rt",
+        "operator-revoked",
+    }
+    assert all(e.token_hash != old_rt_hash for e in loaded)
+    live_access = next(e for e in loaded if e.id == "oauth-live-access")
+    assert live_access.revoked_at is None
+    assert all(e.revoked_at is None for e in loaded if e.profile == "oauth")
+    operator_revoked = next(e for e in loaded if e.id == "operator-revoked")
+    assert operator_revoked.revoked_at == "2026-06-01T00:00:00Z"
+
+
+def test_rotate_with_oauth_compaction_never_writes_raw_tokens(store_path):
+    """Rotation compaction only ever serializes hashes, never raw credentials."""
+    raw = "mcp_rotate_raw_secret"
+    store = TokenStore(store_path)
+    store.add_many(
+        [
+            StoredTokenEntry(
+                id="oauth-old-rt",
+                token_hash=hash_token(raw),
+                name="oauth-grant",
+                profile="oauth",
+                scopes=["mcp:read"],
+                created_at="2026-01-01T00:00:00Z",
+                client_id="mcp_client_1",
+                type="refresh",
+                expires_at="2099-12-31T23:59:59Z",
+            ),
+            _oauth_entry("oauth-expired", expires_at="2025-01-01T00:00:00Z"),
+        ]
+    )
+
+    store.rotate(
+        hash_token(raw),
+        [
+            _oauth_entry("oauth-new-at", expires_at="2099-12-31T23:59:59Z"),
+            _oauth_entry(
+                "oauth-new-rt",
+                expires_at="2099-12-31T23:59:59Z",
+                token_type="refresh",
+            ),
+        ],
+        compact_oauth_now=COMPACTION_NOW,
+    )
+
+    content = Path(store_path).read_text()
+    assert raw not in content
+    assert hash_token(raw) not in content  # the revoked old refresh was compacted

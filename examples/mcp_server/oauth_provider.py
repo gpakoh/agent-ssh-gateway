@@ -306,7 +306,8 @@ class GatewayOAuthProvider:
                     type="refresh",
                     expires_at=_format_persisted_time(refresh.expires_at),
                 ),
-            ]
+            ],
+            compact_oauth_now=now,
         )
 
     def _rotate_oauth_tokens(
@@ -346,6 +347,7 @@ class GatewayOAuthProvider:
                     expires_at=_format_persisted_time(refresh.expires_at),
                 ),
             ],
+            compact_oauth_now=now,
         )
 
     # --- Client Registration ---

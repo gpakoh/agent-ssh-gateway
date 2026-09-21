@@ -183,22 +183,44 @@ class TokenStore:
         """Append an entry and persist atomically (locked read-modify-write)."""
         return self.add_many([entry])
 
-    def add_many(self, entries: list[StoredTokenEntry]) -> None:
-        """Append several entries in one atomic locked read-modify-write."""
+    def add_many(
+        self,
+        entries: list[StoredTokenEntry],
+        compact_oauth_now: float | None = None,
+    ) -> None:
+        """Append several entries in one atomic locked read-modify-write.
+
+        When *compact_oauth_now* is supplied, stale (expired/revoked)
+        OAuth records currently in the store are dropped in the same
+        transaction before the new entries are appended, bounding a
+        long-lived OAuth store without a separate sweep. Generic callers
+        (CLI, static/operator/admin tokens) omit the argument and keep
+        the previous append-only behaviour.
+        """
         with self._locked():
             current = self.load()
+            if compact_oauth_now is not None:
+                current = self._filter_stale_oauth(current, compact_oauth_now)
             current.extend(entries)
             self._write(current)
 
     def rotate(
-        self, revoke_hash: str, new_entries: list[StoredTokenEntry]
+        self,
+        revoke_hash: str,
+        new_entries: list[StoredTokenEntry],
+        compact_oauth_now: float | None = None,
     ) -> StoredTokenEntry | None:
         """Atomically revoke one entry (by hash) and append replacement entries.
 
         Single locked read-modify-write so a rotation is never observed
         half-applied: the old refresh is marked revoked and the new
-        access/refresh pair is persisted in the same write. Returns the
-        revoked entry, or ``None`` when no non-revoked entry matched.
+        access/refresh pair is persisted in the same write. When
+        *compact_oauth_now* is supplied, stale OAuth records — including
+        the just-revoked old refresh — are dropped in the same
+        transaction so revoked refresh history cannot accumulate during
+        a long-lived process; every unexpired OAuth access token and all
+        non-OAuth records are preserved. Returns the revoked entry, or
+        ``None`` when no non-revoked entry matched.
         """
         with self._locked():
             entries = self.load()
@@ -208,6 +230,8 @@ class TokenStore:
                     e.revoked_at = _iso_now()
                     revoked = e
                     break
+            if compact_oauth_now is not None:
+                entries = self._filter_stale_oauth(entries, compact_oauth_now)
             entries.extend(new_entries)
             self._write(entries)
             return revoked
@@ -253,15 +277,27 @@ class TokenStore:
         """
         with self._locked():
             entries = self.load()
-            kept: list[StoredTokenEntry] = []
-            for entry in entries:
-                if entry.profile == "oauth" and self._oauth_record_is_stale(entry, now):
-                    continue
-                kept.append(entry)
+            kept = self._filter_stale_oauth(entries, now)
             removed = len(entries) - len(kept)
             if removed:
                 self._write(kept)
             return removed
+
+    def _filter_stale_oauth(
+        self, entries: list[StoredTokenEntry], now: float
+    ) -> list[StoredTokenEntry]:
+        """Pure filter dropping stale/revoked OAuth records; keeps everything else.
+
+        Applies the compaction predicate to an already-loaded list using
+        one supplied ``now``; non-OAuth records (static, profile-scoped
+        and admin credentials) are always preserved, including their
+        revoked audit history. Caller must already hold the store lock.
+        """
+        return [
+            entry
+            for entry in entries
+            if not (entry.profile == "oauth" and self._oauth_record_is_stale(entry, now))
+        ]
 
     def _oauth_record_is_stale(self, entry: StoredTokenEntry, now: float) -> bool:
         """True when an OAuth record should be removed by compaction."""
