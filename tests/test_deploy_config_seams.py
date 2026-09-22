@@ -1421,8 +1421,9 @@ class TestInstallPackageNetworkResilience:
 
 class TestPipAuditNetworkResilience:
     """CI must distinguish a real vulnerability finding from transient
-    advisory-service network failures, and give OSV enough retry budget to
-    survive the runner pool's intermittent TLS/read-timeout path.
+    advisory-service failures (network exceptions AND HTTP 5xx "Server
+    Error" responses), and give OSV enough retry budget to survive the
+    runner pool's intermittent TLS/read-timeout and 5xx path.
     """
 
     def test_pip_audit_uses_extended_osv_timeout_and_retry_budget(self):
@@ -1461,6 +1462,87 @@ class TestPipAuditNetworkResilience:
         assert "exit $status" in run
         assert "continue" in run
         assert run.index("grep -qE") < run.index("continue") < run.index("exit $status")
+
+    @staticmethod
+    def _pip_audit_run() -> str:
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        steps = wf["jobs"]["test"]["steps"]
+        return next(s for s in steps if s.get("name") == "pip-audit")["run"]
+
+    @classmethod
+    def _retry_signature(cls) -> re.Pattern[str]:
+        """Compile the workflow's own single grep -qE retry classifier, so the
+        regression assertions below exercise the exact signature CI runs."""
+        run = cls._pip_audit_run()
+        match = re.search(r'grep -qE "([^"]+)"', run)
+        assert match is not None, (
+            "pip-audit must gate every retry behind a single grep -qE signature"
+        )
+        return re.compile(match.group(1))
+
+    def test_pip_audit_retry_signature_classifies_http_5xx_server_errors(self):
+        """osv.dev answering HTTP 5xx (PR #344 run #11810: `HTTPError: 501
+        Server Error: Not Implemented`) is an external-service failure and
+        must be retried. requests renders every 5xx as "<code> Server Error:
+        <reason> for url: ...", so that narrow class is the recognition seam.
+        """
+        run = self._pip_audit_run()
+        signature = self._retry_signature()
+
+        assert "HTTPError: 5[0-9]{2} Server Error" in run
+        for server_error in (
+            "HTTPError: 501 Server Error: Not Implemented for url: https://api.osv.dev/v1/query",
+            "HTTPError: 503 Server Error: Service Unavailable for url: https://api.osv.dev/v1/query",
+            "HTTPError: 500 Server Error: Internal Server Error for url: https://api.osv.dev/v1/query",
+        ):
+            assert signature.search(server_error) is not None, server_error
+
+    def test_pip_audit_5xx_only_4xx_and_findings_stay_immediate_fail(self):
+        """Only the 5xx "Server Error" class may retry: 4xx "Client Error"
+        responses and real vulnerability findings are clean, structured
+        failures that must fail on the first attempt, no retry."""
+        run = self._pip_audit_run()
+        signature = self._retry_signature()
+
+        assert "Client Error" not in run, "4xx must never be a retry signature"
+        for non_retryable in (
+            "HTTPError: 404 Client Error: Not Found for url: https://api.osv.dev/v1/query",
+            "HTTPError: 400 Client Error: Bad Request for url: https://api.osv.dev/v1/query",
+            "Found 2 known vulnerabilities in 2 packages",
+            "4 packages have known vulnerabilities",
+        ):
+            assert signature.search(non_retryable) is None, non_retryable
+        assert "exit $status" in run
+
+    def test_pip_audit_persistent_5xx_fails_closed_after_attempt_budget(self):
+        """A persistent 5xx burns all max_attempts=5 and must still exit 1:
+        the retryable 5xx/network class only ever `continue`s while
+        attempt < max_attempts, then aborts the job on the final iteration;
+        the sole exit-0 path is a status-0 run before the classifier."""
+        run = self._pip_audit_run()
+        lines = run.splitlines()
+        stripped = [line.strip() for line in lines]
+
+        assert "HTTPError: 5[0-9]{2} Server Error" in run
+        assert "max_attempts=5" in run
+        assert "timeout_seconds=60" in run
+
+        grep_idx = next(
+            i for i, line in enumerate(stripped) if line.startswith('if echo "$output" | grep -qE')
+        )
+        continue_idx = next(i for i, line in enumerate(stripped) if line == "continue")
+        persist_idx = next(
+            i for i, line in enumerate(stripped) if line.startswith("echo \"::error::pip-audit failed after")
+        )
+        exit1_idx = next(i for i, line in enumerate(stripped) if line == "exit 1")
+        assert grep_idx < continue_idx < persist_idx < exit1_idx, (
+            "a retryable 5xx/network failure must retry up to the attempt "
+            "budget, then fail closed with exit 1"
+        )
+
+        exit0_idx = next(i for i, line in enumerate(stripped) if line == "exit 0")
+        assert exit0_idx < grep_idx, "the only exit-0 path is an immediate status-0 success"
+        assert "exit 0" not in "\n".join(lines[grep_idx:])
 
 
 class TestMakeCheckMirrorsCiExactly:

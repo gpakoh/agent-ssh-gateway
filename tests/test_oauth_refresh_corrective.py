@@ -60,7 +60,11 @@ class _FailingTokenStore(TokenStore):
     def add(self, entry: StoredTokenEntry) -> None:
         raise OSError("durable token store unavailable")
 
-    def add_many(self, entries: list[StoredTokenEntry]) -> None:
+    def add_many(
+        self,
+        entries: list[StoredTokenEntry],
+        compact_oauth_now: float | None = None,
+    ) -> None:
         raise OSError("durable token store unavailable")
 
 

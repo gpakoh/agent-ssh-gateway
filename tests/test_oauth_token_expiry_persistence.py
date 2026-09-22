@@ -1,11 +1,11 @@
 """Regression tests for persisted OAuth token expiry across restarts.
 
-Proves that `GatewayOAuthProvider.load_tokens()` currently discards
-the `expires_at` field from persisted `StoredTokenEntry` records,
-causing expired persisted tokens to become valid after a process restart.
-
-Phase 20B PR1: tests-only, no production code changes.
-Tests marked xfail(strict=True) reproduce the bug against unfixed code.
+Proves that `GatewayOAuthProvider.load_tokens()` applies persisted
+`expires_at` records at startup: entries whose persistence expiry has
+already passed are skipped entirely (filtered out, never registered in
+memory), entries still inside their window are restored with their exact
+expiry, and legacy `expires_at=None` records keep acting as "never
+expires". Revoked persisted entries also remain rejected.
 """
 
 import pytest
@@ -67,11 +67,11 @@ def no_expiry_entry():
     ), raw
 
 
-# ── Bug reproduction tests (xfail until PR2 fix) ───────────────
+# ── Startup filtering regression (post-fix) ─────────────────────
 
 
 def test_expired_token_rejected_after_reload(store_path, expired_entry):
-    """Persisted token with past expires_at must be rejected after reload."""
+    """Persisted token with past expires_at must be skipped at reload."""
     entry, raw_token = expired_entry
     store = TokenStore(store_path)
     store.add(entry)
@@ -79,13 +79,14 @@ def test_expired_token_rejected_after_reload(store_path, expired_entry):
     provider = GatewayOAuthProvider()
     provider.set_token_store(TokenStore(store_path))
     count = provider.load_tokens()
-    assert count == 1
+    assert count == 0, (
+        "BUG: expired persisted token was registered at load; "
+        "expected it to be skipped because expires_at is in the past"
+    )
+    assert provider._tokens == {}
 
     result = provider.verify_access_token(raw_token)
-    assert result is None, (
-        "BUG: expired persisted token was accepted after reload; "
-        "expected rejection because expires_at is in the past"
-    )
+    assert result is None
 
 
 def test_not_expired_token_rejected_after_its_persisted_expiry(
@@ -100,12 +101,58 @@ def test_not_expired_token_rejected_after_its_persisted_expiry(
     provider.set_token_store(TokenStore(store_path))
     provider.load_tokens()
 
+    assert provider._tokens == {}, (
+        "BUG: token with past expires_at registered in memory at load; "
+        "should have been filtered out once persisted expiry has passed"
+    )
     raw_expired = "mcp_test_expired_persisted_token"
     result = provider.verify_access_token(raw_expired)
-    assert result is None, (
-        "BUG: token with past expires_at accepted after reload; "
-        "should be rejected once persisted expiry has passed"
+    assert result is None
+
+
+def test_startup_skips_only_already_expired_using_one_captured_now(
+    store_path, monkeypatch
+):
+    """Startup filters against one captured ``now``: future entries load."""
+    import time as time_module
+
+    now = 1_700_000_000.0
+    monkeypatch.setattr("examples.mcp_server.oauth_provider.time.time", lambda: now)
+
+    store = TokenStore(store_path)
+    store.add(
+        StoredTokenEntry(
+            id="tok_just_expired",
+            token_hash=hash_token("mcp_startup_expired"),
+            name="startup-expired",
+            profile="full",
+            scopes=["mcp:read"],
+            created_at="2025-01-01T00:00:00Z",
+            expires_at=time_module.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time_module.gmtime(now - 1)
+            ),
+        )
     )
+    store.add(
+        StoredTokenEntry(
+            id="tok_about_to_expire",
+            token_hash=hash_token("mcp_startup_boundary"),
+            name="startup-boundary",
+            profile="full",
+            scopes=["mcp:read"],
+            created_at="2025-01-01T00:00:00Z",
+            expires_at=time_module.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time_module.gmtime(now + 300)
+            ),
+        )
+    )
+
+    provider = GatewayOAuthProvider()
+    provider.set_token_store(TokenStore(store_path))
+    assert provider.load_tokens() == 1
+
+    assert provider.verify_access_token("mcp_startup_expired") is None
+    assert provider.verify_access_token("mcp_startup_boundary") is not None
 
 
 # ── Passing regression tests (should pass before and after fix) ─
