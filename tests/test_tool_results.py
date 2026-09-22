@@ -313,6 +313,12 @@ class TestErrorCodes:
         assert "INTERNAL_ERROR" in ERROR_CODES
         assert "SCAN_ERROR" in ERROR_CODES
 
+    def test_audit_unavailable_accepted(self):
+        """AUDIT_UNAVAILABLE is the canonical code for a fail-closed audit failure."""
+        result = tool_error("gitea_close_pull_request", "AUDIT_UNAVAILABLE", "audit unavailable")
+        assert result["error"]["code"] == "AUDIT_UNAVAILABLE"
+        assert "AUDIT_UNAVAILABLE" in ERROR_CODES
+
     def test_each_code_is_accepted(self):
         for code in ERROR_CODES:
             result = tool_error("tool", code, f"msg for {code}")
