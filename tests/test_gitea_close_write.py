@@ -6,14 +6,20 @@ mutation it may issue is a single PATCH that sets state=closed (see
 checked against a freshly-fetched PR BEFORE any mutation, so any
 mismatch fails closed with zero writes.
 
-A real close additionally requires a human-readable reason and strict
-attributed audit attribution: the Gitea username and the authenticated
-caller fingerprint must both resolve, a destructive-intent audit event
-must persist (fail closed with AUDIT_UNAVAILABLE otherwise), and only
-then may the close mutation run. An already-closed PR is an idempotent
-success with no intent audit. The pre-mutation audit must be fsync-
-persisted before the caller proceeds; an fsync failure also fails closed
-with AUDIT_UNAVAILABLE and zero mutation.
+A real close must additionally be justified by a ``superseding_ref``:
+    a ``refs/heads/<branch>`` or plain feature branch in the SAME
+    repository that the adapter freshly resolves and whose exact head
+    commit equals ``expected_head_sha`` before any intent audit or close
+    mutation (missing/malformed/moved/short branch fails closed with zero
+    audit writes and zero mutation). It also requires a human-readable
+    reason and strict attributed audit attribution: the Gitea username and
+    the authenticated caller fingerprint must both resolve, a
+    destructive-intent audit event must persist (fail closed with
+    AUDIT_UNAVAILABLE otherwise), and only then may the close mutation run.
+    An already-closed PR is an idempotent success with no intent audit and
+    no superseding proof because no mutation occurs. The pre-mutation audit
+    must be fsync-persisted before the caller proceeds; an fsync failure
+    also fails closed with AUDIT_UNAVAILABLE and zero mutation.
 """
 
 from __future__ import annotations
@@ -21,6 +27,7 @@ from __future__ import annotations
 import re
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from examples.mcp_client_remote.fleet.gitea_client import GiteaClient
@@ -83,6 +90,8 @@ class FakeCloseClient:
         post_base: str = "master",
         post_merged: bool = False,
         user_payload: dict | None = None,
+        superseding_head_sha: str | None = None,
+        superseding_missing: bool = False,
     ):
         assert token == "token"
         self.state = state
@@ -93,7 +102,12 @@ class FakeCloseClient:
         self.post_base = post_base
         self.post_merged = post_merged
         self.user_payload = user_payload
+        self.superseding_head_sha = (
+            superseding_head_sha if superseding_head_sha is not None else SHA
+        )
+        self.superseding_missing = superseding_missing
         self.pr_reads = 0
+        self.branch_lookups: list[str] = []
         self.close_calls: list[tuple[str, str, int]] = []
 
     async def __aenter__(self):
@@ -119,6 +133,24 @@ class FakeCloseClient:
         if payload is None:
             payload = {"login": "robot"}
         return payload
+
+    async def get_branch(self, owner: str, repo: str, branch: str):
+        if self.superseding_missing:
+            request = httpx.Request(
+                "GET",
+                f"https://git.example.invalid/api/v1/repos/{owner}/{repo}/branches/{branch}",
+            )
+            raise httpx.HTTPStatusError(
+                f"gitea api /repos/{owner}/{repo}/branches/{branch}: 404 Not Found",
+                request=request,
+                response=httpx.Response(404, request=request),
+            )
+        self.branch_lookups.append(branch)
+        return {
+            "name": branch,
+            "commit": {"id": self.superseding_head_sha},
+            "protected": False,
+        }
 
     async def get_pull_request(self, owner: str, repo: str, pull_number: int):
         self.pr_reads += 1
@@ -172,12 +204,12 @@ async def _close(
     client: FakeCloseClient,
     *,
     reason: str | None = REASON,
-    superseding_ref: str | None = None,
+    superseding_ref: str | None = "refs/heads/new-design",
     fingerprint: str | None = FINGERPRINT,
     audit_logger: RecordingAuditLogger | None = None,
 ) -> dict:
     call_reason = REASON if reason is None else reason
-    logger = _setup_close(monkeypatch, client, fingerprint=fingerprint, audit_logger=audit_logger)
+    _setup_close(monkeypatch, client, fingerprint=fingerprint, audit_logger=audit_logger)
     result = await remote.gitea_close_pull_request(
         "owner",
         "repo",
@@ -403,7 +435,9 @@ async def test_adapter_fsync_failure_is_audit_unavailable_zero_mutation(
 
     monkeypatch.setattr("examples.mcp_server.mcp_audit.os.fsync", boom)
 
-    result = await remote.gitea_close_pull_request("owner", "repo", 25, SHA, REASON)
+    result = await remote.gitea_close_pull_request(
+        "owner", "repo", 25, SHA, REASON, superseding_ref="refs/heads/new-design"
+    )
 
     assert result["ok"] is False
     assert result["error"]["code"] == "AUDIT_UNAVAILABLE"
@@ -419,12 +453,15 @@ async def test_adapter_fsync_failure_is_audit_unavailable_zero_mutation(
 @pytest.mark.asyncio
 async def test_adapter_closes_exact_open_pr_once(monkeypatch):
     client = FakeCloseClient("token")
-    logger = _setup_close(monkeypatch, client)
+    _setup_close(monkeypatch, client)
 
-    result = await remote.gitea_close_pull_request("owner", "repo", 25, SHA, REASON)
+    result = await remote.gitea_close_pull_request(
+        "owner", "repo", 25, SHA, REASON, superseding_ref="refs/heads/new-design"
+    )
 
     assert result["ok"] is True
     assert client.pr_reads == 2
+    assert client.branch_lookups == ["new-design"]
     assert client.close_calls == [("owner", "repo", 25)]
     assert result["result"] == {
         "number": 25,
@@ -444,14 +481,16 @@ async def test_adapter_strips_reason_before_audit_and_mutation(monkeypatch):
     logger = RecordingAuditLogger()
     _setup_close(monkeypatch, client, audit_logger=logger)
 
-    result = await remote.gitea_close_pull_request("owner", "repo", 25, SHA, "  cleanup work  ")
+    result = await remote.gitea_close_pull_request(
+        "owner", "repo", 25, SHA, "  cleanup work  ", superseding_ref="refs/heads/new-design"
+    )
 
     assert result["ok"] is True
     assert logger.required_events[0].metadata["reason"] == "cleanup work"
 
 
 @pytest.mark.asyncio
-async def test_adapter_optional_superseding_ref_included_in_audit(monkeypatch):
+async def test_adapter_superseding_ref_recorded_in_audit_with_verified_head(monkeypatch):
     client = FakeCloseClient("token")
     logger = RecordingAuditLogger()
     _setup_close(monkeypatch, client, audit_logger=logger)
@@ -461,21 +500,103 @@ async def test_adapter_optional_superseding_ref_included_in_audit(monkeypatch):
     )
 
     assert result["ok"] is True
-    assert logger.required_events[0].metadata["superseding_ref"] == "refs/heads/new-design"
-    assert logger.append_events[0].metadata["superseding_ref"] == "refs/heads/new-design"
+    assert client.branch_lookups == ["new-design"]
+    for event in (logger.required_events[0], logger.append_events[0]):
+        assert event.metadata["superseding_ref"] == "refs/heads/new-design"
+        assert event.metadata["superseding_head_sha"] == SHA
 
 
 @pytest.mark.asyncio
-async def test_adapter_superseding_ref_absent_from_audit_when_unset(monkeypatch):
+async def test_adapter_plain_superseding_branch_normalized_in_audit(monkeypatch):
     client = FakeCloseClient("token")
     logger = RecordingAuditLogger()
     _setup_close(monkeypatch, client, audit_logger=logger)
 
-    result = await remote.gitea_close_pull_request("owner", "repo", 25, SHA, REASON)
+    result = await remote.gitea_close_pull_request(
+        "owner", "repo", 25, SHA, REASON, superseding_ref="new-design"
+    )
 
     assert result["ok"] is True
-    assert "superseding_ref" not in logger.required_events[0].metadata
-    assert "superseding_ref" not in logger.append_events[0].metadata
+    assert client.branch_lookups == ["new-design"]
+    for event in (logger.required_events[0], logger.append_events[0]):
+        assert event.metadata["superseding_ref"] == "refs/heads/new-design"
+        assert event.metadata["superseding_head_sha"] == SHA
+
+
+@pytest.mark.asyncio
+async def test_adapter_open_close_without_superseding_ref_is_policy_denied(monkeypatch):
+    client = FakeCloseClient("token")
+    logger = RecordingAuditLogger()
+
+    result = await _close(monkeypatch, client, superseding_ref=None, audit_logger=logger)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "POLICY_DENIED"
+    assert "superseding_ref" in result["error"]["message"]
+    assert client.branch_lookups == []
+    assert client.close_calls == []
+    assert logger.required_events == []
+    assert logger.append_events == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_missing_superseding_branch_fails_closed_zero_mutation(monkeypatch):
+    client = FakeCloseClient("token", superseding_missing=True)
+    logger = RecordingAuditLogger()
+
+    result = await _close(monkeypatch, client, audit_logger=logger)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "POLICY_DENIED"
+    assert "does not exist" in result["error"]["message"]
+    assert client.close_calls == []
+    assert logger.required_events == []
+    assert logger.append_events == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_wrong_superseding_head_fails_closed_zero_mutation(monkeypatch):
+    client = FakeCloseClient("token", superseding_head_sha="c" * 40)
+    logger = RecordingAuditLogger()
+
+    result = await _close(monkeypatch, client, audit_logger=logger)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "POLICY_DENIED"
+    assert "does not equal" in result["error"]["message"]
+    assert result["error"]["details"]["observed_superseding_head_sha"] == "c" * 40
+    assert client.close_calls == []
+    assert logger.required_events == []
+    assert logger.append_events == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "superseding_ref",
+    [
+        "refs/tags/v1.0",
+        "refs/heads/../escape",
+        "refs/heads/",
+        "main",
+        "master",
+        "-leading-dash",
+        "has space",
+    ],
+)
+async def test_adapter_malformed_superseding_ref_fails_closed_zero_mutation(
+    monkeypatch, superseding_ref
+):
+    client = FakeCloseClient("token")
+    logger = RecordingAuditLogger()
+
+    result = await _close(monkeypatch, client, superseding_ref=superseding_ref, audit_logger=logger)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INVALID_INPUT"
+    assert client.branch_lookups == []
+    assert client.close_calls == []
+    assert logger.required_events == []
+    assert logger.append_events == []
 
 
 @pytest.mark.asyncio
@@ -484,7 +605,9 @@ async def test_adapter_audit_attribution_metadata_and_correlation(monkeypatch):
     logger = RecordingAuditLogger()
     _setup_close(monkeypatch, client, audit_logger=logger)
 
-    result = await remote.gitea_close_pull_request("owner", "repo", 25, SHA, REASON)
+    result = await remote.gitea_close_pull_request(
+        "owner", "repo", 25, SHA, REASON, superseding_ref="refs/heads/new-design"
+    )
 
     assert result["ok"] is True
     assert len(logger.required_events) == 1
@@ -505,6 +628,8 @@ async def test_adapter_audit_attribution_metadata_and_correlation(monkeypatch):
         assert event.metadata["pull_number"] == 25
         assert event.metadata["expected_head_sha"] == SHA
         assert event.metadata["reason"] == REASON
+        assert event.metadata["superseding_ref"] == "refs/heads/new-design"
+        assert event.metadata["superseding_head_sha"] == SHA
         assert event.metadata["gitea_username"] == "robot"
         assert event.metadata["caller_fingerprint"] == FINGERPRINT
         assert re.fullmatch(r"[0-9a-f]{64}", event.metadata["caller_fingerprint"])
@@ -517,7 +642,9 @@ async def test_adapter_audit_events_contain_no_credentials(monkeypatch):
     logger = RecordingAuditLogger()
     _setup_close(monkeypatch, client, audit_logger=logger)
 
-    result = await remote.gitea_close_pull_request("owner", "repo", 25, SHA, REASON)
+    result = await remote.gitea_close_pull_request(
+        "owner", "repo", 25, SHA, REASON, superseding_ref="refs/heads/new-design"
+    )
 
     assert result["ok"] is True
     for event in (*logger.required_events, *logger.append_events):
@@ -596,6 +723,7 @@ async def test_adapter_already_closed_same_sha_is_idempotent(monkeypatch):
     assert result["result"]["html_url"] == "https://git.example/pr/25"
     assert result["result"]["verified"] is True
     assert client.pr_reads == 2
+    assert client.branch_lookups == []
     assert client.close_calls == []
     assert logger.required_events == []
     assert logger.append_events == []

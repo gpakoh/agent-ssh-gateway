@@ -549,6 +549,66 @@ async def test_adapter_pagination_terminates_and_allows_delete_when_only_merged(
     assert len(delete_calls) == 1
 
 
+def _full_pr_pages(pages: int) -> list[list[dict]]:
+    return [
+        [
+            {"number": i, "head": {"ref": f"other/{i}"}, "state": "closed", "merged": True}
+            for i in range(50)
+        ]
+        for _ in range(pages)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_adapter_page_20_short_page_permits_continuation(monkeypatch):
+    """19 full pages ending in a short page-20 prove exhaustive coverage:
+    the scan may continue to page 20 and deletion proceeds normally."""
+    pages = _full_pr_pages(19) + [[{"number": 0, "head": {"ref": "tail"}}]]
+    client = FakeDeleteClient("token", pr_pages=pages)
+    result, delete_calls = await _call_delete(monkeypatch, client)
+    assert result["ok"] is True
+    assert client.pull_request_pages == list(range(1, 21))
+    assert len(delete_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_adapter_20_full_pages_fails_closed_never_page_21(monkeypatch):
+    """20 full pages (1000 records) cannot prove exhaustion: POLICY_DENIED
+    with zero delete, after requesting exactly pages 1..20 and never 21."""
+    client = FakeDeleteClient("token", pr_pages=_full_pr_pages(20))
+    result, delete_calls = await _call_delete(monkeypatch, client)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "POLICY_DENIED"
+    assert "1000" in result["error"]["message"]
+    assert client.pull_request_pages == list(range(1, 21))
+    assert delete_calls == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_blocker_on_page_20_blocks_for_blocker_reason(monkeypatch):
+    """A same-repo unmerged PR whose page-20 slot is the last of 50 must
+    still block for the unmerged-PR reason (not the coverage-limit reason),
+    after requesting exactly pages 1..20 with zero delete."""
+    blocked = {
+        "number": 500,
+        "head": {"ref": BRANCH, "repo": {"full_name": "owner/repo"}},
+        "state": "closed",
+        "merged": False,
+    }
+    page_20 = [
+        {"number": i, "head": {"ref": f"other/{i}"}, "state": "closed", "merged": True}
+        for i in range(49)
+    ] + [blocked]
+    client = FakeDeleteClient("token", pr_pages=_full_pr_pages(19) + [page_20])
+    result, delete_calls = await _call_delete(monkeypatch, client)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "POLICY_DENIED"
+    assert "unmerged pull request" in result["error"]["message"]
+    assert "1000" not in result["error"]["message"]
+    assert client.pull_request_pages == list(range(1, 21))
+    assert delete_calls == []
+
+
 @pytest.mark.asyncio
 async def test_adapter_allows_delete_when_only_matching_pr_is_merged(monkeypatch):
     """A same-repo PR whose head is the target branch but merged=true does

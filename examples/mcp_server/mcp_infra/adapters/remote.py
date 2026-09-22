@@ -1057,6 +1057,24 @@ async def gitea_merge_pull_request(
     return tool_success("gitea_merge_pull_request", result=data, source="gitea")
 
 
+def _normalize_superseding_branch(superseding_ref: str) -> str:
+    """Validate/normalize a same-repo superseding branch name for PR close.
+
+    Accepts ``refs/heads/<branch>`` or a plain feature branch name that
+    passes the existing feature-branch validation. Rejects other ref
+    namespaces and any branch shape the feature-branch validator refuses
+    (including default/protected names, which that helper already rejects).
+    Returns the canonical branch name (without the ``refs/heads/`` prefix);
+    the caller later re-prefixes it for audit metadata.
+    """
+    value = str(superseding_ref or "").strip()
+    if value.startswith("refs/heads/"):
+        value = value[len("refs/heads/") :]
+    elif value.startswith("refs/"):
+        raise ValueError("superseding_ref must be refs/heads/<branch> or a branch name")
+    return validate_feature_branch(value)
+
+
 async def gitea_close_pull_request(
     owner: str,
     repo: str,
@@ -1074,15 +1092,29 @@ async def gitea_close_pull_request(
     head still matches and is explicitly merged=false is an idempotent
     success (already_closed=true).
 
-    A human-readable ``reason`` (1..500 chars) is required, and an optional
-    ``superseding_ref`` (<=255 chars) records which ref supersedes the PR.
+    A human-readable ``reason`` (1..500 chars) is required. A REAL
+    transition from open+unmerged to closed additionally requires a
+    ``superseding_ref`` (<=255 chars; strip-prefixed, non-empty): a
+    ``refs/heads/<branch>`` or plain feature branch name in the SAME
+    repository, validated only through the existing feature-branch rules.
+    Immediately before the destructive-intent audit and close mutation the
+    adapter freshly resolves that branch via the same Gitea client and
+    requires its exact head commit to equal ``expected_head_sha``. Missing
+    branch, malformed ref, moved/different head, or lookup ambiguity fails
+    closed with zero audit intent and zero close mutation. No arbitrary
+    URL/repo-qualified strings are accepted. A PR already closed whose
+    head still matches and is explicitly merged=false remains an idempotent
+    success (already_closed=true) without any new superseding proof because
+    no mutation occurs.
+
     Before a real close the adapter emits a strict, attributed destructive-intent
     audit event (Gitea username + caller fingerprint + correlation id, no
-    credentials); if that audit cannot be persisted the tool fails closed with
-    AUDIT_UNAVAILABLE before any server mutation. After a confirmed close a
-    best-effort success audit event is emitted with the same correlation id.
-    After mutation the PR is re-read and state=closed, merged=false, head SHA
-    and base ref are verified.
+    credentials); the audit metadata records the canonical superseding
+    ``refs/heads/<branch>`` and its verified head SHA. If that audit cannot be
+    persisted the tool fails closed with AUDIT_UNAVAILABLE before any server
+    mutation. After a confirmed close a best-effort success audit event is
+    emitted with the same correlation id. After mutation the PR is re-read and
+    state=closed, merged=false, head SHA and base ref are verified.
     """
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
@@ -1182,6 +1214,26 @@ async def gitea_close_pull_request(
                     source="gitea",
                 )
             else:
+                if superseding_ref is None:
+                    return tool_error(
+                        tool="gitea_close_pull_request",
+                        code="POLICY_DENIED",
+                        message=(
+                            "closing an open pull request requires a superseding_ref "
+                            "branch in the same repository whose exact head equals "
+                            "expected_head_sha"
+                        ),
+                        source="gitea",
+                    )
+                try:
+                    superseding_branch = _normalize_superseding_branch(superseding_ref)
+                except ValueError as exc:
+                    return tool_error(
+                        tool="gitea_close_pull_request",
+                        code="INVALID_INPUT",
+                        message=str(exc),
+                        source="gitea",
+                    )
                 identity = await _require_gitea_identity(client)
                 if identity is None:
                     return tool_error(
@@ -1194,6 +1246,41 @@ async def gitea_close_pull_request(
                         source="gitea",
                     )
                 username, fingerprint = identity
+                try:
+                    superseding = await client.get_branch(owner, repo, superseding_branch)
+                except httpx.HTTPStatusError as exc:
+                    response = getattr(exc, "response", None)
+                    if response is not None and response.status_code == 404:
+                        return tool_error(
+                            tool="gitea_close_pull_request",
+                            code="POLICY_DENIED",
+                            message=(
+                                f"superseding branch {superseding_branch!r} does not exist "
+                                "in the target repository"
+                            ),
+                            source="gitea",
+                        )
+                    raise
+                superseding_commit = superseding.get("commit") or {}
+                superseding_head_sha = str(
+                    superseding_commit.get("id") or superseding_commit.get("sha") or ""
+                ).lower()
+                if superseding_head_sha != expected_head_sha:
+                    return tool_error(
+                        tool="gitea_close_pull_request",
+                        code="POLICY_DENIED",
+                        message=(
+                            f"superseding branch {superseding_branch!r} head does not "
+                            "equal expected_head_sha; re-read the branch before closing"
+                        ),
+                        details={
+                            "superseding_branch": superseding_branch,
+                            "expected_head_sha": expected_head_sha,
+                            "observed_superseding_head_sha": superseding_head_sha,
+                        },
+                        source="gitea",
+                    )
+                canonical_superseding_ref = f"refs/heads/{superseding_branch}"
                 correlation_id = uuid.uuid4().hex
                 audit_metadata = {
                     "owner": owner,
@@ -1201,12 +1288,12 @@ async def gitea_close_pull_request(
                     "pull_number": pull_number,
                     "expected_head_sha": expected_head_sha,
                     "reason": reason,
+                    "superseding_ref": canonical_superseding_ref,
+                    "superseding_head_sha": superseding_head_sha,
                     "gitea_username": username,
                     "caller_fingerprint": fingerprint,
                     "correlation_id": correlation_id,
                 }
-                if superseding_ref is not None:
-                    audit_metadata["superseding_ref"] = superseding_ref
                 audit_logger = _get_gitea_audit_logger()
                 try:
                     audit_logger.append_required(
@@ -1423,6 +1510,16 @@ async def gitea_delete_branch(
                         )
                 if len(page_prs) < 50:
                     break
+                if page >= 20:
+                    return tool_error(
+                        tool="gitea_delete_branch",
+                        code="POLICY_DENIED",
+                        message=(
+                            f"branch {branch!r} PR scan exceeded {20 * 50} records; "
+                            "exhaustive PR coverage is unproven, refusing deletion"
+                        ),
+                        source="gitea",
+                    )
                 page += 1
 
             permissions = metadata.get("permissions") or {}
