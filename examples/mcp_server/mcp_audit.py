@@ -118,10 +118,17 @@ class McpAuditLogger:
             }
         return record
 
-    def _write_record(self, record: dict[str, Any]) -> None:
+    def _write_record(self, record: dict[str, Any], *, durable: bool = False) -> None:
         Path(self._log_path).parent.mkdir(parents=True, exist_ok=True)
         with open(self._log_path, "a") as f:
             f.write(json.dumps(record, default=str) + "\n")
+            if durable:
+                # A required event must be on disk (not just in the page
+                # cache) before the caller is allowed to proceed with a
+                # destructive mutation. fsync failure raises here, so the
+                # caller can fail closed on an unpersistable decision.
+                f.flush()
+                os.fsync(f.fileno())
 
     def _push_recent(self, record: dict[str, Any]) -> None:
         # Ring buffer
@@ -140,16 +147,16 @@ class McpAuditLogger:
             pass  # non-fatal
 
     def append_required(self, event: McpAuditEvent) -> None:
-        """Append a required event: persist JSONL first, then update the buffer.
+        """Append a required event: persist (and fsync) JSONL, then update the buffer.
 
-        Unlike :meth:`append`, a failed JSONL write raises
-        :class:`AuditWriteError` and leaves the in-memory ring buffer
-        untouched, so callers can fail closed on an unpersistable
-        destructive decision.
+        Unlike :meth:`append`, a failed JSONL write -- including an
+        os.fsync() failure -- raises :class:`AuditWriteError` and leaves the
+        in-memory ring buffer untouched, so callers can fail closed on an
+        unpersistable destructive decision.
         """
         record = self._prepare_record(event)
         try:
-            self._write_record(record)
+            self._write_record(record, durable=True)
         except OSError as exc:
             raise AuditWriteError(str(exc)) from exc
         self._push_recent(record)

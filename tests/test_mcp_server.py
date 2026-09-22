@@ -120,7 +120,12 @@ def test_tools_manifest_gitea_close_pull_request_matches_invokable_schema():
         "repo",
         "pull_number",
         "expected_head_sha",
+        "reason",
     ]
+    properties = tool.parameters["properties"]
+    assert "superseding_ref" in properties
+    assert "superseding_ref" not in tool.parameters["required"]
+    assert properties["reason"] is not None
 
 
 @patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "mcp_client_write"}, clear=False)

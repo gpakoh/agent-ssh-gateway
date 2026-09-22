@@ -1392,38 +1392,38 @@ async def gitea_delete_branch(
                     source="gitea",
                 )
 
-            open_prs = await client.list_pull_requests(owner, repo, state="all", limit=50)
-            for pr in open_prs:
-                head = pr.get("head") or {}
-                if str(head.get("ref") or "") != branch:
-                    continue
-                same_repo = _same_gitea_repo_from_pr_head(head, owner=owner, repo=repo)
-                if same_repo is None:
-                    return tool_error(
-                        tool="gitea_delete_branch",
-                        code="POLICY_DENIED",
-                        message=(
-                            f"pull request head repository for branch {branch!r} "
-                            "could not be verified"
-                        ),
-                        source="gitea",
-                    )
-                if same_repo is False:
-                    continue
-                if pr.get("merged") is not True:
-                    return tool_error(
-                        tool="gitea_delete_branch",
-                        code="POLICY_DENIED",
-                        message=f"branch {branch!r} is still the head of an unmerged pull request",
-                        source="gitea",
-                    )
-            if len(open_prs) >= 50:
-                return tool_error(
-                    tool="gitea_delete_branch",
-                    code="POLICY_DENIED",
-                    message="too many pull requests to prove the branch is unused",
-                    source="gitea",
+            page = 1
+            while True:
+                page_prs = await client.list_pull_requests(
+                    owner, repo, state="all", limit=50, page=page
                 )
+                for pr in page_prs:
+                    head = pr.get("head") or {}
+                    if str(head.get("ref") or "") != branch:
+                        continue
+                    same_repo = _same_gitea_repo_from_pr_head(head, owner=owner, repo=repo)
+                    if same_repo is None:
+                        return tool_error(
+                            tool="gitea_delete_branch",
+                            code="POLICY_DENIED",
+                            message=(
+                                f"pull request head repository for branch {branch!r} "
+                                "could not be verified"
+                            ),
+                            source="gitea",
+                        )
+                    if same_repo is False:
+                        continue
+                    if pr.get("merged") is not True:
+                        return tool_error(
+                            tool="gitea_delete_branch",
+                            code="POLICY_DENIED",
+                            message=f"branch {branch!r} is still the head of an unmerged pull request",
+                            source="gitea",
+                        )
+                if len(page_prs) < 50:
+                    break
+                page += 1
 
             permissions = metadata.get("permissions") or {}
             if not permissions.get("push"):

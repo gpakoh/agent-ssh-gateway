@@ -225,8 +225,40 @@ class TestMcpAuditLogger:
         # Strict failure must leave the ring buffer untouched (fail closed).
         assert logger._buffer == []
 
+    def test_append_required_fsync_failure_raises_without_buffer_update(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The required (destructive-intent) path must fsync the file before
+        returning; a failed fsync raises AuditWriteError and must not poison
+        the ring buffer."""
+        logger = _tmp_logger(tmp_path)
+        event = McpAuditEvent(event_type="test.required.fsync")
+
+        def boom(fd):
+            raise OSError("fsync failed")
+
+        monkeypatch.setattr("examples.mcp_server.mcp_audit.os.fsync", boom)
+        with pytest.raises(AuditWriteError, match="fsync failed"):
+            logger.append_required(event)
+        assert logger._buffer == []
+
     def test_append_required_is_oserror_subclass(self) -> None:
         assert issubclass(AuditWriteError, OSError)
+
+    def test_append_must_not_fsync(self, tmp_path: Path, monkeypatch) -> None:
+        """Ordinary best-effort append stays non-durable: an unexpected
+        os.fsync() call must not even happen (and a broken one must not make
+        a best-effort write fatal)."""
+        logger = _tmp_logger(tmp_path)
+
+        def unwired(fd):
+            raise AssertionError("append must not call os.fsync")
+
+        monkeypatch.setattr("examples.mcp_server.mcp_audit.os.fsync", unwired)
+        event = McpAuditEvent(event_type="test.append.no_fsync")
+        logger.append(event)
+        assert len(logger._buffer) == 1
+        assert logger._buffer[0]["event_type"] == "test.append.no_fsync"
 
     def test_append_required_failure_does_not_poison_later_writes(
         self, tmp_path: Path

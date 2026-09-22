@@ -11,11 +11,14 @@ attributed audit attribution: the Gitea username and the authenticated
 caller fingerprint must both resolve, a destructive-intent audit event
 must persist (fail closed with AUDIT_UNAVAILABLE otherwise), and only
 then may the close mutation run. An already-closed PR is an idempotent
-success with no intent audit.
+success with no intent audit. The pre-mutation audit must be fsync-
+persisted before the caller proceeds; an fsync failure also fails closed
+with AUDIT_UNAVAILABLE and zero mutation.
 """
 
 from __future__ import annotations
 
+import re
 from unittest.mock import AsyncMock
 
 import pytest
@@ -26,7 +29,7 @@ from examples.mcp_server.mcp_infra.adapters import remote
 
 SHA = "a" * 40
 REASON = "superseded by newer design"
-FINGERPRINT = "fp-close"
+FINGERPRINT = "ab" * 32
 
 
 class RecordingAuditLogger:
@@ -383,6 +386,31 @@ async def test_adapter_audit_failure_does_not_leak_internal_details(monkeypatch)
     assert "/" not in message.replace(" ", "").replace(";", "")
 
 
+@pytest.mark.asyncio
+async def test_adapter_fsync_failure_is_audit_unavailable_zero_mutation(
+    monkeypatch, tmp_path
+):
+    """A real McpAuditLogger whose os.fsync() fails must raise AuditWriteError
+    before any mutation: AUDIT_UNAVAILABLE, zero close calls, untouched buffer."""
+    from examples.mcp_server.mcp_audit import McpAuditLogger
+
+    client = FakeCloseClient("token")
+    logger = McpAuditLogger(log_path=str(tmp_path / "audit.jsonl"))
+    _setup_close(monkeypatch, client, audit_logger=logger)
+
+    def boom(fd):
+        raise OSError("fsync failed")
+
+    monkeypatch.setattr("examples.mcp_server.mcp_audit.os.fsync", boom)
+
+    result = await remote.gitea_close_pull_request("owner", "repo", 25, SHA, REASON)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "AUDIT_UNAVAILABLE"
+    assert client.close_calls == []
+    assert logger._buffer == []
+
+
 # ---------------------------------------------------------------------------
 # Successful close: mutation, readback, ordering, audit metadata
 # ---------------------------------------------------------------------------
@@ -470,6 +498,7 @@ async def test_adapter_audit_attribution_metadata_and_correlation(monkeypatch):
     assert success.decision == "allow"
     correlation_id = intent.metadata["correlation_id"]
     assert success.metadata["correlation_id"] == correlation_id
+    assert re.fullmatch(r"[0-9a-f]{32}", correlation_id), correlation_id
     for event in (intent, success):
         assert event.metadata["owner"] == "owner"
         assert event.metadata["repo"] == "repo"
@@ -478,6 +507,7 @@ async def test_adapter_audit_attribution_metadata_and_correlation(monkeypatch):
         assert event.metadata["reason"] == REASON
         assert event.metadata["gitea_username"] == "robot"
         assert event.metadata["caller_fingerprint"] == FINGERPRINT
+        assert re.fullmatch(r"[0-9a-f]{64}", event.metadata["caller_fingerprint"])
         assert "token" not in event.metadata
 
 
@@ -503,6 +533,14 @@ async def test_adapter_audit_order_intent_before_mutation_after(monkeypatch):
     client = FakeCloseClient("token")
     logger = RecordingAuditLogger(order_log=order)
     _setup_close(monkeypatch, client, audit_logger=logger)
+
+    original_close = client.close_pull_request
+
+    async def record_close(owner: str, repo: str, pull_number: int):
+        order.append("close")
+        return await original_close(owner, repo, pull_number)
+
+    client.close_pull_request = record_close  # type: ignore[method-assign]
 
     result = await _close(monkeypatch, client, audit_logger=logger)
 
@@ -628,7 +666,7 @@ async def test_adapter_fails_closed_when_readback_shows_merged_true(monkeypatch)
     client = FakeCloseClient("token", post_merged=True)
     logger = _setup_close(monkeypatch, client)
 
-    result = await _close(monkeypatch, client)
+    result = await _close(monkeypatch, client, audit_logger=logger)
 
     assert result["ok"] is False
     assert result["error"]["code"] == "CLOSE_NOT_CONFIRMED"
@@ -644,7 +682,7 @@ async def test_adapter_fails_closed_when_readback_head_drifted(monkeypatch):
     client = FakeCloseClient("token", post_head_sha="c" * 40)
     logger = _setup_close(monkeypatch, client)
 
-    result = await _close(monkeypatch, client)
+    result = await _close(monkeypatch, client, audit_logger=logger)
 
     assert result["ok"] is False
     assert result["error"]["code"] == "CLOSE_NOT_CONFIRMED"
@@ -660,7 +698,7 @@ async def test_adapter_fails_closed_when_readback_base_drifted(monkeypatch):
     client = FakeCloseClient("token", post_base="main")
     logger = _setup_close(monkeypatch, client)
 
-    result = await _close(monkeypatch, client)
+    result = await _close(monkeypatch, client, audit_logger=logger)
 
     assert result["ok"] is False
     assert result["error"]["code"] == "CLOSE_NOT_CONFIRMED"
