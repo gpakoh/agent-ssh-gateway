@@ -1081,7 +1081,7 @@ async def gitea_close_pull_request(
     pull_number: int,
     expected_head_sha: str,
     reason: str,
-    superseding_ref: str | None = None,
+    superseding_ref: str,
 ) -> dict[str, Any]:
     """Close an open PR protected by exact head-SHA and unmerged-state checks.
 
@@ -1092,20 +1092,22 @@ async def gitea_close_pull_request(
     head still matches and is explicitly merged=false is an idempotent
     success (already_closed=true).
 
-    A human-readable ``reason`` (1..500 chars) is required. A REAL
-    transition from open+unmerged to closed additionally requires a
-    ``superseding_ref`` (<=255 chars; strip-prefixed, non-empty): a
-    ``refs/heads/<branch>`` or plain feature branch name in the SAME
-    repository, validated only through the existing feature-branch rules.
-    Immediately before the destructive-intent audit and close mutation the
+    A human-readable ``reason`` (1..500 chars) is required. The
+    ``superseding_ref`` argument is required by the tool schema: callers
+    must always supply a ``refs/heads/<branch>`` or plain feature branch
+    name in the SAME repository (<=255 chars; strip-prefixed, non-empty,
+    validated only through the existing feature-branch rules); no default
+    ref is invented. For a REAL transition from open+unmerged to closed,
+    immediately before the destructive-intent audit and close mutation the
     adapter freshly resolves that branch via the same Gitea client and
     requires its exact head commit to equal ``expected_head_sha``. Missing
     branch, malformed ref, moved/different head, or lookup ambiguity fails
     closed with zero audit intent and zero close mutation. No arbitrary
     URL/repo-qualified strings are accepted. A PR already closed whose
     head still matches and is explicitly merged=false remains an idempotent
-    success (already_closed=true) without any new superseding proof because
-    no mutation occurs.
+    success (already_closed=true): the argument is still required for schema
+    compliance but is never resolved through the branch API and no
+    destructive-intent audit is emitted because no mutation occurs.
 
     Before a real close the adapter emits a strict, attributed destructive-intent
     audit event (Gitea username + caller fingerprint + correlation id, no
@@ -1162,16 +1164,19 @@ async def gitea_close_pull_request(
             message="reason must not contain control characters",
             source="gitea",
         )
-    if superseding_ref is not None:
-        superseding_ref = str(superseding_ref).strip() or None
-        if superseding_ref is not None and len(superseding_ref) > 255:
+    normalized_superseding_ref: str | None = superseding_ref
+    if normalized_superseding_ref is not None:
+        normalized_superseding_ref = str(normalized_superseding_ref).strip() or None
+        if normalized_superseding_ref is not None and len(normalized_superseding_ref) > 255:
             return tool_error(
                 tool="gitea_close_pull_request",
                 code="INVALID_INPUT",
                 message="superseding_ref must be 255 characters or fewer",
                 source="gitea",
             )
-        if superseding_ref is not None and _contains_ascii_control(superseding_ref):
+        if normalized_superseding_ref is not None and _contains_ascii_control(
+            normalized_superseding_ref
+        ):
             return tool_error(
                 tool="gitea_close_pull_request",
                 code="INVALID_INPUT",
@@ -1214,7 +1219,7 @@ async def gitea_close_pull_request(
                     source="gitea",
                 )
             else:
-                if superseding_ref is None:
+                if normalized_superseding_ref is None:
                     return tool_error(
                         tool="gitea_close_pull_request",
                         code="POLICY_DENIED",
@@ -1226,7 +1231,7 @@ async def gitea_close_pull_request(
                         source="gitea",
                     )
                 try:
-                    superseding_branch = _normalize_superseding_branch(superseding_ref)
+                    superseding_branch = _normalize_superseding_branch(normalized_superseding_ref)
                 except ValueError as exc:
                     return tool_error(
                         tool="gitea_close_pull_request",

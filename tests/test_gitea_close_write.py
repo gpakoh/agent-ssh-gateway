@@ -280,7 +280,9 @@ async def test_client_close_patch_rejects_non_allowlisted_endpoints():
 @pytest.mark.asyncio
 async def test_adapter_requires_reason(monkeypatch):
     monkeypatch.setenv("GITEA_TOKEN", "token")
-    result = await remote.gitea_close_pull_request("owner", "repo", 25, SHA, "")
+    result = await remote.gitea_close_pull_request(
+        "owner", "repo", 25, SHA, "", superseding_ref="refs/heads/new-design"
+    )
     assert result["ok"] is False
     assert result["error"]["code"] == "INVALID_INPUT"
     assert "reason" in result["error"]["message"]
@@ -289,7 +291,9 @@ async def test_adapter_requires_reason(monkeypatch):
 @pytest.mark.asyncio
 async def test_adapter_requires_nonempty_reason_after_strip(monkeypatch):
     monkeypatch.setenv("GITEA_TOKEN", "token")
-    result = await remote.gitea_close_pull_request("owner", "repo", 25, SHA, "   ")
+    result = await remote.gitea_close_pull_request(
+        "owner", "repo", 25, SHA, "   ", superseding_ref="refs/heads/new-design"
+    )
     assert result["ok"] is False
     assert result["error"]["code"] == "INVALID_INPUT"
     assert "reason" in result["error"]["message"]
@@ -298,7 +302,9 @@ async def test_adapter_requires_nonempty_reason_after_strip(monkeypatch):
 @pytest.mark.asyncio
 async def test_adapter_rejects_reason_longer_than_500(monkeypatch):
     monkeypatch.setenv("GITEA_TOKEN", "token")
-    result = await remote.gitea_close_pull_request("owner", "repo", 25, SHA, "x" * 501)
+    result = await remote.gitea_close_pull_request(
+        "owner", "repo", 25, SHA, "x" * 501, superseding_ref="refs/heads/new-design"
+    )
     assert result["ok"] is False
     assert result["error"]["code"] == "INVALID_INPUT"
     assert "500" in result["error"]["message"]
@@ -307,7 +313,9 @@ async def test_adapter_rejects_reason_longer_than_500(monkeypatch):
 @pytest.mark.asyncio
 async def test_adapter_rejects_reason_with_ascii_control(monkeypatch):
     monkeypatch.setenv("GITEA_TOKEN", "token")
-    result = await remote.gitea_close_pull_request("owner", "repo", 25, SHA, "bad\x00reason")
+    result = await remote.gitea_close_pull_request(
+        "owner", "repo", 25, SHA, "bad\x00reason", superseding_ref="refs/heads/new-design"
+    )
     assert result["ok"] is False
     assert result["error"]["code"] == "INVALID_INPUT"
     assert "control" in result["error"]["message"]
@@ -338,7 +346,9 @@ async def test_adapter_rejects_superseding_ref_with_ascii_control(monkeypatch):
 @pytest.mark.asyncio
 async def test_adapter_rejects_invalid_head_sha(monkeypatch):
     monkeypatch.setenv("GITEA_TOKEN", "token")
-    result = await remote.gitea_close_pull_request("owner", "repo", 25, "abc", REASON)
+    result = await remote.gitea_close_pull_request(
+        "owner", "repo", 25, "abc", REASON, superseding_ref="refs/heads/new-design"
+    )
     assert result["ok"] is False
     assert result["error"]["code"] == "INVALID_INPUT"
 
@@ -346,7 +356,9 @@ async def test_adapter_rejects_invalid_head_sha(monkeypatch):
 @pytest.mark.asyncio
 async def test_adapter_requires_gitea_token(monkeypatch):
     monkeypatch.delenv("GITEA_TOKEN", raising=False)
-    result = await remote.gitea_close_pull_request("owner", "repo", 25, SHA, REASON)
+    result = await remote.gitea_close_pull_request(
+        "owner", "repo", 25, SHA, REASON, superseding_ref="refs/heads/new-design"
+    )
     assert result["ok"] is False
     assert result["error"]["code"] == "DEPENDENCY_MISSING"
 
@@ -529,6 +541,22 @@ async def test_adapter_open_close_without_superseding_ref_is_policy_denied(monke
     logger = RecordingAuditLogger()
 
     result = await _close(monkeypatch, client, superseding_ref=None, audit_logger=logger)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "POLICY_DENIED"
+    assert "superseding_ref" in result["error"]["message"]
+    assert client.branch_lookups == []
+    assert client.close_calls == []
+    assert logger.required_events == []
+    assert logger.append_events == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_open_close_with_empty_superseding_ref_is_policy_denied(monkeypatch):
+    client = FakeCloseClient("token")
+    logger = RecordingAuditLogger()
+
+    result = await _close(monkeypatch, client, superseding_ref="", audit_logger=logger)
 
     assert result["ok"] is False
     assert result["error"]["code"] == "POLICY_DENIED"
