@@ -45,6 +45,7 @@ from examples.mcp_server.registered_source_clone import (
 RECEIPT_VERSION = 1
 CONTRACT_VERSION = 1
 ATTEMPT_BINDING_VERSION = 1
+VERIFIER_RECEIPT_SCHEMA_VERSION = 1
 RECEIPT_FILENAME = "candidate-receipt.json"
 CONTRACT_FILENAME = "delivery-contract.json"
 ATTEMPT_BINDING_FILENAME = "attempt-binding.json"
@@ -535,6 +536,163 @@ def _delivery_contract_sha256(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _canonical_verifier_receipt_sha256(evidence: dict[str, Any]) -> str:
+    """Return the deterministic canonical JSON SHA-256 of verifier evidence.
+
+    Canonicalization is fixed (sorted keys, compact separators, ASCII-escaped
+    Unicode) so the digest of stored evidence is reproducible across writers
+    and readers regardless of the on-disk serialization.
+    """
+    encoded = json.dumps(
+        evidence,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _self_consistent_verifier_receipt(
+    evidence: Any, *, candidate_head: str
+) -> list[dict[str, Any]]:
+    """Return the evidence checks when they are internally trustworthy.
+
+    Validates the structural invariants that do not depend on the delivery
+    contract: head binding, verifier image consistency, bounded check count,
+    strict check order, zero exit codes, command hashes and provenance.  Any
+    missing or malformed field fails closed.  Image/check provenance was
+    already validated by candidate_verifier; this re-check never downgrades it.
+    """
+    if not isinstance(evidence, dict):
+        raise CandidateError("candidate receipt is missing trusted verifier evidence")
+    expected_sha = evidence.get("expected_sha")
+    if not isinstance(expected_sha, str) or expected_sha.lower() != candidate_head:
+        raise CandidateError("verifier evidence expected_sha does not match candidate head")
+    verifier_image = evidence.get("verifier_image")
+    if not isinstance(verifier_image, str) or not verifier_image:
+        raise CandidateError("verifier evidence is missing verifier_image")
+    checks = evidence.get("checks")
+    if not isinstance(checks, list):
+        raise CandidateError("verifier evidence checks must be an array")
+    check_count = evidence.get("check_count")
+    if not isinstance(check_count, int) or isinstance(check_count, bool):
+        raise CandidateError("verifier evidence check_count is invalid")
+    if check_count != len(checks):
+        raise CandidateError("verifier evidence check_count does not match its checks")
+    for index, check in enumerate(checks):
+        if not isinstance(check, dict):
+            raise CandidateError("verifier evidence check entry is invalid")
+        if check.get("check_index") != index:
+            raise CandidateError(
+                "verifier evidence checks are missing, duplicated, or out of order"
+            )
+        command = check.get("command")
+        if not isinstance(command, str) or not command:
+            raise CandidateError("verifier evidence check command is invalid")
+        command_sha = check.get("command_sha256")
+        if (
+            not isinstance(command_sha, str)
+            or not _SHA256_RE.fullmatch(command_sha)
+            or command_sha != hashlib.sha256(command.encode("utf-8")).hexdigest()
+        ):
+            raise CandidateError("verifier evidence check command hash does not match")
+        exit_code = check.get("exit_code")
+        if not isinstance(exit_code, int) or isinstance(exit_code, bool) or exit_code != 0:
+            raise CandidateError("verifier evidence contains a failed required check")
+        if check.get("verifier_image") != verifier_image:
+            raise CandidateError("verifier evidence check image does not match")
+        if not isinstance(check.get("primary_tool"), dict):
+            raise CandidateError("verifier evidence check provenance is missing")
+    return checks
+
+
+def _validated_verifier_receipt(
+    verifier_receipt: Any,
+    *,
+    candidate_head: str,
+    required_checks: list[str],
+) -> dict[str, Any]:
+    """Validate bounded verifier evidence against head and required checks.
+
+    Called before evidence is persisted at materialization and again when a
+    stored receipt is revalidated for push.  A missing or non-dict receipt is
+    a hard failure: there is no trusted delivery without verifier evidence.
+    """
+    if not isinstance(verifier_receipt, dict):
+        raise CandidateError("isolated candidate verifier receipt is required")
+    checks = _self_consistent_verifier_receipt(
+        verifier_receipt, candidate_head=candidate_head
+    )
+    if len(checks) != len(required_checks):
+        raise CandidateError("verifier evidence check count does not match required checks")
+    for check, command in zip(checks, required_checks, strict=True):
+        if check.get("command") != command:
+            raise CandidateError(
+                "verifier evidence check command does not match required checks"
+            )
+    return verifier_receipt
+
+
+def _revalidate_stored_verifier_receipt(
+    receipt: dict[str, Any],
+    *,
+    required_checks: list[str],
+) -> dict[str, Any]:
+    """Revalidate stored verifier evidence, its digest and head binding.
+
+    Missing, legacy or tampered evidence fails closed; stored receipts are
+    never silently upgraded to a newer schema version.
+    """
+    version = receipt.get("verifier_receipt_schema_version")
+    if version != VERIFIER_RECEIPT_SCHEMA_VERSION:
+        raise CandidateError(
+            "candidate receipt is missing trusted verifier evidence",
+            hint="Re-materialize the candidate; legacy receipts cannot be upgraded in place.",
+        )
+    digest = receipt.get("verifier_receipt_sha256")
+    if not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest):
+        raise CandidateError("candidate receipt verifier evidence digest is invalid")
+    candidate_head = receipt.get("candidate_head_sha")
+    if not isinstance(candidate_head, str) or not _SHA1_RE.fullmatch(candidate_head):
+        raise CandidateError("candidate receipt candidate_head_sha is invalid")
+    evidence = receipt.get("verifier_receipt")
+    validated = _validated_verifier_receipt(
+        evidence,
+        candidate_head=candidate_head,
+        required_checks=required_checks,
+    )
+    if _canonical_verifier_receipt_sha256(validated) != digest:
+        raise CandidateError("candidate receipt verifier evidence digest does not match")
+    return validated
+
+
+def verifier_receipt_is_trusted(receipt: dict[str, Any]) -> bool:
+    """Derive whether a validated receipt carries digest-bound verifier evidence.
+
+    Only meaningful on a receipt returned by :func:`validate_task_candidate_for_push`,
+    which revalidates this evidence against the immutable delivery contract
+    before any push can be authorized.  This helper never reads a stored
+    ``checks_verified`` bool: it recomputes the canonical digest and the
+    structural evidence checks from scratch.
+    """
+    if not isinstance(receipt, dict):
+        return False
+    if receipt.get("verifier_receipt_schema_version") != VERIFIER_RECEIPT_SCHEMA_VERSION:
+        return False
+    digest = receipt.get("verifier_receipt_sha256")
+    if not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest):
+        return False
+    candidate_head = receipt.get("candidate_head_sha")
+    if not isinstance(candidate_head, str) or not _SHA1_RE.fullmatch(candidate_head):
+        return False
+    evidence = receipt.get("verifier_receipt")
+    try:
+        _self_consistent_verifier_receipt(evidence, candidate_head=candidate_head)
+    except CandidateError:
+        return False
+    return isinstance(evidence, dict) and _canonical_verifier_receipt_sha256(evidence) == digest
+
+
 def record_task_delivery_contract(
     *,
     project: str,
@@ -916,6 +1074,16 @@ def _validate_receipt_shape(receipt: dict[str, Any]) -> None:
         str(destination.get("repo") or ""),
         str(destination.get("branch") or ""),
     )
+    if receipt.get("verifier_receipt_schema_version") != VERIFIER_RECEIPT_SCHEMA_VERSION:
+        raise CandidateError(
+            "candidate receipt is missing trusted verifier evidence",
+            hint="Legacy receipts without verifier evidence cannot be pushed; re-materialize the candidate.",
+        )
+    verifier_digest = receipt.get("verifier_receipt_sha256")
+    if not isinstance(verifier_digest, str) or not _SHA256_RE.fullmatch(verifier_digest):
+        raise CandidateError("candidate receipt verifier evidence digest is invalid")
+    if not isinstance(receipt.get("verifier_receipt"), dict):
+        raise CandidateError("candidate receipt verifier evidence is invalid")
 
 
 def _changed_candidate_paths(repo: Path, base_head: str, candidate_head: str) -> list[str]:
@@ -1036,7 +1204,7 @@ def _materialize_task_candidate_unlocked(
     destination_branch: str,
     expected_diff_sha256: str,
     job_result: Callable[[str], dict[str, Any]] | None,
-    verify_candidate: Callable[[Path, str, list[str]], None] | None,
+    verify_candidate: Callable[[Path, str, list[str]], dict[str, Any]] | None,
 ) -> dict[str, Any]:
     """Materialize one persistent candidate and atomically bind its receipt."""
     root = Path(project_root).resolve()
@@ -1168,11 +1336,18 @@ def _materialize_task_candidate_unlocked(
             raise CandidateError("isolated candidate verifier is required")
         _make_verifier_readable(tmp)
         try:
-            verify_candidate(repo_tmp, candidate_head, evidence["required_checks"])
+            verifier_result = verify_candidate(
+                repo_tmp, candidate_head, evidence["required_checks"]
+            )
         except CandidateError:
             raise
         except Exception as exc:
             raise CandidateError("isolated candidate verification failed") from exc
+        verifier_receipt = _validated_verifier_receipt(
+            verifier_result,
+            candidate_head=candidate_head,
+            required_checks=evidence["required_checks"],
+        )
         os.replace(repo_tmp, staging)
         receipt = {
             "version": RECEIPT_VERSION,
@@ -1188,6 +1363,11 @@ def _materialize_task_candidate_unlocked(
             "implementation_diff_sha256": evidence["implementation_diff_sha256"],
             "delivery_contract_sha256": evidence["delivery_contract_sha256"],
             "candidate_head_sha": candidate_head,
+            "verifier_receipt_schema_version": VERIFIER_RECEIPT_SCHEMA_VERSION,
+            "verifier_receipt_sha256": _canonical_verifier_receipt_sha256(
+                verifier_receipt
+            ),
+            "verifier_receipt": verifier_receipt,
             "destination": destination,
             "created_at": datetime.now(UTC).isoformat(),
         }
@@ -1211,7 +1391,7 @@ def materialize_task_candidate(
     destination_branch: str,
     expected_diff_sha256: str,
     job_result: Callable[[str], dict[str, Any]] | None = None,
-    verify_candidate: Callable[[Path, str, list[str]], None] | None = None,
+    verify_candidate: Callable[[Path, str, list[str]], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Serialize materialization and publish one receipt-bound candidate."""
     with _candidate_root_lock():
@@ -1266,6 +1446,10 @@ def validate_task_candidate_for_push(
         raise CandidateError("candidate receipt destination binding mismatch")
     if receipt["candidate_head_sha"] != expected:
         raise CandidateError("expected_sha does not match trusted candidate receipt")
+    _revalidate_stored_verifier_receipt(
+        receipt,
+        required_checks=evidence["required_checks"],
+    )
 
     staging = _staging_repo(record_dir)
     _assert_no_symlink_chain(_candidate_root(), staging)

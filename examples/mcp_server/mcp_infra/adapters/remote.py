@@ -54,6 +54,7 @@ from examples.mcp_server.task_candidate import (
     materialize_task_candidate,
     record_task_delivery_contract,
     validate_task_candidate_for_push,
+    verifier_receipt_is_trusted,
 )
 from examples.mcp_server.verified_workspace import (
     VerifiedWorkspaceError,
@@ -1808,7 +1809,7 @@ async def gitea_materialize_task_candidate(
             contract_recorded = True
 
         def _verify(staging, expected_sha, checks):
-            verify_candidate_via_docker(
+            return verify_candidate_via_docker(
                 staging_root=staging,
                 expected_sha=expected_sha,
                 required_checks=checks,
@@ -1843,6 +1844,9 @@ async def gitea_materialize_task_candidate(
             message=f"Unknown registered project or unavailable candidate evidence: {project!r}",
             source="gitea",
         )
+    verifier_evidence = receipt.get("verifier_receipt")
+    if not isinstance(verifier_evidence, dict):
+        verifier_evidence = {}
     return tool_success(
         "gitea_materialize_task_candidate",
         result={
@@ -1856,6 +1860,12 @@ async def gitea_materialize_task_candidate(
             "candidate_head_sha": receipt["candidate_head_sha"],
             "created_at": receipt["created_at"],
             "delivery_contract_recorded": contract_recorded,
+            "verifier_receipt_sha256": receipt.get("verifier_receipt_sha256"),
+            "verifier_receipt_schema_version": receipt.get(
+                "verifier_receipt_schema_version"
+            ),
+            "check_count": verifier_evidence.get("check_count"),
+            "verifier_image": verifier_evidence.get("verifier_image"),
         },
         source="gitea",
     )
@@ -1907,6 +1917,12 @@ async def gitea_push_local_ref(
             message=f"Unknown registered project: {project!r}",
             source="gitea",
         )
+
+    # Derived only from the receipt returned by validate_task_candidate_for_push,
+    # which revalidates verifier evidence, its canonical digest and the immutable
+    # required checks before any push authorization. A stored or caller-supplied
+    # naked checks_verified bool is never read here.
+    checks_verified = verifier_receipt_is_trusted(receipt)
 
     try:
         git_base = configured_gitea_git_base()
@@ -2011,6 +2027,7 @@ async def gitea_push_local_ref(
                 "sha": expected,
                 "remote_observed_sha": observed_sha,
                 "verified": True,
+                "checks_verified": checks_verified,
             },
             source="gitea",
         )
