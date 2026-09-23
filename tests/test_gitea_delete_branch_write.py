@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
@@ -17,6 +18,26 @@ from examples.mcp_server.tool_scopes import get_required_scopes
 
 SHA = "a" * 40
 BRANCH = "fix/obsolete-branch"
+FINGERPRINT = "ab" * 32
+
+
+class RecordingAuditLogger:
+    """Records append_required (strict) vs append (best-effort) audit events."""
+
+    def __init__(self, order_log: list[str] | None = None):
+        self.order_log = order_log
+        self.required_events: list[object] = []
+        self.append_events: list[object] = []
+
+    def append_required(self, event) -> None:
+        self.required_events.append(event)
+        if self.order_log is not None:
+            self.order_log.append("audit:intent")
+
+    def append(self, event) -> None:
+        self.append_events.append(event)
+        if self.order_log is not None:
+            self.order_log.append("audit:success")
 
 
 @pytest.mark.asyncio
@@ -297,6 +318,7 @@ class FakeDeleteClient:
         protection_name: str = "",
         open_prs: list[dict] | None = None,
         archived: bool = False,
+        pr_pages: list[list[dict]] | None = None,
     ) -> None:
         assert token == "token"
         self.head_sha = head_sha
@@ -304,8 +326,10 @@ class FakeDeleteClient:
         self.protected = protected
         self.protection_name = protection_name
         self.open_prs = open_prs or []
+        self.pr_pages = pr_pages
         self.archived = archived
         self.branch_reads = 0
+        self.pull_request_pages: list[int] = []
 
     async def __aenter__(self):
         return self
@@ -329,23 +353,55 @@ class FakeDeleteClient:
             "effective_branch_protection_name": self.protection_name,
         }
 
-    async def list_pull_requests(self, owner: str, repo: str, state: str, limit: int):
-        assert state == "open"
+    async def list_pull_requests(
+        self, owner: str, repo: str, state: str, limit: int, page: int = 1
+    ):
+        assert state == "all"
         assert limit == 50
+        assert isinstance(page, int) and page >= 1
+        self.pull_request_pages.append(page)
+        if self.pr_pages is not None:
+            assert page <= len(self.pr_pages), "pagination must terminate"
+            return self.pr_pages[page - 1]
+        assert page == 1
         return self.open_prs
 
     async def get_user(self):
         return {"login": "robot"}
 
 
-async def _call_delete(monkeypatch, client: FakeDeleteClient, *, helper_error: Exception | None = None):
+async def _call_delete(
+    monkeypatch,
+    client: FakeDeleteClient,
+    *,
+    helper_error: Exception | None = None,
+    audit_logger: RecordingAuditLogger | None = None,
+    fingerprint: str | None = FINGERPRINT,
+    order_log: list[str] | None = None,
+):
     monkeypatch.setenv("GITEA_TOKEN", "token")
     monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
     monkeypatch.setattr(remote, "configured_gitea_git_base", lambda: "https://git.example.test")
+    if audit_logger is None:
+        audit_logger = RecordingAuditLogger(order_log=order_log)
+    elif order_log is not None:
+        audit_logger.order_log = order_log
+
+    def fake_server_attr(name: str):
+        if name == "_current_auth_reuse_key":
+            return lambda: fingerprint
+        if name == "get_audit_logger":
+            return lambda: audit_logger
+        raise AssertionError(f"unexpected server_attr({name!r})")
+
+    monkeypatch.setattr(remote, "server_attr", fake_server_attr)
+
     delete_calls: list[dict] = []
 
     def fake_delete(**kwargs):
         delete_calls.append(kwargs)
+        if audit_logger.order_log is not None:
+            audit_logger.order_log.append("delete")
         if helper_error is not None:
             raise helper_error
 
@@ -409,7 +465,7 @@ async def test_adapter_head_mismatch_is_zero_delete(monkeypatch):
                     }
                 ],
             ),
-            "open pull request",
+            "unmerged pull request",
         ),
         (FakeDeleteClient("token", archived=True), "archived repository"),
     ],
@@ -453,15 +509,180 @@ async def test_adapter_fails_closed_for_ambiguous_pr_head_repo(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_adapter_fails_closed_when_open_pr_scan_is_not_exhaustive(monkeypatch):
-    prs = [{"number": i, "head": {"ref": f"other/{i}"}, "state": "open"} for i in range(50)]
-    result, delete_calls = await _call_delete(
-        monkeypatch, FakeDeleteClient("token", open_prs=prs)
-    )
+async def test_adapter_page_2_closed_unmerged_blocks_delete(monkeypatch):
+    """The scan must examine every page: a matching closed-unmerged PR on
+    page 2 must block deletion even when page 1 is full of irrelevant PRs."""
+    first_page = [
+        {"number": i, "head": {"ref": f"other/{i}"}, "state": "closed", "merged": True}
+        for i in range(50)
+    ]
+    matching = {
+        "number": 51,
+        "head": {"ref": BRANCH, "repo": {"full_name": "owner/repo"}},
+        "state": "closed",
+        "merged": False,
+    }
+    client = FakeDeleteClient("token", pr_pages=[first_page, [matching]])
+    result, delete_calls = await _call_delete(monkeypatch, client)
     assert result["ok"] is False
     assert result["error"]["code"] == "POLICY_DENIED"
-    assert "too many open pull requests" in result["error"]["message"]
+    assert "unmerged pull request" in result["error"]["message"]
+    assert client.pull_request_pages == [1, 2]
     assert delete_calls == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_pagination_terminates_and_allows_delete_when_only_merged(monkeypatch):
+    """A full first page followed by a short second page must terminate the
+    scan and, with only merged/no-match PRs, allow deletion."""
+    first_page = [
+        {"number": i, "head": {"ref": f"other/{i}"}, "state": "closed", "merged": True}
+        for i in range(50)
+    ]
+    second_page = [
+        {"number": 50, "head": {"ref": "other/50"}, "state": "closed", "merged": True}
+    ]
+    client = FakeDeleteClient("token", pr_pages=[first_page, second_page])
+    result, delete_calls = await _call_delete(monkeypatch, client)
+    assert result["ok"] is True
+    assert client.pull_request_pages == [1, 2]
+    assert len(delete_calls) == 1
+
+
+def _full_pr_pages(pages: int) -> list[list[dict]]:
+    return [
+        [
+            {"number": i, "head": {"ref": f"other/{i}"}, "state": "closed", "merged": True}
+            for i in range(50)
+        ]
+        for _ in range(pages)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_adapter_page_20_short_page_permits_continuation(monkeypatch):
+    """19 full pages ending in a short page-20 prove exhaustive coverage:
+    the scan may continue to page 20 and deletion proceeds normally."""
+    pages = _full_pr_pages(19) + [[{"number": 0, "head": {"ref": "tail"}}]]
+    client = FakeDeleteClient("token", pr_pages=pages)
+    result, delete_calls = await _call_delete(monkeypatch, client)
+    assert result["ok"] is True
+    assert client.pull_request_pages == list(range(1, 21))
+    assert len(delete_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_adapter_20_full_pages_fails_closed_never_page_21(monkeypatch):
+    """20 full pages (1000 records) cannot prove exhaustion: POLICY_DENIED
+    with zero delete, after requesting exactly pages 1..20 and never 21."""
+    client = FakeDeleteClient("token", pr_pages=_full_pr_pages(20))
+    result, delete_calls = await _call_delete(monkeypatch, client)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "POLICY_DENIED"
+    assert "1000" in result["error"]["message"]
+    assert client.pull_request_pages == list(range(1, 21))
+    assert delete_calls == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_blocker_on_page_20_blocks_for_blocker_reason(monkeypatch):
+    """A same-repo unmerged PR whose page-20 slot is the last of 50 must
+    still block for the unmerged-PR reason (not the coverage-limit reason),
+    after requesting exactly pages 1..20 with zero delete."""
+    blocked = {
+        "number": 500,
+        "head": {"ref": BRANCH, "repo": {"full_name": "owner/repo"}},
+        "state": "closed",
+        "merged": False,
+    }
+    page_20 = [
+        {"number": i, "head": {"ref": f"other/{i}"}, "state": "closed", "merged": True}
+        for i in range(49)
+    ] + [blocked]
+    client = FakeDeleteClient("token", pr_pages=_full_pr_pages(19) + [page_20])
+    result, delete_calls = await _call_delete(monkeypatch, client)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "POLICY_DENIED"
+    assert "unmerged pull request" in result["error"]["message"]
+    assert "1000" not in result["error"]["message"]
+    assert client.pull_request_pages == list(range(1, 21))
+    assert delete_calls == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_allows_delete_when_only_matching_pr_is_merged(monkeypatch):
+    """A same-repo PR whose head is the target branch but merged=true does
+    not block cleanup (r3 merged!=true semantics, open or closed)."""
+    client = FakeDeleteClient(
+        "token",
+        open_prs=[
+            {
+                "number": 9,
+                "head": {"ref": BRANCH, "repo": {"full_name": "owner/repo"}},
+                "state": "closed",
+                "merged": True,
+            }
+        ],
+    )
+    result, delete_calls = await _call_delete(monkeypatch, client)
+    assert result["ok"] is True
+    assert len(delete_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_adapter_delete_intent_audit_is_attributed_before_mutation(monkeypatch):
+    """The destructive-intent audit fires before the git delete with the
+    Gitea username, an opaque 64-hex caller fingerprint, correlation id and
+    exact target/SHA; success audit trails it with the same correlation id."""
+    order: list[str] = []
+    logger = RecordingAuditLogger(order_log=order)
+    client = FakeDeleteClient("token")
+    result, delete_calls = await _call_delete(
+        monkeypatch, client, audit_logger=logger, order_log=order
+    )
+    assert result["ok"] is True
+    assert len(delete_calls) == 1
+    assert order == ["audit:intent", "delete", "audit:success"]
+    assert len(logger.required_events) == 1
+    assert len(logger.append_events) == 1
+    intent = logger.required_events[0]
+    success = logger.append_events[0]
+    assert intent.event_type == "mcp.gitea_destructive_intent"
+    assert success.event_type == "mcp.gitea_destructive_success"
+    target = intent.metadata
+    assert target["owner"] == "owner"
+    assert target["repo"] == "repo"
+    assert target["branch"] == BRANCH
+    assert target["expected_head_sha"] == SHA
+    assert target["gitea_username"] == "robot"
+    assert re.fullmatch(r"[0-9a-f]{64}", target["caller_fingerprint"]), target["caller_fingerprint"]
+    assert re.fullmatch(r"[0-9a-f]{32}", target["correlation_id"]), target["correlation_id"]
+    assert success.metadata["correlation_id"] == target["correlation_id"]
+    for event in (intent, success):
+        dump = repr(event.metadata)
+        assert "GITEA_TOKEN" not in dump
+        assert "Bearer" not in dump
+        assert "token" not in str(event.metadata.values())
+
+
+@pytest.mark.asyncio
+async def test_adapter_delete_fsync_failure_is_audit_unavailable_zero_mutation(
+    monkeypatch, tmp_path
+):
+    from examples.mcp_server.mcp_audit import McpAuditLogger
+
+    logger = McpAuditLogger(log_path=str(tmp_path / "audit.jsonl"))
+
+    def boom(fd):
+        raise OSError("fsync failed")
+
+    monkeypatch.setattr("examples.mcp_server.mcp_audit.os.fsync", boom)
+    client = FakeDeleteClient("token")
+    result, delete_calls = await _call_delete(monkeypatch, client, audit_logger=logger)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "AUDIT_UNAVAILABLE"
+    assert delete_calls == []
+    assert logger._buffer == []
 
 
 @pytest.mark.asyncio

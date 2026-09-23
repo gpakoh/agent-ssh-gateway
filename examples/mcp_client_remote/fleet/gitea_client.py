@@ -484,11 +484,13 @@ class GiteaClient:
         repo: str,
         state: str = "open",
         limit: int = 30,
+        page: int = 1,
     ) -> list[dict[str, Any]]:
         limit = min(limit, MAX_LIMIT)
+        page = _validate_positive_int(page, "page")
         return await self._get(
             "/repos/{owner}/{repo}/pulls",
-            params={"state": state, "limit": limit},
+            params={"state": state, "limit": limit, "page": page},
             owner=owner,
             repo=repo,
         )

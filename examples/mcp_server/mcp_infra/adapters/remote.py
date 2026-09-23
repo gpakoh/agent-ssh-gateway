@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,7 @@ from examples.mcp_server.managed_git import (
     validate_expected_sha,
     validate_feature_branch,
 )
+from examples.mcp_server.mcp_audit import AuditWriteError, McpAuditEvent
 from examples.mcp_server.mcp_infra._server_ref import server_attr
 from examples.mcp_server.mcp_infra.tool_registry import register_tool
 from examples.mcp_server.task_candidate import (
@@ -82,6 +84,45 @@ def _server_agent_client():
 
 def _server_workspace_registry():
     return server_attr("_get_workspace_registry")()
+
+
+def _get_gitea_audit_logger():
+    return server_attr("get_audit_logger")()
+
+
+def _caller_fingerprint() -> str | None:
+    """Return the opaque authenticated caller fingerprint, or None.
+
+    Resolved through the server module's ``_current_auth_reuse_key`` so the
+    raw bearer token never enters adapter code, audit records, or errors.
+    Absent/None degrades to an AUTH_ERROR at the destructive call site.
+    """
+    try:
+        getter = server_attr("_current_auth_reuse_key")
+        value = getter()
+    except Exception:
+        return None
+    if not isinstance(value, str) or not value:
+        return None
+    return value
+
+
+async def _require_gitea_identity(client: Any) -> tuple[str, str] | None:
+    """Resolve the mutable Gitea username and caller fingerprint.
+
+    Returns ``(username, caller_fingerprint)`` only when both are available;
+    otherwise returns None so the caller fails closed with AUTH_ERROR.
+    """
+    user = await client.get_user()
+    username = str(user.get("login") or user.get("username") or "").strip()
+    fingerprint = _caller_fingerprint()
+    if not username or not fingerprint:
+        return None
+    return username, fingerprint
+
+
+def _contains_ascii_control(value: str) -> bool:
+    return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
 
 
 
@@ -1016,11 +1057,31 @@ async def gitea_merge_pull_request(
     return tool_success("gitea_merge_pull_request", result=data, source="gitea")
 
 
+def _normalize_superseding_branch(superseding_ref: str) -> str:
+    """Validate/normalize a same-repo superseding branch name for PR close.
+
+    Accepts ``refs/heads/<branch>`` or a plain feature branch name that
+    passes the existing feature-branch validation. Rejects other ref
+    namespaces and any branch shape the feature-branch validator refuses
+    (including default/protected names, which that helper already rejects).
+    Returns the canonical branch name (without the ``refs/heads/`` prefix);
+    the caller later re-prefixes it for audit metadata.
+    """
+    value = str(superseding_ref or "").strip()
+    if value.startswith("refs/heads/"):
+        value = value[len("refs/heads/") :]
+    elif value.startswith("refs/"):
+        raise ValueError("superseding_ref must be refs/heads/<branch> or a branch name")
+    return validate_feature_branch(value)
+
+
 async def gitea_close_pull_request(
     owner: str,
     repo: str,
     pull_number: int,
     expected_head_sha: str,
+    reason: str,
+    superseding_ref: str,
 ) -> dict[str, Any]:
     """Close an open PR protected by exact head-SHA and unmerged-state checks.
 
@@ -1029,7 +1090,32 @@ async def gitea_close_pull_request(
     is still open and its head still equals expected_head_sha. Any head
     mismatch fails closed with zero writes. A PR already closed whose
     head still matches and is explicitly merged=false is an idempotent
-    success (already_closed=true). After mutation the PR is re-read and
+    success (already_closed=true).
+
+    A human-readable ``reason`` (1..500 chars) is required. The
+    ``superseding_ref`` argument is required by the tool schema: callers
+    must always supply a ``refs/heads/<branch>`` or plain feature branch
+    name in the SAME repository (<=255 chars; strip-prefixed, non-empty,
+    validated only through the existing feature-branch rules); no default
+    ref is invented. For a REAL transition from open+unmerged to closed,
+    immediately before the destructive-intent audit and close mutation the
+    adapter freshly resolves that branch via the same Gitea client and
+    requires its exact head commit to equal ``expected_head_sha``. Missing
+    branch, malformed ref, moved/different head, or lookup ambiguity fails
+    closed with zero audit intent and zero close mutation. No arbitrary
+    URL/repo-qualified strings are accepted. A PR already closed whose
+    head still matches and is explicitly merged=false remains an idempotent
+    success (already_closed=true): the argument is still required for schema
+    compliance but is never resolved through the branch API and no
+    destructive-intent audit is emitted because no mutation occurs.
+
+    Before a real close the adapter emits a strict, attributed destructive-intent
+    audit event (Gitea username + caller fingerprint + correlation id, no
+    credentials); the audit metadata records the canonical superseding
+    ``refs/heads/<branch>`` and its verified head SHA. If that audit cannot be
+    persisted the tool fails closed with AUDIT_UNAVAILABLE before any server
+    mutation. After a confirmed close a best-effort success audit event is
+    emitted with the same correlation id. After mutation the PR is re-read and
     state=closed, merged=false, head SHA and base ref are verified.
     """
     token = os.environ.get("GITEA_TOKEN", "")
@@ -1056,8 +1142,50 @@ async def gitea_close_pull_request(
             message="expected_head_sha must be a 40-character SHA-1",
             source="gitea",
         )
+    reason = str(reason or "").strip()
+    if not reason:
+        return tool_error(
+            tool="gitea_close_pull_request",
+            code="INVALID_INPUT",
+            message="reason is required to close a pull request",
+            source="gitea",
+        )
+    if len(reason) > 500:
+        return tool_error(
+            tool="gitea_close_pull_request",
+            code="INVALID_INPUT",
+            message="reason must be 500 characters or fewer",
+            source="gitea",
+        )
+    if _contains_ascii_control(reason):
+        return tool_error(
+            tool="gitea_close_pull_request",
+            code="INVALID_INPUT",
+            message="reason must not contain control characters",
+            source="gitea",
+        )
+    normalized_superseding_ref: str | None = superseding_ref
+    if normalized_superseding_ref is not None:
+        normalized_superseding_ref = str(normalized_superseding_ref).strip() or None
+        if normalized_superseding_ref is not None and len(normalized_superseding_ref) > 255:
+            return tool_error(
+                tool="gitea_close_pull_request",
+                code="INVALID_INPUT",
+                message="superseding_ref must be 255 characters or fewer",
+                source="gitea",
+            )
+        if normalized_superseding_ref is not None and _contains_ascii_control(
+            normalized_superseding_ref
+        ):
+            return tool_error(
+                tool="gitea_close_pull_request",
+                code="INVALID_INPUT",
+                message="superseding_ref must not contain control characters",
+                source="gitea",
+            )
 
     already_closed = False
+    audit_metadata: dict[str, Any] | None = None
     try:
         async with _server_gitea_client()(token) as client:
             pr = await client.get_pull_request(owner, repo, pull_number)
@@ -1091,6 +1219,105 @@ async def gitea_close_pull_request(
                     source="gitea",
                 )
             else:
+                if normalized_superseding_ref is None:
+                    return tool_error(
+                        tool="gitea_close_pull_request",
+                        code="POLICY_DENIED",
+                        message=(
+                            "closing an open pull request requires a superseding_ref "
+                            "branch in the same repository whose exact head equals "
+                            "expected_head_sha"
+                        ),
+                        source="gitea",
+                    )
+                try:
+                    superseding_branch = _normalize_superseding_branch(normalized_superseding_ref)
+                except ValueError as exc:
+                    return tool_error(
+                        tool="gitea_close_pull_request",
+                        code="INVALID_INPUT",
+                        message=str(exc),
+                        source="gitea",
+                    )
+                identity = await _require_gitea_identity(client)
+                if identity is None:
+                    return tool_error(
+                        tool="gitea_close_pull_request",
+                        code="AUTH_ERROR",
+                        message=(
+                            "Authenticated Gitea identity and caller fingerprint "
+                            "are required to close a pull request"
+                        ),
+                        source="gitea",
+                    )
+                username, fingerprint = identity
+                try:
+                    superseding = await client.get_branch(owner, repo, superseding_branch)
+                except httpx.HTTPStatusError as exc:
+                    response = getattr(exc, "response", None)
+                    if response is not None and response.status_code == 404:
+                        return tool_error(
+                            tool="gitea_close_pull_request",
+                            code="POLICY_DENIED",
+                            message=(
+                                f"superseding branch {superseding_branch!r} does not exist "
+                                "in the target repository"
+                            ),
+                            source="gitea",
+                        )
+                    raise
+                superseding_commit = superseding.get("commit") or {}
+                superseding_head_sha = str(
+                    superseding_commit.get("id") or superseding_commit.get("sha") or ""
+                ).lower()
+                if superseding_head_sha != expected_head_sha:
+                    return tool_error(
+                        tool="gitea_close_pull_request",
+                        code="POLICY_DENIED",
+                        message=(
+                            f"superseding branch {superseding_branch!r} head does not "
+                            "equal expected_head_sha; re-read the branch before closing"
+                        ),
+                        details={
+                            "superseding_branch": superseding_branch,
+                            "expected_head_sha": expected_head_sha,
+                            "observed_superseding_head_sha": superseding_head_sha,
+                        },
+                        source="gitea",
+                    )
+                canonical_superseding_ref = f"refs/heads/{superseding_branch}"
+                correlation_id = uuid.uuid4().hex
+                audit_metadata = {
+                    "owner": owner,
+                    "repo": repo,
+                    "pull_number": pull_number,
+                    "expected_head_sha": expected_head_sha,
+                    "reason": reason,
+                    "superseding_ref": canonical_superseding_ref,
+                    "superseding_head_sha": superseding_head_sha,
+                    "gitea_username": username,
+                    "caller_fingerprint": fingerprint,
+                    "correlation_id": correlation_id,
+                }
+                audit_logger = _get_gitea_audit_logger()
+                try:
+                    audit_logger.append_required(
+                        McpAuditEvent(
+                            event_type="mcp.gitea_destructive_intent",
+                            tool="gitea_close_pull_request",
+                            action="close_pull_request",
+                            decision="allow",
+                            reason=reason,
+                            metadata=audit_metadata,
+                        )
+                    )
+                except AuditWriteError:
+                    return tool_error(
+                        tool="gitea_close_pull_request",
+                        code="AUDIT_UNAVAILABLE",
+                        message="Audit log unavailable; destructive operation refused",
+                        source="gitea",
+                    )
                 await client.close_pull_request(owner, repo, pull_number)
                 confirmed_pr = await client.get_pull_request(owner, repo, pull_number)
 
@@ -1144,6 +1371,21 @@ async def gitea_close_pull_request(
                 "html_url": confirmed_pr.get("html_url"),
                 "verified": True,
             }
+            if audit_metadata is not None:
+                try:
+                    audit_logger = _get_gitea_audit_logger()
+                    audit_logger.append(
+                        McpAuditEvent(
+                            event_type="mcp.gitea_destructive_success",
+                            tool="gitea_close_pull_request",
+                            action="close_pull_request",
+                            decision="allow",
+                            reason=reason,
+                            metadata=audit_metadata,
+                        )
+                    )
+                except Exception:
+                    pass  # best-effort
     except Exception as exc:
         return _remote_api_error("gitea_close_pull_request", "gitea", exc)
     return tool_success("gitea_close_pull_request", result=data, source="gitea")
@@ -1242,37 +1484,48 @@ async def gitea_delete_branch(
                     source="gitea",
                 )
 
-            open_prs = await client.list_pull_requests(owner, repo, state="open", limit=50)
-            for pr in open_prs:
-                head = pr.get("head") or {}
-                if str(head.get("ref") or "") != branch:
-                    continue
-                same_repo = _same_gitea_repo_from_pr_head(head, owner=owner, repo=repo)
-                if same_repo is False:
-                    continue
-                if same_repo is None:
+            page = 1
+            while True:
+                page_prs = await client.list_pull_requests(
+                    owner, repo, state="all", limit=50, page=page
+                )
+                for pr in page_prs:
+                    head = pr.get("head") or {}
+                    if str(head.get("ref") or "") != branch:
+                        continue
+                    same_repo = _same_gitea_repo_from_pr_head(head, owner=owner, repo=repo)
+                    if same_repo is None:
+                        return tool_error(
+                            tool="gitea_delete_branch",
+                            code="POLICY_DENIED",
+                            message=(
+                                f"pull request head repository for branch {branch!r} "
+                                "could not be verified"
+                            ),
+                            source="gitea",
+                        )
+                    if same_repo is False:
+                        continue
+                    if pr.get("merged") is not True:
+                        return tool_error(
+                            tool="gitea_delete_branch",
+                            code="POLICY_DENIED",
+                            message=f"branch {branch!r} is still the head of an unmerged pull request",
+                            source="gitea",
+                        )
+                if len(page_prs) < 50:
+                    break
+                if page >= 20:
                     return tool_error(
                         tool="gitea_delete_branch",
                         code="POLICY_DENIED",
                         message=(
-                            f"open pull request head repository for branch {branch!r} "
-                            "could not be verified"
+                            f"branch {branch!r} PR scan exceeded {20 * 50} records; "
+                            "exhaustive PR coverage is unproven, refusing deletion"
                         ),
                         source="gitea",
                     )
-                return tool_error(
-                    tool="gitea_delete_branch",
-                    code="POLICY_DENIED",
-                    message=f"branch {branch!r} is still the head of an open pull request",
-                    source="gitea",
-                )
-            if len(open_prs) >= 50:
-                return tool_error(
-                    tool="gitea_delete_branch",
-                    code="POLICY_DENIED",
-                    message="too many open pull requests to prove the branch is unused",
-                    source="gitea",
-                )
+                page += 1
 
             permissions = metadata.get("permissions") or {}
             if not permissions.get("push"):
@@ -1282,13 +1535,43 @@ async def gitea_delete_branch(
                     message="Configured Gitea identity does not have push access to repository",
                     source="gitea",
                 )
-            user = await client.get_user()
-            username = str(user.get("login") or user.get("username") or "").strip()
-            if not username:
+
+            identity = await _require_gitea_identity(client)
+            if identity is None:
                 return tool_error(
                     tool="gitea_delete_branch",
                     code="AUTH_ERROR",
-                    message="Configured Gitea identity has no usable username",
+                    message="Authenticated Gitea identity and caller fingerprint are required to delete a branch",
+                    source="gitea",
+                )
+            username, fingerprint = identity
+            correlation_id = uuid.uuid4().hex
+            audit_metadata: dict[str, Any] = {
+                "owner": owner,
+                "repo": repo,
+                "branch": branch,
+                "expected_head_sha": expected_head_sha,
+                "gitea_username": username,
+                "caller_fingerprint": fingerprint,
+                "correlation_id": correlation_id,
+            }
+            audit_logger = _get_gitea_audit_logger()
+            try:
+                audit_logger.append_required(
+                    McpAuditEvent(
+                        event_type="mcp.gitea_destructive_intent",
+                        tool="gitea_delete_branch",
+                        action="delete_branch",
+                        decision="allow",
+                        reason="branch deletion",
+                        metadata=audit_metadata,
+                    )
+                )
+            except AuditWriteError:
+                return tool_error(
+                    tool="gitea_delete_branch",
+                    code="AUDIT_UNAVAILABLE",
+                    message="Audit log unavailable; destructive operation refused",
                     source="gitea",
                 )
 
@@ -1303,6 +1586,20 @@ async def gitea_delete_branch(
                 token=token,
                 git_base=git_base,
             )
+            try:
+                audit_logger = _get_gitea_audit_logger()
+                audit_logger.append(
+                    McpAuditEvent(
+                        event_type="mcp.gitea_destructive_success",
+                        tool="gitea_delete_branch",
+                        action="delete_branch",
+                        decision="allow",
+                        reason="branch deletion",
+                        metadata=audit_metadata,
+                    )
+                )
+            except Exception:
+                pass  # best-effort
     except ManagedGitError as exc:
         return tool_error(
             tool="gitea_delete_branch",

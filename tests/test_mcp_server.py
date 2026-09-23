@@ -115,12 +115,18 @@ def test_tools_manifest_gitea_close_pull_request_matches_invokable_schema():
     assert "unavailable_reason" not in items[0]
     assert "gitea_close_pull_request" in tools
     tool = tools["gitea_close_pull_request"]
+    assert "superseding_ref" in tool.parameters["required"]
     assert tool.parameters["required"] == [
         "owner",
         "repo",
         "pull_number",
         "expected_head_sha",
+        "reason",
+        "superseding_ref",
     ]
+    properties = tool.parameters["properties"]
+    assert "superseding_ref" in properties
+    assert properties["reason"] is not None
 
 
 @patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "mcp_client_write"}, clear=False)

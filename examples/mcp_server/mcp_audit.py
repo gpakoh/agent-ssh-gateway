@@ -88,6 +88,14 @@ class McpAuditEvent:
 # Logger
 # ---------------------------------------------------------------------------
 
+class AuditWriteError(OSError):
+    """A required audit event could not be persisted to the JSONL file.
+
+    Subclasses OSError so callers can distinguish a mandatory audit failure
+    (fail closed) from an ordinary best-effort audit write.
+    """
+
+
 class McpAuditLogger:
     """JSONL audit logger with bounded in-memory ring buffer."""
 
@@ -100,25 +108,58 @@ class McpAuditLogger:
         self._recent_limit = recent_limit
         self._buffer: list[dict[str, Any]] = []
 
-    def append(self, event: McpAuditEvent) -> None:
-        """Append event to JSONL file and in-memory buffer."""
+    def _prepare_record(self, event: McpAuditEvent) -> dict[str, Any]:
+        """Redact secrets and strip forbidden keys, exactly like append."""
         record = redact_secrets(asdict(event))
         # Strip forbidden keys from metadata if present
         if "metadata" in record and isinstance(record["metadata"], dict):
             record["metadata"] = {
                 k: v for k, v in record["metadata"].items() if k not in FORBIDDEN_KEYS
             }
+        return record
+
+    def _write_record(self, record: dict[str, Any], *, durable: bool = False) -> None:
+        Path(self._log_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(self._log_path, "a") as f:
+            f.write(json.dumps(record, default=str) + "\n")
+            if durable:
+                # A required event must be on disk (not just in the page
+                # cache) before the caller is allowed to proceed with a
+                # destructive mutation. fsync failure raises here, so the
+                # caller can fail closed on an unpersistable decision.
+                f.flush()
+                os.fsync(f.fileno())
+
+    def _push_recent(self, record: dict[str, Any]) -> None:
         # Ring buffer
         self._buffer.append(record)
         if len(self._buffer) > self._recent_limit:
             self._buffer = self._buffer[-self._recent_limit:]
+
+    def append(self, event: McpAuditEvent) -> None:
+        """Append event to JSONL file and in-memory buffer (non-fatal write)."""
+        record = self._prepare_record(event)
+        self._push_recent(record)
         # JSONL append (non-fatal)
         try:
-            Path(self._log_path).parent.mkdir(parents=True, exist_ok=True)
-            with open(self._log_path, "a") as f:
-                f.write(json.dumps(record, default=str) + "\n")
+            self._write_record(record)
         except OSError:
             pass  # non-fatal
+
+    def append_required(self, event: McpAuditEvent) -> None:
+        """Append a required event: persist (and fsync) JSONL, then update the buffer.
+
+        Unlike :meth:`append`, a failed JSONL write -- including an
+        os.fsync() failure -- raises :class:`AuditWriteError` and leaves the
+        in-memory ring buffer untouched, so callers can fail closed on an
+        unpersistable destructive decision.
+        """
+        record = self._prepare_record(event)
+        try:
+            self._write_record(record, durable=True)
+        except OSError as exc:
+            raise AuditWriteError(str(exc)) from exc
+        self._push_recent(record)
 
     def recent(self, limit: int | None = None) -> list[dict[str, Any]]:
         """Return recent events from ring buffer."""
