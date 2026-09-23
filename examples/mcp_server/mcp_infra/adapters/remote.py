@@ -54,6 +54,7 @@ from examples.mcp_server.task_candidate import (
     materialize_task_candidate,
     record_task_delivery_contract,
     validate_task_candidate_for_push,
+    verifier_receipt_is_trusted,
 )
 from examples.mcp_server.verified_workspace import (
     VerifiedWorkspaceError,
@@ -1808,7 +1809,7 @@ async def gitea_materialize_task_candidate(
             contract_recorded = True
 
         def _verify(staging, expected_sha, checks):
-            verify_candidate_via_docker(
+            return verify_candidate_via_docker(
                 staging_root=staging,
                 expected_sha=expected_sha,
                 required_checks=checks,
@@ -1843,6 +1844,9 @@ async def gitea_materialize_task_candidate(
             message=f"Unknown registered project or unavailable candidate evidence: {project!r}",
             source="gitea",
         )
+    verifier_evidence = receipt.get("verifier_receipt")
+    if not isinstance(verifier_evidence, dict):
+        verifier_evidence = {}
     return tool_success(
         "gitea_materialize_task_candidate",
         result={
@@ -1856,6 +1860,12 @@ async def gitea_materialize_task_candidate(
             "candidate_head_sha": receipt["candidate_head_sha"],
             "created_at": receipt["created_at"],
             "delivery_contract_recorded": contract_recorded,
+            "verifier_receipt_sha256": receipt.get("verifier_receipt_sha256"),
+            "verifier_receipt_schema_version": receipt.get(
+                "verifier_receipt_schema_version"
+            ),
+            "check_count": verifier_evidence.get("check_count"),
+            "verifier_image": verifier_evidence.get("verifier_image"),
         },
         source="gitea",
     )
@@ -1905,6 +1915,22 @@ async def gitea_push_local_ref(
             tool="gitea_push_local_ref",
             code="INVALID_INPUT",
             message=f"Unknown registered project: {project!r}",
+            source="gitea",
+        )
+
+    # Fail closed before any remote access.  Push is only authorized when the
+    # receipt returned by validate_task_candidate_for_push -- which revalidated
+    # verifier evidence, its canonical digest, the exact candidate head and the
+    # immutable required checks -- derives as trusted here from scratch.  A
+    # stored or caller-supplied naked checks_verified bool is never read.
+    checks_verified = verifier_receipt_is_trusted(receipt)
+    if not checks_verified:
+        return tool_error(
+            tool="gitea_push_local_ref",
+            code="CANDIDATE_RECEIPT_INVALID",
+            message="candidate receipt is missing trusted verifier evidence",
+            hint="Re-materialize the candidate so push can revalidate the digest-bound verifier receipt.",
+            details={"mutation_occurred": False},
             source="gitea",
         )
 
@@ -2011,6 +2037,7 @@ async def gitea_push_local_ref(
                 "sha": expected,
                 "remote_observed_sha": observed_sha,
                 "verified": True,
+                "checks_verified": checks_verified,
             },
             source="gitea",
         )

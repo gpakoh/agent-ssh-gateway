@@ -11,8 +11,29 @@ import pytest
 
 from examples.mcp_server import managed_git
 from examples.mcp_server.mcp_infra.adapters import remote
+from examples.mcp_server.task_candidate import (
+    VERIFIER_RECEIPT_SCHEMA_VERSION,
+    _canonical_verifier_receipt_sha256,
+)
 
 SHA = "4e846348f293539593a194236b42414336d22576"
+VERIFIER_IMAGE = "ghcr.io/example/verifier:1"
+
+
+def _trusted_receipt(candidate_head: str) -> dict[str, object]:
+    """Build a minimal receipt that verifier_receipt_is_trusted accepts."""
+    evidence = {
+        "expected_sha": candidate_head,
+        "verifier_image": VERIFIER_IMAGE,
+        "check_count": 0,
+        "checks": [],
+    }
+    return {
+        "candidate_head_sha": candidate_head,
+        "verifier_receipt_schema_version": VERIFIER_RECEIPT_SCHEMA_VERSION,
+        "verifier_receipt_sha256": _canonical_verifier_receipt_sha256(evidence),
+        "verifier_receipt": evidence,
+    }
 
 
 def test_configured_git_base_requires_credential_free_https(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -242,7 +263,7 @@ def _install_push_adapter_mocks(
     monkeypatch.setattr(
         remote,
         "validate_task_candidate_for_push",
-        lambda **_kwargs: ({"candidate_head_sha": SHA}, staging),
+        lambda **_kwargs: (_trusted_receipt(SHA), staging),
     )
     monkeypatch.setattr(remote, "push_trusted_staging_sha", push_impl)
 
@@ -510,7 +531,7 @@ async def test_adapter_pushes_only_validator_selected_trusted_staging(
         assert kwargs["project"] == "gpt-browser-bridge-hardening"
         assert kwargs["task_id"] == "candidate-task-123"
         assert kwargs["expected_sha"] == SHA
-        return {"candidate_head_sha": SHA}, staging
+        return _trusted_receipt(SHA), staging
 
     def fake_push(**kwargs: Any) -> None:
         captured.update(kwargs)
@@ -534,6 +555,7 @@ async def test_adapter_pushes_only_validator_selected_trusted_staging(
     assert result["ok"] is True
     assert result["result"]["verified"] is True
     assert result["result"]["sha"] == SHA
+    assert result["result"]["checks_verified"] is True
     assert captured["staging_root"] == staging
     assert captured["expected_sha"] == SHA
     assert captured["token"] == "managed-token"
@@ -932,3 +954,140 @@ def test_trusted_staging_push_never_clones_or_uses_another_root(monkeypatch: pyt
     monkeypatch.setattr(managed_git.subprocess, "run", fake_run)
     managed_git.push_trusted_staging_sha(staging_root=staging, owner="gpakoh", repo="gpt-browser-bridge", destination_branch="hardening/runtime-deploy", expected_sha=SHA, username="gpakoh", token="x", git_base="https://git.example.test")
     assert len(calls) == 3
+
+
+# ── push adapter: verifier receipt gates every remote mutation ─────
+
+
+class _PushRegistry:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    def project_info(self, project: str) -> dict[str, Any]:
+        assert project == "gpt-browser-bridge-hardening"
+        return {"root": str(self.root), "type": "repository"}
+
+
+@pytest.mark.asyncio
+async def test_adapter_rejects_naked_checks_verified_before_any_remote_mutation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = tmp_path / "trusted-candidate-staging"
+    staging.mkdir()
+    naked = {"candidate_head_sha": SHA, "checks_verified": True}
+
+    def remote_must_not_run() -> Any:
+        raise AssertionError("Gitea client must not run before trusted verifier evidence")
+
+    def must_not_push(**_kwargs: Any) -> None:
+        raise AssertionError("push must never run with an untrusted receipt")
+
+    monkeypatch.setenv("GITEA_TOKEN", "managed-token")
+    monkeypatch.setenv("GITEA_GIT_BASE", "https://git.example.test")
+    monkeypatch.setattr(remote, "_server_workspace_registry", lambda: _PushRegistry(tmp_path))
+    monkeypatch.setattr(remote, "_server_gitea_client", remote_must_not_run)
+    monkeypatch.setattr(
+        remote,
+        "validate_task_candidate_for_push",
+        lambda **_kwargs: (naked, staging),
+    )
+    monkeypatch.setattr(remote, "push_trusted_staging_sha", must_not_push)
+
+    async def inline_to_thread(func: Any, *args: Any, **kwargs: Any) -> Any:
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(remote.asyncio, "to_thread", inline_to_thread)
+    result = await remote.gitea_push_local_ref(
+        project="gpt-browser-bridge-hardening",
+        task_id="candidate-task-123",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_sha=SHA,
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CANDIDATE_RECEIPT_INVALID"
+    assert "verifier evidence" in result["error"]["message"]
+    assert result["error"]["details"] == {"mutation_occurred": False}
+
+
+@pytest.mark.asyncio
+async def test_adapter_rejects_legacy_receipt_before_any_remote_mutation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = tmp_path / "trusted-candidate-staging"
+    staging.mkdir()
+    legacy = dict(_trusted_receipt(SHA))
+    legacy.pop("verifier_receipt_schema_version", None)
+
+    def remote_must_not_run() -> Any:
+        raise AssertionError("Gitea client must not run before trusted verifier evidence")
+
+    def must_not_push(**_kwargs: Any) -> None:
+        raise AssertionError("push must never run with a legacy receipt")
+
+    monkeypatch.setenv("GITEA_TOKEN", "managed-token")
+    monkeypatch.setenv("GITEA_GIT_BASE", "https://git.example.test")
+    monkeypatch.setattr(remote, "_server_workspace_registry", lambda: _PushRegistry(tmp_path))
+    monkeypatch.setattr(remote, "_server_gitea_client", remote_must_not_run)
+    monkeypatch.setattr(
+        remote,
+        "validate_task_candidate_for_push",
+        lambda **_kwargs: (legacy, staging),
+    )
+    monkeypatch.setattr(remote, "push_trusted_staging_sha", must_not_push)
+
+    async def inline_to_thread(func: Any, *args: Any, **kwargs: Any) -> Any:
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(remote.asyncio, "to_thread", inline_to_thread)
+    result = await remote.gitea_push_local_ref(
+        project="gpt-browser-bridge-hardening",
+        task_id="candidate-task-123",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_sha=SHA,
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CANDIDATE_RECEIPT_INVALID"
+    assert result["error"]["details"] == {"mutation_occurred": False}
+
+
+@pytest.mark.asyncio
+async def test_adapter_trusted_receipt_yields_derived_checks_verified_true(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pushed = {"done": False}
+    staging = tmp_path / "trusted-candidate-staging"
+    staging.mkdir()
+
+    def push(**_kwargs: Any) -> None:
+        pushed["done"] = True
+
+    monkeypatch.setenv("GITEA_TOKEN", "managed-token")
+    monkeypatch.setenv("GITEA_GIT_BASE", "https://git.example.test")
+    monkeypatch.setattr(remote, "_server_workspace_registry", lambda: _PushRegistry(tmp_path))
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: _FakeGiteaClient)
+    monkeypatch.setattr(
+        remote,
+        "validate_task_candidate_for_push",
+        lambda **_kwargs: (_trusted_receipt(SHA), staging),
+    )
+    monkeypatch.setattr(remote, "push_trusted_staging_sha", push)
+
+    result = await remote.gitea_push_local_ref(
+        project="gpt-browser-bridge-hardening",
+        task_id="candidate-task-123",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_sha=SHA,
+    )
+
+    assert pushed["done"] is True
+    assert result["ok"] is True
+    assert result["result"]["verified"] is True
+    assert result["result"]["checks_verified"] is True

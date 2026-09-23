@@ -18,8 +18,10 @@ from examples.mcp_server.task_candidate import (
     CONTRACT_FILENAME,
     RECEIPT_FILENAME,
     RECEIPT_VERSION,
+    VERIFIER_RECEIPT_SCHEMA_VERSION,
     CandidateError,
     _candidate_record_dir,
+    _canonical_verifier_receipt_sha256,
     _changed_candidate_paths,
     _enforce_candidate_scope,
     _staging_repo,
@@ -30,6 +32,7 @@ from examples.mcp_server.task_candidate import (
     record_task_delivery_contract,
     resolve_task_attempt_identity,
     validate_task_candidate_for_push,
+    verifier_receipt_is_trusted,
 )
 
 PROJECT = "candidate-test-project"
@@ -37,6 +40,8 @@ TASK = "trusted-delivery-task-001"
 OWNER = "gpakoh"
 REPO = "agent-ssh-gateway"
 BRANCH = "fix/trusted-candidate-test"
+VERIFIER_IMAGE = "ghcr.io/example/verifier:1"
+REQUIRED_CHECKS = ["pytest -q", "ruff check ."]
 
 
 def _git(root: Path, *args: str) -> str:
@@ -65,6 +70,7 @@ def _write_evidence(
     checks_rc: int = 0,
     fingerprint: str = "fingerprint-001",
     base: str | None = None,
+    required_checks: list[str] | None = None,
 ) -> tuple[str, Path]:
     state = root.parent / "state"
     candidate = root.parent / "candidate-store"
@@ -121,7 +127,7 @@ def _write_evidence(
         base_ref=base,
         allowed_files=["base.txt"],
         forbidden_files=[],
-        required_checks=[],
+        required_checks=list(required_checks or []),
     )
     trusted_attempt, trusted_job = resolve_task_attempt_identity(
         project=PROJECT,
@@ -271,14 +277,51 @@ def _diff_sha(td: Path) -> str:
     return hashlib.sha256((td / "implementation-diff.patch").read_bytes()).hexdigest()
 
 
+def _check_entry(index: int, command: str) -> dict[str, object]:
+    return {
+        "check_index": index,
+        "command": command,
+        "command_sha256": hashlib.sha256(command.encode("utf-8")).hexdigest(),
+        "cwd": ".",
+        "duration_ms": 7,
+        "exit_code": 0,
+        "stdout_tail": "collected 2 items",
+        "stderr_tail": "",
+        "verifier_image": VERIFIER_IMAGE,
+        "primary_tool": {
+            "kind": "builtin",
+            "name": "sh",
+            "shell_path": "/bin/sh",
+            "shell_sha256": "",
+            "shell_identity": "verifier-sh",
+        },
+    }
+
+
+def _verifier_evidence(candidate_head: str, commands: list[str]) -> dict[str, object]:
+    return {
+        "expected_sha": candidate_head,
+        "verifier_image": VERIFIER_IMAGE,
+        "check_count": len(commands),
+        "checks": [
+            _check_entry(index, command) for index, command in enumerate(commands)
+        ],
+    }
+
+
 def _job_success(job_id: str) -> dict[str, object]:
     assert job_id == "job-001"
     return {"status": "completed", "exit_code": 0}
 
 
-def _verify_success(repo: Path, expected_sha: str, checks: list[str]) -> None:
+def _verify_success(repo: Path, expected_sha: str, checks: list[str]) -> dict[str, object]:
     assert _git(repo, "rev-parse", "HEAD") == expected_sha
     assert checks == []
+    return _verifier_evidence(expected_sha, checks)
+
+
+def _verify_receipt(_repo: Path, expected_sha: str, checks: list[str]) -> dict[str, object]:
+    return _verifier_evidence(expected_sha, checks)
 
 
 def _materialize(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -299,6 +342,50 @@ def _materialize(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return root, base, td, receipt
 
 
+def _materialize_with_checks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    root = tmp_path / "repo"
+    _init_repo(root)
+    base, td = _write_evidence(root, monkeypatch, required_checks=REQUIRED_CHECKS)
+    receipt = materialize_task_candidate(
+        project_root=root,
+        project=PROJECT,
+        task_id=TASK,
+        destination_owner=OWNER,
+        destination_repo=REPO,
+        destination_branch=BRANCH,
+        expected_diff_sha256=_diff_sha(td),
+        job_result=_job_success,
+        verify_candidate=_verify_receipt,
+    )
+    return root, base, td, receipt
+
+
+def _validate_for_push(root: Path, expected_sha: str):
+    return validate_task_candidate_for_push(
+        project_root=root,
+        project=PROJECT,
+        task_id=TASK,
+        destination_owner=OWNER,
+        destination_repo=REPO,
+        destination_branch=BRANCH,
+        expected_sha=expected_sha,
+    )
+
+
+def _receipt_path(receipt: dict[str, object]) -> Path:
+    return _candidate_record_dir(PROJECT, TASK, receipt["attempt_id"]) / RECEIPT_FILENAME
+
+
+def _read_stored_receipt(receipt: dict[str, object]) -> dict[str, object]:
+    return json.loads(_receipt_path(receipt).read_text(encoding="utf-8"))
+
+
+def _write_stored_receipt(
+    receipt: dict[str, object], payload: dict[str, object]
+) -> None:
+    _receipt_path(receipt).write_text(json.dumps(payload), encoding="utf-8")
+
+
 def test_materialize_exposes_only_readable_source_to_isolated_verifier(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -307,9 +394,10 @@ def test_materialize_exposes_only_readable_source_to_isolated_verifier(
     _, td = _write_evidence(root, monkeypatch)
     observed: dict[str, int] = {}
 
-    def verifier(repo: Path, _sha: str, _checks: list[str]) -> None:
+    def verifier(repo: Path, _sha: str, _checks: list[str]) -> dict[str, object]:
         observed["parent_mode"] = repo.parent.stat().st_mode & 0o777
         observed["repo_mode"] = repo.stat().st_mode & 0o777
+        return _verifier_evidence(_sha, _checks)
 
     materialize_task_candidate(
         project_root=root,
@@ -861,11 +949,12 @@ def test_materialized_candidate_is_readable_by_distinct_verifier_uid(
     _, td = _write_evidence(root, monkeypatch)
     observed: dict[str, int] = {}
 
-    def verify(repo: Path, _sha: str, _checks: list[str]) -> None:
+    def verify(repo: Path, _sha: str, _checks: list[str]) -> dict[str, object]:
         observed["parent"] = repo.parent.stat().st_mode & 0o777
         observed["repo"] = repo.stat().st_mode & 0o777
         observed["git_head"] = (repo / ".git" / "HEAD").stat().st_mode & 0o777
         observed["source"] = (repo / "base.txt").stat().st_mode & 0o777
+        return _verifier_evidence(_sha, _checks)
 
     materialize_task_candidate(
         project_root=root,
@@ -921,9 +1010,9 @@ def test_receipt_less_staging_is_recovered_by_reverification(
 
     verifier_calls = {"n": 0}
 
-    def verifier(repo: Path, expected_sha: str, checks: list[str]) -> None:
+    def verifier(repo: Path, expected_sha: str, checks: list[str]) -> dict[str, object]:
         verifier_calls["n"] += 1
-        _verify_success(repo, expected_sha, checks)
+        return _verify_success(repo, expected_sha, checks)
 
     recovered = materialize_task_candidate(
         project_root=root,
@@ -1093,9 +1182,9 @@ def test_existing_receipt_idempotency_does_not_rerun_verifier(
     _, td = _write_evidence(root, monkeypatch)
     verifier_calls = {"n": 0}
 
-    def verifier(repo: Path, expected_sha: str, checks: list[str]) -> None:
+    def verifier(repo: Path, expected_sha: str, checks: list[str]) -> dict[str, object]:
         verifier_calls["n"] += 1
-        _verify_success(repo, expected_sha, checks)
+        return _verify_success(repo, expected_sha, checks)
 
     def materialize_once() -> dict[str, object]:
         return materialize_task_candidate(
@@ -1263,3 +1352,142 @@ def test_materialize_git_timeout_has_retry_guidance(tmp_path: Path) -> None:
     assert err.details["phase"] == "clone"
     assert err.details["timeout_seconds"] == 60
     assert str(tmp_path) not in err.details["stderr_tail"]
+
+
+# ── verifier receipt binding on the real materialize/push surface ─
+
+
+def test_materialize_persists_verifier_evidence_and_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _, receipt = _materialize_with_checks(tmp_path, monkeypatch)
+
+    assert receipt["verifier_receipt_schema_version"] == VERIFIER_RECEIPT_SCHEMA_VERSION
+    evidence = receipt["verifier_receipt"]
+    assert evidence["expected_sha"] == receipt["candidate_head_sha"]
+    assert evidence["check_count"] == len(REQUIRED_CHECKS)
+    assert [check["command"] for check in evidence["checks"]] == REQUIRED_CHECKS
+    assert all(check["exit_code"] == 0 for check in evidence["checks"])
+    assert receipt["verifier_receipt_sha256"] == _canonical_verifier_receipt_sha256(
+        evidence
+    )
+
+    stored = _read_stored_receipt(receipt)
+    assert stored["verifier_receipt"] == evidence
+    assert stored["verifier_receipt_sha256"] == receipt["verifier_receipt_sha256"]
+
+    validated, staging = _validate_for_push(root, receipt["candidate_head_sha"])
+    assert verifier_receipt_is_trusted(validated) is True
+    assert staging.is_dir()
+    assert _git(staging, "rev-parse", "HEAD") == receipt["candidate_head_sha"]
+
+
+def test_verifier_receipt_digest_is_deterministic_canonical(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, _, receipt = _materialize_with_checks(tmp_path, monkeypatch)
+    evidence = receipt["verifier_receipt"]
+
+    shuffled = dict(reversed(list(evidence.items())))
+    assert _canonical_verifier_receipt_sha256(shuffled) == (
+        _canonical_verifier_receipt_sha256(evidence)
+    )
+
+    again = _verifier_evidence(receipt["candidate_head_sha"], REQUIRED_CHECKS)
+    assert _canonical_verifier_receipt_sha256(again) == receipt["verifier_receipt_sha256"]
+
+
+def test_push_rejects_tampered_verifier_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _, receipt = _materialize_with_checks(tmp_path, monkeypatch)
+    stored = _read_stored_receipt(receipt)
+    stored["verifier_receipt_sha256"] = "b" * 64
+    _write_stored_receipt(receipt, stored)
+
+    with pytest.raises(CandidateError, match="digest does not match"):
+        _validate_for_push(root, receipt["candidate_head_sha"])
+
+
+def test_push_rejects_recomputed_digest_with_wrong_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _, receipt = _materialize_with_checks(tmp_path, monkeypatch)
+    stored = _read_stored_receipt(receipt)
+    forged = "true"
+    stored["verifier_receipt"]["checks"][0]["command"] = forged
+    stored["verifier_receipt"]["checks"][0]["command_sha256"] = hashlib.sha256(
+        forged.encode("utf-8")
+    ).hexdigest()
+    stored["verifier_receipt_sha256"] = _canonical_verifier_receipt_sha256(
+        stored["verifier_receipt"]
+    )
+    _write_stored_receipt(receipt, stored)
+
+    with pytest.raises(CandidateError, match="command does not match required checks"):
+        _validate_for_push(root, receipt["candidate_head_sha"])
+
+
+def test_push_rejects_recomputed_digest_with_wrong_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _, receipt = _materialize_with_checks(tmp_path, monkeypatch)
+    stored = _read_stored_receipt(receipt)
+    checks = stored["verifier_receipt"]["checks"]
+    first, second = checks[0], checks[1]
+    first["command"], second["command"] = second["command"], first["command"]
+    first["command_sha256"] = hashlib.sha256(first["command"].encode("utf-8")).hexdigest()
+    second["command_sha256"] = hashlib.sha256(second["command"].encode("utf-8")).hexdigest()
+    stored["verifier_receipt_sha256"] = _canonical_verifier_receipt_sha256(
+        stored["verifier_receipt"]
+    )
+    _write_stored_receipt(receipt, stored)
+
+    with pytest.raises(CandidateError, match="command does not match required checks"):
+        _validate_for_push(root, receipt["candidate_head_sha"])
+
+
+def test_push_rejects_recomputed_digest_with_wrong_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _, receipt = _materialize_with_checks(tmp_path, monkeypatch)
+    stored = _read_stored_receipt(receipt)
+    stored["verifier_receipt"]["checks"] = stored["verifier_receipt"]["checks"][:1]
+    stored["verifier_receipt"]["check_count"] = 1
+    stored["verifier_receipt_sha256"] = _canonical_verifier_receipt_sha256(
+        stored["verifier_receipt"]
+    )
+    _write_stored_receipt(receipt, stored)
+
+    with pytest.raises(CandidateError, match="check count does not match required checks"):
+        _validate_for_push(root, receipt["candidate_head_sha"])
+
+
+def test_push_rejects_recomputed_digest_with_wrong_head(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _, receipt = _materialize_with_checks(tmp_path, monkeypatch)
+    stored = _read_stored_receipt(receipt)
+    stored["verifier_receipt"]["expected_sha"] = "0" * 40
+    stored["verifier_receipt_sha256"] = _canonical_verifier_receipt_sha256(
+        stored["verifier_receipt"]
+    )
+    _write_stored_receipt(receipt, stored)
+
+    with pytest.raises(CandidateError, match="expected_sha does not match candidate head"):
+        _validate_for_push(root, receipt["candidate_head_sha"])
+
+
+def test_push_rejects_missing_legacy_verifier_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _, receipt = _materialize_with_checks(tmp_path, monkeypatch)
+    stored = _read_stored_receipt(receipt)
+    stored.pop("verifier_receipt", None)
+    stored.pop("verifier_receipt_sha256", None)
+    stored.pop("verifier_receipt_schema_version", None)
+    stored["checks_verified"] = True
+    _write_stored_receipt(receipt, stored)
+
+    with pytest.raises(CandidateError, match="missing trusted verifier evidence"):
+        _validate_for_push(root, receipt["candidate_head_sha"])
