@@ -253,6 +253,37 @@ json.dump(
   chmod 666 "$STATE_FILE" 2>/dev/null || true
 }
 
+is_transient_compose_stop_failure() {
+  local output="$1"
+  [[ "$output" == *"cannot stop container"* ]] &&
+    [[ "$output" == *"tried to kill container, but did not receive an exit event"* ]]
+}
+
+run_compose_up() {
+  # Compose can rarely fail while replacing a container because dockerd did
+  # not emit the stop/kill exit event. Retry only that exact transient class;
+  # unrelated failures must propagate immediately to the rollback path.
+  local attempt output rc
+  local max_attempts=2
+  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+    rc=0
+    output=$("$@" 2>&1) || rc=$?
+    if [ -n "$output" ]; then
+      printf '%s\n' "$output"
+    fi
+    if [ "$rc" -eq 0 ]; then
+      return 0
+    fi
+    if [ "$attempt" -lt "$max_attempts" ] && is_transient_compose_stop_failure "$output"; then
+      log "Compose transient stop failure detected; retrying once."
+      sleep 2
+      continue
+    fi
+    return "$rc"
+  done
+  return 1
+}
+
 deploy_services() {
   # One container per `up -d` call, not both together -- mirrors
   # deploy-quart-core.sh's fix for a Compose rename-swap race when
@@ -261,10 +292,10 @@ deploy_services() {
   # must be redeployed together or mcp-oauth silently drifts from what
   # was just pushed/rolled back (see verify_provenance()).
   local gateway_image="$1" mcp_image="$2" sshd_image="$3"
-  SSH_GATEWAY_SSHD_IMAGE="$sshd_image" WEB_SSH_GATEWAY_IMAGE="$gateway_image" $COMPOSE up -d --no-deps --no-build sshd web-ssh-gateway
-  SSH_GATEWAY_SSHD_IMAGE="$sshd_image" $COMPOSE up -d --no-deps --no-build agent-sshd
-  MCP_SERVER_IMAGE="$mcp_image" $COMPOSE up -d --no-deps --no-build mcp-server
-  SSH_GATEWAY_SSHD_IMAGE="$sshd_image" MCP_SERVER_IMAGE="$mcp_image" $COMPOSE up -d --no-deps --no-build mcp-oauth
+  SSH_GATEWAY_SSHD_IMAGE="$sshd_image" WEB_SSH_GATEWAY_IMAGE="$gateway_image" run_compose_up $COMPOSE up -d --no-deps --no-build sshd web-ssh-gateway || return $?
+  SSH_GATEWAY_SSHD_IMAGE="$sshd_image" run_compose_up $COMPOSE up -d --no-deps --no-build agent-sshd || return $?
+  MCP_SERVER_IMAGE="$mcp_image" run_compose_up $COMPOSE up -d --no-deps --no-build mcp-server || return $?
+  SSH_GATEWAY_SSHD_IMAGE="$sshd_image" MCP_SERVER_IMAGE="$mcp_image" run_compose_up $COMPOSE up -d --no-deps --no-build mcp-oauth || return $?
 }
 
 # Independently reconstruct a produced source bundle exactly as a consuming
@@ -441,22 +472,28 @@ NEW_EXECUTOR_IMAGE=$(repo_digest "$SSHD_REPO:$DEPLOY_TAG")
 PRE_DEPLOY_REVISION=$(alembic_revision web-ssh-gateway)
 
 log "Deploying $NEW_GATEWAY_IMAGE / $NEW_MCP_IMAGE / $NEW_EXECUTOR_IMAGE"
-deploy_services "$NEW_GATEWAY_IMAGE" "$NEW_MCP_IMAGE" "$NEW_EXECUTOR_IMAGE"
+DEPLOY_SERVICES_OK=true
+if ! deploy_services "$NEW_GATEWAY_IMAGE" "$NEW_MCP_IMAGE" "$NEW_EXECUTOR_IMAGE"; then
+  log "Service deployment FAILED."
+  DEPLOY_SERVICES_OK=false
+fi
 
-log "Running database migrations (alembic upgrade head)..."
-if ! run_migrations; then
-  log "Database migration FAILED."
-elif ! restart_gateway_after_migrations; then
-  log "Gateway restart after database migration FAILED."
-elif smoke; then
-  if publish_agent_source_bundle; then
-    write_state "$NEW_GATEWAY_IMAGE" "$NEW_MCP_IMAGE" "$NEW_EXECUTOR_IMAGE"
-    log "Deploy OK — recorded as last known good."
-    exit 0
+if $DEPLOY_SERVICES_OK; then
+  log "Running database migrations (alembic upgrade head)..."
+  if ! run_migrations; then
+    log "Database migration FAILED."
+  elif ! restart_gateway_after_migrations; then
+    log "Gateway restart after database migration FAILED."
+  elif smoke; then
+    if publish_agent_source_bundle; then
+      write_state "$NEW_GATEWAY_IMAGE" "$NEW_MCP_IMAGE" "$NEW_EXECUTOR_IMAGE"
+      log "Deploy OK — recorded as last known good."
+      exit 0
+    fi
+    log "Agent source publication FAILED."
+  else
+    log "Smoke test FAILED."
   fi
-  log "Agent source publication FAILED."
-else
-  log "Smoke test FAILED."
 fi
 
 POST_MIGRATION_REVISION=$(alembic_revision web-ssh-gateway)
@@ -472,7 +509,10 @@ if ! validate_image_ref "$PREVIOUS_GATEWAY_IMAGE" "$GATEWAY_REPO" || ! validate_
 fi
 
 log "Rolling back to $PREVIOUS_GATEWAY_IMAGE / $PREVIOUS_MCP_IMAGE / $PREVIOUS_SSHD_IMAGE"
-deploy_services "$PREVIOUS_GATEWAY_IMAGE" "$PREVIOUS_MCP_IMAGE" "$PREVIOUS_SSHD_IMAGE"
+if ! deploy_services "$PREVIOUS_GATEWAY_IMAGE" "$PREVIOUS_MCP_IMAGE" "$PREVIOUS_SSHD_IMAGE"; then
+  log "Rollback deployment FAILED — manual investigation required."
+  exit 1
+fi
 
 SCHEMA_ADVANCED=false
 if [ -n "$PRE_DEPLOY_REVISION" ] && [ -n "$POST_MIGRATION_REVISION" ] && [ "$PRE_DEPLOY_REVISION" != "$POST_MIGRATION_REVISION" ]; then

@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -35,3 +36,233 @@ def test_first_rollout_raw_image_id_is_bound_to_the_actual_running_executor() ->
     assert '[ "$ref" = "$expected_running_id" ]' in text
     assert 'validate_sshd_image_ref "$PREVIOUS_SSHD_IMAGE" "$RUNNING_SSHD_ID"' in text
     assert "'sshd_image': '''$3'''" in text
+
+def test_deploy_services_fail_closed_on_each_compose_up() -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    deploy_fn = text.split("deploy_services() {", 1)[1].split("\n}", 1)[0]
+    compose_lines = [
+        line.strip()
+        for line in deploy_fn.splitlines()
+        if "run_compose_up $COMPOSE up -d --no-deps --no-build" in line
+    ]
+    assert len(compose_lines) == 4
+    assert all(line.endswith("|| return $?") for line in compose_lines)
+
+
+def test_compose_retry_is_bounded_to_exact_stop_exit_event_failure() -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    helper = text.split("run_compose_up() {", 1)[1].split("\n}", 1)[0]
+    classifier = text.split("is_transient_compose_stop_failure() {", 1)[1].split("\n}", 1)[0]
+
+    assert 'local max_attempts=2' in helper
+    assert 'output=$("$@" 2>&1) || rc=$?' in helper
+    assert 'is_transient_compose_stop_failure "$output"' in helper
+    assert 'return "$rc"' in helper
+    assert '"cannot stop container"' in classifier
+    assert '"tried to kill container, but did not receive an exit event"' in classifier
+
+
+def test_initial_service_deploy_failure_reaches_rollback_path() -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    initial = 'if ! deploy_services "$NEW_GATEWAY_IMAGE" "$NEW_MCP_IMAGE" "$NEW_EXECUTOR_IMAGE"; then'
+    assert initial in text
+    assert "DEPLOY_SERVICES_OK=false" in text
+    assert "if $DEPLOY_SERVICES_OK; then" in text
+    assert text.index(initial) < text.index("POST_MIGRATION_REVISION=")
+
+
+def test_rollback_deploy_failure_is_captured_fail_closed() -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    rollback = 'if ! deploy_services "$PREVIOUS_GATEWAY_IMAGE" "$PREVIOUS_MCP_IMAGE" "$PREVIOUS_SSHD_IMAGE"; then'
+    assert rollback in text
+    rollback_window = text[text.index(rollback) : text.index("SCHEMA_ADVANCED=false")]
+    assert "Rollback deployment FAILED" in rollback_window
+    assert "exit 1" in rollback_window
+
+def _run_compose_retry_harness(tmp_path: Path, mode: str) -> tuple[int, int]:
+    text = DEPLOY.read_text(encoding="utf-8")
+    classifier = (
+        "is_transient_compose_stop_failure() {"
+        + text.split("is_transient_compose_stop_failure() {", 1)[1].split("\n}\n", 1)[0]
+        + "\n}\n"
+    )
+    helper = (
+        "run_compose_up() {"
+        + text.split("run_compose_up() {", 1)[1].split("\n}\n", 1)[0]
+        + "\n}\n"
+    )
+    counter = tmp_path / "count"
+    fake = tmp_path / "fake-compose"
+    fake.write_text(
+        """#!/usr/bin/env bash
+set -u
+count=0
+if [ -f "$COUNT_FILE" ]; then
+  count=$(cat "$COUNT_FILE")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$COUNT_FILE"
+case "$MODE" in
+  transient-once)
+    if [ "$count" -eq 1 ]; then
+      echo "cannot stop container abc: tried to kill container, but did not receive an exit event" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  transient-always)
+    echo "cannot stop container abc: tried to kill container, but did not receive an exit event" >&2
+    exit 1
+    ;;
+  unrelated)
+    echo "permission denied" >&2
+    exit 1
+    ;;
+esac
+exit 99
+""",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    harness = tmp_path / "harness.sh"
+    harness.write_text(
+        "set -euo pipefail\n"
+        "log() { :; }\n"
+        "sleep() { :; }\n"
+        + classifier
+        + helper
+        + 'run_compose_up "$FAKE"\n',
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["bash", str(harness)],
+        env={"PATH": "/usr/bin:/bin", "FAKE": str(fake), "COUNT_FILE": str(counter), "MODE": mode},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result.returncode, int(counter.read_text(encoding="utf-8"))
+
+
+def test_compose_retry_retries_exact_transient_once(tmp_path: Path) -> None:
+    returncode, attempts = _run_compose_retry_harness(tmp_path, "transient-once")
+    assert returncode == 0
+    assert attempts == 2
+
+
+def test_compose_retry_persistent_transient_is_bounded(tmp_path: Path) -> None:
+    returncode, attempts = _run_compose_retry_harness(tmp_path, "transient-always")
+    assert returncode != 0
+    assert attempts == 2
+
+
+def test_compose_retry_does_not_retry_unrelated_failure(tmp_path: Path) -> None:
+    returncode, attempts = _run_compose_retry_harness(tmp_path, "unrelated")
+    assert returncode != 0
+    assert attempts == 1
+
+def test_compose_retry_preserves_service_image_environment(tmp_path: Path) -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    classifier = (
+        "is_transient_compose_stop_failure() {"
+        + text.split("is_transient_compose_stop_failure() {", 1)[1].split("\n}\n", 1)[0]
+        + "\n}\n"
+    )
+    helper = (
+        "run_compose_up() {"
+        + text.split("run_compose_up() {", 1)[1].split("\n}\n", 1)[0]
+        + "\n}\n"
+    )
+    observed = tmp_path / "observed"
+    fake = tmp_path / "fake-compose"
+    fake.write_text(
+        """#!/usr/bin/env bash
+printf '%s|%s|%s' \
+  "${SSH_GATEWAY_SSHD_IMAGE:-}" \
+  "${WEB_SSH_GATEWAY_IMAGE:-}" \
+  "${MCP_SERVER_IMAGE:-}" > "$OBSERVED"
+""",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    harness = tmp_path / "env-harness.sh"
+    harness.write_text(
+        "set -euo pipefail\n"
+        "log() { :; }\n"
+        "sleep() { :; }\n"
+        + classifier
+        + helper
+        + 'SSH_GATEWAY_SSHD_IMAGE="sshd@sha256:test" '
+        + 'WEB_SSH_GATEWAY_IMAGE="gateway@sha256:test" '
+        + 'MCP_SERVER_IMAGE="mcp@sha256:test" '
+        + 'run_compose_up "$FAKE"\n',
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["bash", str(harness)],
+        env={"PATH": "/usr/bin:/bin", "FAKE": str(fake), "OBSERVED": str(observed)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert observed.read_text(encoding="utf-8") == (
+        "sshd@sha256:test|gateway@sha256:test|mcp@sha256:test"
+    )
+
+def test_deploy_services_short_circuits_inside_errexit_suppressed_if(tmp_path: Path) -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    classifier = (
+        "is_transient_compose_stop_failure() {"
+        + text.split("is_transient_compose_stop_failure() {", 1)[1].split("\n}\n", 1)[0]
+        + "\n}\n"
+    )
+    helper = (
+        "run_compose_up() {"
+        + text.split("run_compose_up() {", 1)[1].split("\n}\n", 1)[0]
+        + "\n}\n"
+    )
+    deploy = (
+        "deploy_services() {"
+        + text.split("deploy_services() {", 1)[1].split("\n}\n", 1)[0]
+        + "\n}\n"
+    )
+    counter = tmp_path / "count"
+    fake = tmp_path / "fake-compose"
+    fake.write_text(
+        """#!/usr/bin/env bash
+count=0
+if [ -f "$COUNT_FILE" ]; then
+  count=$(cat "$COUNT_FILE")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$COUNT_FILE"
+echo "permission denied" >&2
+exit 1
+""",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    harness = tmp_path / "deploy-harness.sh"
+    harness.write_text(
+        "set -euo pipefail\n"
+        "log() { :; }\n"
+        "sleep() { :; }\n"
+        + classifier
+        + helper
+        + deploy
+        + 'COMPOSE="$FAKE"\n'
+        + 'if ! deploy_services "gateway" "mcp" "sshd"; then\n'
+        + '  :\n'
+        + 'fi\n',
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["bash", str(harness)],
+        env={"PATH": "/usr/bin:/bin", "FAKE": str(fake), "COUNT_FILE": str(counter)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert counter.read_text(encoding="utf-8") == "1"
