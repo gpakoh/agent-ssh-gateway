@@ -24,8 +24,8 @@ from examples.mcp_server.task_candidate import (
     RECEIPT_VERSION,
     VERIFIER_RECEIPT_SCHEMA_VERSION,
     CandidateError,
-    _canonical_verifier_receipt_sha256,
     _candidate_record_dir,
+    _canonical_verifier_receipt_sha256,
     bind_task_attempt_job,
     materialize_task_candidate,
     record_task_delivery_contract,
@@ -168,9 +168,10 @@ def _materialize(
     *,
     verify_candidate: Any = _verify_ok,
     required_checks: list[str] | None = None,
+    root: Path | None = None,
 ) -> tuple[Path, str, Path, dict[str, Any]]:
     checks = list(REQUIRED_CHECKS if required_checks is None else required_checks)
-    root = tmp_path / "repo"
+    root = root or tmp_path / "repo"
     _init_repo(root)
     _, td = _write_evidence(root, monkeypatch, required_checks=checks)
     receipt = materialize_task_candidate(
@@ -286,13 +287,23 @@ def test_materialize_requires_dict_verifier_receipt(
         return None
 
     with pytest.raises(CandidateError, match="verifier receipt is required"):
-        _materialize(tmp_path, monkeypatch, verify_candidate=no_receipt)
+        _materialize(
+            tmp_path,
+            monkeypatch,
+            verify_candidate=no_receipt,
+            root=tmp_path / "repo-first",
+        )
 
-    def non_dict_receipt(_repo: Path, _sha: str, _checks: list[str]) -> str:
-        return "checks_verified=true"
+        def non_dict_receipt(_repo: Path, _sha: str, _checks: list[str]) -> str:
+            return "checks_verified=true"
 
-    with pytest.raises(CandidateError, match="verifier receipt is required"):
-        _materialize(tmp_path, monkeypatch, verify_candidate=non_dict_receipt)
+        with pytest.raises(CandidateError, match="verifier receipt is required"):
+            _materialize(
+                tmp_path,
+                monkeypatch,
+                verify_candidate=non_dict_receipt,
+                root=tmp_path / "repo-second",
+            )
 
 
 def test_materialize_rejects_head_mismatch_in_verifier_evidence(
@@ -332,14 +343,7 @@ def test_materialize_rejects_out_of_order_checks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def reordered(_repo: Path, sha: str, _checks: list[str]) -> dict[str, Any]:
-        receipt = _verifier_receipt(sha, list(reversed(REQUIRED_CHECKS)))
-        receipt["checks"] = list(reversed(receipt["checks"]))
-        for index, check in enumerate(receipt["checks"]):
-            check["check_index"] = index
-            check["command_sha256"] = hashlib.sha256(
-                check["command"].encode("utf-8")
-            ).hexdigest()
-        return receipt
+        return _verifier_receipt(sha, list(reversed(REQUIRED_CHECKS)))
 
     with pytest.raises(CandidateError, match="command does not match required checks"):
         _materialize(tmp_path, monkeypatch, verify_candidate=reordered)
@@ -392,6 +396,18 @@ def test_push_rejects_tampered_verifier_evidence(
     root, _, _, receipt = _materialize(tmp_path, monkeypatch)
     stored = _read_stored_receipt(receipt)
     stored["verifier_receipt"]["checks"][0]["exit_code"] = 1
+    _write_stored_receipt(receipt, stored)
+
+    with pytest.raises(CandidateError, match="failed required check"):
+        _validate(root, receipt["candidate_head_sha"])
+
+
+def test_push_rejects_tampered_evidence_without_recomputed_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _, receipt = _materialize(tmp_path, monkeypatch)
+    stored = _read_stored_receipt(receipt)
+    stored["verifier_receipt"]["checks"][0]["stdout_tail"] = "tampered"
     _write_stored_receipt(receipt, stored)
 
     with pytest.raises(CandidateError, match="digest does not match"):
@@ -637,7 +653,7 @@ async def test_push_adapter_derives_checks_verified_only_from_revalidated_eviden
     assert "SECRET-RAW-OUTPUT-TAIL" not in json.dumps(result)
 
 
-async def test_push_adapter_cannot_claim_checks_verified_from_naked_field(
+async def test_push_adapter_denies_naked_checks_verified_without_mutation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     staging = tmp_path / "trusted-candidate-staging"
@@ -647,16 +663,22 @@ async def test_push_adapter_cannot_claim_checks_verified_from_naked_field(
         "checks_verified": True,
     }
     monkeypatch.setenv("GITEA_TOKEN", "managed-token")
-    monkeypatch.setenv("GITEA_GIT_BASE", "https://git.example.test")
     monkeypatch.setattr(remote, "_server_workspace_registry", lambda: _Registry(tmp_path))
-    monkeypatch.setattr(remote, "_server_gitea_client", lambda: _FakeGiteaClient)
     monkeypatch.setattr(
         remote,
         "validate_task_candidate_for_push",
         lambda **_kwargs: (naked, staging),
     )
-    monkeypatch.setattr(remote, "push_trusted_staging_sha", lambda **_kwargs: None)
 
+    def must_not_push(**_kwargs: Any) -> None:
+        raise AssertionError("push must not run with a naked checks_verified field")
+
+    monkeypatch.setattr(remote, "push_trusted_staging_sha", must_not_push)
+
+    async def inline_to_thread(func: Any, *args: Any, **kwargs: Any) -> Any:
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(remote.asyncio, "to_thread", inline_to_thread)
     result = await remote.gitea_push_local_ref(
         project=PROJECT,
         task_id=TASK,
@@ -666,8 +688,9 @@ async def test_push_adapter_cannot_claim_checks_verified_from_naked_field(
         expected_sha=SHA,
     )
 
-    assert result["ok"] is True
-    assert result["result"]["checks_verified"] is False
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CANDIDATE_RECEIPT_INVALID"
+    assert result["error"]["details"] == {"mutation_occurred": False}
 
 
 async def test_push_adapter_derives_nothing_when_validation_fails(

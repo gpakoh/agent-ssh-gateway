@@ -1918,11 +1918,21 @@ async def gitea_push_local_ref(
             source="gitea",
         )
 
-    # Derived only from the receipt returned by validate_task_candidate_for_push,
-    # which revalidates verifier evidence, its canonical digest and the immutable
-    # required checks before any push authorization. A stored or caller-supplied
-    # naked checks_verified bool is never read here.
+    # Fail closed before any remote access.  Push is only authorized when the
+    # receipt returned by validate_task_candidate_for_push -- which revalidated
+    # verifier evidence, its canonical digest, the exact candidate head and the
+    # immutable required checks -- derives as trusted here from scratch.  A
+    # stored or caller-supplied naked checks_verified bool is never read.
     checks_verified = verifier_receipt_is_trusted(receipt)
+    if not checks_verified:
+        return tool_error(
+            tool="gitea_push_local_ref",
+            code="CANDIDATE_RECEIPT_INVALID",
+            message="candidate receipt is missing trusted verifier evidence",
+            hint="Re-materialize the candidate so push can revalidate the digest-bound verifier receipt.",
+            details={"mutation_occurred": False},
+            source="gitea",
+        )
 
     try:
         git_base = configured_gitea_git_base()
