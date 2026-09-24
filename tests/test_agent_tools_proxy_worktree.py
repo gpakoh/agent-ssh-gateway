@@ -2586,6 +2586,138 @@ class TestDailyOpenCodeUpgradeGate:
         assert task_receipt["gate_status"] == "fresh"
         assert task_receipt["permission_flag"] == "--dangerously-skip-permissions"
 
+    def test_upgrade_adopts_curl_installer_output_for_custom_managed_path(
+        self, tmp_path, monkeypatch
+    ):
+        fake_bin = tmp_path / "upgrade-staging-bin"
+        fake_bin.mkdir()
+        seed = fake_bin / "opencode"
+        seed.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            '  --version) echo "1.18.16"; exit 0 ;;\n'
+            "  upgrade)\n"
+            '    target="$HOME/.opencode/bin/opencode"\n'
+            '    mkdir -p "$(dirname "$target")"\n'
+            '    cat > "$target" <<\'UPGRADED\'\n'
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            '  --version) echo "1.18.17"; exit 0 ;;\n'
+            "  run)\n"
+            '    if [ "${2:-}" = "--help" ]; then echo "  --auto"; exit 0; fi\n'
+            "    exit 0 ;;\n"
+            "  *) exit 2 ;;\n"
+            "esac\n"
+            "UPGRADED\n"
+            '    chmod 755 "$target"\n'
+            '    echo "installed 1.18.17"\n'
+            "    exit 0 ;;\n"
+            "  run)\n"
+            '    if [ "${2:-}" = "--help" ]; then\n'
+            '      echo "  --dangerously-skip-permissions"; exit 0\n'
+            "    fi\n"
+            "    exit 0 ;;\n"
+            "  *) exit 2 ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        seed.chmod(0o755)
+
+        runtime_root = tmp_path / "agent-runtime"
+        managed_bin = runtime_root / "custom-managed" / "opencode"
+        state_path = runtime_root / "state" / "opencode-upgrade.json"
+        unrelated_home = tmp_path / "unrelated-home"
+        env = os.environ.copy()
+        env["HOME"] = str(unrelated_home)
+
+        result = subprocess.run(
+            [
+                "python3",
+                "-c",
+                _OPENCODE_UPGRADE_GATE_PY,
+                str(seed),
+                str(managed_bin),
+                str(state_path),
+                "86400",
+                "10",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=env,
+        )
+
+        assert result.returncode == 0, result.stderr or result.stdout
+        receipt = json.loads(result.stdout)
+        assert receipt["binary_version_before"] == "1.18.16"
+        assert receipt["binary_version"] == "1.18.17"
+        assert receipt["permission_flag"] == "--auto"
+        assert subprocess.run(
+            [str(managed_bin), "--version"],
+            text=True,
+            capture_output=True,
+            check=False,
+        ).stdout.strip() == "1.18.17"
+        assert not (unrelated_home / ".opencode/bin/opencode").exists()
+        assert not list(state_path.parent.glob(".opencode-upgrade-home-*"))
+
+    def test_invalid_staged_upgrade_preserves_last_known_good_binary(
+        self, tmp_path, monkeypatch
+    ):
+        fake_bin = tmp_path / "upgrade-invalid-bin"
+        fake_bin.mkdir()
+        seed = fake_bin / "opencode"
+        seed.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            '  --version) echo "1.18.16"; exit 0 ;;\n'
+            "  upgrade)\n"
+            '    target="$HOME/.opencode/bin/opencode"\n'
+            '    mkdir -p "$(dirname "$target")"\n'
+            '    printf \'#!/bin/sh\\nexit 9\\n\' > "$target"\n'
+            '    chmod 755 "$target"\n'
+            '    echo "installed corrupt candidate"\n'
+            "    exit 0 ;;\n"
+            "  run)\n"
+            '    if [ "${2:-}" = "--help" ]; then echo "  --auto"; exit 0; fi\n'
+            "    exit 0 ;;\n"
+            "  *) exit 2 ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        seed.chmod(0o755)
+
+        runtime_root = tmp_path / "agent-runtime"
+        managed_bin = runtime_root / "custom-managed" / "opencode"
+        state_path = runtime_root / "state" / "opencode-upgrade.json"
+
+        result = subprocess.run(
+            [
+                "python3",
+                "-c",
+                _OPENCODE_UPGRADE_GATE_PY,
+                str(seed),
+                str(managed_bin),
+                str(state_path),
+                "86400",
+                "10",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert result.returncode == 1
+        failure = json.loads(result.stdout)
+        assert failure["reason"] == "version_probe_failed"
+        assert subprocess.run(
+            [str(managed_bin), "--version"],
+            text=True,
+            capture_output=True,
+            check=False,
+        ).stdout.strip() == "1.18.16"
+        assert not list(state_path.parent.glob(".opencode-upgrade-home-*"))
+
     def test_concurrent_launches_share_one_upgrade(self, tmp_path, monkeypatch):
         fake_bin = tmp_path / "concurrent-bin"
         fake_bin.mkdir()
