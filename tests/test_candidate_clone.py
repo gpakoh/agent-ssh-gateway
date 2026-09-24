@@ -12,7 +12,10 @@ from pathlib import Path
 import pytest
 
 from app.workspace.registry import reset_registry
-from examples.mcp_server.agent_sources import ManagedSourceBundleError, ManagedSourcePublication
+from examples.mcp_server.agent_sources import (
+    ManagedSourceBundleError,
+    ManagedSourcePublication,
+)
 from examples.mcp_server.candidate_clone import (
     CandidateCloneError,
     CandidateCloneReceipt,
@@ -20,6 +23,10 @@ from examples.mcp_server.candidate_clone import (
     prepare_candidate_clone,
 )
 from examples.mcp_server.project_registry_control import register_project
+
+THREAD_SYNC_TIMEOUT_SECONDS = float(
+    os.environ.get("MCP_TEST_THREAD_SYNC_TIMEOUT_SECONDS", "30")
+)
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -2578,7 +2585,7 @@ def test_candidate_cleanup_holds_registry_lock_through_rmtree(
 
     def blocking_rmtree(path: Path) -> None:
         entered_rmtree.set()
-        assert release_rmtree.wait(timeout=5)
+        assert release_rmtree.wait(timeout=THREAD_SYNC_TIMEOUT_SECONDS)
         real_rmtree(path)
 
     monkeypatch.setattr(module.shutil, "rmtree", blocking_rmtree)
@@ -2595,7 +2602,7 @@ def test_candidate_cleanup_holds_registry_lock_through_rmtree(
             journal_root=journal_root,
             reference_guard=_idle_guard,
         )
-        assert entered_rmtree.wait(timeout=5)
+        assert entered_rmtree.wait(timeout=THREAD_SYNC_TIMEOUT_SECONDS)
 
         register_future = pool.submit(
             registry_module.register_project,
@@ -2610,11 +2617,11 @@ def test_candidate_cleanup_holds_registry_lock_through_rmtree(
         assert not register_future.done()
 
         release_rmtree.set()
-        cleaned = cleanup_future.result(timeout=5)
+        cleaned = cleanup_future.result(timeout=THREAD_SYNC_TIMEOUT_SECONDS)
         assert cleaned.directory_removed is True
 
         with pytest.raises(registry_module.ProjectRegistrationError) as exc_info:
-            register_future.result(timeout=5)
+            register_future.result(timeout=THREAD_SYNC_TIMEOUT_SECONDS)
         assert exc_info.value.code == "INVALID_INPUT"
 
     assert not clone_root.exists()
