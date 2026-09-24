@@ -25,6 +25,7 @@ import pytest
 
 from examples.mcp_server.agent_tasks import build_gate_specs
 from examples.mcp_server.agent_tools import (
+    _OPENCODE_UPGRADE_GATE_PY,
     PROXY_LIMIT_MARKERS,
     _build_opencode_script,
     _isolated_worktree_error,
@@ -40,6 +41,7 @@ TASK_ID = "a12345678901"
 
 RUNNER_HARNESS_TIMEOUT_SECONDS = 60
 PROXY_RETRY_HARNESS_TIMEOUT_SECONDS = RUNNER_HARNESS_TIMEOUT_SECONDS * 2
+TEST_STARTUP_MAX_PROXY_ATTEMPTS = 7
 
 
 def test_supervisor_scope_diff_disables_rename_detection() -> None:
@@ -159,14 +161,32 @@ class TestBuildOpencodeScriptProxy:
         assert 'runner_artifact_write_line "$td/agent-status.md" "Status: run-timeout"' in script
         assert '${FAILURE_REASON:-}' in script
 
-    def test_proxy_startup_retry_default_is_bounded_to_four_attempts(self, monkeypatch):
+    def test_proxy_startup_retry_default_is_bounded_to_six_attempts(self, monkeypatch):
         monkeypatch.setenv("OPENCODE_PROXY_PROVIDER_URL", PROVIDER)
         monkeypatch.delenv("OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS", raising=False)
 
         script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
 
-        assert "OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS=4" in script
+        assert "OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS=45" in script
+        assert "OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS=6" in script
         assert '"$OPENCODE_PROXY_ATTEMPT" -lt "$OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS"' in script
+
+    def test_upgrade_gate_precedes_and_guards_proxy_acquisition(self, monkeypatch):
+        monkeypatch.setenv("OPENCODE_PROXY_PROVIDER_URL", PROVIDER)
+        monkeypatch.setenv("OPENCODE_UPGRADE_GATE_ENABLED", "true")
+
+        script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
+
+        gate = 'if [ "$OPENCODE_UPGRADE_GATE_ENABLED" = "1" ]; then'
+        guarded_acquire = (
+            "OPENCODE_PROXY_ATTEMPT=1\n"
+            'if [ "$OPENCODE_UPGRADE_BLOCKED" -eq 0 ]; then\n'
+            '  write_proxy_status acquiring "" 0\n'
+            "  acquire_opencode_proxy\n"
+            "fi"
+        )
+        assert guarded_acquire in script
+        assert script.index(gate) < script.index(guarded_acquire)
 
     def test_proxy_startup_retry_rejects_nonpositive_attempt_count(self, monkeypatch):
         monkeypatch.setenv("OPENCODE_PROXY_PROVIDER_URL", PROVIDER)
@@ -917,6 +937,10 @@ def _run_proxy_preflight_script(tmp_path: Path, monkeypatch, *, provider_body: s
     monkeypatch.delenv("OPENCODE_PROXY_REQUIRED", raising=False)
     monkeypatch.setenv("OPENCODE_ADMISSION_WAIT_SECONDS", "0")
     monkeypatch.setenv("OPENCODE_STARTUP_RESERVE_BYTES", "0")
+    monkeypatch.setenv(
+        "OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS",
+        str(TEST_STARTUP_MAX_PROXY_ATTEMPTS),
+    )
     if provider_body is None:
         monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
     else:
@@ -955,7 +979,7 @@ def test_malformed_proxy_blocks_before_opencode(tmp_path, monkeypatch):
     assert "rc=3" in (artifacts / "proxy-status.log").read_text()
     proxy_status = json.loads((artifacts / "proxy-status.json").read_text(encoding="utf-8"))
     assert proxy_status["attempt"] == 1
-    assert proxy_status["max_attempts"] == 4
+    assert proxy_status["max_attempts"] == TEST_STARTUP_MAX_PROXY_ATTEMPTS
     assert proxy_status["provider_kind"] == "configured_provider"
     assert proxy_status["last_error_class"] == "provider_unavailable"
     assert proxy_status["final_outcome"] == "blocked"
@@ -975,7 +999,7 @@ def test_valid_proxy_allows_opencode_and_is_not_logged(tmp_path, monkeypatch):
     proxy_status_raw = (artifacts / "proxy-status.json").read_text(encoding="utf-8")
     proxy_status = json.loads(proxy_status_raw)
     assert proxy_status["attempt"] == 1
-    assert proxy_status["max_attempts"] == 4
+    assert proxy_status["max_attempts"] == TEST_STARTUP_MAX_PROXY_ATTEMPTS
     assert proxy_status["provider_kind"] == "configured_provider"
     assert proxy_status["final_outcome"] == "completed"
     assert proxy_status["finished_at"]
@@ -1233,6 +1257,10 @@ def test_proxy_transport_expired_certificate_retries_next_proxy(tmp_path, monkey
         monkeypatch.setenv("OPENCODE_ADMISSION_POLL_SECONDS", "1")
         monkeypatch.setenv("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "5")
         monkeypatch.setenv("OPENCODE_STARTUP_KILL_GRACE_SECONDS", "1")
+        monkeypatch.setenv(
+            "OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS",
+            str(TEST_STARTUP_MAX_PROXY_ATTEMPTS),
+        )
 
         script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
         result = subprocess.run(
@@ -1252,7 +1280,7 @@ def test_proxy_transport_expired_certificate_retries_next_proxy(tmp_path, monkey
         )
         assert "→ Read current-plan.md" in (artifacts / "opencode-output.log").read_text(encoding="utf-8")
         worker_status = (artifacts / "worker-status.md").read_text(encoding="utf-8")
-        assert "rotating proxy (attempt 1/4)" in worker_status
+        assert f"rotating proxy (attempt 1/{TEST_STARTUP_MAX_PROXY_ATTEMPTS})" in worker_status
         for proxy in _ProxyPoolHandler.proxies:
             assert proxy not in worker_status
     finally:
@@ -1363,6 +1391,10 @@ def test_startup_stall_retries_with_different_proxy(tmp_path, monkeypatch):
         monkeypatch.setenv("OPENCODE_ADMISSION_POLL_SECONDS", "1")
         monkeypatch.setenv("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "1")
         monkeypatch.setenv("OPENCODE_STARTUP_KILL_GRACE_SECONDS", "1")
+        monkeypatch.setenv(
+            "OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS",
+            str(TEST_STARTUP_MAX_PROXY_ATTEMPTS),
+        )
 
         script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
         result = subprocess.run(
@@ -1440,6 +1472,10 @@ def test_startup_stall_can_reach_third_distinct_proxy(tmp_path, monkeypatch):
         monkeypatch.setenv("OPENCODE_ADMISSION_POLL_SECONDS", "1")
         monkeypatch.setenv("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "1")
         monkeypatch.setenv("OPENCODE_STARTUP_KILL_GRACE_SECONDS", "1")
+        monkeypatch.setenv(
+            "OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS",
+            str(TEST_STARTUP_MAX_PROXY_ATTEMPTS),
+        )
 
         script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
         result = subprocess.run(
@@ -1460,14 +1496,14 @@ def test_startup_stall_can_reach_third_distinct_proxy(tmp_path, monkeypatch):
         assert _ProxyPoolHandler.proxies[1] in reported
         assert "→ Read current-plan.md" in (artifacts / "opencode-output.log").read_text(encoding="utf-8")
         worker_status = (artifacts / "worker-status.md").read_text(encoding="utf-8")
-        assert "attempt 1/4" in worker_status
-        assert "attempt 2/4" in worker_status
+        assert f"attempt 1/{TEST_STARTUP_MAX_PROXY_ATTEMPTS}" in worker_status
+        assert f"attempt 2/{TEST_STARTUP_MAX_PROXY_ATTEMPTS}" in worker_status
         for proxy in _ProxyPoolHandler.proxies:
             assert proxy not in worker_status
         proxy_status_raw = (artifacts / "proxy-status.json").read_text(encoding="utf-8")
         proxy_status = json.loads(proxy_status_raw)
         assert proxy_status["attempt"] == 3
-        assert proxy_status["max_attempts"] == 4
+        assert proxy_status["max_attempts"] == TEST_STARTUP_MAX_PROXY_ATTEMPTS
         assert proxy_status["final_outcome"] == "completed"
         assert "last_error_class" not in proxy_status
         for proxy in _ProxyPoolHandler.proxies:
@@ -2464,6 +2500,204 @@ def test_large_failure_log_is_not_loaded_or_classified(tmp_path, monkeypatch):
     assert "Failure reason: none" in report
 
 
+class TestDailyOpenCodeUpgradeGate:
+    @staticmethod
+    def _configure_gate(
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        managed_bin: Path,
+        state_path: Path,
+    ) -> None:
+        monkeypatch.setenv("OPENCODE_UPGRADE_GATE_ENABLED", "true")
+        monkeypatch.setenv("OPENCODE_UPGRADE_INTERVAL_SECONDS", "86400")
+        monkeypatch.setenv("OPENCODE_UPGRADE_TIMEOUT_SECONDS", "10")
+        monkeypatch.setenv("OPENCODE_MANAGED_BIN", str(managed_bin))
+        monkeypatch.setenv("OPENCODE_UPGRADE_STATE_PATH", str(state_path))
+        monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
+        monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "false")
+        monkeypatch.setenv("OPENCODE_STARTUP_RESERVE_BYTES", "0")
+
+    def test_upgrade_runs_once_before_two_agent_launches(self, tmp_path, monkeypatch):
+        source = tmp_path / "upgrade-source"
+        source.mkdir()
+        _init_git_repo(source)
+        artifacts = tmp_path / "upgrade-artifacts"
+        artifacts.mkdir()
+        (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+
+        fake_bin = tmp_path / "upgrade-bin"
+        fake_bin.mkdir()
+        calls = tmp_path / "upgrade-calls.txt"
+        seed = fake_bin / "opencode"
+        seed.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            '  --version) echo "1.18.16"; exit 0 ;;\n'
+            '  upgrade) echo upgrade >> "$UPGRADE_CALLS"; echo "opencode upgrade skipped: 1.18.16 is already installed"; exit 0 ;;\n'
+            '  run)\n'
+            '    if [ "${2:-}" = "--help" ]; then\n'
+            '      echo "  --dangerously-skip-permissions"; exit 0\n'
+            "    fi\n"
+            '    echo "→ Read current-plan.md"; exit 0 ;;\n'
+            "  *) exit 2 ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        seed.chmod(0o755)
+        managed_bin = tmp_path / "managed" / "opencode"
+        state_path = tmp_path / "state" / "opencode-upgrade.json"
+        monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+        monkeypatch.setenv("UPGRADE_CALLS", str(calls))
+        self._configure_gate(
+            monkeypatch,
+            managed_bin=managed_bin,
+            state_path=state_path,
+        )
+
+        for _ in range(2):
+            script = _build_opencode_script(
+                str(artifacts),
+                TASK_ID,
+                None,
+                project_root=str(source),
+            )
+            result = subprocess.run(
+                ["sh", "-c", script],
+                cwd=source,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+            )
+            assert result.returncode == 0, result.stderr or result.stdout
+
+        assert calls.read_text(encoding="utf-8").splitlines() == ["upgrade"]
+        durable_receipt = json.loads(state_path.read_text(encoding="utf-8"))
+        assert durable_receipt["binary_version"] == "1.18.16"
+        assert durable_receipt["upgrade_command"] == [
+            "opencode",
+            "upgrade",
+            "--method",
+            "curl",
+        ]
+        task_receipt = json.loads(
+            (artifacts / "opencode-upgrade.json").read_text(encoding="utf-8")
+        )
+        assert task_receipt["gate_status"] == "fresh"
+        assert task_receipt["permission_flag"] == "--dangerously-skip-permissions"
+
+    def test_concurrent_launches_share_one_upgrade(self, tmp_path, monkeypatch):
+        fake_bin = tmp_path / "concurrent-bin"
+        fake_bin.mkdir()
+        calls = tmp_path / "concurrent-upgrade-calls.txt"
+        seed = fake_bin / "opencode"
+        seed.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            '  --version) echo "1.18.16"; exit 0 ;;\n'
+            '  upgrade)\n'
+            '    echo upgrade >> "$UPGRADE_CALLS"\n'
+            "    sleep 1\n"
+            '    echo "opencode upgrade skipped: 1.18.16 is already installed"\n'
+            "    exit 0 ;;\n"
+            '  run) echo "  --auto"; exit 0 ;;\n'
+            "  *) exit 2 ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        seed.chmod(0o755)
+        managed_bin = tmp_path / "concurrent-managed" / "opencode"
+        state_path = tmp_path / "concurrent-state" / "opencode-upgrade.json"
+        env = os.environ.copy()
+        env["UPGRADE_CALLS"] = str(calls)
+        argv = [
+            "python3",
+            "-c",
+            _OPENCODE_UPGRADE_GATE_PY,
+            str(seed),
+            str(managed_bin),
+            str(state_path),
+            "86400",
+            "10",
+        ]
+
+        processes = [
+            subprocess.Popen(
+                argv,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+            )
+            for _ in range(2)
+        ]
+        completed = [process.communicate(timeout=15) for process in processes]
+
+        assert [process.returncode for process in processes] == [0, 0], completed
+        assert calls.read_text(encoding="utf-8").splitlines() == ["upgrade"]
+        payloads = [json.loads(stdout) for stdout, _ in completed]
+        statuses = sorted(payload["gate_status"] for payload in payloads)
+        assert statuses == ["checked", "fresh"]
+        assert {payload["permission_flag"] for payload in payloads} == {"--auto"}
+
+    def test_failed_upgrade_blocks_agent_before_proxy_or_run(self, tmp_path, monkeypatch):
+        source = tmp_path / "upgrade-failure-source"
+        source.mkdir()
+        _init_git_repo(source)
+        artifacts = tmp_path / "upgrade-failure-artifacts"
+        artifacts.mkdir()
+        (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+
+        fake_bin = tmp_path / "upgrade-failure-bin"
+        fake_bin.mkdir()
+        ran_agent = tmp_path / "agent-ran"
+        seed = fake_bin / "opencode"
+        seed.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            '  --version) echo "1.18.16"; exit 0 ;;\n'
+            '  upgrade) echo "upgrade unavailable"; exit 9 ;;\n'
+            '  run) touch "$AGENT_RAN"; exit 0 ;;\n'
+            "  *) exit 2 ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        seed.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+        monkeypatch.setenv("AGENT_RAN", str(ran_agent))
+        self._configure_gate(
+            monkeypatch,
+            managed_bin=tmp_path / "managed-failure" / "opencode",
+            state_path=tmp_path / "state-failure" / "opencode-upgrade.json",
+        )
+
+        script = _build_opencode_script(
+            str(artifacts),
+            TASK_ID,
+            None,
+            project_root=str(source),
+        )
+        result = subprocess.run(
+            ["sh", "-c", script],
+            cwd=source,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+        )
+
+        assert result.returncode == 80, result.stderr or result.stdout
+        assert not ran_agent.exists()
+        status = (artifacts / "agent-status.md").read_text(encoding="utf-8")
+        assert status.strip() == "Status: upgrade-blocked"
+        report = (artifacts / "agent-report.md").read_text(encoding="utf-8")
+        assert "Failure reason: opencode-upgrade-failed" in report
+        failure = json.loads(
+            (artifacts / "opencode-upgrade.json").read_text(encoding="utf-8")
+        )
+        assert failure["reason"] == "upgrade_command_failed"
+
+
 class TestRuntimeTimeout:
     """TEST-09: A fake OpenCode that emits non-build progress and then
     hangs is killed by the runtime watchdog before the test timeout.
@@ -2524,11 +2758,11 @@ class TestRuntimeTimeout:
         status = (artifacts / "agent-status.md").read_text(encoding="utf-8")
         assert status.strip() == "Status: run-timeout"
 
-    def test_default_runtime_timeout_is_1800_seconds(self, monkeypatch):
+    def test_default_runtime_timeout_is_7200_seconds(self, monkeypatch):
         monkeypatch.delenv("OPENCODE_RUN_TIMEOUT_SECONDS", raising=False)
         monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
         script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
-        assert "OPENCODE_RUNTIME_TIMEOUT_SECONDS=1800" in script
+        assert "OPENCODE_RUNTIME_TIMEOUT_SECONDS=7200" in script
 
     def test_runtime_timeout_rejects_nonpositive_value(self, monkeypatch):
         monkeypatch.setenv("OPENCODE_RUN_TIMEOUT_SECONDS", "0")
