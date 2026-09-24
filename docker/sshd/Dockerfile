@@ -44,14 +44,13 @@ RUN apk add --no-cache openssh-server openssh-client-default git curl bash pytho
 
 COPY authorized_keys /home/mcpuser/.ssh/authorized_keys
 
+COPY entrypoint.sh /usr/local/bin/sshd-entrypoint
+
 RUN chown -R mcpuser:mcpuser /home/mcpuser/.ssh && \
     chmod 600 /home/mcpuser/.ssh/authorized_keys && \
     mkdir -p /etc/ssh/hostkeys && \
-    ssh-keygen -q -t rsa -b 4096 -f /etc/ssh/hostkeys/ssh_host_rsa_key -N "" && \
-    ssh-keygen -q -t ecdsa -f /etc/ssh/hostkeys/ssh_host_ecdsa_key -N "" && \
-    ssh-keygen -q -t ed25519 -f /etc/ssh/hostkeys/ssh_host_ed25519_key -N "" && \
     chmod 700 /etc/ssh/hostkeys && \
-    chmod 600 /etc/ssh/hostkeys/ssh_host_*_key && \
+    chmod 755 /usr/local/bin/sshd-entrypoint && \
     echo "HostKey /etc/ssh/hostkeys/ssh_host_rsa_key" >> /etc/ssh/sshd_config && \
     echo "HostKey /etc/ssh/hostkeys/ssh_host_ecdsa_key" >> /etc/ssh/sshd_config && \
     echo "HostKey /etc/ssh/hostkeys/ssh_host_ed25519_key" >> /etc/ssh/sshd_config && \
@@ -65,4 +64,5 @@ ARG BUILD_TIME=unknown
 ENV BUILD_SHA=${BUILD_SHA} BUILD_TIME=${BUILD_TIME}
 EXPOSE 2222
 
+ENTRYPOINT ["/usr/local/bin/sshd-entrypoint"]
 CMD ["/usr/sbin/sshd", "-D", "-p", "2222"]
