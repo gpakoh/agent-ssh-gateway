@@ -253,10 +253,14 @@ json.dump(
   chmod 666 "$STATE_FILE" 2>/dev/null || true
 }
 
-is_transient_compose_stop_failure() {
+is_transient_compose_failure() {
   local output="$1"
-  [[ "$output" == *"cannot stop container"* ]] &&
-    [[ "$output" == *"tried to kill container, but did not receive an exit event"* ]]
+  if [[ "$output" == *"cannot stop container"* ]] &&
+    [[ "$output" == *"tried to kill container, but did not receive an exit event"* ]]; then
+    return 0
+  fi
+  [[ "$output" == *"Error when allocating new name: Conflict."* ]] &&
+    [[ "$output" == *'container name "/ssh-gateway-agent-sshd" is already in use'* ]]
 }
 
 run_compose_up() {
@@ -274,8 +278,8 @@ run_compose_up() {
     if [ "$rc" -eq 0 ]; then
       return 0
     fi
-    if [ "$attempt" -lt "$max_attempts" ] && is_transient_compose_stop_failure "$output"; then
-      log "Compose transient stop failure detected; retrying once."
+    if [ "$attempt" -lt "$max_attempts" ] && is_transient_compose_failure "$output"; then
+      log "Compose transient replacement failure detected; retrying once."
       sleep 2
       continue
     fi
