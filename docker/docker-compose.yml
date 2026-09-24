@@ -63,11 +63,12 @@ services:
       - ${WORKSPACE_HOST_PATH:-..}:${WORKSPACE_CONTAINER_PATH:-/workspace}:rw
       - agent_runtime:/var/lib/mcp-agent
       - agent_sources:/var/lib/mcp-agent/sources:ro
-      # Persistent SSH server host keys: sshd no longer regenerates them on
-      # every image build (that rotated the fingerprint and broke the
-      # gateway's strict known_hosts check with a 502). Keys live in a named
-      # volume, auto-populated from the image on first mount; regenerate via
-      # `docker compose down -v` + `up` if identity rotation is ever wanted.
+      # Persistent SSH server host keys: the image no longer bakes private
+      # keys into layers. docker/sshd/entrypoint.sh generates only the
+      # missing/invalid keys at container start and preserves existing ones,
+      # so the fingerprint survives recreates but the volume is re-populated
+      # if it is ever emptied (e.g. `docker compose down -v` + `up`, or a
+      # fresh host). Rotate deliberately by emptying this volume.
       - sshd_host_keys:/etc/ssh/hostkeys
     restart: unless-stopped
     security_opt:
