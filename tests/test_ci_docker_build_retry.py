@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -25,6 +26,9 @@ count=$((count + 1))
 printf '%s\n' "$count" > "$FAKE_DOCKER_COUNTER"
 printf '%s\n' "$*" >> "$FAKE_DOCKER_ARGS"
 case "$FAKE_DOCKER_MODE" in
+  always_success)
+    exit 0
+    ;;
   transient_then_success)
     if [ "$count" -eq 1 ]; then
       echo 'failed to authorize: net/http: TLS handshake timeout' >&2
@@ -167,3 +171,230 @@ def test_webui_e2e_remote_mode_collects_all_browser_tests_without_local_toolchai
     assert result.returncode == 0, output
     assert output.count("tests/test_webui_e2e.py::TestWebUiE2E::") == 4, output
     assert "skipped" not in output.lower(), output
+
+
+def test_observability_success_emits_one_start_and_success_notice(
+    tmp_path: Path,
+) -> None:
+    result, counter = _run_wrapper(tmp_path, "always_success")
+    output = result.stderr
+
+    assert result.returncode == 0
+    assert counter.read_text(encoding="utf-8").strip() == "1"
+    assert output.count("docker-build-start") == 1
+    assert output.count("docker-build-end") == 1
+    assert (
+        "docker-build-start phase=Dockerfile.test runner=unknown run_id=unknown "
+        "job=unknown attempt=1/3"
+        in output
+    )
+    assert (
+        "docker-build-end phase=Dockerfile.test runner=unknown run_id=unknown "
+        "job=unknown attempt=1/3 status=success"
+        in output
+    )
+    assert re.search(r"docker-build-end [^\n]*status=success duration_s=\d+", output)
+
+
+def test_observability_transient_retry_then_success_emits_two_starts_and_two_ends(
+    tmp_path: Path,
+) -> None:
+    result, counter = _run_wrapper(tmp_path, "transient_then_success")
+    output = result.stderr
+    lines = [line for line in output.splitlines() if line.strip()]
+    starts = [line for line in lines if "docker-build-start" in line]
+    ends = [line for line in lines if "docker-build-end" in line]
+
+    assert result.returncode == 0
+    assert counter.read_text(encoding="utf-8").strip() == "2"
+    assert len(starts) == 2
+    assert len(ends) == 2
+    assert "attempt=1/3" in starts[0]
+    assert "attempt=2/3" in starts[1]
+    assert "attempt=1/3" in ends[0]
+    assert "attempt=2/3" in ends[1]
+    assert "status=transient_failure" in ends[0]
+    assert "status=success" in ends[1]
+    assert re.search(r"status=transient_failure duration_s=\d+", ends[0])
+    assert re.search(r"status=success duration_s=\d+", ends[1])
+    assert lines.index(ends[0]) < lines.index(starts[1])
+
+
+def test_observability_nonretryable_failure_emits_nonretryable_status(
+    tmp_path: Path,
+) -> None:
+    result, counter = _run_wrapper(tmp_path, "deterministic_failure")
+    output = result.stderr
+
+    assert result.returncode == 1
+    assert counter.read_text(encoding="utf-8").strip() == "1"
+    assert output.count("docker-build-start") == 1
+    assert output.count("docker-build-end") == 1
+    assert (
+        "docker-build-end phase=Dockerfile.test runner=unknown run_id=unknown "
+        "job=unknown attempt=1/3 status=nonretryable_failure"
+        in output
+    )
+    assert re.search(r"status=nonretryable_failure duration_s=\d+", output)
+
+
+def test_observability_exhaustion_emits_transient_failure_status(
+    tmp_path: Path,
+) -> None:
+    result, counter = _run_wrapper(tmp_path, "persistent_transient")
+    output = result.stderr
+    lines = [line for line in output.splitlines() if line.strip()]
+    starts = [line for line in lines if "docker-build-start" in line]
+    ends = [line for line in lines if "docker-build-end" in line]
+
+    assert result.returncode == 1
+    assert counter.read_text(encoding="utf-8").strip() == "3"
+    assert len(starts) == 3
+    assert len(ends) == 3
+    for index, attempt in enumerate(("1", "2", "3")):
+        assert f"attempt={attempt}/3" in ends[index]
+        assert "status=transient_failure" in ends[index]
+        assert re.search(r"status=transient_failure duration_s=\d+", ends[index])
+    for index in range(2):
+        assert lines.index(ends[index]) < lines.index(starts[index + 1])
+    assert "failed after 3/3 transient-network attempts" in output
+
+
+def test_observability_sanitizes_phase_runner_run_id_and_job(
+    tmp_path: Path,
+) -> None:
+    env, counter = _fake_docker(tmp_path, "always_success")
+    env["RUNNER_NAME"] = "My Runner/Box:1"
+    env["GITHUB_RUN_ID"] = "42$17"
+    env["GITHUB_JOB"] = "build-job"
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "--build-arg", "X=1", "-f", "My Dockerfile:latest", "."],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    output = result.stderr
+
+    assert result.returncode == 0
+    assert counter.read_text(encoding="utf-8").strip() == "1"
+    identity = (
+        "phase=My_Dockerfile_latest runner=My_Runner_Box_1 "
+        "run_id=42_17 job=build-job"
+    )
+    assert f"docker-build-start {identity}" in output
+    assert f"docker-build-end {identity} attempt=1/3 status=success" in output
+    assert "My Runner" not in output
+    assert "42$17" not in output
+
+
+def test_observability_empty_env_renders_unknown(tmp_path: Path) -> None:
+    env, counter = _fake_docker(tmp_path, "always_success")
+    for key in ("RUNNER_NAME", "GITHUB_RUN_ID", "GITHUB_JOB"):
+        env.pop(key, None)
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "-f", "Dockerfile.test", "."],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 0
+    assert counter.read_text(encoding="utf-8").strip() == "1"
+    assert (
+        "docker-build-start phase=Dockerfile.test runner=unknown run_id=unknown "
+        "job=unknown attempt=1/3"
+        in result.stderr
+    )
+    assert (
+        "docker-build-end phase=Dockerfile.test runner=unknown run_id=unknown "
+        "job=unknown attempt=1/3 status=success"
+        in result.stderr
+    )
+
+
+def test_observability_phase_forms_and_current_dockerfiles(tmp_path: Path) -> None:
+    env, _ = _fake_docker(tmp_path, "always_success")
+    cases = [
+        ("docker_Dockerfile", ["-f", "docker/Dockerfile"]),
+        ("docker_Dockerfile.mcp-server", ["--file", "docker/Dockerfile.mcp-server"]),
+        ("docker_sshd_Dockerfile", ["-f=docker/sshd/Dockerfile"]),
+        ("docker_Dockerfile", ["--file=docker/Dockerfile"]),
+        ("Dockerfile.test", ["--build-arg", "X=1", "-f", "Dockerfile.test", "."]),
+        ("unknown", ["."]),
+    ]
+    for expected, args in cases:
+        result = subprocess.run(
+            ["bash", str(SCRIPT)] + args,
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        assert result.returncode == 0, (expected, result.stderr)
+        assert f"docker-build-start phase={expected}" in result.stderr, (expected, result.stderr)
+
+
+def test_observability_argv_forwarded_to_docker_unchanged(tmp_path: Path) -> None:
+    result, counter = _run_wrapper(tmp_path, "transient_then_success")
+    args_lines = (tmp_path / "args.log").read_text(encoding="utf-8").splitlines()
+
+    assert result.returncode == 0
+    assert counter.read_text(encoding="utf-8").strip() == "2"
+    assert args_lines == [
+        "build -f Dockerfile.test --build-arg X=1 .",
+        "build -f Dockerfile.test --build-arg X=1 .",
+    ]
+
+
+def test_observability_unchanged_defaults_and_validation_exit_codes(
+    tmp_path: Path,
+) -> None:
+    env, counter = _fake_docker(tmp_path, "always_success")
+    for key in (
+        "CI_DOCKER_BUILD_MAX_ATTEMPTS",
+        "CI_DOCKER_BUILD_RETRY_DELAY_SECONDS",
+        "RUNNER_NAME",
+        "GITHUB_RUN_ID",
+        "GITHUB_JOB",
+    ):
+        env.pop(key, None)
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "-f", "Dockerfile.test", "."],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 0
+    assert counter.read_text(encoding="utf-8").strip() == "1"
+    assert (
+        "docker-build-start phase=Dockerfile.test runner=unknown run_id=unknown "
+        "job=unknown attempt=1/3"
+        in result.stderr
+    )
+
+    invalid_env = os.environ.copy()
+    invalid_env["CI_DOCKER_BUILD_MAX_ATTEMPTS"] = "0"
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "-f", "Dockerfile.test", "."],
+        cwd=ROOT,
+        env=invalid_env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 2
+    assert "invalid CI_DOCKER_BUILD_MAX_ATTEMPTS: 0" in result.stderr
+
