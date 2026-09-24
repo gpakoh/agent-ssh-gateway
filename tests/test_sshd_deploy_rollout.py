@@ -342,10 +342,15 @@ for a in "$@"; do
 done
 if [ "$mode" = "y" ]; then
   content=$(cat "$out" 2>/dev/null || true)
+  perms=$(stat -c %a "$out" 2>/dev/null || true)
   case "$content" in
-    VALID*) exit 0 ;;
+    VALID*) ;;
     *) exit 1 ;;
   esac
+  if [ "$perms" != "600" ]; then
+    exit 1
+  fi
+  exit 0
 fi
 printf 'VALID-generated-key' > "$out"
 printf 'VALID-generated-pub' > "$out.pub"
@@ -391,10 +396,14 @@ def test_sshd_entrypoint_generates_missing_keys_and_normalizes_perms(tmp_path: P
 
 
 def test_sshd_entrypoint_preserves_existing_valid_key(tmp_path: Path) -> None:
+    """A valid persisted 0644 key must be chmod 0600 before the ssh-keygen -y
+    probe and then preserved -- the entrypoint must never regenerate a key
+    that is valid but merely world-readable on disk."""
     key_dir = tmp_path / "hostkeys"
     key_dir.mkdir()
     existing = key_dir / "ssh_host_rsa_key"
     existing.write_text("VALID-existing", encoding="utf-8")
+    existing.chmod(0o644)
     gen_log = tmp_path / "gen-count"
     result = _run_entrypoint_with_fake_keygen(tmp_path, key_dir, gen_log)
     assert result.returncode == 0, result.stderr

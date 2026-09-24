@@ -17,6 +17,9 @@ ensure_host_key() {
   key_type="$1"
   key_path="$2"
   shift 2
+  if [ -f "$key_path" ]; then
+    chmod 600 "$key_path"
+  fi
   if [ ! -s "$key_path" ] || ! key_is_loadable "$key_path"; then
     rm -f "$key_path" "$key_path.pub"
     ssh-keygen -q -t "$key_type" "$@" -f "$key_path" -N ""
