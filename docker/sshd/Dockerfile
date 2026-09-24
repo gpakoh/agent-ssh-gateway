@@ -6,9 +6,10 @@ ARG OPENCODE_VERSION=1.18.16
 
 # python3: the generated agent script (agent_tools.py) runs python3 heredocs
 # on the SSH target for proxy lease (fetch) and limit reporting (report).
-# opencode: pinned release v1.18.16 matches the flags the agent script generates
-# (opencode run --dangerously-skip-permissions --model ...). Download the
-# release artifact directly so retries cover the actual binary archive rather
+# opencode: pinned release v1.18.16 is the reproducible bootstrap seed. The
+# production runner copies it into agent_runtime, runs the serialized daily
+# upgrade gate, and selects the unattended flag supported by the upgraded CLI.
+# Download the seed artifact directly so retries cover the actual binary archive
 # than only a mutable bootstrap installer. Alpine uses musl; x64 without AVX2
 # uses the baseline artifact, matching OpenCode's official installer selection.
 # Install into /usr/local/bin so `command -v opencode` resolves for mcpuser's

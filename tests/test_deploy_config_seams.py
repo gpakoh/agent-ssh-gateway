@@ -1820,9 +1820,36 @@ class TestOpenCodeProductionAdmission:
             env = services[service]["environment"]
             assert "OPENCODE_PROXY_REQUIRED=${OPENCODE_PROXY_REQUIRED:-true}" in env
 
-    def test_oauth_wires_bounded_opencode_runtime_timeout(self):
+    def test_oauth_gives_productive_agents_two_hours(self):
         env = _load_compose()["services"]["mcp-oauth"]["environment"]
-        assert "OPENCODE_RUN_TIMEOUT_SECONDS=${OPENCODE_RUN_TIMEOUT_SECONDS:-1800}" in env
+        assert "OPENCODE_RUN_TIMEOUT_SECONDS=${OPENCODE_RUN_TIMEOUT_SECONDS:-7200}" in env
+
+    def test_oauth_gates_launch_on_daily_managed_opencode_upgrade(self):
+        env = _load_compose()["services"]["mcp-oauth"]["environment"]
+        assert "OPENCODE_UPGRADE_GATE_ENABLED=${OPENCODE_UPGRADE_GATE_ENABLED:-true}" in env
+        assert (
+            "OPENCODE_UPGRADE_INTERVAL_SECONDS="
+            "${OPENCODE_UPGRADE_INTERVAL_SECONDS:-86400}"
+        ) in env
+        assert (
+            "OPENCODE_MANAGED_BIN="
+            "${OPENCODE_MANAGED_BIN:-/var/lib/mcp-agent/opencode/bin/opencode}"
+        ) in env
+        assert (
+            "OPENCODE_UPGRADE_STATE_PATH="
+            "${OPENCODE_UPGRADE_STATE_PATH:-/var/lib/mcp-agent/state/opencode-upgrade.json}"
+        ) in env
+
+    def test_oauth_rotates_stalled_startups_faster_across_more_proxies(self):
+        env = _load_compose()["services"]["mcp-oauth"]["environment"]
+        assert (
+            "OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS="
+            "${OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS:-45}"
+        ) in env
+        assert (
+            "OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS="
+            "${OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS:-6}"
+        ) in env
 
     def test_dynamic_startup_reservation_is_configured(self):
         env = _load_compose()["services"]["mcp-oauth"]["environment"]

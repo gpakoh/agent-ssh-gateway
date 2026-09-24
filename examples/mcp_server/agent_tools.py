@@ -1257,7 +1257,7 @@ def _agent_runtime_status_script_lines() -> list[str]:
 
 
 def _opencode_startup_watchdog_script_lines(
-    opencode_flags: str,
+    opencode_model_arg: str,
     startup_timeout_seconds: int,
     kill_grace_seconds: int,
     runtime_timeout_seconds: int,
@@ -1267,6 +1267,8 @@ def _opencode_startup_watchdog_script_lines(
         "$td/GATES.md, then execute the scoped work fully. "
         "Use the gates to organize evidence, but do not edit or weaken "
         "task.json/GATES.md and do not declare the finding or project closed/ready. "
+        "Work autonomously inside the scoped workspace, use any local tools needed, "
+        "and do not pause for interactive confirmation. "
         "Save the implementation diff to $td/implementation-diff.patch. "
         "Update $td/agent-status.md as you complete each step. "
         "Do not commit, do not push, do not create branches."
@@ -1335,11 +1337,11 @@ def _opencode_startup_watchdog_script_lines(
         "  OPENCODE_PRE_USEFUL_RETRY=0",
         "  FAILURE_REASON=",
         '  if command -v setsid >/dev/null 2>&1; then',
-        f'    setsid "$OPCODE_BIN" run {opencode_flags} < /dev/null "{prompt}" > "$RUNNER_OUTPUT_LOG" 2>&1 &',
+        f'    setsid "$OPCODE_BIN" run "$OPENCODE_PERMISSION_FLAG"{opencode_model_arg} < /dev/null "{prompt}" > "$RUNNER_OUTPUT_LOG" 2>&1 &',
         "    OPENCODE_PID=$!",
         "    OPENCODE_PROCESS_GROUP=1",
         "  else",
-        f'    "$OPCODE_BIN" run {opencode_flags} < /dev/null "{prompt}" > "$RUNNER_OUTPUT_LOG" 2>&1 &',
+        f'    "$OPCODE_BIN" run "$OPENCODE_PERMISSION_FLAG"{opencode_model_arg} < /dev/null "{prompt}" > "$RUNNER_OUTPUT_LOG" 2>&1 &',
         "    OPENCODE_PID=$!",
         "    OPENCODE_PROCESS_GROUP=0",
         "  fi",
@@ -1915,6 +1917,286 @@ def _supervisor_postrun_script_lines(
     return lines
 
 
+_OPENCODE_UPGRADE_GATE_PY = """\
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+seed = Path(sys.argv[1])
+managed = Path(sys.argv[2])
+state_path = Path(sys.argv[3])
+interval = int(sys.argv[4])
+timeout = int(sys.argv[5])
+# Only the explicit serialized command may update the shared executable.
+os.environ["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
+
+
+def fail(reason, detail):
+    payload = {
+        "version": 1,
+        "status": "failed",
+        "reason": reason,
+        "detail": " ".join(str(detail).split())[-4096:],
+    }
+    print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    raise SystemExit(1)
+
+
+def regular_file(path, label):
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        fail(f"{label}_unavailable", exc)
+    if path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        fail(f"{label}_unsafe", "expected one regular, non-symlink inode")
+    return info
+
+
+def digest_file(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def command(argv, command_timeout):
+    try:
+        result = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=command_timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        fail("command_failed", exc)
+    return result
+
+
+def binary_version(path):
+    result = command([str(path), "--version"], min(timeout, 30))
+    if result.returncode != 0:
+        fail("version_probe_failed", result.stdout)
+    version = " ".join(result.stdout.split())[:200]
+    if not version:
+        fail("version_probe_failed", "empty version output")
+    return version
+
+
+def permission_flag(path):
+    result = command([str(path), "run", "--help"], min(timeout, 30))
+    if result.returncode != 0:
+        fail("run_help_failed", result.stdout)
+    if "--dangerously-skip-permissions" in result.stdout:
+        return "--dangerously-skip-permissions"
+    if "--auto" in result.stdout:
+        return "--auto"
+    fail("permission_mode_unsupported", "run help exposes no unattended permission flag")
+
+
+def atomic_json(path, payload):
+    fd, tmp_raw = tempfile.mkstemp(prefix=".opencode-upgrade-", dir=str(path.parent))
+    tmp = Path(tmp_raw)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+if interval <= 0 or timeout <= 0:
+    fail("invalid_config", "interval and timeout must be positive")
+managed.parent.mkdir(parents=True, exist_ok=True)
+state_path.parent.mkdir(parents=True, exist_ok=True)
+lock_path = state_path.with_name(state_path.name + ".lock")
+lock_flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+try:
+    lock_fd = os.open(lock_path, lock_flags, 0o600)
+except OSError as exc:
+    fail("lock_unavailable", exc)
+
+with os.fdopen(lock_fd, "a+") as lock_handle:
+    lock_info = os.fstat(lock_handle.fileno())
+    if not stat.S_ISREG(lock_info.st_mode) or lock_info.st_nlink != 1:
+        fail("lock_unsafe", "upgrade lock is not one regular inode")
+    fcntl.flock(lock_handle, fcntl.LOCK_EX)
+
+    if not managed.exists():
+        regular_file(seed, "seed_binary")
+        fd, tmp_raw = tempfile.mkstemp(prefix=".opencode-seed-", dir=str(managed.parent))
+        os.close(fd)
+        tmp = Path(tmp_raw)
+        try:
+            shutil.copyfile(seed, tmp)
+            os.chmod(tmp, 0o755)
+            os.replace(tmp, managed)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    regular_file(managed, "managed_binary")
+    now = int(time.time())
+    current_digest = digest_file(managed)
+    receipt = None
+    try:
+        state_info = state_path.lstat()
+        if (
+            not state_path.is_symlink()
+            and stat.S_ISREG(state_info.st_mode)
+            and state_info.st_nlink == 1
+        ):
+            receipt = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        receipt = None
+
+    if isinstance(receipt, dict):
+        checked_at = receipt.get("checked_at_epoch")
+        age = now - checked_at if isinstance(checked_at, int) else -1
+        if (
+            receipt.get("version") == 1
+            and 0 <= age < interval
+            and receipt.get("binary_sha256") == current_digest
+            and receipt.get("permission_flag")
+            in {"--dangerously-skip-permissions", "--auto"}
+        ):
+            response = dict(receipt)
+            response["gate_status"] = "fresh"
+            print(json.dumps(response, sort_keys=True, separators=(",", ":")))
+            raise SystemExit(0)
+
+    version_before = binary_version(managed)
+    upgrade_env = os.environ.copy()
+    upgrade_env.pop("OPENCODE_DISABLE_AUTOUPDATE", None)
+    upgrade_env["OPENCODE_INSTALL_DIR"] = str(managed.parent)
+    try:
+        upgraded = subprocess.run(
+            [str(managed), "upgrade", "--method", "curl"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+            env=upgrade_env,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        fail("upgrade_command_failed", exc)
+    if upgraded.returncode != 0:
+        fail("upgrade_command_failed", upgraded.stdout)
+
+    regular_file(managed, "managed_binary")
+    version_after = binary_version(managed)
+    normalized_output = " ".join(upgraded.stdout.lower().split())
+    if (
+        version_after == version_before
+        and "already installed" not in normalized_output
+        and "upgrade skipped" not in normalized_output
+    ):
+        fail("upgrade_not_applied", upgraded.stdout)
+    selected_permission_flag = permission_flag(managed)
+    output_digest = hashlib.sha256(upgraded.stdout.encode("utf-8")).hexdigest()
+    receipt = {
+        "version": 1,
+        "gate_status": "checked",
+        "checked_at_epoch": int(time.time()),
+        "binary_sha256": digest_file(managed),
+        "binary_version_before": version_before,
+        "binary_version": version_after,
+        "permission_flag": selected_permission_flag,
+        "upgrade_command": ["opencode", "upgrade", "--method", "curl"],
+        "upgrade_exit_code": upgraded.returncode,
+        "upgrade_output_sha256": output_digest,
+    }
+    atomic_json(state_path, receipt)
+    print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
+"""
+
+
+def _opencode_upgrade_gate_script_lines(
+    *,
+    enabled: bool,
+    managed_bin: str,
+    state_path: str,
+    interval_seconds: int,
+    timeout_seconds: int,
+) -> list[str]:
+    """Gate worker launch on a serialized, durable daily OpenCode upgrade."""
+    permission_reader = (
+        'import json,sys; print(json.load(sys.stdin)["permission_flag"])'
+    )
+    return [
+        f"OPENCODE_UPGRADE_GATE_ENABLED={'1' if enabled else '0'}",
+        f"OPENCODE_UPGRADE_INTERVAL_SECONDS={interval_seconds}",
+        f"OPENCODE_UPGRADE_TIMEOUT_SECONDS={timeout_seconds}",
+        f"OPENCODE_MANAGED_BIN={_shell_escape(managed_bin)}",
+        f"OPENCODE_UPGRADE_STATE={_shell_escape(state_path)}",
+        "OPENCODE_UPGRADE_BLOCKED=0",
+        "OPENCODE_UPGRADE_ERROR_CLASS=",
+        "OPENCODE_PERMISSION_FLAG=",
+        'runner_artifact_remove "$td/opencode-upgrade.json"',
+        'if [ "$OPENCODE_UPGRADE_GATE_ENABLED" = "1" ]; then',
+        '  runner_artifact_write_line "$td/agent-status.md" "Status: upgrading-opencode"',
+        '  if OPENCODE_UPGRADE_RESULT=$(python3 - "$OPCODE_SEED_BIN" "$OPENCODE_MANAGED_BIN" "$OPENCODE_UPGRADE_STATE" "$OPENCODE_UPGRADE_INTERVAL_SECONDS" "$OPENCODE_UPGRADE_TIMEOUT_SECONDS" 2>&1 <<\'OPENCODE_UPGRADE_EOF\'',
+        _OPENCODE_UPGRADE_GATE_PY.rstrip("\n"),
+        "OPENCODE_UPGRADE_EOF",
+        "  ); then",
+        '    OPCODE_BIN="$OPENCODE_MANAGED_BIN"',
+        '    runner_artifact_write_line "$td/opencode-upgrade.json" "$OPENCODE_UPGRADE_RESULT"',
+        f'    OPENCODE_PERMISSION_FLAG=$(printf "%s" "$OPENCODE_UPGRADE_RESULT" | python3 -c {_shell_escape(permission_reader)}) || OPENCODE_PERMISSION_FLAG=',
+        '    runner_artifact_write_line "$td/agent-status.md" "Status: running"',
+        "  else",
+        "    OPENCODE_UPGRADE_BLOCKED=1",
+        '    OPENCODE_UPGRADE_ERROR_CLASS="opencode_upgrade_failed"',
+        "    RC=80",
+        '    FAILURE_REASON="opencode-upgrade-failed"',
+        '    runner_artifact_write_line "$td/opencode-upgrade.json" "$OPENCODE_UPGRADE_RESULT"',
+        '    runner_artifact_append_line "$td/agent-status.md" "OpenCode daily upgrade failed; agent launch blocked"',
+        "  fi",
+        "else",
+        '  OPCODE_BIN="$OPCODE_SEED_BIN"',
+        '  OPENCODE_PERMISSION_FLAG="--dangerously-skip-permissions"',
+        "fi",
+        'if [ "$OPENCODE_UPGRADE_BLOCKED" -eq 0 ]; then',
+        '  case "$OPENCODE_PERMISSION_FLAG" in',
+        '    --dangerously-skip-permissions|--auto) ;;',
+        "    *)",
+        "      OPENCODE_UPGRADE_BLOCKED=1",
+        '      OPENCODE_UPGRADE_ERROR_CLASS="opencode_permission_mode_unsupported"',
+        "      RC=80",
+        '      FAILURE_REASON="opencode-permission-mode-unsupported"',
+        '      runner_artifact_append_line "$td/agent-status.md" "OpenCode unattended permission mode unavailable; agent launch blocked"',
+        "      ;;",
+        "  esac",
+        "fi",
+        # The explicit daily gate owns upgrades; worker starts must not race it.
+        "export OPENCODE_DISABLE_AUTOUPDATE=1",
+    ]
+
+
 _WORKER_SECURE_COPY_PY = """\
 import hashlib
 import os
@@ -2019,9 +2301,7 @@ def _build_opencode_script(
     managed_source_path: str | None = None,
     managed_source_sha256: str | None = None,
 ) -> str:
-    opencode_flags = "--dangerously-skip-permissions"
-    if model:
-        opencode_flags += f" --model {_shell_escape(model)}"
+    opencode_model_arg = f" --model {_shell_escape(model)}" if model else ""
 
     proxy_provider_url = os.environ.get("OPENCODE_PROXY_PROVIDER_URL", "").strip()
     proxy_timeout = os.environ.get("OPENCODE_PROXY_PROVIDER_TIMEOUT", "5").strip() or "5"
@@ -2034,10 +2314,33 @@ def _build_opencode_script(
     startup_reserve_seconds = int(os.environ.get("OPENCODE_STARTUP_RESERVE_SECONDS", "60"))
     admission_wait_seconds = int(os.environ.get("OPENCODE_ADMISSION_WAIT_SECONDS", "300"))
     admission_poll_seconds = int(os.environ.get("OPENCODE_ADMISSION_POLL_SECONDS", "2"))
-    startup_response_timeout_seconds = int(os.environ.get("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "60"))
-    startup_kill_grace_seconds = int(os.environ.get("OPENCODE_STARTUP_KILL_GRACE_SECONDS", "5"))
-    startup_max_proxy_attempts = int(os.environ.get("OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS", "4"))
-    runtime_timeout_seconds = int(os.environ.get("OPENCODE_RUN_TIMEOUT_SECONDS", "1800"))
+    startup_response_timeout_seconds = int(
+        os.environ.get("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "45")
+    )
+    startup_kill_grace_seconds = int(
+        os.environ.get("OPENCODE_STARTUP_KILL_GRACE_SECONDS", "5")
+    )
+    startup_max_proxy_attempts = int(
+        os.environ.get("OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS", "6")
+    )
+    runtime_timeout_seconds = int(os.environ.get("OPENCODE_RUN_TIMEOUT_SECONDS", "7200"))
+    upgrade_gate_enabled = os.environ.get(
+        "OPENCODE_UPGRADE_GATE_ENABLED", "false"
+    ).strip().lower() not in {"0", "false", "no", "off"}
+    upgrade_interval_seconds = int(
+        os.environ.get("OPENCODE_UPGRADE_INTERVAL_SECONDS", "86400")
+    )
+    upgrade_timeout_seconds = int(
+        os.environ.get("OPENCODE_UPGRADE_TIMEOUT_SECONDS", "600")
+    )
+    upgrade_managed_bin = os.environ.get(
+        "OPENCODE_MANAGED_BIN",
+        "/var/lib/mcp-agent/opencode/bin/opencode",
+    ).strip()
+    upgrade_state_path = os.environ.get(
+        "OPENCODE_UPGRADE_STATE_PATH",
+        "/var/lib/mcp-agent/state/opencode-upgrade.json",
+    ).strip()
     if (
         startup_reserve_bytes < 0
         or startup_reserve_seconds < 0
@@ -2047,8 +2350,15 @@ def _build_opencode_script(
         or startup_kill_grace_seconds < 0
         or startup_max_proxy_attempts <= 0
         or runtime_timeout_seconds <= 0
+        or upgrade_interval_seconds <= 0
+        or upgrade_timeout_seconds <= 0
     ):
         raise ValueError("OpenCode admission timing/reserve values are invalid")
+    if upgrade_gate_enabled and (
+        not os.path.isabs(upgrade_managed_bin)
+        or not os.path.isabs(upgrade_state_path)
+    ):
+        raise ValueError("OpenCode upgrade paths must be absolute")
     allowed_files = list(allowed_files or [])
     forbidden_files = list(forbidden_files or [])
     required_checks = list(required_checks or [])
@@ -2126,7 +2436,7 @@ def _build_opencode_script(
         parts.append(f"td={_shell_escape(os.path.join(project_root, td))}")
     else:
         parts.append(f"td='{td}'")
-    parts.append("OPCODE_BIN=$(command -v opencode 2>/dev/null || echo '/root/.opencode/bin/opencode')")
+    parts.append("OPCODE_SEED_BIN=$(command -v opencode 2>/dev/null || echo '/usr/local/bin/opencode')")
     parts.extend(_runner_artifact_io_script_lines())
     parts.append('runner_artifact_verify_dir "$td"')
     parts.extend(_agent_runtime_status_script_lines())
@@ -2258,8 +2568,17 @@ def _build_opencode_script(
         "}",
     ])
     parts.extend(
+        _opencode_upgrade_gate_script_lines(
+            enabled=upgrade_gate_enabled,
+            managed_bin=upgrade_managed_bin,
+            state_path=upgrade_state_path,
+            interval_seconds=upgrade_interval_seconds,
+            timeout_seconds=upgrade_timeout_seconds,
+        )
+    )
+    parts.extend(
         _opencode_startup_watchdog_script_lines(
-            opencode_flags,
+            opencode_model_arg,
             startup_response_timeout_seconds,
             startup_kill_grace_seconds,
             runtime_timeout_seconds,
@@ -2302,8 +2621,10 @@ def _build_opencode_script(
             [
                 f"OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS={startup_max_proxy_attempts}",
                 "OPENCODE_PROXY_ATTEMPT=1",
-                'write_proxy_status acquiring "" 0',
-                "acquire_opencode_proxy",
+                'if [ "$OPENCODE_UPGRADE_BLOCKED" -eq 0 ]; then',
+                '  write_proxy_status acquiring "" 0',
+                "  acquire_opencode_proxy",
+                "fi",
             ]
         )
     startup_retry_lines: list[str] = []
@@ -2343,7 +2664,9 @@ def _build_opencode_script(
             "fi",
         ]
     parts.extend([
-        'if [ "$PROXY_BLOCKED" -eq 1 ]; then',
+        'if [ "$OPENCODE_UPGRADE_BLOCKED" -eq 1 ]; then',
+        "  RC=80",
+        'elif [ "$PROXY_BLOCKED" -eq 1 ]; then',
         "  RC=76",
         'elif [ -f "$td/current-plan.md" ]; then',
         # stdin must be /dev/null for opencode: the script itself is piped
@@ -2395,6 +2718,7 @@ def _build_opencode_script(
         'runner_artifact_remove "$td/parent-index-tree-after.txt"',
         'runner_artifact_remove "$td/parent-tree-after.txt"',
         'runner_artifact_remove "$td/.supervisor-index"',
+        'if [ -n "${OPENCODE_UPGRADE_RESULT:-}" ]; then runner_artifact_write_line "$td/opencode-upgrade.json" "$OPENCODE_UPGRADE_RESULT"; fi',
     ])
     if proxy_provider_url:
         parts.extend(
@@ -2419,6 +2743,8 @@ def _build_opencode_script(
         proxy_final_status_lines = [
             'if [ "$FINAL_RC" -eq 0 ]; then',
             '  write_proxy_status completed "" 1',
+            'elif [ "$FINAL_RC" -eq 80 ]; then',
+            '  write_proxy_status upgrade_blocked "${OPENCODE_UPGRADE_ERROR_CLASS:-opencode_upgrade_failed}" 1',
             'elif [ "$FINAL_RC" -eq 77 ]; then',
             '  write_proxy_status rate_limited rate_limited 1',
             'elif [ "$FINAL_RC" -eq 78 ]; then',
@@ -2440,6 +2766,7 @@ def _build_opencode_script(
             'if [ "$FINAL_RC" -eq 77 ] && [ "${RATE_LIMITED:-0}" != "1" ]; then FINAL_RC=1; fi',
             'if [ "$FINAL_RC" -eq 78 ] && [ "${FAILURE_REASON:-}" != "opencode-startup-timeout" ]; then FINAL_RC=1; fi',
             'if [ "$FINAL_RC" -eq 79 ] && [ "${FAILURE_REASON:-}" != "opencode-run-timeout" ]; then FINAL_RC=1; fi',
+            'if [ "$FINAL_RC" -eq 80 ] && [ "${FAILURE_REASON:-}" != "opencode-upgrade-failed" ] && [ "${FAILURE_REASON:-}" != "opencode-permission-mode-unsupported" ]; then FINAL_RC=1; fi',
             *proxy_final_status_lines,
             'if [ $FINAL_RC -eq 0 ] && [ "${CHECKS_WARNING:-0}" -eq 1 ]; then',
             '  runner_artifact_write_line "$td/agent-status.md" "Status: needs-review-warning"',
@@ -2453,6 +2780,8 @@ def _build_opencode_script(
             '  runner_artifact_write_line "$td/agent-status.md" "Status: startup-timeout"',
             'elif [ $FINAL_RC -eq 79 ]; then',
             '  runner_artifact_write_line "$td/agent-status.md" "Status: run-timeout"',
+            'elif [ $FINAL_RC -eq 80 ]; then',
+            '  runner_artifact_write_line "$td/agent-status.md" "Status: upgrade-blocked"',
             'elif [ $FINAL_RC -eq 137 ]; then',
             '  runner_artifact_write_line "$td/agent-status.md" "Status: resource-exhausted"',
             "else",
