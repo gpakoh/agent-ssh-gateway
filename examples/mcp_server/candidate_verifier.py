@@ -914,6 +914,7 @@ def build_ephemeral_verifier_argv(
     return [
         "docker",
         "run",
+        "-i",
         "--rm",
         "--name",
         execution_container_name,

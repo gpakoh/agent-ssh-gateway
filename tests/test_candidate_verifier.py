@@ -232,6 +232,7 @@ def test_ephemeral_docker_argv_has_narrow_security_boundary(
         image="registry.invalid/ssh-gateway-sshd:deadbeef",
         timeout_seconds=120,
     )
+    assert argv[:3] == ["docker", "run", "-i"]
     joined = " ".join(argv)
     for token in (
         "--rm",
