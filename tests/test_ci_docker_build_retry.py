@@ -79,6 +79,8 @@ esac
 
 def _run_wrapper(tmp_path: Path, mode: str) -> tuple[subprocess.CompletedProcess[str], Path]:
     env, counter = _fake_docker(tmp_path, mode)
+    for key in ("RUNNER_NAME", "GITHUB_RUN_ID", "GITHUB_JOB"):
+        env.pop(key, None)
     result = subprocess.run(
         ["bash", str(SCRIPT), "-f", "Dockerfile.test", "--build-arg", "X=1", "."],
         cwd=ROOT,
