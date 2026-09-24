@@ -23,20 +23,64 @@ is_transient_network_failure() {
     "$log_file"
 }
 
+sanitize() {
+  local value="${1:-}"
+  if [ -z "$value" ]; then
+    printf 'unknown'
+    return 0
+  fi
+  printf '%s' "$value" | tr -c 'A-Za-z0-9._-' '_'
+}
+
+phase="unknown"
+expect_dockerfile=0
+for arg in "$@"; do
+  if [ "$expect_dockerfile" -eq 1 ]; then
+    phase=$(sanitize "$arg")
+    expect_dockerfile=0
+    continue
+  fi
+  case "$arg" in
+    -f|--file)
+      expect_dockerfile=1
+      ;;
+    -f=*|--file=*)
+      phase=$(sanitize "${arg#*=}")
+      ;;
+    *)
+      ;;
+  esac
+done
+
+runner=$(sanitize "${RUNNER_NAME:-}")
+run_id=$(sanitize "${GITHUB_RUN_ID:-}")
+job=$(sanitize "${GITHUB_JOB:-}")
+
+notice() {
+  printf '::notice::docker-build-%s %s\n' "$1" "$2" >&2
+}
+
 attempt=1
 while [ "$attempt" -le "$max_attempts" ]; do
   : > "$log_file"
+  start_epoch=$(date +%s)
+  notice start "phase=${phase} runner=${runner} run_id=${run_id} job=${job} attempt=${attempt}/${max_attempts}"
   docker build "$@" 2>&1 | tee "$log_file"
   rc=${PIPESTATUS[0]}
+  duration_s=$(( $(date +%s) - start_epoch ))
 
   if [ "$rc" -eq 0 ]; then
+    notice end "phase=${phase} runner=${runner} run_id=${run_id} job=${job} attempt=${attempt}/${max_attempts} status=success duration_s=${duration_s}"
     exit 0
   fi
 
   if ! is_transient_network_failure; then
+    notice end "phase=${phase} runner=${runner} run_id=${run_id} job=${job} attempt=${attempt}/${max_attempts} status=nonretryable_failure duration_s=${duration_s}"
     echo "docker build failed with a non-retryable error; not retrying" >&2
     exit "$rc"
   fi
+
+  notice end "phase=${phase} runner=${runner} run_id=${run_id} job=${job} attempt=${attempt}/${max_attempts} status=transient_failure duration_s=${duration_s}"
 
   if [ "$attempt" -ge "$max_attempts" ]; then
     echo "docker build failed after ${attempt}/${max_attempts} transient-network attempts" >&2
@@ -51,3 +95,4 @@ while [ "$attempt" -le "$max_attempts" ]; do
 done
 
 exit 1
+
