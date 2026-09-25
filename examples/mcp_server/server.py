@@ -483,6 +483,7 @@ gitea_get_pull_request = remote.gitea_get_pull_request
 gitea_list_action_runs = remote.gitea_list_action_runs
 gitea_get_action_run = remote.gitea_get_action_run
 gitea_list_action_run_jobs = remote.gitea_list_action_run_jobs
+gitea_list_action_jobs = remote.gitea_list_action_jobs
 gitea_get_action_job_logs = remote.gitea_get_action_job_logs
 gitea_list_workflows = remote.gitea_list_workflows
 github_get_repo = remote.github_get_repo

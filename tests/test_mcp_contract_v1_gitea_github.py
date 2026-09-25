@@ -240,6 +240,54 @@ class TestGiteaToolsContractV1:
         list_branches.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_gitea_list_action_jobs_returns_contract_v1_result(self, monkeypatch):
+        payload = {
+            "total_count": 1,
+            "jobs": [
+                {
+                    "id": 10,
+                    "run_id": 5,
+                    "run_attempt": 1,
+                    "head_branch": "main",
+                    "head_sha": "0" * 40,
+                    "name": "lint",
+                    "status": "in_progress",
+                    "conclusion": None,
+                    "runner_id": 7,
+                    "runner_name": "runner-7",
+                    "started_at": "2026-01-01T00:00:00Z",
+                    "completed_at": None,
+                    "url": "https://git.example/jobs/10",
+                    "run_url": "https://git.example/runs/5",
+                }
+            ],
+        }
+        methods = {"list_action_jobs": AsyncMock(return_value=payload)}
+        monkeypatch.setattr(
+            mcp_server_mod, "GiteaClient", lambda token: _FakeRemoteClient(methods)
+        )
+        monkeypatch.setenv("GITEA_TOKEN", "tok")
+
+        result = await mcp_server_mod.gitea_list_action_jobs(
+            "gpakoh",
+            "web-ssh-gateway",
+            status="running",
+            page=2,
+            limit=25,
+        )
+
+        _assert_envelope(result)
+        assert result["meta"]["source"] == "gitea"
+        assert result["result"] == payload
+        methods["list_action_jobs"].assert_awaited_once_with(
+            "gpakoh",
+            "web-ssh-gateway",
+            status="running",
+            page=2,
+            limit=25,
+        )
+
+    @pytest.mark.asyncio
     async def test_gitea_get_action_job_logs_returns_bounded_contract_result(self, monkeypatch):
         payload = {
             "job_id": 39251,
