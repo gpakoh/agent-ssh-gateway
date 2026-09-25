@@ -2089,35 +2089,87 @@ with os.fdopen(lock_fd, "a+") as lock_handle:
     version_before = binary_version(managed)
     upgrade_env = os.environ.copy()
     upgrade_env.pop("OPENCODE_DISABLE_AUTOUPDATE", None)
+    # Current OpenCode curl installers write to $HOME/.opencode/bin even when
+    # OPENCODE_INSTALL_DIR is supplied. Isolate that installer output, validate
+    # it, and atomically adopt it into the configured managed path. Keep
+    # OPENCODE_INSTALL_DIR set so a future upstream installer may update the
+    # managed path directly without changing this gate contract.
+    try:
+        upgrade_home = Path(
+            tempfile.mkdtemp(
+                prefix=".opencode-upgrade-home-", dir=str(state_path.parent)
+            )
+        )
+    except OSError as exc:
+        fail("upgrade_staging_unavailable", exc)
+    upgrade_env["HOME"] = str(upgrade_home)
     upgrade_env["OPENCODE_INSTALL_DIR"] = str(managed.parent)
     try:
-        upgraded = subprocess.run(
-            [str(managed), "upgrade", "--method", "curl"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            check=False,
-            env=upgrade_env,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        fail("upgrade_command_failed", exc)
-    if upgraded.returncode != 0:
-        fail("upgrade_command_failed", upgraded.stdout)
+        try:
+            upgraded = subprocess.run(
+                [str(managed), "upgrade", "--method", "curl"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                check=False,
+                env=upgrade_env,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            fail("upgrade_command_failed", exc)
+        if upgraded.returncode != 0:
+            fail("upgrade_command_failed", upgraded.stdout)
 
-    regular_file(managed, "managed_binary")
-    version_after = binary_version(managed)
-    normalized_output = " ".join(upgraded.stdout.lower().split())
-    if (
-        version_after == version_before
-        and "already installed" not in normalized_output
-        and "upgrade skipped" not in normalized_output
-    ):
-        fail("upgrade_not_applied", upgraded.stdout)
-    selected_permission_flag = permission_flag(managed)
+        staged = upgrade_home / ".opencode" / "bin" / "opencode"
+        if staged.exists():
+            staged_info = regular_file(staged, "upgrade_binary")
+            staged_mode = stat.S_IMODE(staged_info.st_mode)
+            if (staged_mode & 0o111) == 0:
+                fail("upgrade_binary_unsafe", "staged binary is not executable")
+            # Reject a corrupt/incompatible installer result before replacing
+            # the last known-good managed binary.
+            binary_version(staged)
+            permission_flag(staged)
+
+            fd, tmp_raw = tempfile.mkstemp(
+                prefix=".opencode-upgrade-bin-", dir=str(managed.parent)
+            )
+            tmp = Path(tmp_raw)
+            try:
+                with staged.open("rb") as source, os.fdopen(fd, "wb") as target:
+                    shutil.copyfileobj(source, target)
+                    target.flush()
+                    os.fsync(target.fileno())
+                os.chmod(tmp, staged_mode)
+                regular_file(tmp, "upgrade_binary")
+                os.replace(tmp, managed)
+                directory_fd = os.open(
+                    managed.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                )
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except OSError as exc:
+                fail("upgrade_adoption_failed", exc)
+            finally:
+                tmp.unlink(missing_ok=True)
+
+        regular_file(managed, "managed_binary")
+        version_after = binary_version(managed)
+        normalized_output = " ".join(upgraded.stdout.lower().split())
+        if (
+            version_after == version_before
+            and "already installed" not in normalized_output
+            and "upgrade skipped" not in normalized_output
+        ):
+            fail("upgrade_not_applied", upgraded.stdout)
+        selected_permission_flag = permission_flag(managed)
+    finally:
+        shutil.rmtree(upgrade_home, ignore_errors=True)
     output_digest = hashlib.sha256(upgraded.stdout.encode("utf-8")).hexdigest()
     receipt = {
         "version": 1,
