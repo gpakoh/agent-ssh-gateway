@@ -462,6 +462,14 @@ def _configured_workflow_count(payload: Any) -> int | None:
     return None
 
 
+def _run_ids_descend_from(run_ids: list[int], previous_oldest_id: int | None) -> bool:
+    if any(left <= right for left, right in zip(run_ids, run_ids[1:], strict=False)):
+        return False
+    if not run_ids or previous_oldest_id is None:
+        return True
+    return run_ids[0] < previous_oldest_id
+
+
 def _validated_action_run_page(
     payload: Any,
 ) -> tuple[int, list[dict[str, Any]], list[int]] | None:
@@ -549,43 +557,59 @@ async def _gitea_ci_evidence(
     first_page = _validated_action_run_page(first_payload)
     if first_page is None:
         return "CI_EVIDENCE_INCOMPLETE"
-    expected_total, runs, first_page_ids = first_page
-    if expected_total > _GITEA_CI_MAX_RUNS or len(runs) > expected_total:
-        return "CI_EVIDENCE_INCOMPLETE"
-    if len(runs) < expected_total and len(runs) < _GITEA_CI_PAGE_LIMIT:
-        return "CI_EVIDENCE_INCOMPLETE"
+    expected_total, _, first_page_ids = first_page
 
-    all_runs = list(runs)
-    seen_ids = set(first_page_ids)
+    page = first_page
     page_number = 1
-    while len(all_runs) < expected_total:
-        if page_number >= _GITEA_CI_MAX_PAGES or len(all_runs) >= _GITEA_CI_MAX_RUNS:
+    scanned_runs = 0
+    oldest_seen_id: int | None = None
+    seen_ids: set[int] = set()
+    saw_exact_head_run = False
+    latest_exact_head_run: dict[str, Any] | None = None
+    while True:
+        total_count, page_runs, page_run_ids = page
+        if total_count != expected_total:
             return "CI_EVIDENCE_INCOMPLETE"
-        page_number += 1
+        if scanned_runs + len(page_runs) > expected_total:
+            return "CI_EVIDENCE_INCOMPLETE"
+        if any(run_id in seen_ids for run_id in page_run_ids):
+            return "CI_EVIDENCE_INCOMPLETE"
+        if not _run_ids_descend_from(page_run_ids, oldest_seen_id):
+            return "CI_EVIDENCE_INCOMPLETE"
+        if (
+            scanned_runs + len(page_runs) < expected_total
+            and len(page_runs) < _GITEA_CI_PAGE_LIMIT
+        ):
+            return "CI_EVIDENCE_INCOMPLETE"
+        seen_ids.update(page_run_ids)
+        if page_run_ids:
+            oldest_seen_id = page_run_ids[-1]
+        scanned_runs += len(page_runs)
+        for run in page_runs:
+            if run.get("head_sha") != expected_head_sha:
+                continue
+            saw_exact_head_run = True
+            if run.get("event") == "pull_request" and latest_exact_head_run is None:
+                latest_exact_head_run = run
+        if latest_exact_head_run is not None or scanned_runs >= expected_total:
+            break
+        if page_number >= _GITEA_CI_MAX_PAGES or scanned_runs >= _GITEA_CI_MAX_RUNS:
+            return "CI_EVIDENCE_INCOMPLETE"
         try:
             page_payload = await client.list_action_runs(
                 owner,
                 repo,
                 status=None,
                 limit=_GITEA_CI_PAGE_LIMIT,
-                page=page_number,
+                page=page_number + 1,
             )
         except GiteaActionRunResponseError:
             return "CI_EVIDENCE_INCOMPLETE"
-        page = _validated_action_run_page(page_payload)
-        if page is None:
+        next_page = _validated_action_run_page(page_payload)
+        if next_page is None:
             return "CI_EVIDENCE_INCOMPLETE"
-        total_count, page_runs, page_run_ids = page
-        if total_count != expected_total:
-            return "CI_EVIDENCE_INCOMPLETE"
-        if len(all_runs) + len(page_runs) > expected_total:
-            return "CI_EVIDENCE_INCOMPLETE"
-        if any(run_id in seen_ids for run_id in page_run_ids):
-            return "CI_EVIDENCE_INCOMPLETE"
-        all_runs.extend(page_runs)
-        seen_ids.update(page_run_ids)
-        if len(all_runs) < expected_total and len(page_runs) < _GITEA_CI_PAGE_LIMIT:
-            return "CI_EVIDENCE_INCOMPLETE"
+        page = next_page
+        page_number += 1
 
     try:
         reread_payload = await client.list_action_runs(
@@ -604,20 +628,13 @@ async def _gitea_ci_evidence(
     if reread_total != expected_total or reread_ids != first_page_ids:
         return "CI_EVIDENCE_INCOMPLETE"
 
-    exact_head_runs = [
-        run for run in all_runs if run.get("head_sha") == expected_head_sha
-    ]
-    if not exact_head_runs:
-        return "NO_REQUIRED_RUN_FOUND"
-    pull_request_runs = [
-        run for run in exact_head_runs if run.get("event") == "pull_request"
-    ]
-    if not pull_request_runs:
+    if latest_exact_head_run is None:
+        if not saw_exact_head_run:
+            return "NO_REQUIRED_RUN_FOUND"
         return "CI_TRIGGER_INCOMPATIBLE"
-    latest_run = max(pull_request_runs, key=lambda run: run["id"])
     if (
-        latest_run.get("status") != "completed"
-        or latest_run.get("conclusion") != "success"
+        latest_exact_head_run.get("status") != "completed"
+        or latest_exact_head_run.get("conclusion") != "success"
     ):
         return "CI_NOT_GREEN"
     return "CI_GREEN"

@@ -255,6 +255,29 @@ def _ci_page(runs: list[object], total_count: int | None = None) -> dict[str, ob
     }
 
 
+def _ci_descending_page(
+    start_id: int,
+    count: int,
+    *,
+    total_count: int,
+    head_sha: str = "c" * 40,
+    event: str = "pull_request",
+    conclusion: str | None = "success",
+) -> dict[str, object]:
+    return _ci_page(
+        [
+            _ci_run(
+                start_id - index,
+                head_sha=head_sha,
+                event=event,
+                conclusion=conclusion,
+            )
+            for index in range(count)
+        ],
+        total_count=total_count,
+    )
+
+
 async def _ci_evidence_status(
     action_pages: list[object],
     workflow_payload: object = _DEFAULT_WORKFLOW_PAYLOAD,
@@ -326,9 +349,9 @@ async def test_ci_evidence_distinguishes_no_exact_head_from_incompatible_trigger
 
 @pytest.mark.asyncio
 async def test_ci_evidence_finds_exact_head_pull_request_run_on_later_page():
-    first_runs = [_ci_run(100 + index, head_sha="c" * 40) for index in range(50)]
-    first_page = _ci_page(first_runs, total_count=51)
-    second_page = _ci_page([_ci_run(200)], total_count=51)
+    total_count = remote._GITEA_CI_MAX_RUNS + 431
+    first_page = _ci_descending_page(100, 50, total_count=total_count)
+    second_page = _ci_descending_page(50, 50, total_count=total_count, head_sha=SHA)
 
     status, client = await _ci_evidence_status([first_page, second_page, first_page])
 
@@ -339,16 +362,127 @@ async def test_ci_evidence_finds_exact_head_pull_request_run_on_later_page():
 
 
 @pytest.mark.asyncio
-async def test_ci_evidence_uses_highest_id_exact_head_pull_request_run():
-    successful_first = [_ci_run(10, conclusion="failure"), _ci_run(11)]
-    successful_page = _ci_page(successful_first)
-    status, _ = await _ci_evidence_status([successful_page, successful_page])
+async def test_ci_evidence_proves_green_head_on_first_page_beyond_max_runs():
+    total_count = remote._GITEA_CI_MAX_RUNS + 431
+    newest_run = _ci_run(1431, head_sha=SHA)
+    older_runs = [_ci_run(1430 - index) for index in range(remote._GITEA_CI_PAGE_LIMIT - 1)]
+    first_page = _ci_page([newest_run, *older_runs], total_count=total_count)
+
+    status, client = await _ci_evidence_status([first_page, first_page])
+
+    assert status == "CI_GREEN"
+    assert [call.kwargs["page"] for call in client.list_action_runs.await_args_list] == [1, 1]
+    assert client.list_action_runs.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_ci_evidence_fails_closed_when_bounded_prefix_exhausts_without_qualifying_run():
+    total_count = remote._GITEA_CI_MAX_RUNS + 431
+    start_id = total_count
+    pages = [
+        _ci_descending_page(
+            start_id - page_index * remote._GITEA_CI_PAGE_LIMIT,
+            remote._GITEA_CI_PAGE_LIMIT,
+            total_count=total_count,
+        )
+        for page_index in range(remote._GITEA_CI_MAX_PAGES)
+    ]
+
+    status, client = await _ci_evidence_status(pages)
+
+    assert status == "CI_EVIDENCE_INCOMPLETE"
+    assert client.list_action_runs.await_count == remote._GITEA_CI_MAX_PAGES
+    assert [call.kwargs["page"] for call in client.list_action_runs.await_args_list] == list(
+        range(1, remote._GITEA_CI_MAX_PAGES + 1)
+    )
+    assert remote._GITEA_CI_MAX_RUNS < total_count
+
+
+@pytest.mark.asyncio
+async def test_ci_evidence_fails_closed_on_run_bound_with_unscanned_history(monkeypatch):
+    total_count = remote._GITEA_CI_MAX_RUNS + 431
+    fetched_page_budget = remote._GITEA_CI_MAX_PAGES
+    monkeypatch.setattr(remote, "_GITEA_CI_MAX_PAGES", 10_000)
+    pages = [
+        _ci_descending_page(
+            total_count - page_index * remote._GITEA_CI_PAGE_LIMIT,
+            remote._GITEA_CI_PAGE_LIMIT,
+            total_count=total_count,
+        )
+        for page_index in range(fetched_page_budget)
+    ]
+
+    status, client = await _ci_evidence_status(pages)
+
+    assert status == "CI_EVIDENCE_INCOMPLETE"
+    assert client.list_action_runs.await_count == fetched_page_budget
+    assert [call.kwargs["page"] for call in client.list_action_runs.await_args_list] == list(
+        range(1, fetched_page_budget + 1)
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "first_runs",
+    [
+        [_ci_run(1), _ci_run(2)],
+        [_ci_run(2), _ci_run(1), _ci_run(3)],
+    ],
+    ids=["ascending", "reshuffled"],
+)
+async def test_ci_evidence_rejects_non_descending_run_ids_within_page(first_runs):
+    page = _ci_page(first_runs, total_count=len(first_runs))
+
+    status, client = await _ci_evidence_status([page, page])
+
+    assert status == "CI_EVIDENCE_INCOMPLETE"
+    assert client.list_action_runs.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second_page_id", [101, 150])
+async def test_ci_evidence_rejects_non_descending_run_ids_across_pages(second_page_id):
+    first_page = _ci_descending_page(100, 50, total_count=51)
+    second_page = _ci_descending_page(
+        second_page_id,
+        1,
+        total_count=51,
+        head_sha=SHA,
+    )
+
+    status, client = await _ci_evidence_status([first_page, second_page, first_page])
+
+    assert status == "CI_EVIDENCE_INCOMPLETE"
+    assert client.list_action_runs.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_ci_evidence_uses_newest_exact_head_pull_request_run():
+    newest_green_first = [_ci_run(11), _ci_run(10, conclusion="failure")]
+    green_page = _ci_page(newest_green_first)
+    status, _ = await _ci_evidence_status([green_page, green_page])
     assert status == "CI_GREEN"
 
-    successful_latest = [_ci_run(10), _ci_run(11, conclusion="failure")]
-    failed_page = _ci_page(successful_latest)
+    newest_failure_first = [_ci_run(11, conclusion="failure"), _ci_run(10)]
+    failed_page = _ci_page(newest_failure_first)
     status, _ = await _ci_evidence_status([failed_page, failed_page])
     assert status == "CI_NOT_GREEN"
+
+
+@pytest.mark.asyncio
+async def test_ci_evidence_uses_newest_pull_request_run_over_older_push_run():
+    runs = [
+        _ci_run(100),
+        _ci_run(99, event="push", conclusion="failure"),
+        _ci_run(98),
+        *[_ci_run(97 - index) for index in range(remote._GITEA_CI_PAGE_LIMIT - 3)],
+    ]
+    page = _ci_page(runs, total_count=remote._GITEA_CI_MAX_RUNS + 431)
+
+    status, client = await _ci_evidence_status([page, page])
+
+    assert status == "CI_GREEN"
+    assert client.list_action_runs.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -398,9 +532,8 @@ async def test_ci_evidence_rejects_duplicate_ids_within_and_across_pages():
     status, _ = await _ci_evidence_status([duplicate_page])
     assert status == "CI_EVIDENCE_INCOMPLETE"
 
-    first_runs = [_ci_run(index) for index in range(50)]
-    first_page = _ci_page(first_runs, total_count=51)
-    second_page = _ci_page([_ci_run(0)], total_count=51)
+    first_page = _ci_descending_page(100, 50, total_count=51)
+    second_page = _ci_descending_page(51, 1, total_count=51, head_sha=SHA)
     status, client = await _ci_evidence_status([first_page, second_page])
     assert status == "CI_EVIDENCE_INCOMPLETE"
     assert client.list_action_runs.await_count == 2
@@ -408,9 +541,8 @@ async def test_ci_evidence_rejects_duplicate_ids_within_and_across_pages():
 
 @pytest.mark.asyncio
 async def test_ci_evidence_rejects_changed_total_count_across_pages():
-    first_runs = [_ci_run(index) for index in range(50)]
-    first_page = _ci_page(first_runs, total_count=51)
-    second_page = _ci_page([_ci_run(100)], total_count=52)
+    first_page = _ci_descending_page(100, 50, total_count=51)
+    second_page = _ci_descending_page(50, 1, total_count=52, head_sha=SHA)
 
     status, client = await _ci_evidence_status([first_page, second_page])
 
@@ -424,37 +556,26 @@ async def test_ci_evidence_rejects_early_empty_or_short_page():
     status, _ = await _ci_evidence_status([empty_first])
     assert status == "CI_EVIDENCE_INCOMPLETE"
 
-    first_runs = [_ci_run(index) for index in range(50)]
-    first_page = _ci_page(first_runs, total_count=101)
-    short_second_page = _ci_page(
-        [_ci_run(100 + index) for index in range(49)],
-        total_count=101,
-    )
-    status, _ = await _ci_evidence_status([first_page, short_second_page])
+    first_page = _ci_descending_page(101, 50, total_count=101)
+    short_second_page = _ci_descending_page(51, 49, total_count=101, head_sha=SHA)
+    status, client = await _ci_evidence_status([first_page, short_second_page, first_page])
     assert status == "CI_EVIDENCE_INCOMPLETE"
-
-
-@pytest.mark.asyncio
-async def test_ci_evidence_rejects_total_beyond_max_runs():
-    page = _ci_page([_ci_run(1)], total_count=remote._GITEA_CI_MAX_RUNS + 1)
-    status, client = await _ci_evidence_status([page])
-    assert status == "CI_EVIDENCE_INCOMPLETE"
-    client.list_action_runs.assert_awaited_once()
+    assert client.list_action_runs.await_count == 2
 
 
 @pytest.mark.asyncio
 async def test_ci_evidence_accepts_exact_run_bound_without_requesting_page_21():
     pages = []
     for page_index in range(remote._GITEA_CI_MAX_PAGES):
-        first_id = page_index * remote._GITEA_CI_PAGE_LIMIT + 1
-        runs = [
-            _ci_run(
-                first_id + run_index,
+        first_id = (remote._GITEA_CI_MAX_PAGES - page_index) * remote._GITEA_CI_PAGE_LIMIT
+        pages.append(
+            _ci_descending_page(
+                first_id,
+                remote._GITEA_CI_PAGE_LIMIT,
+                total_count=remote._GITEA_CI_MAX_RUNS,
                 head_sha=SHA if page_index == remote._GITEA_CI_MAX_PAGES - 1 else "c" * 40,
             )
-            for run_index in range(remote._GITEA_CI_PAGE_LIMIT)
-        ]
-        pages.append(_ci_page(runs, total_count=remote._GITEA_CI_MAX_RUNS))
+        )
 
     status, client = await _ci_evidence_status([*pages, pages[0]])
 
@@ -469,14 +590,15 @@ async def test_ci_evidence_accepts_exact_run_bound_without_requesting_page_21():
 @pytest.mark.parametrize(
     "reread",
     [
-        {"total_count": 3, "workflow_runs": [_ci_run(1), _ci_run(2)]},
-        {"workflow_runs": [_ci_run(1), _ci_run(2)]},
-        {"total_count": 2, "workflow_runs": [_ci_run(2), _ci_run(1)]},
+        {"total_count": 3, "workflow_runs": [_ci_run(2), _ci_run(1)]},
+        {"workflow_runs": [_ci_run(2), _ci_run(1)]},
+        {"total_count": 2, "workflow_runs": [_ci_run(1), _ci_run(2)]},
         {"total_count": 2, "workflow_runs": [_ci_run(1), _ci_run(1)]},
+        {"total_count": 2, "workflow_runs": [_ci_run(2), _ci_run(3)]},
     ],
 )
 async def test_ci_evidence_rejects_page_one_reread_drift(reread):
-    initial_page = _ci_page([_ci_run(1), _ci_run(2)])
+    initial_page = _ci_page([_ci_run(2), _ci_run(1)])
     status, _ = await _ci_evidence_status([initial_page, reread])
     assert status == "CI_EVIDENCE_INCOMPLETE"
 
@@ -729,18 +851,18 @@ async def test_adapter_uses_newest_matching_ci_run(monkeypatch):
             "total_count": 2,
             "workflow_runs": [
                 {
-                    "id": 10,
-                    "event": "pull_request",
-                    "head_sha": SHA,
-                    "status": "completed",
-                    "conclusion": "success",
-                },
-                {
                     "id": 11,
                     "event": "pull_request",
                     "head_sha": SHA,
                     "status": "completed",
                     "conclusion": "failure",
+                },
+                {
+                    "id": 10,
+                    "event": "pull_request",
+                    "head_sha": SHA,
+                    "status": "completed",
+                    "conclusion": "success",
                 },
             ]
         }
