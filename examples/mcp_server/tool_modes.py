@@ -102,6 +102,7 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "gitea_list_action_runs",
         "gitea_get_action_run",
         "gitea_list_action_run_jobs",
+        "gitea_list_action_jobs",
         "gitea_get_action_job_logs",
         "gitea_list_workflows",
         "github_get_repo",

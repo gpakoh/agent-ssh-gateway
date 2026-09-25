@@ -223,6 +223,29 @@ async def gitea_list_action_run_jobs(
 
 
 @mcp.tool()
+async def gitea_list_action_jobs(
+    owner: str,
+    repo: str,
+    status: str | None = None,
+    page: int = 1,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """List repository-wide Gitea Actions jobs. Optionally filter by status (pending, queued, running/in_progress, failure, success, skipped)."""
+    try:
+        async with _get_client() as client:
+            data = await client.list_action_jobs(
+                owner,
+                repo,
+                status=status,
+                page=page,
+                limit=limit,
+            )
+    except Exception as exc:
+        return remote_api_error("gitea_list_action_jobs", "gitea", exc)
+    return tool_success("gitea_list_action_jobs", data, source="gitea")
+
+
+@mcp.tool()
 async def gitea_get_action_job_logs(
     owner: str,
     repo: str,
