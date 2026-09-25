@@ -27,6 +27,12 @@ def _init_repo(tmp_path: Path) -> Path:
     _git(repo, "init", "-b", "main")
     _git(repo, "config", "user.email", "test@example.invalid")
     _git(repo, "config", "user.name", "Test User")
+    # Keep Git's automatic maintenance synchronous in this fixture.  Some CI
+    # runners detach it after commit, leaving objects/maintenance.lock alive
+    # just long enough for the pre-probe snapshot to observe it and the
+    # post-probe snapshot to observe its disappearance.
+    _git(repo, "config", "maintenance.autoDetach", "false")
+    _git(repo, "config", "gc.autoDetach", "false")
     (repo / "file.txt").write_text("base\n", encoding="utf-8")
     _git(repo, "add", "file.txt")
     _git(repo, "commit", "-m", "base")
