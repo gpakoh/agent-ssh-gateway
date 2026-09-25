@@ -23,7 +23,10 @@ from typing import Any
 import httpx
 from tool_results import tool_error, tool_success, validate_pagination
 
-from examples.mcp_client_remote.fleet.gitea_client import GiteaMutationOutcomeUnknown
+from examples.mcp_client_remote.fleet.gitea_client import (
+    GiteaActionRunResponseError,
+    GiteaMutationOutcomeUnknown,
+)
 from examples.mcp_client_remote.fleet.github_client import (
     normalize_list_response,
 )
@@ -422,6 +425,214 @@ async def _gitea_pr_branch_tracking(
 
 _MERGE_RECONCILE_ATTEMPTS = 3
 _MERGE_RECONCILE_DELAY_SECONDS = 0.05
+_GITEA_CI_PAGE_LIMIT = 50
+_GITEA_CI_MAX_RUNS = 1000
+_GITEA_CI_MAX_PAGES = 20
+
+
+def _configured_workflow_count(payload: Any) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    has_total = "total_count" in payload
+    has_workflows = "workflows" in payload
+    total_count = payload.get("total_count")
+    workflows = payload.get("workflows")
+    if has_total and (
+        isinstance(total_count, bool)
+        or not isinstance(total_count, int)
+        or total_count < 0
+    ):
+        return None
+    if has_workflows and not isinstance(workflows, list):
+        return None
+    if (
+        has_total
+        and has_workflows
+        and isinstance(total_count, int)
+        and isinstance(workflows, list)
+        and len(workflows) > total_count
+    ):
+        return None
+    if has_total and isinstance(total_count, int):
+        if total_count == 0:
+            return 0 if has_workflows and workflows == [] else None
+        return total_count
+    if has_workflows and isinstance(workflows, list) and workflows:
+        return len(workflows)
+    return None
+
+
+def _validated_action_run_page(
+    payload: Any,
+) -> tuple[int, list[dict[str, Any]], list[int]] | None:
+    if not isinstance(payload, dict):
+        return None
+    total_count = payload.get("total_count")
+    if (
+        isinstance(total_count, bool)
+        or not isinstance(total_count, int)
+        or total_count < 0
+    ):
+        return None
+    raw_runs = payload.get("workflow_runs")
+    if not isinstance(raw_runs, list):
+        return None
+    runs: list[dict[str, Any]] = []
+    run_ids: list[int] = []
+    seen_ids: set[int] = set()
+    for run in raw_runs:
+        if not isinstance(run, dict):
+            return None
+        run_id = run.get("id")
+        if isinstance(run_id, bool) or not isinstance(run_id, int):
+            return None
+        if run_id in seen_ids:
+            return None
+        seen_ids.add(run_id)
+        runs.append(run)
+        run_ids.append(run_id)
+    return total_count, runs, run_ids
+
+
+_CI_EVIDENCE_ERROR_POLICIES: dict[str, tuple[str, bool, str]] = {
+    "CI_NOT_CONFIGURED": (
+        "Gitea Actions has no configured workflows for this repository",
+        False,
+        "Configure the repository's required CI workflows before merging.",
+    ),
+    "NO_REQUIRED_RUN_FOUND": (
+        "no Actions run exists for the expected pull request head",
+        False,
+        "Run the repository's required CI for the exact pull request head.",
+    ),
+    "CI_TRIGGER_INCOMPATIBLE": (
+        "Actions runs exist for the expected head, but none use the pull_request trigger",
+        False,
+        "Configure the required workflow to run for pull_request events.",
+    ),
+    "CI_EVIDENCE_INCOMPLETE": (
+        "Gitea Actions CI evidence is incomplete or changed while it was being read",
+        True,
+        "Re-read the complete Actions evidence and retry after it stabilizes.",
+    ),
+    "CI_NOT_GREEN": (
+        "latest pull_request CI for the expected head is not successful",
+        True,
+        "Wait for the latest required pull_request run to complete successfully.",
+    ),
+}
+
+
+async def _gitea_ci_evidence(
+    client: Any,
+    owner: str,
+    repo: str,
+    expected_head_sha: str,
+) -> str:
+    workflow_payload = await client.list_workflows(owner, repo)
+    configured_count = _configured_workflow_count(workflow_payload)
+    if configured_count == 0:
+        return "CI_NOT_CONFIGURED"
+    if configured_count is None:
+        return "CI_EVIDENCE_INCOMPLETE"
+
+    try:
+        first_payload = await client.list_action_runs(
+            owner,
+            repo,
+            status=None,
+            limit=_GITEA_CI_PAGE_LIMIT,
+            page=1,
+        )
+    except GiteaActionRunResponseError:
+        return "CI_EVIDENCE_INCOMPLETE"
+    first_page = _validated_action_run_page(first_payload)
+    if first_page is None:
+        return "CI_EVIDENCE_INCOMPLETE"
+    expected_total, runs, first_page_ids = first_page
+    if expected_total > _GITEA_CI_MAX_RUNS or len(runs) > expected_total:
+        return "CI_EVIDENCE_INCOMPLETE"
+    if len(runs) < expected_total and len(runs) < _GITEA_CI_PAGE_LIMIT:
+        return "CI_EVIDENCE_INCOMPLETE"
+
+    all_runs = list(runs)
+    seen_ids = set(first_page_ids)
+    page_number = 1
+    while len(all_runs) < expected_total:
+        if page_number >= _GITEA_CI_MAX_PAGES or len(all_runs) >= _GITEA_CI_MAX_RUNS:
+            return "CI_EVIDENCE_INCOMPLETE"
+        page_number += 1
+        try:
+            page_payload = await client.list_action_runs(
+                owner,
+                repo,
+                status=None,
+                limit=_GITEA_CI_PAGE_LIMIT,
+                page=page_number,
+            )
+        except GiteaActionRunResponseError:
+            return "CI_EVIDENCE_INCOMPLETE"
+        page = _validated_action_run_page(page_payload)
+        if page is None:
+            return "CI_EVIDENCE_INCOMPLETE"
+        total_count, page_runs, page_run_ids = page
+        if total_count != expected_total:
+            return "CI_EVIDENCE_INCOMPLETE"
+        if len(all_runs) + len(page_runs) > expected_total:
+            return "CI_EVIDENCE_INCOMPLETE"
+        if any(run_id in seen_ids for run_id in page_run_ids):
+            return "CI_EVIDENCE_INCOMPLETE"
+        all_runs.extend(page_runs)
+        seen_ids.update(page_run_ids)
+        if len(all_runs) < expected_total and len(page_runs) < _GITEA_CI_PAGE_LIMIT:
+            return "CI_EVIDENCE_INCOMPLETE"
+
+    try:
+        reread_payload = await client.list_action_runs(
+            owner,
+            repo,
+            status=None,
+            limit=_GITEA_CI_PAGE_LIMIT,
+            page=1,
+        )
+    except GiteaActionRunResponseError:
+        return "CI_EVIDENCE_INCOMPLETE"
+    reread = _validated_action_run_page(reread_payload)
+    if reread is None:
+        return "CI_EVIDENCE_INCOMPLETE"
+    reread_total, _, reread_ids = reread
+    if reread_total != expected_total or reread_ids != first_page_ids:
+        return "CI_EVIDENCE_INCOMPLETE"
+
+    exact_head_runs = [
+        run for run in all_runs if run.get("head_sha") == expected_head_sha
+    ]
+    if not exact_head_runs:
+        return "NO_REQUIRED_RUN_FOUND"
+    pull_request_runs = [
+        run for run in exact_head_runs if run.get("event") == "pull_request"
+    ]
+    if not pull_request_runs:
+        return "CI_TRIGGER_INCOMPATIBLE"
+    latest_run = max(pull_request_runs, key=lambda run: run["id"])
+    if (
+        latest_run.get("status") != "completed"
+        or latest_run.get("conclusion") != "success"
+    ):
+        return "CI_NOT_GREEN"
+    return "CI_GREEN"
+
+
+def _ci_evidence_tool_error(status: str) -> dict[str, Any]:
+    message, retryable, hint = _CI_EVIDENCE_ERROR_POLICIES[status]
+    return tool_error(
+        tool="gitea_merge_pull_request",
+        code=status,
+        message=message,
+        retryable=retryable,
+        hint=hint,
+        source="gitea",
+    )
 
 
 def _valid_commit_sha(value: Any) -> str | None:
@@ -888,29 +1099,14 @@ async def gitea_merge_pull_request(
                     source="gitea",
                 )
 
-            actions = await client.list_action_runs(owner, repo, status=None, limit=50)
-            matching_runs = [
-                run
-                for run in actions.get("workflow_runs", [])
-                if run.get("event") == "pull_request" and run.get("head_sha") == expected_head_sha
-            ]
-            latest_run = (
-                max(matching_runs, key=lambda run: int(run.get("id") or -1))
-                if matching_runs
-                else None
+            ci_status = await _gitea_ci_evidence(
+                client,
+                owner,
+                repo,
+                expected_head_sha,
             )
-            if (
-                not latest_run
-                or latest_run.get("status") != "completed"
-                or latest_run.get("conclusion") != "success"
-            ):
-                return tool_error(
-                    tool="gitea_merge_pull_request",
-                    code="CI_NOT_GREEN",
-                    message="latest pull_request CI for expected_head_sha is not successful",
-                    retryable=True,
-                    source="gitea",
-                )
+            if ci_status != "CI_GREEN":
+                return _ci_evidence_tool_error(ci_status)
 
             latest_pr = await client.get_pull_request(owner, repo, pull_number)
             latest_head = latest_pr.get("head") or {}
@@ -980,6 +1176,15 @@ async def gitea_merge_pull_request(
                     details={"branch_tracking": branch_tracking},
                     source="gitea",
                 )
+
+            ci_status = await _gitea_ci_evidence(
+                client,
+                owner,
+                repo,
+                expected_head_sha,
+            )
+            if ci_status != "CI_GREEN":
+                return _ci_evidence_tool_error(ci_status)
 
             mutation_error: BaseException | None = None
             try:

@@ -96,6 +96,10 @@ class GiteaMutationOutcomeUnknown(RuntimeError):
     """The HTTP mutation boundary was crossed but its response was unusable."""
 
 
+class GiteaActionRunResponseError(ValueError):
+    pass
+
+
 def _validate_branch_name(value: str, label: str) -> str:
     value = value.strip()
     if (
@@ -197,6 +201,13 @@ def _action_job_head_sha(value: Any) -> str | None:
     if not _SHA1_RE.fullmatch(value):
         raise ValueError("action job head_sha must be a lowercase 40-character SHA-1")
     return value
+
+
+def _validate_action_run_list_limit(limit: int) -> int:
+    limit = _validate_positive_int(limit, "limit")
+    if limit > MAX_LIMIT:
+        raise ValueError(f"limit must be <= {MAX_LIMIT}")
+    return limit
 
 
 def _validate_action_job_limit(limit: int) -> int:
@@ -701,9 +712,14 @@ class GiteaClient:
         repo: str,
         status: str | None = None,
         limit: int = 10,
+        page: int | None = None,
     ) -> dict[str, Any]:
-        limit = min(limit, MAX_LIMIT)
+        limit = _validate_action_run_list_limit(limit)
+        if page is not None:
+            page = _validate_positive_int(page, "page")
         params: dict[str, Any] = {"limit": limit}
+        if page is not None:
+            params["page"] = page
         normalized_status = _normalize_action_run_status_filter(status)
         if normalized_status:
             params["status"] = normalized_status
@@ -713,7 +729,15 @@ class GiteaClient:
             owner=owner,
             repo=repo,
         )
-        runs = data.get("workflow_runs") or []
+        if not isinstance(data, dict):
+            raise GiteaActionRunResponseError(
+                "gitea action runs response must contain a workflow_runs list"
+            )
+        runs = data.get("workflow_runs")
+        if not isinstance(runs, list) or any(not isinstance(run, dict) for run in runs):
+            raise GiteaActionRunResponseError(
+                "gitea action runs response must contain a workflow_runs list"
+            )
         data["workflow_runs"] = [minimize_action_run_payload(r) for r in runs]
         return data
 

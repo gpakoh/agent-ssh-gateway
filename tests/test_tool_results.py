@@ -319,6 +319,19 @@ class TestErrorCodes:
         assert result["error"]["code"] == "AUDIT_UNAVAILABLE"
         assert "AUDIT_UNAVAILABLE" in ERROR_CODES
 
+    def test_ci_evidence_codes_not_degraded(self):
+        for code in (
+            "AUDIT_UNAVAILABLE",
+            "CI_NOT_CONFIGURED",
+            "NO_REQUIRED_RUN_FOUND",
+            "CI_TRIGGER_INCOMPATIBLE",
+            "CI_EVIDENCE_INCOMPLETE",
+            "CI_NOT_GREEN",
+        ):
+            result = tool_error("gitea_merge_pull_request", code, "CI evidence")
+            assert result["error"]["code"] == code
+            assert code in ERROR_CODES
+
     def test_each_code_is_accepted(self):
         for code in ERROR_CODES:
             result = tool_error("tool", code, f"msg for {code}")

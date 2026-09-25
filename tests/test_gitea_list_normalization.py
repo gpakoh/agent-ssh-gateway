@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples" / "mcp_c
 
 from fleet.gitea_client import (
     MAX_ACTION_JOB_LOG_BYTES,
+    MAX_LIMIT,
     GiteaClient,
     _normalize_action_job_status_filter,
     _normalize_action_run_status_filter,
@@ -32,6 +33,95 @@ def test_gitea_action_run_status_filter_normalizes_running_alias():
 def test_gitea_action_run_status_filter_rejects_unknown_status_before_http():
     with pytest.raises(ValueError, match="status must be one of"):
         _normalize_action_run_status_filter("queued")
+
+
+@pytest.mark.asyncio
+async def test_gitea_list_action_runs_rejects_bad_page_limit_before_http(monkeypatch):
+    get = AsyncMock(return_value=None)
+    monkeypatch.setattr(GiteaClient, "_get", get)
+    client = GiteaClient("token")
+    try:
+        for kwargs in (
+            {"page": 0},
+            {"page": -1},
+            {"page": True},
+            {"page": "2"},
+            {"page": 1.5},
+            {"limit": 0},
+            {"limit": -3},
+            {"limit": MAX_LIMIT + 1},
+            {"limit": True},
+            {"limit": 3.5},
+            {"limit": "3"},
+        ):
+            with pytest.raises(ValueError):
+                await client.list_action_runs("owner", "repo", **kwargs)
+    finally:
+        await client.aclose()
+    get.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_gitea_list_action_runs_forwards_optional_page_only_when_provided(monkeypatch):
+    captured = []
+
+    async def fake_get(self, endpoint, params=None, **path_params):
+        captured.append((endpoint, params, path_params))
+        return {"total_count": 0, "workflow_runs": []}
+
+    monkeypatch.setattr(GiteaClient, "_get", fake_get)
+    client = GiteaClient("token")
+    try:
+        await client.list_action_runs("owner", "repo")
+        await client.list_action_runs(
+            "owner",
+            "repo",
+            status="running",
+            limit=25,
+            page=3,
+        )
+    finally:
+        await client.aclose()
+
+    assert captured == [
+        (
+            "/repos/{owner}/{repo}/actions/runs",
+            {"limit": 10},
+            {"owner": "owner", "repo": "repo"},
+        ),
+        (
+            "/repos/{owner}/{repo}/actions/runs",
+            {"limit": 25, "page": 3, "status": "in_progress"},
+            {"owner": "owner", "repo": "repo"},
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raw_response",
+    [
+        None,
+        [],
+        [{"email": "secret@example.com"}],
+        {"total_count": 0},
+        {"total_count": 0, "workflow_runs": None},
+        {"total_count": 0, "workflow_runs": {}},
+        {"total_count": 1, "workflow_runs": [None]},
+    ],
+)
+async def test_gitea_list_action_runs_rejects_malformed_response_shape(monkeypatch, raw_response):
+    get = AsyncMock(return_value=raw_response)
+    monkeypatch.setattr(GiteaClient, "_get", get)
+    client = GiteaClient("token")
+    try:
+        with pytest.raises(ValueError, match="workflow_runs list") as exc_info:
+            await client.list_action_runs("owner", "repo", page=1)
+    finally:
+        await client.aclose()
+
+    assert "secret" not in str(exc_info.value).lower()
+    get.assert_awaited_once()
 
 
 def test_gitea_branches_normalized():

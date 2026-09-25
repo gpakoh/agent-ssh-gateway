@@ -17,6 +17,7 @@ from examples.mcp_server.mcp_infra.adapters import remote
 SHA = "a" * 40
 BASE_SHA = "1" * 40
 NEW_BASE_SHA = "2" * 40
+_DEFAULT_WORKFLOW_PAYLOAD = object()
 
 
 @pytest.mark.asyncio
@@ -120,6 +121,8 @@ class FakeMergeClient:
         merge_exception: Exception | None = None,
         apply_merge: bool = True,
         post_merge_read_failures: int = 0,
+        workflow_payload: object | None = None,
+        second_ci_run: dict[str, object] | None = None,
     ):
         assert token == "token"
         self.ci_conclusion = ci_conclusion
@@ -131,9 +134,18 @@ class FakeMergeClient:
         self.merge_exception = merge_exception
         self.apply_merge = apply_merge
         self.post_merge_read_failures = post_merge_read_failures
+        self.workflow_payload = (
+            workflow_payload
+            if workflow_payload is not None
+            else {"total_count": 1, "workflows": [{}]}
+        )
+        self.second_ci_run = second_ci_run
         self.merged = False
         self.compare_calls: list[tuple[str, str]] = []
         self.merge_calls: list[dict] = []
+        self.action_run_pages: list[int] = []
+        self.operations: list[str] = []
+        self.workflow_reads = 0
         self.pr_reads = 0
 
     async def __aenter__(self):
@@ -164,20 +176,34 @@ class FakeMergeClient:
             "html_url": "https://git.example/pr/25",
         }
 
-    async def list_action_runs(self, owner: str, repo: str, status: str | None, limit: int):
+    async def list_workflows(self, owner: str, repo: str):
+        self.workflow_reads += 1
+        self.operations.append("list_workflows")
+        return self.workflow_payload
+
+    async def list_action_runs(
+        self,
+        owner: str,
+        repo: str,
+        status: str | None,
+        limit: int,
+        page: int,
+    ):
         assert status is None
         assert limit == 50
-        return {
-            "workflow_runs": [
-                {
-                    "id": 765,
-                    "event": "pull_request",
-                    "head_sha": self.head_sha,
-                    "status": "completed",
-                    "conclusion": self.ci_conclusion,
-                }
-            ]
-        }
+        assert page in {1, 2}
+        self.action_run_pages.append(page)
+        self.operations.append(f"list_action_runs:{page}")
+        run = self.second_ci_run if self.workflow_reads >= 2 and self.second_ci_run else None
+        if run is None:
+            run = {
+                "id": 765,
+                "event": "pull_request",
+                "head_sha": self.head_sha,
+                "status": "completed",
+                "conclusion": self.ci_conclusion,
+            }
+        return {"total_count": 1, "workflow_runs": [run]}
 
     async def compare_commits(self, owner: str, repo: str, *, base: str, head: str):
         self.compare_calls.append((base, head))
@@ -194,6 +220,7 @@ class FakeMergeClient:
         raise AssertionError(f"unexpected compare: {base!r}...{head!r}")
 
     async def merge_pull_request(self, owner: str, repo: str, pull_number: int, **kwargs):
+        self.operations.append("merge")
         self.merge_calls.append(
             {"owner": owner, "repo": repo, "pull_number": pull_number, **kwargs}
         )
@@ -202,6 +229,274 @@ class FakeMergeClient:
         if self.merge_exception is not None:
             raise self.merge_exception
         return {}
+
+
+def _ci_run(
+    run_id: int,
+    *,
+    head_sha: str = SHA,
+    event: str = "pull_request",
+    status: str = "completed",
+    conclusion: str | None = "success",
+) -> dict[str, object]:
+    return {
+        "id": run_id,
+        "event": event,
+        "head_sha": head_sha,
+        "status": status,
+        "conclusion": conclusion,
+    }
+
+
+def _ci_page(runs: list[object], total_count: int | None = None) -> dict[str, object]:
+    return {
+        "total_count": len(runs) if total_count is None else total_count,
+        "workflow_runs": runs,
+    }
+
+
+async def _ci_evidence_status(
+    action_pages: list[object],
+    workflow_payload: object = _DEFAULT_WORKFLOW_PAYLOAD,
+) -> tuple[str, AsyncMock]:
+    client = AsyncMock()
+    client.list_workflows.return_value = (
+        {"total_count": 1, "workflows": [{}]}
+        if workflow_payload is _DEFAULT_WORKFLOW_PAYLOAD
+        else workflow_payload
+    )
+    client.list_action_runs.side_effect = action_pages
+    status = await remote._gitea_ci_evidence(client, "owner", "repo", SHA)
+    return status, client
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"total_count": 0, "workflows": []}, 0),
+        ({"total_count": 3, "workflows": []}, 3),
+        ({"total_count": 3, "workflows": [{}, {}]}, 3),
+        ({"total_count": 2}, 2),
+        ({"workflows": [{}]}, 1),
+        ({}, None),
+        ({"total_count": 0, "workflows": [{}]}, None),
+        ({"total_count": 1, "workflows": [{}, {}]}, None),
+        ({"total_count": True, "workflows": []}, None),
+        ({"total_count": "1", "workflows": []}, None),
+        ({"total_count": -1, "workflows": []}, None),
+        ({"workflows": {}}, None),
+        (None, None),
+    ],
+)
+def test_configured_workflow_count_requires_consistent_signals(payload, expected):
+    assert remote._configured_workflow_count(payload) == expected
+
+
+@pytest.mark.asyncio
+async def test_ci_evidence_distinguishes_no_workflows_from_malformed_inventory():
+    status, client = await _ci_evidence_status(
+        [],
+        workflow_payload={"total_count": 0, "workflows": []},
+    )
+    assert status == "CI_NOT_CONFIGURED"
+    client.list_action_runs.assert_not_awaited()
+
+    for payload in (
+        None,
+        {},
+        {"total_count": 0, "workflows": [{}]},
+        {"total_count": "1", "workflows": []},
+        {"workflows": {}},
+    ):
+        status, client = await _ci_evidence_status([], workflow_payload=payload)
+        assert status == "CI_EVIDENCE_INCOMPLETE"
+        client.list_action_runs.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ci_evidence_distinguishes_no_exact_head_from_incompatible_trigger():
+    stale_page = _ci_page([_ci_run(1, head_sha="c" * 40)])
+    status, _ = await _ci_evidence_status([stale_page, stale_page])
+    assert status == "NO_REQUIRED_RUN_FOUND"
+
+    push_page = _ci_page([_ci_run(2, event="push")])
+    status, _ = await _ci_evidence_status([push_page, push_page])
+    assert status == "CI_TRIGGER_INCOMPATIBLE"
+
+
+@pytest.mark.asyncio
+async def test_ci_evidence_finds_exact_head_pull_request_run_on_later_page():
+    first_runs = [_ci_run(100 + index, head_sha="c" * 40) for index in range(50)]
+    first_page = _ci_page(first_runs, total_count=51)
+    second_page = _ci_page([_ci_run(200)], total_count=51)
+
+    status, client = await _ci_evidence_status([first_page, second_page, first_page])
+
+    assert status == "CI_GREEN"
+    assert [call.kwargs["page"] for call in client.list_action_runs.await_args_list] == [1, 2, 1]
+    assert all(call.kwargs["status"] is None for call in client.list_action_runs.await_args_list)
+    assert all(call.kwargs["limit"] == 50 for call in client.list_action_runs.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_ci_evidence_uses_highest_id_exact_head_pull_request_run():
+    successful_first = [_ci_run(10, conclusion="failure"), _ci_run(11)]
+    successful_page = _ci_page(successful_first)
+    status, _ = await _ci_evidence_status([successful_page, successful_page])
+    assert status == "CI_GREEN"
+
+    successful_latest = [_ci_run(10), _ci_run(11, conclusion="failure")]
+    failed_page = _ci_page(successful_latest)
+    status, _ = await _ci_evidence_status([failed_page, failed_page])
+    assert status == "CI_NOT_GREEN"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_id", [True, "7", 7.5, None])
+async def test_ci_evidence_rejects_bool_string_and_other_run_ids(bad_id):
+    page = {"total_count": 1, "workflow_runs": [{"id": bad_id}]}
+    status, client = await _ci_evidence_status([page])
+    assert status == "CI_EVIDENCE_INCOMPLETE"
+    client.list_action_runs.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_ci_evidence_rejects_non_object_run():
+    page = {"total_count": 1, "workflow_runs": [None]}
+    status, _ = await _ci_evidence_status([page])
+    assert status == "CI_EVIDENCE_INCOMPLETE"
+
+
+@pytest.mark.asyncio
+async def test_ci_evidence_rejects_malformed_run_lists_from_real_client(monkeypatch):
+    for raw_page in (
+        {"total_count": 0},
+        {"total_count": 0, "workflow_runs": None},
+        {"total_count": 0, "workflow_runs": {}},
+        {"total_count": 0, "workflow_runs": ""},
+        [],
+    ):
+        client = GiteaClient("token")
+
+        async def list_workflows(owner: str, repo: str):
+            return {"total_count": 1, "workflows": [{}]}
+
+        get = AsyncMock(return_value=raw_page)
+        monkeypatch.setattr(client, "list_workflows", list_workflows)
+        monkeypatch.setattr(client, "_get", get)
+        try:
+            status = await remote._gitea_ci_evidence(client, "owner", "repo", SHA)
+        finally:
+            await client.aclose()
+        assert status == "CI_EVIDENCE_INCOMPLETE"
+        get.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_ci_evidence_rejects_duplicate_ids_within_and_across_pages():
+    duplicate_page = _ci_page([_ci_run(1), _ci_run(1)])
+    status, _ = await _ci_evidence_status([duplicate_page])
+    assert status == "CI_EVIDENCE_INCOMPLETE"
+
+    first_runs = [_ci_run(index) for index in range(50)]
+    first_page = _ci_page(first_runs, total_count=51)
+    second_page = _ci_page([_ci_run(0)], total_count=51)
+    status, client = await _ci_evidence_status([first_page, second_page])
+    assert status == "CI_EVIDENCE_INCOMPLETE"
+    assert client.list_action_runs.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_ci_evidence_rejects_changed_total_count_across_pages():
+    first_runs = [_ci_run(index) for index in range(50)]
+    first_page = _ci_page(first_runs, total_count=51)
+    second_page = _ci_page([_ci_run(100)], total_count=52)
+
+    status, client = await _ci_evidence_status([first_page, second_page])
+
+    assert status == "CI_EVIDENCE_INCOMPLETE"
+    assert client.list_action_runs.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_ci_evidence_rejects_early_empty_or_short_page():
+    empty_first = _ci_page([], total_count=1)
+    status, _ = await _ci_evidence_status([empty_first])
+    assert status == "CI_EVIDENCE_INCOMPLETE"
+
+    first_runs = [_ci_run(index) for index in range(50)]
+    first_page = _ci_page(first_runs, total_count=101)
+    short_second_page = _ci_page(
+        [_ci_run(100 + index) for index in range(49)],
+        total_count=101,
+    )
+    status, _ = await _ci_evidence_status([first_page, short_second_page])
+    assert status == "CI_EVIDENCE_INCOMPLETE"
+
+
+@pytest.mark.asyncio
+async def test_ci_evidence_rejects_total_beyond_max_runs():
+    page = _ci_page([_ci_run(1)], total_count=remote._GITEA_CI_MAX_RUNS + 1)
+    status, client = await _ci_evidence_status([page])
+    assert status == "CI_EVIDENCE_INCOMPLETE"
+    client.list_action_runs.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_ci_evidence_accepts_exact_run_bound_without_requesting_page_21():
+    pages = []
+    for page_index in range(remote._GITEA_CI_MAX_PAGES):
+        first_id = page_index * remote._GITEA_CI_PAGE_LIMIT + 1
+        runs = [
+            _ci_run(
+                first_id + run_index,
+                head_sha=SHA if page_index == remote._GITEA_CI_MAX_PAGES - 1 else "c" * 40,
+            )
+            for run_index in range(remote._GITEA_CI_PAGE_LIMIT)
+        ]
+        pages.append(_ci_page(runs, total_count=remote._GITEA_CI_MAX_RUNS))
+
+    status, client = await _ci_evidence_status([*pages, pages[0]])
+
+    assert status == "CI_GREEN"
+    assert [call.kwargs["page"] for call in client.list_action_runs.await_args_list] == [
+        *range(1, remote._GITEA_CI_MAX_PAGES + 1),
+        1,
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reread",
+    [
+        {"total_count": 3, "workflow_runs": [_ci_run(1), _ci_run(2)]},
+        {"workflow_runs": [_ci_run(1), _ci_run(2)]},
+        {"total_count": 2, "workflow_runs": [_ci_run(2), _ci_run(1)]},
+        {"total_count": 2, "workflow_runs": [_ci_run(1), _ci_run(1)]},
+    ],
+)
+async def test_ci_evidence_rejects_page_one_reread_drift(reread):
+    initial_page = _ci_page([_ci_run(1), _ci_run(2)])
+    status, _ = await _ci_evidence_status([initial_page, reread])
+    assert status == "CI_EVIDENCE_INCOMPLETE"
+
+
+@pytest.mark.parametrize(
+    ("status", "retryable"),
+    [
+        ("CI_NOT_CONFIGURED", False),
+        ("NO_REQUIRED_RUN_FOUND", False),
+        ("CI_TRIGGER_INCOMPATIBLE", False),
+        ("CI_EVIDENCE_INCOMPLETE", True),
+        ("CI_NOT_GREEN", True),
+    ],
+)
+def test_ci_evidence_tool_error_maps_status_and_retryability(status, retryable):
+    result = remote._ci_evidence_tool_error(status)
+    assert result["error"]["code"] == status
+    assert result["error"]["retryable"] is retryable
+    assert result["meta"]["source"] == "gitea"
+    assert "token" not in repr(result).lower()
 
 
 @pytest.mark.asyncio
@@ -255,7 +550,37 @@ async def test_adapter_merges_only_expected_green_head_and_confirms_result(monke
         (SHA, BASE_SHA),
     ]
     assert client.pr_reads == 3
+    assert client.workflow_reads == 2
+    assert client.action_run_pages == [1, 1, 1, 1]
+    assert client.operations[-2:] == ["list_action_runs:1", "merge"]
     assert "token" not in repr(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("workflow_payload", "code", "retryable"),
+    [
+        ({"total_count": 0, "workflows": []}, "CI_NOT_CONFIGURED", False),
+        ({"total_count": 0, "workflows": [{}]}, "CI_EVIDENCE_INCOMPLETE", True),
+    ],
+)
+async def test_adapter_fails_closed_on_unprovable_workflow_inventory(
+    monkeypatch,
+    workflow_payload,
+    code,
+    retryable,
+):
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient("token", workflow_payload=workflow_payload)
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request("owner", "repo", 25, SHA)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == code
+    assert result["error"]["retryable"] is retryable
+    assert client.action_run_pages == []
+    assert client.merge_calls == []
 
 
 @pytest.mark.asyncio
@@ -366,13 +691,42 @@ async def test_adapter_rejects_non_green_ci_before_merge(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_adapter_second_ci_proof_blocks_new_pending_run_before_post(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient(
+        "token",
+        second_ci_run={
+            "id": 766,
+            "event": "pull_request",
+            "head_sha": SHA,
+            "status": "in_progress",
+            "conclusion": None,
+        },
+    )
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request("owner", "repo", 25, SHA)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CI_NOT_GREEN"
+    assert result["error"]["retryable"] is True
+    assert client.workflow_reads == 2
+    assert client.action_run_pages == [1, 1, 1, 1]
+    assert client.operations[-1] == "list_action_runs:1"
+    assert client.merge_calls == []
+
+
+@pytest.mark.asyncio
 async def test_adapter_uses_newest_matching_ci_run(monkeypatch):
     monkeypatch.setenv("GITEA_TOKEN", "token")
     client = FakeMergeClient("token")
 
-    async def list_runs(owner: str, repo: str, status: str | None, limit: int):
+    async def list_runs(owner: str, repo: str, status: str | None, limit: int, page: int):
         assert status is None
+        assert limit == 50
+        assert page == 1
         return {
+            "total_count": 2,
             "workflow_runs": [
                 {
                     "id": 10,
