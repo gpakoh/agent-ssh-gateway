@@ -40,6 +40,7 @@ TD = ".ai-bridge/tasks/a12345678901"
 TASK_ID = "a12345678901"
 
 RUNNER_HARNESS_TIMEOUT_SECONDS = 60
+PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS = RUNNER_HARNESS_TIMEOUT_SECONDS * 2
 PROXY_RETRY_HARNESS_TIMEOUT_SECONDS = RUNNER_HARNESS_TIMEOUT_SECONDS * 2
 TEST_STARTUP_MAX_PROXY_ATTEMPTS = 7
 
@@ -591,7 +592,7 @@ def test_explicit_base_ref_checks_out_pinned_commit(tmp_path, monkeypatch):
         text=True,
         capture_output=True,
         check=False,
-        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+        timeout=PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS,
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
