@@ -13,7 +13,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples" / "mcp_c
 from fleet.gitea_client import (
     MAX_ACTION_JOB_LOG_BYTES,
     GiteaClient,
+    _normalize_action_job_status_filter,
     _normalize_action_run_status_filter,
+    minimize_action_job_payload,
+    normalize_action_jobs_response,
 )
 from fleet.shared import minimize_action_run_payload, normalize_list_response
 
@@ -229,3 +232,321 @@ async def test_gitea_get_action_job_logs_rejects_bad_bounds_before_http(monkeypa
         await client.aclose()
 
     get_text.assert_not_awaited()
+
+
+# Repo-wide Actions job inventory (CI-002)
+
+_JOB_OUTPUT_KEYS = (
+    "id",
+    "run_id",
+    "run_attempt",
+    "head_branch",
+    "head_sha",
+    "name",
+    "status",
+    "conclusion",
+    "runner_id",
+    "runner_name",
+    "started_at",
+    "completed_at",
+    "url",
+    "run_url",
+)
+
+
+def _raw_gitea_action_job_payload() -> dict[str, object]:
+    return {
+        "id": 10,
+        "run_id": 5,
+        "run_attempt": 1,
+        "head_branch": "main",
+        "head_sha": "0" * 40,
+        "name": "lint",
+        "status": "in_progress",
+        "conclusion": None,
+        "runner_id": 7,
+        "runner_name": "runner-7",
+        "started_at": "2026-01-01T00:00:00Z",
+        "completed_at": None,
+        "url": "https://git.example/gpakoh/web-ssh-gateway/actions/jobs/10",
+        "run_url": "https://git.example/gpakoh/web-ssh-gateway/actions/runs/5",
+    }
+
+
+def test_gitea_action_job_status_filter_accepts_exact_statuses():
+    assert _normalize_action_job_status_filter(None) is None
+    for status in ("pending", "queued", "in_progress", "failure", "success", "skipped"):
+        assert _normalize_action_job_status_filter(status) == status
+    assert _normalize_action_job_status_filter("running") == "in_progress"
+
+
+def test_gitea_action_job_status_filter_rejects_unknown_before_http():
+    for status in ("waiting", "completed", "", "in progress"):
+        with pytest.raises(ValueError, match="status must be one of"):
+            _normalize_action_job_status_filter(status)
+
+
+def test_gitea_action_job_status_filter_rejects_non_string():
+    for status in (123, True, ["pending"], {"status": "pending"}, 3.5):
+        with pytest.raises(ValueError, match="status must be a string"):
+            _normalize_action_job_status_filter(status)
+
+
+@pytest.mark.asyncio
+async def test_gitea_list_action_jobs_rejects_bad_status_before_http(monkeypatch):
+    get = AsyncMock(return_value=None)
+    monkeypatch.setattr(GiteaClient, "_get", get)
+    client = GiteaClient("token")
+    try:
+        with pytest.raises(ValueError, match="status must be a string"):
+            await client.list_action_jobs("owner", "repo", status=123)
+        with pytest.raises(ValueError, match="status must be one of"):
+            await client.list_action_jobs("owner", "repo", status="waiting")
+    finally:
+        await client.aclose()
+    get.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_gitea_list_action_jobs_rejects_bad_page_limit_before_http(monkeypatch):
+    get = AsyncMock(return_value=None)
+    monkeypatch.setattr(GiteaClient, "_get", get)
+    client = GiteaClient("token")
+    try:
+        for kwargs in (
+            {"page": 0},
+            {"page": -1},
+            {"page": True},
+            {"page": "2"},
+            {"page": 1.5},
+            {"limit": 0},
+            {"limit": -3},
+            {"limit": 51},
+            {"limit": True},
+            {"limit": 3.5},
+        ):
+            with pytest.raises(ValueError):
+                await client.list_action_jobs("owner", "repo", **kwargs)
+    finally:
+        await client.aclose()
+    get.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_gitea_list_action_jobs_hits_repo_wide_endpoint_and_normalizes(monkeypatch):
+    captured = {}
+
+    async def fake_get(self, endpoint, params=None, **path_params):
+        captured["endpoint"] = endpoint
+        captured["params"] = params
+        captured["path_params"] = path_params
+        return {"total_count": 2, "jobs": [_raw_gitea_action_job_payload()]}
+
+    monkeypatch.setattr(GiteaClient, "_get", fake_get)
+
+    client = GiteaClient("token")
+    try:
+        out = await client.list_action_jobs("owner", "repo")
+    finally:
+        await client.aclose()
+
+    assert captured["endpoint"] == "/repos/{owner}/{repo}/actions/jobs"
+    assert captured["params"] == {"page": 1, "limit": 50}
+    assert captured["path_params"] == {"owner": "owner", "repo": "repo"}
+    assert out == {
+        "total_count": 2,
+        "jobs": [_raw_gitea_action_job_payload()],
+    }  # payload mirrors raw since it is already minimal-shaped
+    assert list(out["jobs"][0].keys()) == list(_JOB_OUTPUT_KEYS)
+
+
+@pytest.mark.asyncio
+async def test_gitea_list_action_jobs_passes_status_page_limit(monkeypatch):
+    captured = {}
+
+    async def fake_get(self, endpoint, params=None, **path_params):
+        captured["params"] = params
+        return {"total_count": 0, "jobs": []}
+
+    monkeypatch.setattr(GiteaClient, "_get", fake_get)
+
+    client = GiteaClient("token")
+    try:
+        out = await client.list_action_jobs(
+            "owner", "repo", status="running", page=2, limit=25
+        )
+    finally:
+        await client.aclose()
+
+    assert captured["params"] == {"page": 2, "limit": 25, "status": "in_progress"}
+    assert out == {"total_count": 0, "jobs": []}
+
+
+@pytest.mark.asyncio
+async def test_gitea_list_action_jobs_minimizes_to_exact_fields(monkeypatch):
+    async def fake_get(self, endpoint, params=None, **path_params):
+        return {
+            "total_count": 1,
+            "jobs": [
+                {
+                    "id": 10,
+                    "run_id": 5,
+                    "run_attempt": 1,
+                    "head_branch": "main",
+                    "head_sha": "0" * 40,
+                    "name": "lint",
+                    "status": "in_progress",
+                    "conclusion": None,
+                    "runner_id": 7,
+                    "runner_name": "runner-7",
+                    "started_at": "2026-01-01T00:00:00Z",
+                    "completed_at": None,
+                    "url": "https://git.example/jobs/10",
+                    "run_url": "https://git.example/runs/5",
+                    "steps": [{"name": "checkout"}],
+                    "repository": {"name": "web-ssh-gateway"},
+                }
+            ],
+        }
+
+    monkeypatch.setattr(GiteaClient, "_get", fake_get)
+
+    client = GiteaClient("token")
+    try:
+        out = await client.list_action_jobs("owner", "repo")
+    finally:
+        await client.aclose()
+
+    job = out["jobs"][0]
+    assert list(job.keys()) == list(_JOB_OUTPUT_KEYS)
+    assert job["id"] == 10
+    assert job["run_id"] == 5
+    assert job["run_attempt"] == 1
+    assert job["runner_id"] == 7
+    assert job["conclusion"] is None
+    assert job["completed_at"] is None
+    assert "steps" not in job
+    assert "repository" not in job
+
+
+@pytest.mark.asyncio
+async def test_gitea_list_action_jobs_response_shape_fails_closed(monkeypatch):
+    bad_responses = [
+        None,
+        [],
+        {"jobs": []},
+        {"total_count": None, "jobs": []},
+        {"total_count": "2", "jobs": []},
+        {"total_count": -1, "jobs": []},
+        {"total_count": True, "jobs": []},
+        {"total_count": 0, "jobs": {}},
+        {"total_count": 0, "jobs": None},
+        {"total_count": 0, "jobs": "not-a-list"},
+    ]
+    for bad in bad_responses:
+        async def fake_get(self, endpoint, params=None, bad=bad, **path_params):
+            return bad
+
+        monkeypatch.setattr(GiteaClient, "_get", fake_get)
+        client = GiteaClient("token")
+        try:
+            with pytest.raises(ValueError):
+                await client.list_action_jobs("owner", "repo")
+        finally:
+            await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_gitea_list_action_jobs_malformed_job_fields_fail_closed(monkeypatch):
+    bad_mutations = [
+        ("id", True),
+        ("id", 1.5),
+        ("id", "5"),
+        ("id", None),
+        ("run_id", 0),
+        ("run_id", True),
+        ("run_id", "5"),
+        ("run_attempt", 0),
+        ("run_attempt", -1),
+        ("run_attempt", True),
+        ("run_attempt", 1.0),
+        ("head_branch", 123),
+        ("head_branch", ["main"]),
+        ("name", True),
+        ("name", {"name": "x"}),
+        ("status", ["in_progress"]),
+        ("conclusion", {"x": 1}),
+        ("runner_id", -1),
+        ("runner_id", True),
+        ("runner_id", "7"),
+        ("runner_name", 7),
+        ("started_at", 1),
+        ("completed_at", []),
+        ("url", {1: 2}),
+        ("run_url", 0),
+    ]
+    for key, bad in bad_mutations:
+        payload = dict(_raw_gitea_action_job_payload())
+        payload[key] = bad
+        with pytest.raises(ValueError):
+            minimize_action_job_payload(payload)
+
+
+def test_gitea_list_action_jobs_run_attempt_positive_succeeds():
+    payload = dict(_raw_gitea_action_job_payload())
+    payload["run_attempt"] = 1
+    assert minimize_action_job_payload(payload)["run_attempt"] == 1
+
+
+@pytest.mark.asyncio
+async def test_gitea_list_action_jobs_head_sha_validated_without_coercion(monkeypatch):
+    for bad in ("", "A" * 40, "0" * 39, "abc123", 123, True, ["0" * 40], b"0" * 40):
+        payload = dict(_raw_gitea_action_job_payload())
+        payload["head_sha"] = bad
+        with pytest.raises(ValueError):
+            minimize_action_job_payload(payload)
+
+    for good in (None,):
+        payload = dict(_raw_gitea_action_job_payload())
+        payload["head_sha"] = good
+        assert minimize_action_job_payload(payload)["head_sha"] is None
+
+    payload = dict(_raw_gitea_action_job_payload())
+    payload.pop("head_sha")
+    assert minimize_action_job_payload(payload)["head_sha"] is None
+
+
+def test_gitea_list_action_jobs_allows_absent_optional_scalars():
+    payload = dict(_raw_gitea_action_job_payload())
+    for key in (
+        "head_branch",
+        "name",
+        "status",
+        "conclusion",
+        "runner_name",
+        "started_at",
+        "completed_at",
+        "url",
+        "run_url",
+        "head_sha",
+        "runner_id",
+    ):
+        payload.pop(key, None)
+    job = minimize_action_job_payload(payload)
+    assert list(job.keys()) == list(_JOB_OUTPUT_KEYS)
+    for key in _JOB_OUTPUT_KEYS:
+        if key in ("id", "run_id", "run_attempt"):
+            continue
+        assert job[key] is None, key
+    assert job["id"] == 10 and job["run_id"] == 5 and job["run_attempt"] == 1
+
+
+def test_gitea_normalize_action_jobs_response_requires_object_shape():
+    assert normalize_action_jobs_response({"total_count": 0, "jobs": []}) == {
+        "total_count": 0,
+        "jobs": [],
+    }
+    with pytest.raises(ValueError):
+        normalize_action_jobs_response([])
+    with pytest.raises(ValueError):
+        normalize_action_jobs_response({"total_count": "0", "jobs": []})

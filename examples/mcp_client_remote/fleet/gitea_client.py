@@ -33,6 +33,16 @@ _ACTION_RUN_STATUS_ALIASES = {
 }
 _ALLOWED_ACTION_RUN_STATUS_FILTERS = frozenset({"completed", "in_progress", "waiting"})
 
+# Job-level statuses accepted by the repo-wide /actions/jobs filter. Unlike
+# the run-list filter, "running" is the only alias and it maps forward to the
+# remote's in_progress spelling; every other value must match exactly.
+_ACTION_JOB_STATUS_ALIASES = {
+    "running": "in_progress",
+}
+_ALLOWED_ACTION_JOB_STATUS_FILTERS = frozenset(
+    {"pending", "queued", "in_progress", "failure", "success", "skipped"}
+)
+
 API_BASE = os.environ.get("GITEA_API_BASE", "https://git.example.com/api/v1")
 GITEA_FORWARDED_HOST = os.environ.get("GITEA_FORWARDED_HOST", "")
 GITEA_FORWARDED_PROTO = os.environ.get("GITEA_FORWARDED_PROTO", "https")
@@ -54,6 +64,7 @@ ALLOWED_ENDPOINTS = frozenset(
         "/repos/{owner}/{repo}/actions/runs",
         "/repos/{owner}/{repo}/actions/runs/{run_id}",
         "/repos/{owner}/{repo}/actions/runs/{run_id}/jobs",
+        "/repos/{owner}/{repo}/actions/jobs",
         "/repos/{owner}/{repo}/actions/jobs/{job_id}/logs",
         "/repos/{owner}/{repo}/actions/workflows",
     }
@@ -122,6 +133,19 @@ def _normalize_action_run_status_filter(status: str | None) -> str | None:
     return normalized
 
 
+def _normalize_action_job_status_filter(status: str | None) -> str | None:
+    if status is None:
+        return None
+    if not isinstance(status, str):
+        raise ValueError(f"status must be a string, got {type(status).__name__}")
+    stripped = status.strip()
+    normalized = _ACTION_JOB_STATUS_ALIASES.get(stripped, stripped)
+    if normalized not in _ALLOWED_ACTION_JOB_STATUS_FILTERS:
+        allowed = ", ".join(sorted(_ALLOWED_ACTION_JOB_STATUS_FILTERS | set(_ACTION_JOB_STATUS_ALIASES)))
+        raise ValueError(f"status must be one of: {allowed}")
+    return normalized
+
+
 def _validate_positive_int(value: int, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{label} must be a positive integer")
@@ -133,6 +157,97 @@ def _validate_action_job_log_max_bytes(max_bytes: int) -> int:
     if max_bytes > MAX_ACTION_JOB_LOG_BYTES:
         raise ValueError(f"max_bytes must be <= {MAX_ACTION_JOB_LOG_BYTES}")
     return max_bytes
+
+
+def _action_job_str_or_none(value: Any, label: str) -> str | None:
+    """Require an emitted job string field to be exactly str or null."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"action job {label} must be a string or null")
+    return value
+
+
+def _action_job_positive_int(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"action job {label} must be a positive integer")
+    return value
+
+
+def _action_job_optional_nonneg_int(value: Any, label: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"action job {label} must be an integer >= 0 or null")
+    return value
+
+
+def _action_job_head_sha(value: Any) -> str | None:
+    """Validate head_sha without normalizing or coercing remote input.
+
+    None/absent is allowed. Any present value must be exactly a lowercase
+    40-hex SHA-1; empty string, uppercase, non-string, and otherwise
+    malformed remote values fail closed instead of silently becoming a
+    different SHA. We never lowercase or coerce it ourselves.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("action job head_sha must be a string or null")
+    if not _SHA1_RE.fullmatch(value):
+        raise ValueError("action job head_sha must be a lowercase 40-character SHA-1")
+    return value
+
+
+def _validate_action_job_limit(limit: int) -> int:
+    limit = _validate_positive_int(limit, "limit")
+    if limit > MAX_LIMIT:
+        raise ValueError(f"limit must be <= {MAX_LIMIT}")
+    return limit
+
+
+def minimize_action_job_payload(job: Any) -> dict[str, Any]:
+    """Validate and minimize a Gitea Actions job to a strict 14-field allowlist.
+
+    Malformed emitted scalars fail closed with ValueError instead of being
+    coerced to None: any job whose id/run_id/run_attempt/runner_id/string
+    fields or head_sha do not match the contract is a remote-shape bug we
+    refuse to hide from callers.
+    """
+    if not isinstance(job, dict):
+        raise ValueError("action job payload must be an object")
+    return {
+        "id": _action_job_positive_int(job.get("id"), "id"),
+        "run_id": _action_job_positive_int(job.get("run_id"), "run_id"),
+        "run_attempt": _action_job_positive_int(job.get("run_attempt"), "run_attempt"),
+        "head_branch": _action_job_str_or_none(job.get("head_branch"), "head_branch"),
+        "head_sha": _action_job_head_sha(job.get("head_sha")),
+        "name": _action_job_str_or_none(job.get("name"), "name"),
+        "status": _action_job_str_or_none(job.get("status"), "status"),
+        "conclusion": _action_job_str_or_none(job.get("conclusion"), "conclusion"),
+        "runner_id": _action_job_optional_nonneg_int(job.get("runner_id"), "runner_id"),
+        "runner_name": _action_job_str_or_none(job.get("runner_name"), "runner_name"),
+        "started_at": _action_job_str_or_none(job.get("started_at"), "started_at"),
+        "completed_at": _action_job_str_or_none(job.get("completed_at"), "completed_at"),
+        "url": _action_job_str_or_none(job.get("url"), "url"),
+        "run_url": _action_job_str_or_none(job.get("run_url"), "run_url"),
+    }
+
+
+def normalize_action_jobs_response(data: Any) -> dict[str, Any]:
+    """Return the minimized repo-wide jobs response, failing closed on shape."""
+    if not isinstance(data, dict):
+        raise ValueError("actions jobs response must be an object")
+    total_count = data.get("total_count")
+    if isinstance(total_count, bool) or not isinstance(total_count, int) or total_count < 0:
+        raise ValueError("total_count must be an integer >= 0")
+    jobs = data.get("jobs")
+    if not isinstance(jobs, list):
+        raise ValueError("jobs must be a list")
+    return {
+        "total_count": total_count,
+        "jobs": [minimize_action_job_payload(job) for job in jobs],
+    }
 
 
 def _redact_action_job_log(text: str) -> tuple[str, bool]:
@@ -628,6 +743,39 @@ class GiteaClient:
             repo=repo,
             run_id=run_id,
         )
+
+    async def list_action_jobs(
+        self,
+        owner: str,
+        repo: str,
+        status: str | None = None,
+        page: int = 1,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """List repository-wide Gitea Actions jobs (read-only).
+
+        ``status`` accepts exactly pending, queued, in_progress, failure,
+        success, skipped (plus the running alias mapped to in_progress).
+        A non-string status, or an unknown status, is rejected here with
+        ValueError before any HTTP request is made. ``page``/``limit`` must
+        be positive ints (bools rejected) and limit may not exceed 50.
+        The response is expected to be an object with a non-negative
+        ``total_count`` and a ``jobs`` list; each job is minimized to a
+        strict allowlist and malformed emitted scalars fail closed.
+        """
+        normalized_status = _normalize_action_job_status_filter(status)
+        page = _validate_positive_int(page, "page")
+        limit = _validate_action_job_limit(limit)
+        params: dict[str, Any] = {"page": page, "limit": limit}
+        if normalized_status:
+            params["status"] = normalized_status
+        data = await self._get(
+            "/repos/{owner}/{repo}/actions/jobs",
+            params=params,
+            owner=owner,
+            repo=repo,
+        )
+        return normalize_action_jobs_response(data)
 
     async def get_action_job_logs(
         self,

@@ -1684,6 +1684,39 @@ async def gitea_list_action_run_jobs(owner: str, repo: str, run_id: int) -> dict
     return tool_success("gitea_list_action_run_jobs", result=data, source="gitea")
 
 
+async def gitea_list_action_jobs(
+    owner: str,
+    repo: str,
+    status: str | None = None,
+    page: int = 1,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """List repository-wide Gitea Actions jobs. Optionally filter by status
+    (pending, queued, running/in_progress, failure, success, skipped)."""
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return tool_error(
+            tool="gitea_list_action_jobs",
+            code="DEPENDENCY_MISSING",
+            message="GITEA_TOKEN not configured",
+            source="gitea",
+        )
+    try:
+        validate_pagination(page, "page")
+        validate_pagination(limit, "limit", max_value=50)
+        async with _server_gitea_client()(token) as client:
+            data = await client.list_action_jobs(
+                owner,
+                repo,
+                status=status,
+                page=page,
+                limit=limit,
+            )
+    except Exception as exc:
+        return _remote_api_error("gitea_list_action_jobs", "gitea", exc)
+    return tool_success("gitea_list_action_jobs", result=data, source="gitea")
+
+
 def _validate_action_log_tail_lines(tail_lines: int) -> int:
     if (
         isinstance(tail_lines, bool)
@@ -2467,6 +2500,7 @@ def register_all() -> None:
     register_tool("gitea_list_action_runs")(gitea_list_action_runs)
     register_tool("gitea_get_action_run")(gitea_get_action_run)
     register_tool("gitea_list_action_run_jobs")(gitea_list_action_run_jobs)
+    register_tool("gitea_list_action_jobs")(gitea_list_action_jobs)
     register_tool("gitea_get_action_job_logs")(gitea_get_action_job_logs)
     register_tool("gitea_list_workflows")(gitea_list_workflows)
     register_tool("github_get_repo")(github_get_repo)

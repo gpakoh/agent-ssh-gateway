@@ -164,6 +164,13 @@ class TestChatGPTSafeMode:
         for name in ("health", "tools_manifest", "job_status", "read_file", "repo_status"):
             assert name in safe
 
+    def test_gitea_list_action_jobs_is_readonly_repo_scoped(self):
+        name = "gitea_list_action_jobs"
+        assert name in TOOL_NAMES_BY_MODE["mcp_client"]
+        assert name not in MCP_CLIENT_BLOCKED_TOOLS
+        assert name in get_mcp_client_safe_tools()
+        assert get_required_scopes(name) == ["mcp:repo"]
+
     def test_safe_tools_include_testlint(self):
         safe = get_mcp_client_safe_tools()
         for name in ("run_tests", "run_lint", "run_pytest", "run_ruff"):
