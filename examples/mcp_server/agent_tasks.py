@@ -1276,7 +1276,8 @@ _AGENT_TERMINAL_STATUSES = frozenset(
         "cancelled",
     }
 )
-_AGENT_ACTIVE_STATUSES = frozenset({"created", "pending", "processing", "running", "cancelling"})
+_AGENT_ACTIVE_STATUSES = frozenset({"pending", "processing", "running", "cancelling"})
+_AGENT_PRE_EXECUTION_STATUSES = frozenset({"created"})
 _STARTUP_STALLED_RE = re.compile(r"OpenCode startup stalled; rotating proxy \(attempt (\d+)/(\d+)\)")
 _PRE_USEFUL_SERVER_RETRY_RE = re.compile(
     r"OpenCode upstream server error before useful work; rotating proxy \(attempt (\d+)/(\d+)\)"
@@ -2006,6 +2007,48 @@ def _job_status_token(job: dict[str, Any] | None) -> str | None:
     return value.lower() if isinstance(value, str) and value else None
 
 
+def _agent_execution_started(
+    *,
+    attempt: dict[str, Any] | None,
+    job_token: str | None,
+    heartbeat: dict[str, Any],
+    files: dict[str, dict[str, Any]],
+) -> bool:
+    """Return True once an executor has actually bound or emitted runtime state.
+
+    ``Status: created`` means a task definition exists, not that a worker was
+    submitted. A bound gateway job, runner heartbeat, runtime sidecar, proxy
+    sidecar, failure sidecar, worker status, required-check log, or non-empty
+    live log proves execution crossed the submission boundary; an absent
+    attempt-state record or an attempt record with no ``job_id`` does not.
+    """
+    if job_token:
+        return True
+    if attempt:
+        job_id = attempt.get("job_id")
+        if isinstance(job_id, str) and job_id:
+            return True
+    if heartbeat.get("exists"):
+        return True
+    for name in (
+        "log",
+        "runtime_status",
+        "proxy_status",
+        "failure_status",
+        "worker_status",
+        "required_checks",
+    ):
+        meta = files.get(name) or {}
+        if not meta.get("exists"):
+            continue
+        if name in {"log", "worker_status", "required_checks"}:
+            size = meta.get("size_bytes")
+            if isinstance(size, int) and size <= 0:
+                continue
+        return True
+    return False
+
+
 def _gateway_job_absent(job: dict[str, Any] | None) -> bool:
     return bool(
         job
@@ -2718,7 +2761,17 @@ def agent_task_status(
         }
         semantic_age = None
 
-    active = bool(status_token in _AGENT_ACTIVE_STATUSES or job_token in _AGENT_ACTIVE_STATUSES)
+    execution_started = _agent_execution_started(
+        attempt=attempt,
+        job_token=job_token,
+        heartbeat=heartbeat,
+        files=files,
+    )
+    active = bool(
+        status_token in _AGENT_ACTIVE_STATUSES
+        or job_token in _AGENT_ACTIVE_STATUSES
+        or (status_token in _AGENT_PRE_EXECUTION_STATUSES and execution_started)
+    )
     gate_ledger = _read_agent_gate_ledger(
         run_cmd, project=project, task_id=task_id
     )
@@ -2737,6 +2790,11 @@ def agent_task_status(
         heartbeat=heartbeat,
         heartbeat_mtime=(files.get("heartbeat") or {}).get("mtime_epoch"),
         attempt_state_mtime=(files.get("attempt_state") or {}).get("mtime_epoch"),
+    )
+    awaiting_executor = bool(
+        status_token in _AGENT_PRE_EXECUTION_STATUSES
+        and not terminal
+        and not execution_started
     )
     reconciliation = _agent_reconciliation_diagnostics(
         attempt=attempt,
@@ -2771,6 +2829,8 @@ def agent_task_status(
         verdict = failure_reason
     elif terminal:
         verdict = "finished"
+    elif awaiting_executor:
+        verdict = "awaiting_executor"
     elif reconciliation.get("state") is not None:
         verdict = str(reconciliation["state"])
     elif startup.get("dead_time_kind") == "opencode_startup":
@@ -2834,6 +2894,8 @@ def agent_task_status(
         "acceptance": gate_ledger,
         "startup": startup,
         "stale_after_seconds": stale_after_seconds,
+        "execution_started": execution_started,
+        "awaiting_executor": awaiting_executor,
         "terminal": terminal,
         "likely_hung": likely_hung,
         "verdict": verdict,
@@ -2985,7 +3047,17 @@ def inspect_agent_task(
         }
         semantic_age = None
 
-    active = bool(status_token in _AGENT_ACTIVE_STATUSES or job_token in _AGENT_ACTIVE_STATUSES)
+    execution_started = _agent_execution_started(
+        attempt=attempt,
+        job_token=job_token,
+        heartbeat=heartbeat,
+        files=files,
+    )
+    active = bool(
+        status_token in _AGENT_ACTIVE_STATUSES
+        or job_token in _AGENT_ACTIVE_STATUSES
+        or (status_token in _AGENT_PRE_EXECUTION_STATUSES and execution_started)
+    )
     gate_ledger = _read_agent_gate_ledger(
         run_cmd, project=project, task_id=task_id
     )
@@ -3004,6 +3076,11 @@ def inspect_agent_task(
         heartbeat=heartbeat,
         heartbeat_mtime=(files.get("heartbeat") or {}).get("mtime_epoch"),
         attempt_state_mtime=(files.get("attempt_state") or {}).get("mtime_epoch"),
+    )
+    awaiting_executor = bool(
+        status_token in _AGENT_PRE_EXECUTION_STATUSES
+        and not terminal
+        and not execution_started
     )
     reconciliation = _agent_reconciliation_diagnostics(
         attempt=attempt,
@@ -3064,6 +3141,8 @@ def inspect_agent_task(
         verdict = failure_reason
     elif terminal:
         verdict = "finished"
+    elif awaiting_executor:
+        verdict = "awaiting_executor"
     elif reconciliation.get("state") is not None:
         verdict = str(reconciliation["state"])
         likely_hung = True
@@ -3115,6 +3194,8 @@ def inspect_agent_task(
         "reasoning_loop_after_seconds": reasoning_loop_after_seconds,
         "trailing_colon_after_seconds": trailing_colon_after_seconds,
         "emitted_invoke_after_seconds": emitted_invoke_after_seconds,
+        "execution_started": execution_started,
+        "awaiting_executor": awaiting_executor,
         "terminal": terminal,
         "likely_hung": likely_hung,
         "verdict": verdict,

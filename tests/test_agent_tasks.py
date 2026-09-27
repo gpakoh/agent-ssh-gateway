@@ -1104,6 +1104,74 @@ class TestAgentTaskStatus:
 
         return run_cmd
 
+    def test_never_submitted_created_snapshot_is_awaiting_executor_not_hung(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text(
+            "Status: created\n\nTask created, awaiting executor.\n",
+            encoding="utf-8",
+        )
+        (td / "consensus.md").write_text("# Agent consensus\n", encoding="utf-8")
+        old = 1_000
+        for child in td.iterdir():
+            os.utime(child, (old, old))
+
+        result = agent_task_status(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            now_epoch=2_000,
+        )
+
+        assert result["exists"] is True
+        assert result["status"] == "created"
+        assert result["attempt"] is None
+        assert result["job"] is None
+        assert result["execution_started"] is False
+        assert result["awaiting_executor"] is True
+        assert result["verdict"] == "awaiting_executor"
+        assert result["likely_hung"] is False
+        assert "inspect_agent_task" not in result["next"]
+
+    def test_created_snapshot_with_bound_old_execution_is_likely_hung(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: created\n\nWaiting for worker.\n", encoding="utf-8")
+        (td / "attempt-state.json").write_text(
+            json.dumps(
+                {"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"},
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        old = 1_000
+        for child in td.iterdir():
+            os.utime(child, (old, old))
+
+        result = agent_task_status(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            now_epoch=2_000,
+            job_status=lambda job_id: {"job_id": job_id, "status": "running"},
+        )
+
+        assert result["execution_started"] is True
+        assert result["awaiting_executor"] is False
+        assert result["verdict"] == "likely_hung"
+        assert result["likely_hung"] is True
+        assert result["next"]["inspect_agent_task"]["task_id"] == task_id
+
     def test_lost_job_snapshot_escalates_without_claiming_worker_terminated(
         self, tmp_path, monkeypatch
     ):
@@ -1968,6 +2036,68 @@ class TestInspectAgentTask:
         assert result["exists"] is False
         assert result["verdict"] == "missing"
         assert result["likely_hung"] is False
+
+    def test_never_submitted_created_task_is_awaiting_executor_not_hung(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text(
+            "Status: created\n\nTask created, awaiting executor.\n",
+            encoding="utf-8",
+        )
+        (td / "consensus.md").write_text("# Agent consensus\n", encoding="utf-8")
+        old = 1_000
+        for child in td.iterdir():
+            os.utime(child, (old, old))
+
+        result = inspect_agent_task(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            now_epoch=2_000,
+        )
+
+        assert result["exists"] is True
+        assert result["status"] == "created"
+        assert result["attempt"] is None
+        assert result["job"] is None
+        assert result["execution_started"] is False
+        assert result["awaiting_executor"] is True
+        assert result["verdict"] == "awaiting_executor"
+        assert result["likely_hung"] is False
+
+    def test_created_task_with_bound_old_execution_is_likely_hung(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: created\n\nWaiting for worker.\n", encoding="utf-8")
+        (td / "attempt-state.json").write_text(
+            json.dumps(
+                {"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"},
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        old = 1_000
+        for child in td.iterdir():
+            os.utime(child, (old, old))
+
+        result = inspect_agent_task(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            now_epoch=2_000,
+            job_status=lambda job_id: {"job_id": job_id, "status": "running"},
+        )
+
+        assert result["execution_started"] is True
+        assert result["awaiting_executor"] is False
+        assert result["verdict"] == "likely_hung"
+        assert result["likely_hung"] is True
 
     def test_running_job_with_old_artifacts_is_likely_hung(self, tmp_path, monkeypatch):
         monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
