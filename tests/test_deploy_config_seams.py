@@ -1802,6 +1802,9 @@ class TestOpenCodeProductionAdmission:
         env = _load_compose()["services"]["mcp-oauth"]["environment"]
         values = {item.split("=", 1)[0]: item.split("=", 1)[1] for item in env}
         assert values["MCP_AGENT_FLEET_ENABLED"] == "${MCP_AGENT_FLEET_ENABLED:-true}"
+        assert values["MCP_OPENCODE_FLEET_ADMISSION_ENABLED"] == (
+            "${MCP_OPENCODE_FLEET_ADMISSION_ENABLED:-false}"
+        )
         assert values["MCP_AGENT_FLEET_GENERATION_RECOVERY"] == (
             "${MCP_AGENT_FLEET_GENERATION_RECOVERY:-true}"
         )

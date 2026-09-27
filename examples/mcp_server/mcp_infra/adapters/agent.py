@@ -743,6 +743,19 @@ def gateway_archive_agent_task(project: str, task_id: str) -> dict[str, Any]:
     )
 
 
+_OPENCODE_FLEET_ADMISSION_ENV = "MCP_OPENCODE_FLEET_ADMISSION_ENABLED"
+
+
+def _opencode_fleet_admission_enabled() -> bool:
+    """Whether direct run_opencode submissions opt into global fleet admission."""
+    return os.environ.get(_OPENCODE_FLEET_ADMISSION_ENV, "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 _OPENCODE_HELP = {
     "recommended_model": "big-pickle",
     "profile": (
@@ -767,11 +780,14 @@ async def gateway_run_opencode(
     model: str | None = None,
     async_submit: bool = False,
 ) -> dict[str, Any]:
-    """Execute an existing handoff task via OpenCode CLI.
+    """Execute an existing handoff task directly via OpenCode CLI.
 
-    When durable fleet admission is enabled, async submissions acquire a
-    shared Postgres lease before the blocking gateway call. The blocking HTTP
-    path runs in a worker thread; asyncpg stays on the FastMCP event loop.
+    This path deliberately bypasses the backend router. It also bypasses the
+    global Postgres fleet admission layer by default because the dedicated
+    executor already enforces proxy leases and cgroup headroom admission.
+    Set MCP_OPENCODE_FLEET_ADMISSION_ENABLED=true to opt this tool back into
+    the fleet layer. Durable attempt identity and isolated workspace handling
+    remain inside project_run_opencode regardless of this setting.
     """
     from write_modes import assert_handoff_write_allowed
 
@@ -811,11 +827,14 @@ async def gateway_run_opencode(
         )
 
     async def _fn() -> dict[str, Any]:
-        result = await _submit_agent_with_fleet(
-            project=project,
-            task_id=task_id,
-            submit_sync=_submit,
-        )
+        if _opencode_fleet_admission_enabled():
+            result = await _submit_agent_with_fleet(
+                project=project,
+                task_id=task_id,
+                submit_sync=_submit,
+            )
+        else:
+            result = await asyncio.to_thread(_submit, None)
         return _normalize_single_agent_submission("run_opencode", result)
 
     response = await run_tool_async(

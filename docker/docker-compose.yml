@@ -293,6 +293,10 @@ services:
       # a catastrophe ceiling. Normal concurrency is governed dynamically by
       # executor memory headroom and the number of distinct proxy leases.
       - MCP_AGENT_FLEET_ENABLED=${MCP_AGENT_FLEET_ENABLED:-true}
+      # Direct run_opencode already has executor-local proxy/cgroup admission.
+      # Keep the Postgres fleet layer opt-in for that tool to avoid a redundant
+      # pre-launch dependency; run_agent/run_agents continue to use fleet admission.
+      - MCP_OPENCODE_FLEET_ADMISSION_ENABLED=${MCP_OPENCODE_FLEET_ADMISSION_ENABLED:-false}
       # This profile starts mcp-oauth only after Gateway + dedicated agent-sshd
       # health, so replacement-generation fleet recovery has an attested
       # startup ordering. Other deployment topologies must opt in separately.
