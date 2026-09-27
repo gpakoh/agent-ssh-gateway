@@ -343,10 +343,10 @@ services:
       - OPENCODE_STARTUP_KILL_GRACE_SECONDS=${OPENCODE_STARTUP_KILL_GRACE_SECONDS:-5}
       - OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS=${OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS:-6}
       - OPENCODE_RUN_TIMEOUT_SECONDS=${OPENCODE_RUN_TIMEOUT_SECONDS:-7200}
-      # The first launch after the durable receipt reaches 24h performs one
+      # The first launch after the durable receipt reaches 7d performs one
       # serialized upgrade of the exact persistent binary used by all workers.
       - OPENCODE_UPGRADE_GATE_ENABLED=${OPENCODE_UPGRADE_GATE_ENABLED:-true}
-      - OPENCODE_UPGRADE_INTERVAL_SECONDS=${OPENCODE_UPGRADE_INTERVAL_SECONDS:-86400}
+      - OPENCODE_UPGRADE_INTERVAL_SECONDS=${OPENCODE_UPGRADE_INTERVAL_SECONDS:-604800}
       - OPENCODE_UPGRADE_TIMEOUT_SECONDS=${OPENCODE_UPGRADE_TIMEOUT_SECONDS:-600}
       - OPENCODE_MANAGED_BIN=${OPENCODE_MANAGED_BIN:-/var/lib/mcp-agent/opencode/bin/opencode}
       - OPENCODE_UPGRADE_STATE_PATH=${OPENCODE_UPGRADE_STATE_PATH:-/var/lib/mcp-agent/state/opencode-upgrade.json}

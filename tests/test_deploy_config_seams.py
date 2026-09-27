@@ -1824,12 +1824,12 @@ class TestOpenCodeProductionAdmission:
         env = _load_compose()["services"]["mcp-oauth"]["environment"]
         assert "OPENCODE_RUN_TIMEOUT_SECONDS=${OPENCODE_RUN_TIMEOUT_SECONDS:-7200}" in env
 
-    def test_oauth_gates_launch_on_daily_managed_opencode_upgrade(self):
+    def test_oauth_gates_launch_on_weekly_managed_opencode_upgrade(self):
         env = _load_compose()["services"]["mcp-oauth"]["environment"]
         assert "OPENCODE_UPGRADE_GATE_ENABLED=${OPENCODE_UPGRADE_GATE_ENABLED:-true}" in env
         assert (
             "OPENCODE_UPGRADE_INTERVAL_SECONDS="
-            "${OPENCODE_UPGRADE_INTERVAL_SECONDS:-86400}"
+            "${OPENCODE_UPGRADE_INTERVAL_SECONDS:-604800}"
         ) in env
         assert (
             "OPENCODE_MANAGED_BIN="
