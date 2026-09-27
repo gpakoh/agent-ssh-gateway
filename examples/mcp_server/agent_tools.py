@@ -2196,7 +2196,7 @@ def _opencode_upgrade_gate_script_lines(
     interval_seconds: int,
     timeout_seconds: int,
 ) -> list[str]:
-    """Gate worker launch on a serialized, durable daily OpenCode upgrade."""
+    """Gate worker launch on a serialized, durable scheduled OpenCode upgrade."""
     permission_reader = (
         'import json,sys; print(json.load(sys.stdin)["permission_flag"])'
     )
@@ -2226,7 +2226,7 @@ def _opencode_upgrade_gate_script_lines(
         "    RC=80",
         '    FAILURE_REASON="opencode-upgrade-failed"',
         '    runner_artifact_write_line "$td/opencode-upgrade.json" "$OPENCODE_UPGRADE_RESULT"',
-        '    runner_artifact_append_line "$td/agent-status.md" "OpenCode daily upgrade failed; agent launch blocked"',
+        '    runner_artifact_append_line "$td/agent-status.md" "OpenCode scheduled upgrade failed; agent launch blocked"',
         "  fi",
         "else",
         '  OPCODE_BIN="$OPCODE_SEED_BIN"',
@@ -2244,7 +2244,7 @@ def _opencode_upgrade_gate_script_lines(
         "      ;;",
         "  esac",
         "fi",
-        # The explicit daily gate owns upgrades; worker starts must not race it.
+        # The explicit scheduled gate owns upgrades; worker starts must not race it.
         "export OPENCODE_DISABLE_AUTOUPDATE=1",
     ]
 
@@ -2380,7 +2380,7 @@ def _build_opencode_script(
         "OPENCODE_UPGRADE_GATE_ENABLED", "false"
     ).strip().lower() not in {"0", "false", "no", "off"}
     upgrade_interval_seconds = int(
-        os.environ.get("OPENCODE_UPGRADE_INTERVAL_SECONDS", "86400")
+        os.environ.get("OPENCODE_UPGRADE_INTERVAL_SECONDS", "604800")
     )
     upgrade_timeout_seconds = int(
         os.environ.get("OPENCODE_UPGRADE_TIMEOUT_SECONDS", "600")

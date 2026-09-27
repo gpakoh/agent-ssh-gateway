@@ -2501,7 +2501,7 @@ def test_large_failure_log_is_not_loaded_or_classified(tmp_path, monkeypatch):
     assert "Failure reason: none" in report
 
 
-class TestDailyOpenCodeUpgradeGate:
+class TestScheduledOpenCodeUpgradeGate:
     @staticmethod
     def _configure_gate(
         monkeypatch: pytest.MonkeyPatch,
@@ -2510,7 +2510,7 @@ class TestDailyOpenCodeUpgradeGate:
         state_path: Path,
     ) -> None:
         monkeypatch.setenv("OPENCODE_UPGRADE_GATE_ENABLED", "true")
-        monkeypatch.setenv("OPENCODE_UPGRADE_INTERVAL_SECONDS", "86400")
+        monkeypatch.setenv("OPENCODE_UPGRADE_INTERVAL_SECONDS", "604800")
         monkeypatch.setenv("OPENCODE_UPGRADE_TIMEOUT_SECONDS", "10")
         monkeypatch.setenv("OPENCODE_MANAGED_BIN", str(managed_bin))
         monkeypatch.setenv("OPENCODE_UPGRADE_STATE_PATH", str(state_path))
