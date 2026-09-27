@@ -1574,11 +1574,41 @@ class TestGatewayRunAgents:
         assert callable(kwargs["submit_sync"])
 
     @pytest.mark.asyncio
-    async def test_sync_run_opencode_routes_through_fleet_submit(self, monkeypatch):
-        """BLOCKER A: the durable sync opencode path admits via fleet too."""
-        import examples.mcp_server.server as server_mod
-        from examples.mcp_server.mcp_infra.adapters.agent import gateway_run_opencode
+    async def test_sync_run_opencode_bypasses_router_and_fleet_by_default(self, monkeypatch):
+        import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
 
+        monkeypatch.delenv("MCP_OPENCODE_FLEET_ADMISSION_ENABLED", raising=False)
+        project_run = MagicMock(
+            return_value={"task_id": "single", "status": "running", "job_id": "job-direct-open"}
+        )
+
+        async def unexpected_fleet():
+            raise AssertionError("direct run_opencode must not initialize fleet admission")
+
+        def unexpected_router():
+            raise AssertionError("direct run_opencode must not consult the backend router")
+
+        monkeypatch.setattr(agent_adapter, "_project_run_opencode", project_run)
+        monkeypatch.setattr(agent_adapter, "get_fleet_runtime", unexpected_fleet)
+        monkeypatch.setattr(agent_adapter, "_server_agent_router", unexpected_router)
+
+        result = await agent_adapter.gateway_run_opencode(
+            "test", "single", async_submit=False
+        )
+
+        assert result["ok"] is True
+        assert result["result"]["job_id"] == "job-direct-open"
+        project_run.assert_called_once()
+        assert project_run.call_args.kwargs["before_gateway_dispatch"] is None
+        assert result["help"]["recommended_model"] == "big-pickle"
+        assert "finding is closed" in result["help"]["supervisor_rule"]
+        assert "glm" not in repr(result["help"]).lower()
+
+    @pytest.mark.asyncio
+    async def test_sync_run_opencode_can_opt_in_to_fleet_submit(self, monkeypatch):
+        import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+        monkeypatch.setenv("MCP_OPENCODE_FLEET_ADMISSION_ENABLED", "true")
         fleet = MagicMock()
         fleet.submit = AsyncMock(
             return_value={"task_id": "single", "status": "running", "job_id": "job-sync-open"}
@@ -1587,26 +1617,23 @@ class TestGatewayRunAgents:
         async def get_fleet():
             return fleet
 
-        monkeypatch.setattr(
-            "examples.mcp_server.mcp_infra.adapters.agent.get_fleet_runtime",
-            get_fleet,
-        )
-        monkeypatch.setattr(server_mod, "client", MagicMock())
+        monkeypatch.setattr(agent_adapter, "get_fleet_runtime", get_fleet)
 
-        result = await gateway_run_opencode("test", "single", async_submit=False)
+        result = await agent_adapter.gateway_run_opencode(
+            "test", "single", async_submit=False
+        )
 
         assert result["ok"] is True
         assert fleet.submit.await_count == 1
         assert fleet.submit.await_args.kwargs["project"] == "test"
         assert fleet.submit.await_args.kwargs["task_id"] == "single"
         assert callable(fleet.submit.await_args.kwargs["submit_sync"])
-        assert result["help"]["recommended_model"] == "big-pickle"
-        assert "finding is closed" in result["help"]["supervisor_rule"]
-        assert "glm" not in repr(result["help"]).lower()
 
     @pytest.mark.asyncio
     async def test_run_opencode_error_envelope_includes_help(self, monkeypatch):
         import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+        monkeypatch.setenv("MCP_OPENCODE_FLEET_ADMISSION_ENABLED", "true")
 
         async def fail_submission(**_kwargs):
             raise ValueError("simulated invalid submission")
@@ -1665,10 +1692,11 @@ class TestGatewayRunAgents:
             "job_id": None,
         }
 
-        async def fail_submission(**_kwargs):
+        def fail_submission(*_args, **_kwargs):
             return dict(raw)
 
-        monkeypatch.setattr(agent_adapter, "_submit_agent_with_fleet", fail_submission)
+        monkeypatch.delenv("MCP_OPENCODE_FLEET_ADMISSION_ENABLED", raising=False)
+        monkeypatch.setattr(agent_adapter, "_project_run_opencode", fail_submission)
 
         result = await agent_adapter.gateway_run_opencode(
             "test", "single", async_submit=False
