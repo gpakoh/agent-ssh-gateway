@@ -35,6 +35,7 @@ except ImportError:  # pragma: no cover
 _DRIVER = shutil.which("chromedriver")
 _CHROMIUM = shutil.which("chromium") or shutil.which("chromium-browser") or shutil.which("google-chrome")
 _REMOTE_URL = os.environ.get("SELENIUM_REMOTE_URL", "").strip()
+E2E_SERVER_READY_TIMEOUT_SECONDS = 90.0
 
 if not webdriver or (not _REMOTE_URL and not (_DRIVER and _CHROMIUM)):
     pytest.skip(
@@ -153,6 +154,7 @@ def server():
             f"{base}/api/health",
             proc=proc,
             startup_log_path=startup_log_path,
+            timeout=E2E_SERVER_READY_TIMEOUT_SECONDS,
         )
         yield base, auth_db
     finally:
