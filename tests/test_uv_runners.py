@@ -738,6 +738,146 @@ class TestRunUvToolContract:
         assert result["result"]["stderr"] == "2 failed"
         assert result["error"]["code"] == "CHECK_FAILED"
 
+    def test_pytest_missing_uv_lock_uses_external_fallback(self, monkeypatch):
+        """Projects without uv.lock must not fail before pytest starts."""
+        from mcp_client_tools import _run_uv_tool
+
+        monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
+        monkeypatch.setattr(
+            "mcp_client_tools._build_readonly_fallback_script",
+            lambda *a: "external fallback script",
+        )
+
+        class MissingLockClient:
+            def __init__(self):
+                self._n = 0
+                self.fallback_script = None
+
+            def execute_raw(self, cmd, **kw):
+                self._n += 1
+                return {"job_id": f"j{self._n}"}
+
+            def wait_job(self, job_id, **kw):
+                if job_id == "j1":
+                    return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
+                return {
+                    "exit_code": 2,
+                    "stdout": "",
+                    "stderr": "error: Unable to find lockfile at `uv.lock`, but `--frozen` was provided.\n",
+                }
+
+            def execute_project_script(self, proj, script, timeout_s=300):
+                self.fallback_script = script
+                return {
+                    "exit_code": 0,
+                    "stdout": "fallback OK",
+                    "stderr": "",
+                    "execution_duration_ms": 456,
+                    "job_id": "j-fallback",
+                }
+
+        client = MissingLockClient()
+        result = _run_uv_tool(client, "proj", "pytest", "run_pytest", target=["tests"])
+
+        assert client.fallback_script == "external fallback script"
+        assert result["ok"] is True
+        assert result["result"]["outcome"] == "passed"
+        assert result["result"]["stdout"] == "fallback OK"
+
+    def test_ruff_missing_uv_lock_uses_uvx_fallback(self, monkeypatch):
+        """Ruff has no project install requirement; uvx is the external fallback."""
+        from mcp_client_tools import _run_uv_tool
+
+        monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
+
+        class MissingLockClient:
+            def __init__(self):
+                self._n = 0
+                self.argv_calls: list[list[str]] = []
+
+            def execute_raw(self, cmd, **kw):
+                self._n += 1
+                return {"job_id": f"j{self._n}"}
+
+            def wait_job(self, job_id, **kw):
+                if job_id == "j1":
+                    return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
+                return {
+                    "exit_code": 2,
+                    "stdout": "",
+                    "stderr": "error: Unable to find lockfile at `uv.lock`, but `--frozen` was provided.\n",
+                }
+
+            def execute_argv(self, argv, **kw):
+                self.argv_calls.append(argv)
+                return {
+                    "exit_code": 0,
+                    "stdout": "All checks passed!\n",
+                    "stderr": "",
+                    "execution_duration_ms": 12,
+                    "job_id": "j-uvx",
+                }
+
+        client = MissingLockClient()
+        result = _run_uv_tool(client, "proj", "ruff", "run_ruff", target=["app"])
+
+        assert len(client.argv_calls) == 1
+        assert client.argv_calls[0][:4] == [
+            "env",
+            "RUFF_CACHE_DIR=/tmp/.mcp-ruff-cache",
+            "uvx",
+            "--from",
+        ]
+        assert result["ok"] is True
+        assert result["result"]["stdout"] == "All checks passed!\n"
+
+    def test_compileall_missing_uv_lock_uses_no_project_python(self, monkeypatch):
+        """compileall must bypass a missing project lockfile with stdlib Python."""
+        from mcp_client_tools import _run_uv_tool
+
+        monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
+
+        class MissingLockClient:
+            def __init__(self):
+                self._n = 0
+                self.argv_calls: list[list[str]] = []
+                self.argv_kwargs: list[dict] = []
+
+            def execute_raw(self, cmd, **kw):
+                self._n += 1
+                return {"job_id": f"j{self._n}"}
+
+            def wait_job(self, job_id, **kw):
+                if job_id == "j1":
+                    return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
+                return {
+                    "exit_code": 2,
+                    "stdout": "",
+                    "stderr": "error: Unable to find lockfile at `uv.lock`, but `--frozen` was provided.\n",
+                }
+
+            def execute_argv(self, argv, **kw):
+                self.argv_calls.append(argv)
+                self.argv_kwargs.append(kw)
+                return {
+                    "exit_code": 0,
+                    "stdout": "Compiling 'app/__init__.py'...\n",
+                    "stderr": "",
+                    "execution_duration_ms": 9,
+                    "job_id": "j-compileall",
+                }
+
+        client = MissingLockClient()
+        result = _run_uv_tool(client, "proj", "compileall", "run_compileall", target=["app"])
+
+        assert len(client.argv_calls) == 1
+        argv = client.argv_calls[0]
+        assert "uv" in argv and "run" in argv and "--no-project" in argv
+        assert "python3" in argv
+        assert client.argv_kwargs[0].get("timeout_s") == 300
+        assert result["ok"] is True
+        assert result["result"]["stdout"] == "Compiling 'app/__init__.py'...\n"
+
     def test_compileall_readonly_fallback_uses_uv_run_no_project_not_uvx(self, monkeypatch):
         """Regression: compileall isn't an installable PyPI tool, so its
         read-only fallback must not go through the uvx --from <tool> path
@@ -1177,6 +1317,7 @@ class TestAsyncRunTestsReadonlyFallback:
             "mcp_client_tools._resolve_project",
             lambda _: Path("/project"),
         )
+        monkeypatch.setattr("mcp_client_tools._project_has_uv_lock", lambda _: True)
         client, calls = self._client(venv_ok=False)
         result = _run_uv_tool(
             client,
@@ -1194,8 +1335,58 @@ class TestAsyncRunTestsReadonlyFallback:
             kind == "execute_project_script_async" for kind, _ in calls
         ), "broken venv must submit the fallback script"
         assert any(
-            "Read-only workspace detected" in w for w in result["meta"].get("warnings", [])
+            "Read-only or unusable project venv detected" in w
+            for w in result["meta"].get("warnings", [])
         )
+
+    def test_missing_uv_lock_submits_fallback_script_async(self, monkeypatch, tmp_path):
+        from mcp_client_tools import _run_uv_tool
+
+        project_dir = tmp_path / "legacy-project"
+        project_dir.mkdir()
+        (project_dir / "pyproject.toml").write_text(
+            '[project]\nname = "legacy"\nversion = "0.0.0"\n',
+            encoding="utf-8",
+        )
+        captured: dict[str, str] = {}
+        calls: list[tuple[str, str]] = []
+
+        class CapturingClient:
+            async_job_timeout = 3600
+
+            def execute_raw(self, cmd, **kw):
+                calls.append(("execute_raw", cmd))
+                if cmd == "command -v uv":
+                    return {"job_id": "j-check"}
+                if cmd.startswith("test -x "):
+                    raise AssertionError("no-lock path must not probe a source-local venv")
+                return {"job_id": "j-run"}
+
+            def wait_job(self, job_id, **kw):
+                assert job_id == "j-check"
+                return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
+
+            def execute_project_script_async(self, project, script):
+                captured["script"] = script
+                calls.append(("execute_project_script_async", project))
+                return {"job_id": "j-fallback"}
+
+        monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: project_dir)
+        result = _run_uv_tool(
+            CapturingClient(),
+            "proj",
+            "pytest",
+            "run_tests",
+            target=["."],
+            async_submit=True,
+        )
+
+        assert result["ok"] is True
+        assert result["result"]["job_id"] == "j-fallback"
+        assert "Project has no uv.lock" in result["meta"]["warnings"][0]
+        assert '--project "$SYNC_PROJECT" --no-sync' in captured["script"]
+        assert any(kind == "execute_project_script_async" for kind, _ in calls)
+        assert not any(cmd.startswith("test -x ") for kind, cmd in calls if kind == "execute_raw")
 
     def test_broken_venv_fallback_script_contains_pytest(self, monkeypatch):
         from mcp_client_tools import _run_uv_tool
@@ -1204,6 +1395,7 @@ class TestAsyncRunTestsReadonlyFallback:
             "mcp_client_tools._resolve_project",
             lambda _: Path("/project"),
         )
+        monkeypatch.setattr("mcp_client_tools._project_has_uv_lock", lambda _: True)
         captured: dict[str, str] = {}
 
         class CapturingClient:
@@ -1246,6 +1438,7 @@ class TestAsyncRunTestsReadonlyFallback:
             "mcp_client_tools._resolve_project",
             lambda _: Path("/project"),
         )
+        monkeypatch.setattr("mcp_client_tools._project_has_uv_lock", lambda _: True)
         client, calls = self._client(venv_ok=True)
         result = _run_uv_tool(
             client,
@@ -1272,6 +1465,7 @@ class TestAsyncRunTestsReadonlyFallback:
 
         project_dir = Path("/project")
         monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: project_dir)
+        monkeypatch.setattr("mcp_client_tools._project_has_uv_lock", lambda _: True)
 
         captured_kwargs: dict[str, dict] = {}
 
