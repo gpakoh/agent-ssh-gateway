@@ -178,23 +178,44 @@ jobs:
           set +e
           max_attempts=5
           timeout_seconds=60
+          heartbeat_seconds=20
+          stop_heartbeat() {
+            if [ -n "${heartbeat_pid:-}" ]; then
+              kill "$heartbeat_pid" >/dev/null 2>&1
+              wait "$heartbeat_pid" 2>/dev/null
+              heartbeat_pid=""
+            fi
+          }
           for attempt in $(seq 1 "$max_attempts"); do
-            output=$(uv run pip-audit -l -s osv --strict --timeout "$timeout_seconds" --progress-spinner=off 2>&1)
-            status=$?
-            echo "$output"
-            if [ $status -eq 0 ]; then
+            audit_log="$(mktemp)"
+            heartbeat_pid=""
+            (
+              while true; do
+                sleep "$heartbeat_seconds"
+                echo "::notice::pip-audit attempt ${attempt}/${max_attempts} still running after ${heartbeat_seconds}s heartbeat interval"
+              done
+            ) &
+            heartbeat_pid="$!"
+            uv run pip-audit -l -s osv --strict --timeout "$timeout_seconds" --progress-spinner=off 2>&1 | tee "$audit_log"
+            status=${PIPESTATUS[0]}
+            stop_heartbeat
+            if [ "$status" -eq 0 ]; then
+              rm -f "$audit_log"
               exit 0
             fi
-            if echo "$output" | grep -qE "ReadTimeout|ConnectTimeout|ConnectionError|Read timed out|Connection reset|Temporary failure in name resolution|Network is unreachable|TimeoutError|SSLError|ProxyError|RemoteDisconnected|handshake operation timed out|HTTPError: 5[0-9]{2} Server Error"; then
+            if grep -qE "ReadTimeout|ConnectTimeout|ConnectionError|Read timed out|Connection reset|Temporary failure in name resolution|Network is unreachable|TimeoutError|SSLError|ProxyError|RemoteDisconnected|handshake operation timed out|HTTPError: 5[0-9]{2} Server Error" "$audit_log"; then
               if [ "$attempt" -lt "$max_attempts" ]; then
                 delay=$((attempt * 10))
                 echo "::warning::pip-audit attempt ${attempt}/${max_attempts} failed with a transient network or service error, retrying in ${delay}s..."
+                rm -f "$audit_log"
                 sleep "$delay"
                 continue
               fi
               echo "::error::pip-audit failed after ${max_attempts} attempts due to persistent network or service errors"
+              rm -f "$audit_log"
               exit 1
             fi
+            rm -f "$audit_log"
             exit $status
           done
           echo "::error::pip-audit exited retry loop unexpectedly"

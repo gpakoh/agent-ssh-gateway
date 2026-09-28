@@ -898,6 +898,26 @@ def _venv_usable_on_target(client: Any, project_dir: str) -> bool:
     return raw.get("exit_code", 1) == 0
 
 
+def _project_has_uv_lock(project_dir: str | Path) -> bool:
+    """Return True only when the project has a uv lockfile for --frozen runs."""
+    return (Path(project_dir) / "uv.lock").is_file()
+
+
+def _uv_run_needs_external_fallback(raw: dict[str, Any]) -> bool:
+    """Detect uv-run failures that happen before the requested tool starts."""
+    if raw.get("exit_code", 0) == 0:
+        return False
+    stderr_lower = (raw.get("stderr", "") or "").lower()
+    return (
+        "read-only file system" in stderr_lower
+        or "failed to remove directory" in stderr_lower
+        or (
+            "unable to find lockfile" in stderr_lower
+            and "--frozen" in stderr_lower
+        )
+    )
+
+
 def _fallback_result(
     tool_key: str, tool_name: str, r2: dict[str, Any], project_dir: str = ""
 ) -> dict[str, Any]:
@@ -985,23 +1005,29 @@ def _run_uv_tool(
         # Detect that upfront (before queuing the doomed job) and submit
         # the writable temp-project script asynchronously so the async
         # contract (job_id now, result later) still holds.
-        if tool_key == "pytest" and not _venv_usable_on_target(client, str(project_dir)):
-            script = _build_readonly_fallback_script(tool_key, str(project_dir), targets)
-            r2 = client.execute_project_script_async(project, script)
-            return tool_success(
-                tool=tool_name,
-                result={
-                    "job_id": r2.get("job_id"),
-                    "status": "running",
-                    "outcome": "started",
-                },
-                source="gateway",
-                warnings=[
-                    "Read-only workspace detected: tests run in the writable "
-                    "temp project (/tmp/.mcp-test); poll with "
-                    "gateway_job_status then gateway_job_result"
-                ],
-            )
+        if tool_key == "pytest":
+            fallback_reason = None
+            if not _project_has_uv_lock(project_dir):
+                fallback_reason = "Project has no uv.lock for a frozen uv run"
+            elif not _venv_usable_on_target(client, str(project_dir)):
+                fallback_reason = "Read-only or unusable project venv detected"
+            if fallback_reason is not None:
+                script = _build_readonly_fallback_script(tool_key, str(project_dir), targets)
+                r2 = client.execute_project_script_async(project, script)
+                return tool_success(
+                    tool=tool_name,
+                    result={
+                        "job_id": r2.get("job_id"),
+                        "status": "running",
+                        "outcome": "started",
+                    },
+                    source="gateway",
+                    warnings=[
+                        f"{fallback_reason}: tests run in the writable "
+                        "temp project (/tmp/.mcp-test); poll with "
+                        "gateway_job_status then gateway_job_result"
+                    ],
+                )
 
     result = client.execute_raw(
         command,
@@ -1026,13 +1052,9 @@ def _run_uv_tool(
 
     raw = client.wait_job(result["job_id"])
 
-    stderr_lower = (raw.get("stderr", "") or "").lower()
-    is_readonly_fail = raw.get("exit_code", 0) != 0 and (
-        "read-only file system" in stderr_lower
-        or "failed to remove directory" in stderr_lower
-    )
+    needs_external_fallback = _uv_run_needs_external_fallback(raw)
 
-    if is_readonly_fail:
+    if needs_external_fallback:
         if tool_key in ("pytest", "mypy"):
             script = _build_readonly_fallback_script(tool_key, str(project_dir), targets)
             r2 = client.execute_project_script(project, script, timeout_s=300)

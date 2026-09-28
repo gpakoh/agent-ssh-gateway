@@ -1528,7 +1528,7 @@ class TestPipAuditNetworkResilience:
         assert "timeout_seconds=60" in run
 
         grep_idx = next(
-            i for i, line in enumerate(stripped) if line.startswith('if echo "$output" | grep -qE')
+            i for i, line in enumerate(stripped) if line.startswith('if grep -qE')
         )
         continue_idx = next(i for i, line in enumerate(stripped) if line == "continue")
         persist_idx = next(
