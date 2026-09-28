@@ -1571,7 +1571,7 @@ def test_startup_retry_stops_at_configured_attempt_limit(tmp_path, monkeypatch):
             text=True,
             capture_output=True,
             check=False,
-            timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+            timeout=PROXY_RETRY_HARNESS_TIMEOUT_SECONDS,
         )
 
         assert result.returncode == 78
