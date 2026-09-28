@@ -1646,6 +1646,51 @@ def _same_gitea_repo_from_pr_head(
     return None
 
 
+def _gitea_root_tree_signature(payload: Any) -> tuple[tuple[str, str, str], ...] | None:
+    """Return a stable root-tree signature from a Gitea contents listing.
+
+    Directory listings expose the root entry name/path, entry type and Git blob
+    or tree SHA.  This deliberately compares only the repository root tree: it
+    is enough for stale branch cleanup where the operator already identified
+    a branch as top-level-tree equivalent, while avoiding a recursive content
+    crawl before a destructive branch delete.
+    """
+    if not isinstance(payload, list):
+        return None
+    entries: list[tuple[str, str, str]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            return None
+        path = str(item.get("path") or item.get("name") or "").strip()
+        kind = str(item.get("type") or "").strip()
+        sha = str(item.get("sha") or "").strip().lower()
+        if not path or not kind or not sha:
+            return None
+        entries.append((path, kind, sha))
+    return tuple(sorted(entries))
+
+
+async def _gitea_root_tree_matches_ref(
+    client: Any,
+    owner: str,
+    repo: str,
+    *,
+    left_ref: str,
+    right_ref: str,
+) -> bool | None:
+    """Fail-closed proof that two refs have the same repository root tree."""
+    try:
+        left = await client.get_file(owner, repo, "", branch=left_ref, include_content=False)
+        right = await client.get_file(owner, repo, "", branch=right_ref, include_content=False)
+    except Exception:
+        return None
+    left_sig = _gitea_root_tree_signature(left)
+    right_sig = _gitea_root_tree_signature(right)
+    if left_sig is None or right_sig is None:
+        return None
+    return left_sig == right_sig
+
+
 async def gitea_delete_branch(
     owner: str,
     repo: str,
@@ -1707,6 +1752,7 @@ async def gitea_delete_branch(
                     source="gitea",
                 )
 
+            closed_unmerged_pr_cleanup: list[dict[str, Any]] = []
             page = 1
             while True:
                 page_prs = await client.list_pull_requests(
@@ -1729,13 +1775,80 @@ async def gitea_delete_branch(
                         )
                     if same_repo is False:
                         continue
-                    if pr.get("merged") is not True:
+                    if pr.get("merged") is True:
+                        continue
+                    if pr.get("state") == "closed":
+                        if not default_branch:
+                            return tool_error(
+                                tool="gitea_delete_branch",
+                                code="POLICY_DENIED",
+                                message="repository default branch is unavailable; refusing deletion",
+                                source="gitea",
+                            )
+                        root_tree_matches = await _gitea_root_tree_matches_ref(
+                            client,
+                            owner,
+                            repo,
+                            left_ref=expected_head_sha,
+                            right_ref=default_branch,
+                        )
+                        if root_tree_matches is True:
+                            closed_unmerged_pr_cleanup.append(
+                                {
+                                    "number": pr.get("number"),
+                                    "state": "closed",
+                                    "merged": False,
+                                    "default_branch": default_branch,
+                                    "head_sha": expected_head_sha,
+                                    "root_tree_equivalent_to_default": True,
+                                }
+                            )
+                            continue
+                        if root_tree_matches is False:
+                            return tool_error(
+                                tool="gitea_delete_branch",
+                                code="POLICY_DENIED",
+                                message=(
+                                    f"branch {branch!r} is the head of a closed unmerged "
+                                    f"pull request whose root tree differs from default "
+                                    f"branch {default_branch!r}; refusing deletion without "
+                                    "an explicit cleanup decision"
+                                ),
+                                details={
+                                    "branch": branch,
+                                    "pull_number": pr.get("number"),
+                                    "default_branch": default_branch,
+                                    "expected_head_sha": expected_head_sha,
+                                    "root_tree_equivalent_to_default": False,
+                                    "mutation_occurred": False,
+                                },
+                                source="gitea",
+                            )
                         return tool_error(
                             tool="gitea_delete_branch",
                             code="POLICY_DENIED",
-                            message=f"branch {branch!r} is still the head of an unmerged pull request",
+                            message=(
+                                f"could not prove root tree equivalence between branch "
+                                f"{branch!r} and default branch {default_branch!r}; "
+                                "refusing deletion"
+                            ),
+                            retryable=True,
+                            details={
+                                "branch": branch,
+                                "pull_number": pr.get("number"),
+                                "default_branch": default_branch,
+                                "left_ref": expected_head_sha,
+                                "right_ref": default_branch,
+                                "mutation_occurred": False,
+                            },
                             source="gitea",
                         )
+                    return tool_error(
+                        tool="gitea_delete_branch",
+                        code="POLICY_DENIED",
+                        message=f"branch {branch!r} is still the head of an unmerged pull request",
+                        source="gitea",
+                    )
                 if len(page_prs) < 50:
                     break
                 if page >= 20:
@@ -1778,6 +1891,8 @@ async def gitea_delete_branch(
                 "caller_fingerprint": fingerprint,
                 "correlation_id": correlation_id,
             }
+            if closed_unmerged_pr_cleanup:
+                audit_metadata["closed_unmerged_pr_cleanup"] = closed_unmerged_pr_cleanup
             audit_logger = _get_gitea_audit_logger()
             try:
                 audit_logger.append_required(
@@ -1834,17 +1949,20 @@ async def gitea_delete_branch(
     except Exception as exc:
         return _remote_api_error("gitea_delete_branch", "gitea", exc)
 
+    result: dict[str, Any] = {
+        "owner": owner,
+        "repo": repo,
+        "branch": branch,
+        "deleted": True,
+        "head_sha": expected_head_sha,
+        "lease_guarded": True,
+        "verified_absent": True,
+    }
+    if closed_unmerged_pr_cleanup:
+        result["closed_unmerged_pr_cleanup"] = closed_unmerged_pr_cleanup
     return tool_success(
         "gitea_delete_branch",
-        result={
-            "owner": owner,
-            "repo": repo,
-            "branch": branch,
-            "deleted": True,
-            "head_sha": expected_head_sha,
-            "lease_guarded": True,
-            "verified_absent": True,
-        },
+        result=result,
         source="gitea",
     )
 
