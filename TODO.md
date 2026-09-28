@@ -402,3 +402,20 @@ Stable IDs, not list positions, define ownership. One finding has exactly one im
     direct pushes/ambiguous ancestry retain full CI. Build, deploy and host-smoke
     still run for the delivered master SHA.
 
+## Archived audit intake — 2026-09-28
+
+1. ⬜ **Reconcile archived gateway audit findings.**
+   <!-- gateway-todo-key: archived-gateway-audit-reconciliation-20260906 -->
+   **Severity:** P2
+
+   **Observed behavior:** The preserve/canonical-audit-worktree-20260919 branch contains a large 2026-09-06 gateway audit worktree snapshot that is not appropriate to merge wholesale. The preserved material covers source bootstrap / exact-base candidate availability, unbound fleet recovery, Docker operation receipts and partial-result durability, tool-contract CI exposure, and OpenCode runtime progress/canary semantics. Several items appear to have been fixed by later PRs, while others need explicit closure evidence or conversion into current focused backlog items.
+
+   **Reproduction:** Inspect preserve/canonical-audit-worktree-20260919 at commit 1322252a772cd8071db3e0ab1bbeea5bb8a2e874, especially docs/architecture/Gateway_Architecture_2026-09-06.md and Gateway_GPT1_Source.md through Gateway_GPT5_OpenCode.md. Compare each archived finding against current master and merged PR evidence before treating it as current.
+
+   **Expected behavior:** The useful audit findings should be represented in current TODO.md as an explicit reconciliation task before the preserve branch is deleted; stale or already-fixed findings should be closed with linked commit/PR evidence instead of reintroduced as active defects.
+
+   **Impact:** Deleting the preserve branch without carrying forward this reconciliation would make it harder to distinguish already-fixed historical blockers from still-open reliability work. Keeping the whole branch indefinitely creates stale branch noise and encourages accidental wholesale merges of old docs.
+
+   **Acceptance:** For each archived front GW-A/GPT1 through GW-E/GPT5, record one of: merged fix evidence, a current focused TODO entry, or a deliberate no-action note. Do not merge the large archived docs wholesale. After reconciliation is represented in master, delete preserve/canonical-audit-worktree-20260919 with exact-SHA lease.
+
+   **Related evidence:** preserve/canonical-audit-worktree-20260919@1322252a772cd8071db3e0ab1bbeea5bb8a2e874; docs/architecture/Gateway_Architecture_2026-09-06.md; docs/architecture/Gateway_GPT1_Source.md; docs/architecture/Gateway_GPT2_Fleet.md; docs/architecture/Gateway_GPT3_Docker.md; docs/architecture/Gateway_GPT4_Contracts_CI.md; docs/architecture/Gateway_GPT5_OpenCode.md
