@@ -1569,6 +1569,22 @@ class TestMakeCheckMirrorsCiExactly:
         assert "timeout --signal=TERM --kill-after=30s 25m uv run pytest" not in makefile
         assert wf["jobs"]["test"]["timeout-minutes"] == 60
 
+    def test_unit_runner_emits_keepalive_while_pytest_is_silent(self):
+        makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
+        assert "PYTEST_UNIT_KEEPALIVE_SECONDS ?= 60" in makefile
+        assert "pytest unit keepalive:" in makefile
+        assert "sleep $(PYTEST_UNIT_KEEPALIVE_SECONDS)" in makefile
+        assert "date -u +%Y-%m-%dT%H:%M:%SZ" in makefile
+        assert makefile.index("pytest unit keepalive:") < makefile.index("timeout --signal=TERM")
+
+    def test_unit_runner_cleans_up_keepalive_and_preserves_pytest_status(self):
+        makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
+        assert "cleanup_heartbeat()" in makefile
+        assert "trap cleanup_heartbeat EXIT INT TERM" in makefile
+        assert 'heartbeat_pid="$$!"' in makefile
+        assert 'status="$$?"' in makefile
+        assert "cleanup_heartbeat; \\\n\texit \"$$status\"" in makefile
+
     def test_makefile_owns_the_coverage_floor_and_rerun_handling(self):
         makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
         for flag in ("--cov-fail-under=69", "--reruns 2", "--only-rerun 'WebSocketDisconnect'"):

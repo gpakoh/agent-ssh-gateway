@@ -35,8 +35,28 @@ PYTEST_UNIT_ARGS ?=
 # guard. Keep a bounded 45m process guard and a larger outer CI job budget so
 # pytest can still emit its real failure/coverage summary before job teardown.
 PYTEST_UNIT_TIMEOUT ?= 45m
+PYTEST_UNIT_KEEPALIVE_SECONDS ?= 60
 test-unit:
-	timeout --signal=TERM --kill-after=30s $(PYTEST_UNIT_TIMEOUT) uv run pytest -m "not host_smoke and not e2e and not integration and not smoke" --reruns 2 --reruns-delay 2 --only-rerun 'WebSocketDisconnect' --cov=app --cov-report=term-missing --cov-fail-under=69 -q $(PYTEST_UNIT_ARGS)
+	@set -u; \
+	heartbeat_pid=""; \
+	cleanup_heartbeat() { \
+		if [ -n "$$heartbeat_pid" ]; then \
+			kill "$$heartbeat_pid" >/dev/null 2>&1 || true; \
+			wait "$$heartbeat_pid" 2>/dev/null || true; \
+		fi; \
+	}; \
+	trap cleanup_heartbeat EXIT INT TERM; \
+	( \
+		while :; do \
+			sleep $(PYTEST_UNIT_KEEPALIVE_SECONDS); \
+			echo "pytest unit keepalive: $$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
+		done \
+	) & \
+	heartbeat_pid="$$!"; \
+	timeout --signal=TERM --kill-after=30s $(PYTEST_UNIT_TIMEOUT) uv run pytest -m "not host_smoke and not e2e and not integration and not smoke" --reruns 2 --reruns-delay 2 --only-rerun 'WebSocketDisconnect' --cov=app --cov-report=term-missing --cov-fail-under=69 -q $(PYTEST_UNIT_ARGS); \
+	status="$$?"; \
+	cleanup_heartbeat; \
+	exit "$$status"
 
 test: test-unit
 
