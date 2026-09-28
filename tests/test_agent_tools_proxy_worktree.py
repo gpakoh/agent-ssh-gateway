@@ -1734,7 +1734,7 @@ def test_pre_useful_server_error_exhausts_configured_proxy_attempts(tmp_path, mo
             text=True,
             capture_output=True,
             check=False,
-            timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+            timeout=PROXY_RETRY_HARNESS_TIMEOUT_SECONDS,
         )
 
         assert result.returncode == 1

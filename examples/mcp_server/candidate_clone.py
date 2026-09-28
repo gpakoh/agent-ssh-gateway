@@ -21,7 +21,13 @@ from typing import Any
 
 import yaml
 
-from app.workspace.registry import get_registry, reset_registry, resolve_runtime_registry_path
+from app.workspace.registry import (
+    WorkspacePolicyError,
+    get_registry,
+    load_registry_roots,
+    reset_registry,
+    resolve_runtime_registry_path,
+)
 from examples.mcp_server.agent_sources import (
     ManagedSourceBundleError,
     _resolve_trusted_remote,
@@ -481,17 +487,10 @@ def _status_state(repo: Path) -> tuple[bool, str, int]:
 def _workspace_root(config_dir: Path) -> Path:
     registry_path = config_dir / "projects.yaml"
     try:
-        data = yaml.safe_load(registry_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        registry_roots = load_registry_roots(registry_path)
+    except (OSError, UnicodeError, yaml.YAMLError, WorkspacePolicyError) as exc:
         raise _fail("TOOL_EXECUTION_FAILED", "workspace registry cannot be read") from exc
-    if not isinstance(data, dict):
-        raise _fail("TOOL_EXECUTION_FAILED", "workspace registry is malformed")
-    raw = data.get("registry_root", ".")
-    if not isinstance(raw, str) or not raw.strip():
-        raise _fail("TOOL_EXECUTION_FAILED", "workspace registry root is malformed")
-    root = Path(raw.strip())
-    if not root.is_absolute():
-        root = config_dir / root
+    root = registry_roots["default"]
     try:
         resolved = root.resolve(strict=True)
     except OSError as exc:
@@ -499,6 +498,25 @@ def _workspace_root(config_dir: Path) -> Path:
     if not resolved.is_dir():
         raise _fail("TOOL_EXECUTION_FAILED", "workspace registry root is unavailable")
     return resolved
+
+
+def _registry_root_allowlist(config_dir: Path) -> tuple[Path, ...]:
+    registry_path = config_dir / "projects.yaml"
+    try:
+        return tuple(load_registry_roots(registry_path).values())
+    except (OSError, UnicodeError, yaml.YAMLError, WorkspacePolicyError) as exc:
+        raise _fail("TOOL_EXECUTION_FAILED", "workspace registry cannot be read") from exc
+
+
+def _is_under_any_root(path: Path, roots: tuple[Path, ...]) -> bool:
+    resolved = path.resolve()
+    for root in roots:
+        try:
+            resolved.relative_to(root.resolve())
+            return True
+        except ValueError:
+            continue
+    return False
 
 
 def _candidate_clones_root(workspace_root: Path) -> Path:
@@ -1429,10 +1447,8 @@ def prepare_candidate_clone(
     journal_root = journal_root.resolve()
     workspace_root = _workspace_root(config_dir)
     source_root = _source_root(config_dir, project, workspace_root=workspace_root)
-    try:
-        source_root.relative_to(workspace_root)
-    except ValueError as exc:
-        raise _fail("POLICY_DENIED", "source project root is outside workspace registry root") from exc
+    if not _is_under_any_root(source_root, _registry_root_allowlist(config_dir)):
+        raise _fail("POLICY_DENIED", "source project root is outside configured registry roots")
 
     requested_ref = base_ref or "HEAD"
     local_sha = _local_commit_or_none(source_root, requested_ref)

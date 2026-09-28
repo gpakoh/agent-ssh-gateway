@@ -11,6 +11,7 @@ from app.workspace.registry import (  # noqa: F401
     get_registry,
     get_registry_root,
     load_registry,
+    load_registry_roots,
     reset_registry,
     set_registry_root,
 )
