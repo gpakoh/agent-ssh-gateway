@@ -19,6 +19,14 @@ from examples.mcp_server.tool_scopes import get_required_scopes
 SHA = "a" * 40
 BRANCH = "fix/obsolete-branch"
 FINGERPRINT = "ab" * 32
+ROOT_TREE = [
+    {"path": "README.md", "type": "file", "sha": "1" * 40},
+    {"path": "app", "type": "dir", "sha": "2" * 40},
+]
+DIVERGENT_ROOT_TREE = [
+    {"path": "README.md", "type": "file", "sha": "3" * 40},
+    {"path": "app", "type": "dir", "sha": "2" * 40},
+]
 
 
 class RecordingAuditLogger:
@@ -319,6 +327,7 @@ class FakeDeleteClient:
         open_prs: list[dict] | None = None,
         archived: bool = False,
         pr_pages: list[list[dict]] | None = None,
+        root_trees: dict[str, list[dict]] | None = None,
     ) -> None:
         assert token == "token"
         self.head_sha = head_sha
@@ -327,6 +336,7 @@ class FakeDeleteClient:
         self.protection_name = protection_name
         self.open_prs = open_prs or []
         self.pr_pages = pr_pages
+        self.root_trees = root_trees or {}
         self.archived = archived
         self.branch_reads = 0
         self.pull_request_pages: list[int] = []
@@ -365,6 +375,22 @@ class FakeDeleteClient:
             return self.pr_pages[page - 1]
         assert page == 1
         return self.open_prs
+
+    async def get_file(
+        self,
+        owner: str,
+        repo: str,
+        path: str,
+        *,
+        branch: str | None = None,
+        include_content: bool = True,
+    ):
+        assert path == ""
+        assert include_content is False
+        ref = branch or self.default_branch
+        if ref not in self.root_trees:
+            raise RuntimeError(f"root tree unavailable for {ref}")
+        return self.root_trees[ref]
 
     async def get_user(self):
         return {"login": "robot"}
@@ -509,9 +535,10 @@ async def test_adapter_fails_closed_for_ambiguous_pr_head_repo(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_adapter_page_2_closed_unmerged_blocks_delete(monkeypatch):
+async def test_adapter_page_2_closed_unmerged_divergent_tree_blocks_delete(monkeypatch):
     """The scan must examine every page: a matching closed-unmerged PR on
-    page 2 must block deletion even when page 1 is full of irrelevant PRs."""
+    page 2 still blocks deletion when its leased head root tree differs from
+    the default branch."""
     first_page = [
         {"number": i, "head": {"ref": f"other/{i}"}, "state": "closed", "merged": True}
         for i in range(50)
@@ -522,12 +549,66 @@ async def test_adapter_page_2_closed_unmerged_blocks_delete(monkeypatch):
         "state": "closed",
         "merged": False,
     }
-    client = FakeDeleteClient("token", pr_pages=[first_page, [matching]])
+    client = FakeDeleteClient(
+        "token",
+        pr_pages=[first_page, [matching]],
+        root_trees={SHA: DIVERGENT_ROOT_TREE, "master": ROOT_TREE},
+    )
     result, delete_calls = await _call_delete(monkeypatch, client)
     assert result["ok"] is False
     assert result["error"]["code"] == "POLICY_DENIED"
-    assert "unmerged pull request" in result["error"]["message"]
+    assert "root tree differs" in result["error"]["message"]
     assert client.pull_request_pages == [1, 2]
+    assert delete_calls == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_allows_closed_unmerged_pr_head_when_root_tree_matches_default(monkeypatch):
+    client = FakeDeleteClient(
+        "token",
+        open_prs=[
+            {
+                "number": 17,
+                "head": {"ref": BRANCH, "repo": {"full_name": "owner/repo"}},
+                "state": "closed",
+                "merged": False,
+            }
+        ],
+        root_trees={SHA: ROOT_TREE, "master": ROOT_TREE},
+    )
+    result, delete_calls = await _call_delete(monkeypatch, client)
+    assert result["ok"] is True
+    assert len(delete_calls) == 1
+    cleanup = result["result"]["closed_unmerged_pr_cleanup"]
+    assert cleanup == [
+        {
+            "number": 17,
+            "state": "closed",
+            "merged": False,
+            "default_branch": "master",
+            "head_sha": SHA,
+            "root_tree_equivalent_to_default": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_adapter_closed_unmerged_pr_head_blocks_when_root_tree_unproven(monkeypatch):
+    client = FakeDeleteClient(
+        "token",
+        open_prs=[
+            {
+                "number": 18,
+                "head": {"ref": BRANCH, "repo": {"full_name": "owner/repo"}},
+                "state": "closed",
+                "merged": False,
+            }
+        ],
+    )
+    result, delete_calls = await _call_delete(monkeypatch, client)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "POLICY_DENIED"
+    assert "could not prove root tree equivalence" in result["error"]["message"]
     assert delete_calls == []
 
 
@@ -599,11 +680,15 @@ async def test_adapter_blocker_on_page_20_blocks_for_blocker_reason(monkeypatch)
         {"number": i, "head": {"ref": f"other/{i}"}, "state": "closed", "merged": True}
         for i in range(49)
     ] + [blocked]
-    client = FakeDeleteClient("token", pr_pages=_full_pr_pages(19) + [page_20])
+    client = FakeDeleteClient(
+        "token",
+        pr_pages=_full_pr_pages(19) + [page_20],
+        root_trees={SHA: DIVERGENT_ROOT_TREE, "master": ROOT_TREE},
+    )
     result, delete_calls = await _call_delete(monkeypatch, client)
     assert result["ok"] is False
     assert result["error"]["code"] == "POLICY_DENIED"
-    assert "unmerged pull request" in result["error"]["message"]
+    assert "root tree differs" in result["error"]["message"]
     assert "1000" not in result["error"]["message"]
     assert client.pull_request_pages == list(range(1, 21))
     assert delete_calls == []
