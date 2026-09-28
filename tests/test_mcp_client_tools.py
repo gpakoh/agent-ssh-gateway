@@ -418,6 +418,54 @@ class TestProjectAwareHandoffWrite:
         assert result["error"]["code"] == "POLICY_DENIED"
         assert str(tmp_path) not in result["error"]["message"]
 
+    def test_non_writeable_project_root_fails_before_handoff_dir_creation(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._enable_handoff(monkeypatch)
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        registry, project_root = self._registry(tmp_path)
+        monkeypatch.setattr(mod.os, "access", lambda path, mode: False)
+
+        result = mod.write_handoff_plan(
+            self._NoSshClient(),
+            "demo",
+            "Must route away from read-only root",
+            registry=registry,
+        )
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "WORKSPACE_NOT_WRITEABLE"
+        assert result["error"]["details"]["required_write_plane"] == "writeable_candidate_clone"
+        assert result["error"]["details"]["mutation_occurred"] is False
+        assert not (project_root / ".ai-bridge").exists()
+        assert str(tmp_path) not in result["error"]["message"]
+
+    def test_permission_oserror_is_typed_as_non_writeable_workspace(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._enable_handoff(monkeypatch)
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        registry, project_root = self._registry(tmp_path)
+        monkeypatch.setattr(mod.os, "access", lambda path, mode: True)
+
+        def _raise_rofs(*args, **kwargs):
+            raise OSError(mod.errno.EROFS, "Read-only file system")
+
+        monkeypatch.setattr("app.workspace.edit.project_file_write", _raise_rofs)
+
+        result = mod.write_handoff_plan(
+            self._NoSshClient(),
+            "demo",
+            "Must classify OS permission failure",
+            registry=registry,
+        )
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "WORKSPACE_NOT_WRITEABLE"
+        assert result["error"]["details"]["mutation_occurred"] is False
+        assert (project_root / ".ai-bridge").is_dir()
+        assert str(tmp_path) not in result["error"]["message"]
+
     def test_workspace_readonly_blocks_before_mutation(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:

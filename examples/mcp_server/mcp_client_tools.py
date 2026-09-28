@@ -6,6 +6,7 @@ by wrapping fixed allowlisted commands in semantic functions.
 
 from __future__ import annotations
 
+import errno
 import fnmatch
 import hashlib
 import os
@@ -1214,6 +1215,24 @@ def _handoff_write_registry(registry: Any | None = None):
     return get_registry()
 
 
+def _handoff_workspace_not_writeable_error(project: str) -> dict[str, Any]:
+    return tool_error(
+        tool="write_handoff_plan",
+        code="WORKSPACE_NOT_WRITEABLE",
+        message="Registered project root is not writable for handoff coordination files",
+        retryable=False,
+        hint=(
+            "Use a managed writable candidate clone for handoff/task writes, "
+            "or restore write access to the registered workspace before retrying."
+        ),
+        details={
+            "project": project,
+            "required_write_plane": "writeable_candidate_clone",
+            "mutation_occurred": False,
+        },
+    )
+
+
 def write_handoff_plan(
     client: GatewayClient,
     project: str,
@@ -1252,6 +1271,9 @@ def write_handoff_plan(
         # symlinks/path policy after this potential race.
         target = write_registry._policy.validate_write(project, handoff_path)
         parent = target.parent
+        project_root = parent.parent
+        if not os.access(project_root, os.W_OK):
+            return _handoff_workspace_not_writeable_error(project)
         if not parent.exists():
             try:
                 parent.mkdir(mode=0o755, parents=False)
@@ -1279,6 +1301,8 @@ def write_handoff_plan(
             retryable=False,
         )
     except OSError as exc:
+        if getattr(exc, "errno", None) in {errno.EACCES, errno.EPERM, errno.EROFS}:
+            return _handoff_workspace_not_writeable_error(project)
         safe_reason = getattr(exc, "strerror", None) or type(exc).__name__
         return tool_error(
             tool="write_handoff_plan",
