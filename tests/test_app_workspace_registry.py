@@ -12,6 +12,7 @@ from app.workspace_registry import (
     VENDOR_CACHE_PATTERNS,
     WorkspaceRegistry,
     load_registry,
+    load_registry_roots,
     project_info,
     project_tree,
     reset_registry,
@@ -160,6 +161,85 @@ class TestLoadRegistry:
         projects, root = load_registry(str(p))
         assert "ghost" not in projects
         assert root == registry_root
+
+    def test_loads_project_from_named_registry_root(self, tmp_path):
+        primary = tmp_path / "workspace"
+        astro_sites = tmp_path / "astro-sites"
+        primary.mkdir()
+        (astro_sites / "example").mkdir(parents=True)
+        p = tmp_path / "projects.yaml"
+        data = {
+            "version": 1,
+            "registry_root": str(primary),
+            "registry_roots": {"astro-sites": str(astro_sites)},
+            "projects": {
+                "example": {
+                    "root": "example",
+                    "root_selector": "astro-sites",
+                    "type": "astro-site",
+                    "description": "XLOUD site",
+                    "tags": ["astro"],
+                }
+            },
+        }
+        p.write_text(yaml.dump(data), encoding="utf-8")
+
+        projects, root = load_registry(p)
+        registry = WorkspaceRegistry.load(p)
+
+        assert root == primary
+        assert projects["example"].root == astro_sites / "example"
+        assert registry.list_projects()[0]["root"] == "example"
+        assert load_registry_roots(p) == {
+            "default": primary,
+            "astro-sites": astro_sites,
+        }
+
+    def test_named_registry_root_must_be_absolute(self, tmp_path):
+        primary = tmp_path / "workspace"
+        primary.mkdir()
+        p = tmp_path / "projects.yaml"
+        p.write_text(
+            yaml.dump(
+                {
+                    "registry_root": str(primary),
+                    "registry_roots": {"astro-sites": "../astro-sites"},
+                    "projects": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(WorkspacePolicyError, match="absolute paths"):
+            load_registry(p)
+
+    def test_named_registry_root_symlink_escape_fails_closed(self, tmp_path):
+        primary = tmp_path / "workspace"
+        astro_sites = tmp_path / "astro-sites"
+        escape = tmp_path / "escape"
+        primary.mkdir()
+        astro_sites.mkdir()
+        escape.mkdir()
+        (astro_sites / "example").symlink_to(escape, target_is_directory=True)
+        p = tmp_path / "projects.yaml"
+        p.write_text(
+            yaml.dump(
+                {
+                    "registry_root": str(primary),
+                    "registry_roots": {"astro-sites": str(astro_sites)},
+                    "projects": {
+                        "example": {
+                            "root": "example",
+                            "root_selector": "astro-sites",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(WorkspacePolicyError, match="resolves outside registry root"):
+            load_registry(p)
 
 
 # ── list_projects tests ───────────────────────────────────────────

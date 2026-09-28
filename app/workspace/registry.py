@@ -15,6 +15,7 @@ from __future__ import annotations
 import fnmatch
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 # ── Default project registry path ─────────────────────────────────
 _registry_root: Path | None = None
+_ROOT_SELECTOR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 
 def set_registry_root(path: str | Path) -> None:
@@ -128,6 +130,55 @@ VENDOR_CACHE_PATTERNS: tuple[str, ...] = (
 # ── Registry loader ───────────────────────────────────────────────
 
 
+def _configured_registry_roots(data: dict[str, Any], path: Path) -> dict[str, Path]:
+    raw_primary = data.get("registry_root", ".")
+    if not isinstance(raw_primary, str) or not raw_primary.strip():
+        raise WorkspacePolicyError("registry_root must be a non-empty path string")
+
+    primary = Path(raw_primary.strip())
+    if not primary.is_absolute():
+        primary = (path.parent / primary).resolve()
+    else:
+        primary = primary.resolve()
+
+    roots: dict[str, Path] = {"default": primary}
+    raw_extra = data.get("registry_roots", {})
+    if raw_extra is None:
+        raw_extra = {}
+    if not isinstance(raw_extra, dict):
+        raise WorkspacePolicyError("registry_roots must be a mapping")
+
+    for selector, raw_root in raw_extra.items():
+        if (
+            not isinstance(selector, str)
+            or selector == "default"
+            or not _ROOT_SELECTOR_RE.fullmatch(selector)
+        ):
+            raise WorkspacePolicyError("registry_roots contains an invalid selector")
+        if not isinstance(raw_root, str) or not raw_root.strip():
+            raise WorkspacePolicyError(
+                "registry_roots values must be non-empty path strings"
+            )
+        candidate = Path(raw_root.strip())
+        if not candidate.is_absolute():
+            raise WorkspacePolicyError("registry_roots values must be absolute paths")
+        roots[selector] = candidate.resolve()
+    return roots
+
+
+def load_registry_roots(path: str | Path) -> dict[str, Path]:
+    """Return the server-configured project-root allowlist."""
+    path = Path(path)
+    if not path.exists():
+        raise WorkspacePolicyError(f"Registry file not found: {path}")
+    if not path.is_file():
+        raise WorkspacePolicyError(f"Registry path is not a file: {path}")
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise WorkspacePolicyError("Registry file must be a YAML mapping")
+    return _configured_registry_roots(data, path)
+
+
 def _resolve(registry_root: Path, relative_root: str) -> Path:
     """Resolve project root relative to registry_root, with traversal check."""
     resolved = (registry_root / relative_root).resolve()
@@ -143,7 +194,7 @@ def _resolve(registry_root: Path, relative_root: str) -> Path:
 def _add_project_entries(
     projects: dict[str, ProjectInfo],
     projects_raw: dict[str, Any],
-    registry_root: Path,
+    registry_roots: dict[str, Path],
     *,
     source: str,
 ) -> None:
@@ -158,7 +209,15 @@ def _add_project_entries(
         if not relative_root:
             logger.warning("Skipping project %s from %s: missing 'root'", pid, source)
             continue
-        root = _resolve(registry_root, relative_root)
+        root_selector = cfg.get("root_selector", "default")
+        if not isinstance(root_selector, str) or root_selector not in registry_roots:
+            logger.warning(
+                "Skipping project %s from %s: unknown root_selector",
+                pid,
+                source,
+            )
+            continue
+        root = _resolve(registry_roots[root_selector], relative_root)
         if not root.exists():
             logger.warning("Skipping project %s from %s: root does not exist", pid, source)
             continue
@@ -191,17 +250,15 @@ def load_registry(path: str | Path) -> tuple[dict[str, ProjectInfo], Path]:
     if not isinstance(data, dict):
         raise WorkspacePolicyError("Registry file must be a YAML mapping")
 
-    registry_root_str = data.get("registry_root", ".")
-    registry_root = Path(registry_root_str)
-    if not registry_root.is_absolute():
-        registry_root = (path.parent / registry_root).resolve()
+    registry_roots = _configured_registry_roots(data, path)
+    registry_root = registry_roots["default"]
 
     projects_raw = data.get("projects")
     if not isinstance(projects_raw, dict):
         raise WorkspacePolicyError("Registry file must contain a 'projects' mapping")
 
     projects: dict[str, ProjectInfo] = {}
-    _add_project_entries(projects, projects_raw, registry_root, source="source registry")
+    _add_project_entries(projects, projects_raw, registry_roots, source="source registry")
 
     runtime_path = resolve_runtime_registry_path(path)
     if runtime_path is not None and runtime_path.exists():
@@ -217,7 +274,7 @@ def load_registry(path: str | Path) -> tuple[dict[str, ProjectInfo], Path]:
             overlay_projects = {}
         if not isinstance(overlay_projects, dict):
             raise WorkspacePolicyError("Runtime registry overlay must contain a 'projects' mapping")
-        _add_project_entries(projects, overlay_projects, registry_root, source="runtime overlay")
+        _add_project_entries(projects, overlay_projects, registry_roots, source="runtime overlay")
 
     return projects, registry_root
 
@@ -264,9 +321,9 @@ class WorkspaceRegistry:
 
         If allowed_roots is None, the registry_root from the YAML file is used.
         """
-        projects, yaml_registry_root = load_registry(registry_path)
+        projects, _yaml_registry_root = load_registry(registry_path)
         if allowed_roots is None:
-            allowed_roots = [yaml_registry_root]
+            allowed_roots = list(load_registry_roots(registry_path).values())
         return cls(projects, allowed_roots, granted_scopes)
 
     def _display_project_root(self, root: Path) -> str:

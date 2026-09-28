@@ -123,6 +123,53 @@ def test_prepare_candidate_clone_creates_registered_clean_clone(registry_fixture
     assert ".mcp-candidate-clones/" in registry
 
 
+def test_prepare_candidate_clone_accepts_source_from_named_registry_root(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    astro_sites = tmp_path / "astro-sites"
+    workspace.mkdir()
+    source = astro_sites / "example"
+    base = _init_repo(source)
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "projects.yaml").write_text(
+        "version: 1\n"
+        f"registry_root: {workspace}\n"
+        "registry_roots:\n"
+        f"  astro-sites: {astro_sites}\n\n"
+        "projects:\n"
+        "  example:\n"
+        "    root: example\n"
+        "    root_selector: astro-sites\n"
+        "    type: astro-site\n"
+        "    description: XLOUD site\n"
+        "    tags: [astro]\n",
+        encoding="utf-8",
+    )
+    journal_root = tmp_path / "journals"
+    reset_registry()
+    try:
+        receipt = prepare_candidate_clone(
+            "example",
+            "candidate/external-root-flow",
+            base,
+            config_dir=config_dir,
+            journal_root=journal_root,
+        )
+
+        clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+        assert clone_root.is_dir()
+        assert source.resolve().is_relative_to(astro_sites.resolve())
+        assert not clone_root.resolve().is_relative_to(astro_sites.resolve())
+        assert clone_root.resolve().is_relative_to(workspace.resolve())
+        assert _git(clone_root, "rev-parse", "HEAD") == base
+        assert _git(clone_root, "rev-parse", "--abbrev-ref", "HEAD") == (
+            "candidate/external-root-flow"
+        )
+        assert receipt.clean is True
+    finally:
+        reset_registry()
+
+
 def test_prepare_candidate_clone_recovers_same_clean_clone(registry_fixture) -> None:
     _workspace, _source, config_dir, journal_root, base = registry_fixture
     first = prepare_candidate_clone(
