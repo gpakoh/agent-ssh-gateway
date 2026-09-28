@@ -1434,6 +1434,8 @@ class TestPipAuditNetworkResilience:
 
         assert "max_attempts=5" in run
         assert "timeout_seconds=60" in run
+        assert "api.osv.dev" in run
+        assert 'export NO_PROXY="$audit_no_proxy" no_proxy="$audit_no_proxy"' in run
         assert '--timeout "$timeout_seconds"' in run
         assert 'for attempt in $(seq 1 "$max_attempts")' in run
         assert 'sleep "$delay"' in run

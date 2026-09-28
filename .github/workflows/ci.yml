@@ -176,6 +176,12 @@ jobs:
         # signature and still fail on the first attempt, no retry.
         run: |
           set +e
+          audit_no_proxy="${NO_PROXY:-}"
+          case ",$audit_no_proxy," in
+            *,api.osv.dev,*) ;;
+            *) audit_no_proxy="${audit_no_proxy:+${audit_no_proxy},}api.osv.dev" ;;
+          esac
+          export NO_PROXY="$audit_no_proxy" no_proxy="$audit_no_proxy"
           max_attempts=5
           timeout_seconds=60
           heartbeat_seconds=20
