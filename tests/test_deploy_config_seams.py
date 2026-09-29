@@ -620,6 +620,7 @@ class TestDeployVerifiesRunningProvenance:
         assert 'PREVIOUS_GATEWAY_BUILD_SHA=$(image_build_sha "$PREVIOUS_GATEWAY_IMAGE")' in text
         assert 'PREVIOUS_MCP_BUILD_SHA=$(image_build_sha "$PREVIOUS_MCP_IMAGE")' in text
         assert 'if smoke "$PREVIOUS_DEPLOY_SHA"; then' in text
+        assert '[ "$PREVIOUS_DEPLOY_SHA" = "latest" ]' in text
         assert "'deploy_sha': '''$DEPLOY_TAG'''" in text
 
     def test_mcp_oauth_deploy_health_budget_is_extended_and_configurable(self):

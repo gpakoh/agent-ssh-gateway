@@ -529,7 +529,7 @@ fi
 PREVIOUS_DEPLOY_SHA=$(read_state_field deploy_sha)
 PREVIOUS_GATEWAY_BUILD_SHA=$(image_build_sha "$PREVIOUS_GATEWAY_IMAGE")
 PREVIOUS_MCP_BUILD_SHA=$(image_build_sha "$PREVIOUS_MCP_IMAGE")
-if [ -z "$PREVIOUS_DEPLOY_SHA" ]; then
+if [ -z "$PREVIOUS_DEPLOY_SHA" ] || [ "$PREVIOUS_DEPLOY_SHA" = "latest" ]; then
   PREVIOUS_DEPLOY_SHA="$PREVIOUS_GATEWAY_BUILD_SHA"
 fi
 if ! [[ "$PREVIOUS_DEPLOY_SHA" =~ ^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$ ]] || \
