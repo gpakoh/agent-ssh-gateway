@@ -526,6 +526,11 @@ if ! validate_image_ref "$PREVIOUS_GATEWAY_IMAGE" "$GATEWAY_REPO" || ! validate_
   exit 1
 fi
 
+if ! docker pull "$PREVIOUS_GATEWAY_IMAGE" || ! docker pull "$PREVIOUS_MCP_IMAGE"; then
+  log "Rollback image pull FAILED — cannot verify or restore the last-known-good images."
+  exit 1
+fi
+
 PREVIOUS_DEPLOY_SHA=$(read_state_field deploy_sha)
 PREVIOUS_GATEWAY_BUILD_SHA=$(image_build_sha "$PREVIOUS_GATEWAY_IMAGE")
 PREVIOUS_MCP_BUILD_SHA=$(image_build_sha "$PREVIOUS_MCP_IMAGE")

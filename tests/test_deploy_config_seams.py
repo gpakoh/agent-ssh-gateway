@@ -616,6 +616,11 @@ class TestDeployVerifiesRunningProvenance:
 
     def test_rollback_smoke_uses_previous_image_provenance(self):
         text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        assert 'docker pull "$PREVIOUS_GATEWAY_IMAGE"' in text
+        assert 'docker pull "$PREVIOUS_MCP_IMAGE"' in text
+        assert text.index('docker pull "$PREVIOUS_GATEWAY_IMAGE"') < text.index(
+            'PREVIOUS_GATEWAY_BUILD_SHA=$(image_build_sha "$PREVIOUS_GATEWAY_IMAGE")'
+        )
         assert "PREVIOUS_DEPLOY_SHA=$(read_state_field deploy_sha)" in text
         assert 'PREVIOUS_GATEWAY_BUILD_SHA=$(image_build_sha "$PREVIOUS_GATEWAY_IMAGE")' in text
         assert 'PREVIOUS_MCP_BUILD_SHA=$(image_build_sha "$PREVIOUS_MCP_IMAGE")' in text
