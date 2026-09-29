@@ -241,6 +241,7 @@ def _register_project_impl(
     tags: list[str] | None,
     parent: str | None,
     persist_to_source: bool,
+    root_selector: str,
 ) -> dict[str, Any]:
     tool = "supervisor_register_project"
     try:
@@ -251,6 +252,7 @@ def _register_project_impl(
             journal_root=journal_root,
             project_id=project_id,
             root=root,
+            root_selector=root_selector,
             project_type=project_type,
             description=description,
             tags=tags,
@@ -284,6 +286,7 @@ def _register_project_impl(
     payload: dict[str, Any] = {
         "project_id": result.project_id,
         "root": result.root,
+        "root_selector": result.root_selector,
         "type": result.project_type,
         "description": result.description,
         "tags": result.tags,
@@ -305,6 +308,7 @@ def supervisor_register_project(
     tags: list[str] | None = None,
     parent: str | None = None,
     persist_to_source: bool = False,
+    root_selector: str = "default",
 ) -> dict[str, Any]:
     """Register one existing directory without dirtying source by default."""
     return run_tool(
@@ -318,6 +322,7 @@ def supervisor_register_project(
             tags,
             parent,
             persist_to_source,
+            root_selector,
         ),
         success_text="Project registration completed.",
     )
