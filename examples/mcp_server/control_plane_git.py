@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
@@ -363,6 +364,7 @@ def git_fetch_ref_control_plane(
 
     local_ref = f"refs/remotes/{remote}/{branch}"
     previous_head = _read_ref(project_root, local_ref)
+    temp_ref = f"refs/mcp-fetch/{uuid.uuid4().hex}"
     askpass = _write_askpass()
     try:
         env = {
@@ -371,7 +373,7 @@ def git_fetch_ref_control_plane(
             "GIT_PASSWORD": token,
             "GIT_TERMINAL_PROMPT": "0",
         }
-        refspec = f"refs/heads/{branch}:{local_ref}"
+        refspec = f"refs/heads/{branch}:{temp_ref}"
         result = _run_git(
             ["git", "fetch", "--no-tags", clone_url, refspec],
             cwd=project_root,
@@ -388,6 +390,7 @@ def git_fetch_ref_control_plane(
     stdout = _redact_text(result.stdout, token=token, project_root=project_root)
     stderr = _redact_text(result.stderr, token=token, project_root=project_root)
     if result.returncode != 0:
+        _run_git(["git", "update-ref", "-d", temp_ref], cwd=project_root)
         return tool_error(
             tool="git_fetch_ref",
             code="GIT_OPERATION_FAILED",
@@ -398,40 +401,86 @@ def git_fetch_ref_control_plane(
             source="gitea",
         )
 
-    fetched_head = _read_ref(project_root, local_ref)
-    if fetched_head != remote_head:
-        return tool_error(
+    fetched_head = _read_ref(project_root, temp_ref)
+    try:
+        if fetched_head != remote_head:
+            return tool_error(
+                tool="git_fetch_ref",
+                code="HEAD_MISMATCH",
+                message="Remote branch changed while fetch was in progress; fetched ref does not match the preflight SHA.",
+                retryable=True,
+                details={
+                    "project": project,
+                    "remote": remote,
+                    "branch": branch,
+                    "preflight_remote_head": remote_head,
+                    "fetched_head": fetched_head,
+                    "local_ref": local_ref,
+                    "phase": "post_fetch_remote_head_race",
+                    "local_ref_unchanged": True,
+                },
+                source="gitea",
+            )
+
+        expected_old = previous_head or ("0" * len(remote_head))
+        update = _run_git(
+            ["git", "update-ref", local_ref, fetched_head, expected_old],
+            cwd=project_root,
+        )
+        if update.returncode != 0:
+            current_head = _read_ref(project_root, local_ref)
+            return tool_error(
+                tool="git_fetch_ref",
+                code="WORKSPACE_CONTENDED",
+                message="Local tracking ref changed after fetch preflight; refusing to overwrite it.",
+                retryable=True,
+                details={
+                    "project": project,
+                    "remote": remote,
+                    "branch": branch,
+                    "local_ref": local_ref,
+                    "expected_previous_head": previous_head,
+                    "actual_head": current_head,
+                    "fetched_head": fetched_head,
+                },
+                source="gitea",
+            )
+
+        committed_head = _read_ref(project_root, local_ref)
+        if committed_head != fetched_head:
+            return tool_error(
+                tool="git_fetch_ref",
+                code="WORKSPACE_VERIFICATION_FAILED",
+                message="Tracking-ref update returned success but exact-head postconditions were not met.",
+                retryable=False,
+                details={
+                    "project": project,
+                    "remote": remote,
+                    "branch": branch,
+                    "local_ref": local_ref,
+                    "expected_head": fetched_head,
+                    "actual_head": committed_head,
+                },
+                source="gitea",
+            )
+
+        return tool_success(
             tool="git_fetch_ref",
-            code="HEAD_MISMATCH",
-            message="Remote branch changed while fetch was in progress; fetched ref does not match the preflight SHA.",
-            retryable=True,
-            details={
+            result={
+                **build_command_result(outcome="passed", exit_code=0, stdout=stdout, stderr=stderr),
                 "project": project,
                 "remote": remote,
                 "branch": branch,
-                "preflight_remote_head": remote_head,
-                "fetched_head": fetched_head,
                 "local_ref": local_ref,
-                "phase": "post_fetch_remote_head_race",
+                "previous_head": previous_head,
+                "remote_head": remote_head,
+                "fetched_head": fetched_head,
             },
+            redacted=(stdout != result.stdout or stderr != result.stderr),
             source="gitea",
         )
-
-    return tool_success(
-        tool="git_fetch_ref",
-        result={
-            **build_command_result(outcome="passed", exit_code=0, stdout=stdout, stderr=stderr),
-            "project": project,
-            "remote": remote,
-            "branch": branch,
-            "local_ref": local_ref,
-            "previous_head": previous_head,
-            "remote_head": remote_head,
-            "fetched_head": fetched_head,
-        },
-        redacted=(stdout != result.stdout or stderr != result.stderr),
-        source="gitea",
-    )
+    finally:
+        _run_git(["git", "update-ref", "-d", temp_ref], cwd=project_root)
 
 
 def git_push_control_plane(project: str, remote: str = "origin", branch: str | None = None) -> dict[str, Any]:
