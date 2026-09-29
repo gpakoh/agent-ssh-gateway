@@ -414,6 +414,23 @@ def _read_or_create_runtime_registry(path: Path) -> bytes:
     return seed
 
 
+def _load_existing_runtime_registry_data(config_dir: Path) -> dict[str, Any]:
+    """Read the runtime overlay for cross-store validation without creating it."""
+    runtime_path = resolve_runtime_registry_path(config_dir / "projects.yaml")
+    if runtime_path is None or not runtime_path.exists():
+        return {"version": 1, "projects": {}}
+    if not runtime_path.is_file():
+        raise _error("TOOL_EXECUTION_FAILED", "Runtime project registry overlay is not a file.")
+    try:
+        original = runtime_path.read_bytes()
+        data = yaml.safe_load(original) or {}
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raise _error("TOOL_EXECUTION_FAILED", "Runtime project registry overlay cannot be read.") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("projects", {}), dict):
+        raise _error("TOOL_EXECUTION_FAILED", "Runtime project registry overlay is malformed.")
+    return data
+
+
 def _load_runtime_registry(config_dir: Path) -> tuple[bytes, dict[str, Any], Path]:
     runtime_path = resolve_runtime_registry_path(config_dir / "projects.yaml")
     if runtime_path is None:
@@ -487,7 +504,8 @@ def _register_project_unlocked(
     original, data, workspace_roots = _load_registry(config_dir)
     storage = "source_registry" if persist_to_source else "runtime_overlay"
     if persist_to_source:
-        validation_data = data
+        runtime_data = _load_existing_runtime_registry_data(config_dir)
+        validation_data = _merged_registry_data(data, runtime_data)
         target_root = config_dir
         target_relative = "projects.yaml"
         target_original = original

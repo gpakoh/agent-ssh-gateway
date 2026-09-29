@@ -202,6 +202,48 @@ def test_register_can_persist_to_source_when_explicitly_requested(registry_layou
         "description": "Everything Claude Code reference",
         "tags": ["reference", "agents"],
     }
+    runtime_path = resolve_runtime_registry_path(config_dir / "projects.yaml")
+    assert runtime_path is not None
+    assert not runtime_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("project_id", "root"),
+    [
+        ("runtime-entry", "source-only"),
+        ("source-entry", "runtime-only"),
+    ],
+)
+def test_source_persist_rejects_runtime_overlay_identity_conflicts(
+    registry_layout,
+    project_id: str,
+    root: str,
+):
+    config_dir, workspace_root, initial = registry_layout
+    (workspace_root / "runtime-only").mkdir()
+    (workspace_root / "source-only").mkdir()
+
+    runtime = supervisor.supervisor_register_project(
+        "runtime-entry",
+        "runtime-only",
+        project_type="reference",
+    )
+    assert runtime["ok"] is True
+
+    result = supervisor.supervisor_register_project(
+        project_id,
+        root,
+        project_type="reference",
+        persist_to_source=True,
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "ALREADY_EXISTS"
+    assert (config_dir / "projects.yaml").read_text(encoding="utf-8") == initial
+    runtime_path = resolve_runtime_registry_path(config_dir / "projects.yaml")
+    assert runtime_path is not None
+    overlay = yaml.safe_load(runtime_path.read_text(encoding="utf-8"))
+    assert list(overlay["projects"]) == ["runtime-entry"]
 
 
 def test_register_uses_named_registry_root_in_runtime_overlay(registry_layout):
