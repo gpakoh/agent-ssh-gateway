@@ -1,8 +1,7 @@
-FROM ghcr.io/astral-sh/uv:0.12.5 AS uv
-
 FROM alpine:3.19
 
 ARG OPENCODE_VERSION=1.18.16
+ARG UV_VERSION=0.12.5
 
 # python3: the generated agent script (agent_tools.py) runs python3 heredocs
 # on the SSH target for proxy lease (fetch) and limit reporting (report).
@@ -14,11 +13,13 @@ ARG OPENCODE_VERSION=1.18.16
 # uses the baseline artifact, matching OpenCode's official installer selection.
 # Install into /usr/local/bin so `command -v opencode` resolves for mcpuser's
 # SSH session without depending on root's untraversable home directory.
+# uv: installed inside the retryable build layer instead of copied from an
+# external uv OCI stage, so CI does not fail before retries/proxy args can apply
+# while fetching an anonymous registry metadata token.
 # ripgrep: OpenCode's repo tools (grep/search) shell out to `rg`; the agent's
 # SSH session needs the binary on PATH to search the executor workspace.
-COPY --from=uv /uv /usr/local/bin/uv
-
-RUN apk add --no-cache openssh-server openssh-client-default git curl bash python3 ripgrep && \
+RUN apk add --no-cache openssh-server openssh-client-default git curl bash python3 py3-pip ripgrep && \
+    python3 -m pip install --no-cache-dir --break-system-packages "uv==${UV_VERSION}" && \
     adduser -D mcpuser && \
     mkdir -p /home/mcpuser/.ssh && \
     chmod 700 /home/mcpuser/.ssh && \
