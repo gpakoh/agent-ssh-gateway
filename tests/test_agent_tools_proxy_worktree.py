@@ -645,6 +645,69 @@ def test_full_script_reports_needs_review_warning_when_check_tool_missing(tmp_pa
     assert "- Required-checks exit code: 127 (ran=1)" in report
 
 
+def test_full_script_warns_but_runs_checks_when_dev_bootstrap_unavailable(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "false")
+    monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
+
+    source = tmp_path / "source-bootstrap-warning"
+    source.mkdir()
+    _init_git_repo(source)
+    (source / "pyproject.toml").write_text(
+        '[project]\nname = "verification-fixture"\nversion = "0.0.0"\n'
+        '\n[project.optional-dependencies]\ndev = []\n',
+        encoding="utf-8",
+    )
+    (source / "uv.lock").write_text(
+        'version = 1\nrevision = 1\nrequires-python = ">=3.11"\n',
+        encoding="utf-8",
+    )
+    _git(source, "add", "pyproject.toml", "uv.lock")
+    _git(source, "commit", "-q", "-m", "add verification fixture")
+
+    artifacts = tmp_path / "bootstrap-warning-artifacts" / TASK_ID
+    artifacts.mkdir(parents=True)
+    (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+    workspace = tmp_path / "bootstrap-warning-workspaces" / TASK_ID
+
+    fake_bin = tmp_path / "bootstrap-warning-bin"
+    fake_bin.mkdir()
+    opencode = fake_bin / "opencode"
+    opencode.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    opencode.chmod(0o755)
+    uv = fake_bin / "uv"
+    uv.write_text("#!/bin/sh\nexit 42\n", encoding="utf-8")
+    uv.chmod(0o755)
+    check_marker = tmp_path / "declared-check-ran"
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+    script = _build_opencode_script(
+        str(artifacts),
+        TASK_ID,
+        None,
+        project_root=str(source),
+        worktree_path=str(workspace),
+        required_checks=[f"touch {shlex.quote(str(check_marker))}"],
+    )
+    result = subprocess.run(
+        ["sh", "-c", script],
+        cwd=source,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert check_marker.exists()
+    assert (artifacts / "agent-status.md").read_text(encoding="utf-8").strip() == (
+        "Status: needs-review-warning"
+    )
+    report = (artifacts / "agent-report.md").read_text(encoding="utf-8")
+    assert "- Required-checks exit code: 0 (ran=1)" in report
+
+
 def test_existing_clean_workspace_rejects_base_ref_drift(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "false")
     monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
@@ -2317,7 +2380,7 @@ class TestSupervisorRequiredCheckDevExtraBootstrap:
         assert "bootstrapping declared dev extra" not in log
         assert "PASS" in log
 
-    def test_declared_dev_extra_bootstrap_failure_fails_closed(self, tmp_path, monkeypatch):
+    def test_declared_dev_extra_bootstrap_failure_warns_and_runs_declared_check(self, tmp_path, monkeypatch):
         _init_git_repo(tmp_path)
         base_head = self._commit_uv_project(tmp_path, dev_extra=True)
         fake_bin = tmp_path.parent / f"{tmp_path.name}-fake-bin"
@@ -2335,10 +2398,12 @@ class TestSupervisorRequiredCheckDevExtraBootstrap:
             required_checks=[f"touch {shlex.quote(str(check_marker))}"],
         )
 
-        assert result.returncode == 72, result.stderr
-        assert not check_marker.exists()
+        assert result.returncode == 0, result.stderr
+        assert check_marker.exists()
         status = (td / "agent-status.md").read_text(encoding="utf-8")
-        assert "dev extra bootstrap FAILED" in status
+        assert "dev extra bootstrap unavailable; continuing with declared checks" in status
+        checks = (td / "required-checks.log").read_text(encoding="utf-8")
+        assert "PASS" in checks
 
 
 def test_worker_cannot_spoof_canonical_gates_or_gate_ledger(tmp_path, monkeypatch):

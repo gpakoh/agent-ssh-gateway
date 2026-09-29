@@ -2916,6 +2916,21 @@ class TestInspectAgentTask:
             is True
         )
 
+    def test_trailing_colon_detector_ignores_older_colon_after_new_output(self):
+        from examples.mcp_server.agent_tasks import _last_line_with_trailing_colon
+
+        log = (
+            "Both required checks pass. Updating status:\n"
+            "← Write <agent-task>/agent-status.md\n"
+            "Wrote file successfully.\n"
+            "Now writing the report artifacts.\n"
+        )
+
+        assert _last_line_with_trailing_colon(log) is None
+        assert _last_line_with_trailing_colon(log + "Waiting for continuation:\n") == (
+            "Waiting for continuation:"
+        )
+
     def test_fresh_progress_artifact_suppresses_trailing_colon_stall(self, tmp_path, monkeypatch):
         monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
         task_id = "a12345678901"
