@@ -72,7 +72,7 @@ jobs:
             package_proxy_enabled=true
           fi
           if [ "$package_proxy_enabled" = "true" ]; then
-            package_no_proxy="${CI_PACKAGE_NO_PROXY:-localhost,127.0.0.1,::1,.example.com,git.example.com,gitea}"
+            package_no_proxy="${CI_PACKAGE_NO_PROXY:-${{ vars.CI_PACKAGE_NO_PROXY }}}"
             echo "NO_PROXY=$package_no_proxy" >> "$GITHUB_ENV"
             echo "no_proxy=$package_no_proxy" >> "$GITHUB_ENV"
             echo "::notice::CI package proxy enabled for dependency install and audit steps"
@@ -288,7 +288,7 @@ jobs:
             package_proxy_enabled=true
           fi
           if [ "$package_proxy_enabled" = "true" ]; then
-            package_no_proxy="${CI_PACKAGE_NO_PROXY:-localhost,127.0.0.1,::1,.example.com,git.example.com,gitea}"
+            package_no_proxy="${CI_PACKAGE_NO_PROXY:-${{ vars.CI_PACKAGE_NO_PROXY }}}"
             echo "NO_PROXY=$package_no_proxy" >> "$GITHUB_ENV"
             echo "no_proxy=$package_no_proxy" >> "$GITHUB_ENV"
             echo "::notice::CI package proxy enabled for dependency install and audit steps"
@@ -505,14 +505,15 @@ jobs:
     env:
       REGISTRY: ${{ secrets.REGISTRY_HOST }}
       # Self-hosted runner pool has no direct internet; outbound egress goes
-      # through the local Squid proxy (192.0.2.199:3128). docker build
+      # through the local Squid proxy (value stored in the CI_DOCKER_*_PROXY
+      # repo variables, rendered below). docker build
       # (BuildKit) does NOT inherit proxy vars from the client env into
       # RUN layers, so they must be passed explicitly as --build-arg (both
       # case variants: apt reads lowercase, other tools uppercase).
       # NO_PROXY keeps internal hosts (Gitea, registry, CI network) direct.
-      DOCKER_HTTP_PROXY: http://192.0.2.199:3128
-      DOCKER_HTTPS_PROXY: http://192.0.2.199:3128
-      DOCKER_NO_PROXY: 127.0.0.1,localhost,::1,198.51.100.103,.example.com,git.example.com,gitea,198.51.100.0/24,172.17.0.0/16,172.18.0.0/16,172.19.0.0/16,172.20.0.0/16
+      DOCKER_HTTP_PROXY: ${{ vars.CI_DOCKER_HTTP_PROXY }}
+      DOCKER_HTTPS_PROXY: ${{ vars.CI_DOCKER_HTTPS_PROXY }}
+      DOCKER_NO_PROXY: ${{ vars.CI_DOCKER_NO_PROXY }}
     steps:
       - uses: actions/checkout@v7
       - name: Log in to the Gitea container registry
