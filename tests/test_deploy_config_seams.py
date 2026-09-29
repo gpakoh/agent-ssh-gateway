@@ -590,7 +590,8 @@ class TestDeployVerifiesRunningProvenance:
         ):
             assert name in fn
         assert "printenv BUILD_SHA" in fn
-        assert 'DEPLOY_TAG"' in fn
+        assert 'local expected_sha="${1:-$DEPLOY_TAG}"' in fn
+        assert '"$expected_sha"' in fn
 
     def test_verify_provenance_is_skipped_for_the_floating_latest_tag(self):
         """DEPLOY_TAG defaults to "latest" for manual/local invocation --
@@ -598,7 +599,7 @@ class TestDeployVerifiesRunningProvenance:
         against, so the check must no-op rather than false-fail."""
         text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
         fn = text.split("verify_provenance() {", 1)[1].split("\n}\n", 1)[0]
-        assert '"$DEPLOY_TAG" = "latest"' in fn
+        assert '"$expected_sha" = "latest"' in fn
 
     def test_smoke_calls_verify_provenance_after_black_box_checks(self):
         text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
@@ -609,9 +610,24 @@ class TestDeployVerifiesRunningProvenance:
         verify_call_line = next(
             i
             for i, line in enumerate(lines)
-            if line.strip() == "verify_provenance || ok=false"
+            if line.strip() == 'verify_provenance "$expected_sha" || ok=false'
         )
         assert mcp_check_line < verify_call_line
+
+    def test_rollback_smoke_uses_previous_image_provenance(self):
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        assert "PREVIOUS_DEPLOY_SHA=$(read_state_field deploy_sha)" in text
+        assert 'PREVIOUS_GATEWAY_BUILD_SHA=$(image_build_sha "$PREVIOUS_GATEWAY_IMAGE")' in text
+        assert 'PREVIOUS_MCP_BUILD_SHA=$(image_build_sha "$PREVIOUS_MCP_IMAGE")' in text
+        assert 'if smoke "$PREVIOUS_DEPLOY_SHA"; then' in text
+        assert "'deploy_sha': '''$DEPLOY_TAG'''" in text
+
+    def test_mcp_oauth_deploy_health_budget_is_extended_and_configurable(self):
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        assert (
+            'wait_docker_health "mcp-oauth"       mcp-oauth       '
+            '"${MCP_OAUTH_DEPLOY_HEALTH_TIMEOUT_SECONDS:-180}"'
+        ) in text
 
 
 class TestMcpOauthServiceCoherence:

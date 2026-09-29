@@ -462,9 +462,75 @@ def test_sshd_entrypoint_is_idempotent_across_reruns(tmp_path: Path) -> None:
 
 def test_rollback_smoke_failure_is_captured_fail_closed() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
-    rollback_tail = text[text.index("if smoke; then") :]
+    rollback_tail = text[text.index('if smoke "$PREVIOUS_DEPLOY_SHA"; then') :]
     assert "Rollback ALSO failed smoke" in rollback_tail
     assert "exit 1" in rollback_tail
+
+
+def test_rollback_smoke_accepts_previous_sha_when_new_deploy_sha_differs(tmp_path: Path) -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    funcs = "".join(
+        _extract_bash_function(text, name)
+        for name in ("wait_docker_health", "smoke", "verify_provenance")
+    )
+    fake_dir = tmp_path / "fake-bin"
+    fake_dir.mkdir()
+    fake_docker = fake_dir / "docker"
+    fake_docker.write_text(
+        """#!/usr/bin/env bash
+set -eu
+case "$1" in
+  inspect)
+    fmt="$3"
+    case "$fmt" in
+      *Health.Status*) echo "healthy" ;;
+      *HostConfig.Memory*) echo "17179869184" ;;
+      *) echo "unknown" ;;
+    esac
+    ;;
+  exec)
+    shift
+    while [ "$#" -gt 0 ] && [ "$1" = "-e" ]; do shift 2; done
+    container="$1"; shift
+    if [ "${1:-}" = "printenv" ] && [ "${2:-}" = "BUILD_SHA" ]; then
+      echo "$OLD_SHA"
+      exit 0
+    fi
+    exit 0
+    ;;
+  *)
+    echo "unexpected docker subcommand: $1" >&2
+    exit 99
+    ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    harness = tmp_path / "rollback-provenance-harness.sh"
+    harness.write_text(
+        "set -euo pipefail\n"
+        + 'DEPLOY_TAG="$NEW_SHA"\n'
+        + funcs
+        + 'smoke "$OLD_SHA"\n',
+        encoding="utf-8",
+    )
+    old_sha = "a" * 40
+    new_sha = "b" * 40
+    result = subprocess.run(
+        ["bash", str(harness)],
+        env={
+            "PATH": f"{fake_dir}:/usr/bin:/bin",
+            "OLD_SHA": old_sha,
+            "NEW_SHA": new_sha,
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"provenance OK ({old_sha})" in result.stdout
+    assert f"expected '{new_sha}'" not in result.stdout
 
 
 def test_rollback_smoke_fails_when_executor_stays_unhealthy(tmp_path: Path) -> None:
