@@ -353,10 +353,12 @@ jobs:
           set -euo pipefail
           job_container="$(hostname)"
           docker inspect "$job_container" >/dev/null
-          selenium_id="$(docker run -d --rm \
+          selenium_image="ghcr.io/seleniumhq/standalone-chromium:150.0.7871.114-chromedriver-150.0.7871.114-grid-4.46.0-20260707@sha256:3400b92f1cddb2dfaaf358654e8f7d83d7be45192fb73c5f28c25faa28d36504"
+          selenium_id="$(docker run -d \
             --network "container:${job_container}" \
             --shm-size=2g \
-            ghcr.io/seleniumhq/standalone-chromium:150.0.7871.114-chromedriver-150.0.7871.114-grid-4.46.0-20260707@sha256:3400b92f1cddb2dfaaf358654e8f7d83d7be45192fb73c5f28c25faa28d36504)"
+            "$selenium_image")"
+          echo "E2E_SELENIUM_IMAGE=$selenium_image" >> "$GITHUB_ENV"
           echo "E2E_SELENIUM_CONTAINER=$selenium_id" >> "$GITHUB_ENV"
           echo "SELENIUM_REMOTE_URL=http://127.0.0.1:4444/wd/hub" >> "$GITHUB_ENV"
 
@@ -375,7 +377,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "${SELENIUM_REMOTE_URL:-}" ]; then
-            uv run python - <<'PY'
+            for attempt in 1 2; do
+              if uv run python - <<'PY'
           import json
           import os
           import time
@@ -390,13 +393,35 @@ jobs:
                       payload = json.load(response)
                   if payload.get("value", {}).get("ready") is True:
                       print(f"Selenium service ready: {status_url}")
-                      break
+                      raise SystemExit(0)
               except Exception as exc:  # noqa: BLE001 - bounded CI readiness probe
                   last_error = exc
               time.sleep(1)
-          else:
-              raise SystemExit(f"Selenium service did not become ready: {last_error}")
+          print(f"Selenium service did not become ready: {last_error}")
+          raise SystemExit(1)
           PY
+              then
+                break
+              fi
+
+              echo "::warning::Selenium sidecar readiness attempt ${attempt}/2 failed"
+              if [ -n "${E2E_SELENIUM_CONTAINER:-}" ]; then
+                docker inspect --format '{{json .State}}' "$E2E_SELENIUM_CONTAINER" || true
+                docker logs --tail 200 "$E2E_SELENIUM_CONTAINER" || true
+              fi
+              if [ "$attempt" -eq 2 ]; then
+                exit 1
+              fi
+
+              docker rm -f "$E2E_SELENIUM_CONTAINER" >/dev/null 2>&1 || true
+              job_container="$(hostname)"
+              selenium_id="$(docker run -d \
+                --network "container:${job_container}" \
+                --shm-size=2g \
+                "$E2E_SELENIUM_IMAGE")"
+              E2E_SELENIUM_CONTAINER="$selenium_id"
+              echo "E2E_SELENIUM_CONTAINER=$selenium_id" >> "$GITHUB_ENV"
+            done
           else
             driver="$(command -v chromedriver || true)"
             browser=""

@@ -95,6 +95,7 @@ wait_docker_health() {
 }
 
 smoke() {
+  local expected_sha="${1:-$DEPLOY_TAG}"
   local ok=true
   wait_docker_health "ssh-gateway-sshd" ssh-gateway-sshd 120 || ok=false
   wait_docker_health "ssh-gateway-agent-sshd" ssh-gateway-agent-sshd 120 || ok=false
@@ -135,7 +136,7 @@ smoke() {
   # unlike mcp-server's HEALTHCHECK, which deliberately hits an
   # auth-exempt /healthz -- so wait_docker_health here is already a
   # meaningful smoke check, no separate docker-exec step needed.
-  wait_docker_health "mcp-oauth"       mcp-oauth       120 || ok=false
+  wait_docker_health "mcp-oauth"       mcp-oauth       "${MCP_OAUTH_DEPLOY_HEALTH_TIMEOUT_SECONDS:-180}" || ok=false
 
   # P1 BLOCKER audit finding: wait_docker_health above only proves each
   # container's own HEALTHCHECK passes (process readiness) -- mcp-server's
@@ -169,12 +170,13 @@ smoke() {
       echo "FAIL"
       ok=false
     fi
-    verify_provenance || ok=false
+    verify_provenance "$expected_sha" || ok=false
   fi
   $ok
 }
 
 verify_provenance() {
+  local expected_sha="${1:-$DEPLOY_TAG}"
   # P0 BLOCKER audit finding: nothing ever confirmed the container actually
   # running after a deploy is the commit that triggered it -- a stuck
   # `docker compose up -d` (wrong image resolved, a stale local tag
@@ -183,15 +185,19 @@ verify_provenance() {
   # DEPLOY_TAG is a real commit SHA (CI always sets DEPLOY_SHA); a manual
   # invocation with no DEPLOY_SHA falls back to the floating :latest tag,
   # which has no single commit to compare against.
-  if [ "$DEPLOY_TAG" = "latest" ]; then
+  if [ "$expected_sha" = "latest" ]; then
     return 0
+  fi
+  if [ -z "$expected_sha" ]; then
+    echo "  provenance expected SHA is empty"
+    return 1
   fi
   local ok=true
   local name sha
   for name in web-ssh-gateway mcp-server mcp-oauth; do
     sha=$(docker exec "$name" printenv BUILD_SHA 2>/dev/null || echo "")
-    if [ "$sha" != "$DEPLOY_TAG" ]; then
-      echo "  $name: provenance MISMATCH (running BUILD_SHA='$sha', expected '$DEPLOY_TAG')"
+    if [ "$sha" != "$expected_sha" ]; then
+      echo "  $name: provenance MISMATCH (running BUILD_SHA='$sha', expected '$expected_sha')"
       ok=false
     else
       echo "  $name: provenance OK ($sha)"
@@ -236,6 +242,13 @@ except Exception:
 "
 }
 
+image_build_sha() {
+  local image_ref="$1"
+  docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$image_ref" 2>/dev/null \
+    | sed -n 's/^BUILD_SHA=//p' \
+    | head -n 1 || true
+}
+
 write_state() {
   python3 -c "
 import json
@@ -244,6 +257,7 @@ json.dump(
         'gateway_image': '''$1''',
         'mcp_server_image': '''$2''',
         'sshd_image': '''$3''',
+        'deploy_sha': '''$DEPLOY_TAG''',
         'deployed_at': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
     },
     open('$STATE_FILE', 'w'),
@@ -512,6 +526,24 @@ if ! validate_image_ref "$PREVIOUS_GATEWAY_IMAGE" "$GATEWAY_REPO" || ! validate_
   exit 1
 fi
 
+if ! docker pull "$PREVIOUS_GATEWAY_IMAGE" || ! docker pull "$PREVIOUS_MCP_IMAGE"; then
+  log "Rollback image pull FAILED — cannot verify or restore the last-known-good images."
+  exit 1
+fi
+
+PREVIOUS_DEPLOY_SHA=$(read_state_field deploy_sha)
+PREVIOUS_GATEWAY_BUILD_SHA=$(image_build_sha "$PREVIOUS_GATEWAY_IMAGE")
+PREVIOUS_MCP_BUILD_SHA=$(image_build_sha "$PREVIOUS_MCP_IMAGE")
+if [ -z "$PREVIOUS_DEPLOY_SHA" ] || [ "$PREVIOUS_DEPLOY_SHA" = "latest" ]; then
+  PREVIOUS_DEPLOY_SHA="$PREVIOUS_GATEWAY_BUILD_SHA"
+fi
+if ! [[ "$PREVIOUS_DEPLOY_SHA" =~ ^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$ ]] || \
+   [ "$PREVIOUS_GATEWAY_BUILD_SHA" != "$PREVIOUS_DEPLOY_SHA" ] || \
+   [ "$PREVIOUS_MCP_BUILD_SHA" != "$PREVIOUS_DEPLOY_SHA" ]; then
+  log "Rollback provenance is missing or inconsistent — refusing to claim a verified rollback."
+  exit 1
+fi
+
 log "Rolling back to $PREVIOUS_GATEWAY_IMAGE / $PREVIOUS_MCP_IMAGE / $PREVIOUS_SSHD_IMAGE"
 if ! deploy_services "$PREVIOUS_GATEWAY_IMAGE" "$PREVIOUS_MCP_IMAGE" "$PREVIOUS_SSHD_IMAGE"; then
   log "Rollback deployment FAILED — manual investigation required."
@@ -523,7 +555,7 @@ if [ -n "$PRE_DEPLOY_REVISION" ] && [ -n "$POST_MIGRATION_REVISION" ] && [ "$PRE
   SCHEMA_ADVANCED=true
 fi
 
-if smoke; then
+if smoke "$PREVIOUS_DEPLOY_SHA"; then
   if [ "$SCHEMA_ADVANCED" = "true" ]; then
     log "Rollback PARTIAL — application reverted to $PREVIOUS_GATEWAY_IMAGE and passed smoke, but the DB schema was NOT reverted: still at '$POST_MIGRATION_REVISION' (was '$PRE_DEPLOY_REVISION' before this deploy). The rolled-back application is now running against a newer schema than it shipped with -- verify compatibility manually; downgrading the schema automatically is not attempted here (real data-loss risk on some migrations)."
   else
