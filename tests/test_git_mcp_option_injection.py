@@ -155,7 +155,39 @@ def test_git_refresh_branch_to_head_fast_forwards_clean_current_branch(tmp_path)
     assert result["new_head"] == target_head
     assert result["clean"] is True
     assert _git(repo, "rev-parse", "HEAD") == target_head
-    assert client.commands == [f"git reset --hard {target_head}"]
+    assert client.commands == [f"git reset --keep {target_head}"]
+
+
+def test_git_refresh_branch_to_head_preserves_concurrent_tracked_edit(tmp_path):
+    repo, feature_head = _init_merge_repo(tmp_path)
+    _git(repo, "switch", "feature/update")
+    (repo / "feature.txt").write_text("target\n", encoding="utf-8")
+    _git(repo, "add", "feature.txt")
+    _git(repo, "commit", "-m", "target")
+    target_head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "reset", "--hard", feature_head)
+
+    class _ConcurrentEditClient(_LocalGitClient):
+        def execute_project_command(self, project: str, command: str) -> dict:
+            (self.root / "feature.txt").write_text("concurrent\n", encoding="utf-8")
+            return super().execute_project_command(project, command)
+
+    client = _ConcurrentEditClient(repo)
+    from unittest.mock import patch
+
+    with patch("mcp_client_tools._resolve_project", return_value=repo):
+        result = git_refresh_branch_to_head(
+            client,
+            "proj",
+            branch="feature/update",
+            expected_current_head=feature_head,
+            target_head=target_head,
+        )
+
+    assert result["exit_code"] != 0
+    assert _git(repo, "rev-parse", "HEAD") == feature_head
+    assert (repo / "feature.txt").read_text(encoding="utf-8") == "concurrent\n"
+    assert client.commands == [f"git reset --keep {target_head}"]
 
 
 def test_git_refresh_branch_to_head_rejects_non_fast_forward(tmp_path):

@@ -2337,7 +2337,7 @@ def git_refresh_branch_to_head(
     result = run_project_command(
         client,
         project,
-        f"git reset --hard {shlex.quote(target_head)}",
+        f"git reset --keep {shlex.quote(target_head)}",
     )
     if result.get("exit_code") != 0:
         return _git_mutation_result(
