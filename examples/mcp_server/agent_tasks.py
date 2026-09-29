@@ -2529,8 +2529,7 @@ def _last_line_with_trailing_colon(log_stdout: str) -> str | None:
         line = _ANSI_ESCAPE_RE.sub("", line).strip()
         if not line:
             continue
-        if line.endswith(":"):
-            return line
+        return line if line.endswith(":") else None
     return None
 
 
