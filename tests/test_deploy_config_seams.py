@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -888,6 +889,30 @@ class TestE2eFailsClosedWithoutBrowserToolchain:
         assert "exit 1" in run
         assert "GITHUB_OUTPUT" not in run
         assert "available=false" not in run
+
+    def test_remote_selenium_readiness_dumps_diagnostics_and_retries_once(self):
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        steps = wf["jobs"]["e2e"]["steps"]
+        start = next(s for s in steps if s.get("name") == "Start pinned Selenium Chromium sidecar")
+        check = next(s for s in steps if s.get("name") == "Check browser runtime")
+        start_run = start["run"]
+        check_run = check["run"]
+        assert "E2E_SELENIUM_IMAGE" in start_run
+        assert "docker run -d --rm" not in start_run
+        assert "for attempt in 1 2" in check_run
+        assert "docker inspect --format '{{json .State}}'" in check_run
+        assert "docker logs --tail 200" in check_run
+        assert 'docker rm -f "$E2E_SELENIUM_CONTAINER"' in check_run
+        assert '"$E2E_SELENIUM_IMAGE"' in check_run
+        assert 'if [ "$attempt" -eq 2 ]; then' in check_run
+        syntax = subprocess.run(
+            ["bash", "-n"],
+            input=check_run,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert syntax.returncode == 0, syntax.stderr
 
     def test_e2e_step_is_unconditional_and_proves_non_skipped_execution(self):
         wf = _load_workflow(CI_WORKFLOW_PATH)
