@@ -1750,8 +1750,11 @@ class TestSshdVersionedArtifact:
 
     def test_sshd_dependency_artifacts_are_pinned_and_retryable(self):
         text = SSHD_DOCKERFILE.read_text(encoding="utf-8")
-        assert "FROM ghcr.io/astral-sh/uv:0.12.5 AS uv" in text
-        assert "COPY --from=uv /uv /usr/local/bin/uv" in text
+        assert "ARG UV_VERSION=0.12.5" in text
+        assert "ghcr.io/astral-sh/uv" not in text
+        assert "COPY --from=uv" not in text
+        assert "py3-pip" in text
+        assert 'python3 -m pip install --no-cache-dir --break-system-packages "uv==${UV_VERSION}"' in text
         assert "ARG OPENCODE_VERSION=1.18.16" in text
         assert "astral.sh/uv" not in text
         assert "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/" in text
