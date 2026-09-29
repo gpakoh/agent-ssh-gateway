@@ -61,6 +61,21 @@ def registry_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return config_dir, workspace_root, initial
 
 
+def _add_named_registry_root(config_dir: Path, selector: str, root: Path) -> None:
+    path = config_dir / "projects.yaml"
+    text = path.read_text(encoding="utf-8")
+    marker = "\nprojects:\n"
+    assert marker in text
+    path.write_text(
+        text.replace(
+            marker,
+            f"\nregistry_roots:\n  {selector}: {root}\n\nprojects:\n",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_registry_root_can_be_overridden_without_cwd_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -187,6 +202,174 @@ def test_register_can_persist_to_source_when_explicitly_requested(registry_layou
         "description": "Everything Claude Code reference",
         "tags": ["reference", "agents"],
     }
+    runtime_path = resolve_runtime_registry_path(config_dir / "projects.yaml")
+    assert runtime_path is not None
+    assert not runtime_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("project_id", "root"),
+    [
+        ("runtime-entry", "source-only"),
+        ("source-entry", "runtime-only"),
+    ],
+)
+def test_source_persist_rejects_runtime_overlay_identity_conflicts(
+    registry_layout,
+    project_id: str,
+    root: str,
+):
+    config_dir, workspace_root, initial = registry_layout
+    (workspace_root / "runtime-only").mkdir()
+    (workspace_root / "source-only").mkdir()
+
+    runtime = supervisor.supervisor_register_project(
+        "runtime-entry",
+        "runtime-only",
+        project_type="reference",
+    )
+    assert runtime["ok"] is True
+
+    result = supervisor.supervisor_register_project(
+        project_id,
+        root,
+        project_type="reference",
+        persist_to_source=True,
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "ALREADY_EXISTS"
+    assert (config_dir / "projects.yaml").read_text(encoding="utf-8") == initial
+    runtime_path = resolve_runtime_registry_path(config_dir / "projects.yaml")
+    assert runtime_path is not None
+    overlay = yaml.safe_load(runtime_path.read_text(encoding="utf-8"))
+    assert list(overlay["projects"]) == ["runtime-entry"]
+
+
+def test_register_uses_named_registry_root_in_runtime_overlay(registry_layout):
+    config_dir, _workspace_root, _initial = registry_layout
+    named_root = config_dir.parent / "astro-sites"
+    named_root.mkdir()
+    (named_root / "example").mkdir()
+    _add_named_registry_root(config_dir, "astro-sites", named_root)
+
+    result = supervisor.supervisor_register_project(
+        "example",
+        "example",
+        project_type="astro-site",
+        tags=["astro"],
+        root_selector="astro-sites",
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["root_selector"] == "astro-sites"
+    assert result["result"]["storage"] == "runtime_overlay"
+    runtime_path = resolve_runtime_registry_path(config_dir / "projects.yaml")
+    assert runtime_path is not None
+    overlay = yaml.safe_load(runtime_path.read_text(encoding="utf-8"))
+    assert overlay["projects"]["example"]["root"] == "example"
+    assert overlay["projects"]["example"]["root_selector"] == "astro-sites"
+    visible = WorkspaceRegistry.load(config_dir / "projects.yaml").project_info("example")
+    assert visible["root"] == str((named_root / "example").resolve())
+
+
+def test_register_allows_same_relative_path_in_distinct_registry_roots(registry_layout):
+    config_dir, _workspace_root, _initial = registry_layout
+    named_root = config_dir.parent / "external-root"
+    named_root.mkdir()
+    (named_root / "existing").mkdir()
+    _add_named_registry_root(config_dir, "external", named_root)
+
+    result = supervisor.supervisor_register_project(
+        "external-existing",
+        "existing",
+        root_selector="external",
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["root_selector"] == "external"
+
+
+def test_register_rejects_unknown_root_selector(registry_layout):
+    _config_dir, _workspace_root, _initial = registry_layout
+
+    result = supervisor.supervisor_register_project(
+        "unknown-root",
+        "existing",
+        root_selector="missing-selector",
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INVALID_INPUT"
+
+
+def test_unregister_does_not_treat_other_selector_prefix_as_descendant(registry_layout):
+    config_dir, workspace_root, _initial = registry_layout
+    named_root = config_dir.parent / "external-root"
+    named_root.mkdir()
+    (workspace_root / "candidate").mkdir()
+    (named_root / "candidate" / "child").mkdir(parents=True)
+    _add_named_registry_root(config_dir, "external", named_root)
+    journal_root = config_dir.parent / "direct-journal"
+
+    project_registry_control.register_project(
+        config_dir=config_dir,
+        journal_root=journal_root,
+        project_id="candidate",
+        root="candidate",
+        project_type="candidate-clone",
+    )
+    project_registry_control.register_project(
+        config_dir=config_dir,
+        journal_root=journal_root,
+        project_id="external-child",
+        root="candidate/child",
+        root_selector="external",
+        project_type="service",
+    )
+
+    removed = project_registry_control.unregister_project_exact(
+        config_dir=config_dir,
+        journal_root=journal_root,
+        project_id="candidate",
+        expected_root="candidate",
+        expected_type="candidate-clone",
+    )
+
+    assert removed.already_absent is False
+    runtime_path = resolve_runtime_registry_path(config_dir / "projects.yaml")
+    assert runtime_path is not None
+    overlay = yaml.safe_load(runtime_path.read_text(encoding="utf-8"))
+    assert "candidate" not in overlay["projects"]
+    assert overlay["projects"]["external-child"]["root_selector"] == "external"
+
+
+def test_unregister_requires_matching_root_selector(registry_layout):
+    config_dir, _workspace_root, _initial = registry_layout
+    named_root = config_dir.parent / "external-root"
+    named_root.mkdir()
+    (named_root / "candidate").mkdir()
+    _add_named_registry_root(config_dir, "external", named_root)
+    journal_root = config_dir.parent / "selector-journal"
+
+    project_registry_control.register_project(
+        config_dir=config_dir,
+        journal_root=journal_root,
+        project_id="external-candidate",
+        root="candidate",
+        root_selector="external",
+        project_type="candidate-clone",
+    )
+
+    with pytest.raises(project_registry_control.ProjectRegistrationError) as exc_info:
+        project_registry_control.unregister_project_exact(
+            config_dir=config_dir,
+            journal_root=journal_root,
+            project_id="external-candidate",
+            expected_root="candidate",
+            expected_type="candidate-clone",
+        )
+    assert exc_info.value.code == "WORKSPACE_CONTENDED"
 
 
 @pytest.mark.parametrize(

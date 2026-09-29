@@ -23,10 +23,11 @@ from typing import Any
 
 import yaml
 
-from app.workspace.registry import resolve_runtime_registry_path
+from app.workspace.registry import load_registry_roots, resolve_runtime_registry_path
 from examples.mcp_server.supervisor_integration import integrate_file
 
 _PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_ROOT_SELECTOR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _REGISTRY_LOCK_FILENAME = ".project-registry.lock"
 _REGISTRY_LOCK_TIMEOUT_S = 30.0
 _REGISTRY_LOCK_POLL_S = 0.05
@@ -47,6 +48,7 @@ class ProjectRegistrationError(ValueError):
 class ProjectRegistrationResult:
     project_id: str
     root: str
+    root_selector: str
     project_type: str
     description: str
     tags: list[str]
@@ -193,32 +195,23 @@ def _normalize_metadata(
 
 def _load_registry(
     config_dir: Path,
-) -> tuple[bytes, dict[str, Any], Path]:
+) -> tuple[bytes, dict[str, Any], dict[str, Path]]:
     registry_path = config_dir / "projects.yaml"
     try:
         original = registry_path.read_bytes()
         data = yaml.safe_load(original)
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        workspace_roots = load_registry_roots(registry_path)
+    except (OSError, UnicodeError, yaml.YAMLError, ValueError) as exc:
         raise _error("TOOL_EXECUTION_FAILED", "Workspace registry cannot be read.") from exc
 
     if not isinstance(data, dict) or not isinstance(data.get("projects"), dict):
         raise _error("TOOL_EXECUTION_FAILED", "Workspace registry is malformed.")
 
-    raw_workspace_root = data.get("registry_root", ".")
-    if not isinstance(raw_workspace_root, str) or not raw_workspace_root.strip():
-        raise _error("TOOL_EXECUTION_FAILED", "Workspace registry root is malformed.")
-
-    workspace_root = Path(raw_workspace_root.strip())
-    if not workspace_root.is_absolute():
-        workspace_root = config_dir / workspace_root
-    try:
-        workspace_root = workspace_root.resolve(strict=True)
-    except OSError as exc:
-        raise _error("TOOL_EXECUTION_FAILED", "Workspace registry root is unavailable.") from exc
-    if not workspace_root.is_dir():
+    default_root = workspace_roots.get("default")
+    if default_root is None or not default_root.is_dir():
         raise _error("TOOL_EXECUTION_FAILED", "Workspace registry root is unavailable.")
 
-    return original, data, workspace_root
+    return original, data, workspace_roots
 
 
 def _resolve_candidate(workspace_root: Path, relative_root: str) -> Path:
@@ -244,11 +237,18 @@ def _resolve_candidate(workspace_root: Path, relative_root: str) -> Path:
 
 
 def _resolve_existing_root(
-    workspace_root: Path,
+    workspace_roots: dict[str, Path],
     relative_root: str,
     *,
+    root_selector: str,
     require_existing: bool,
 ) -> Path:
+    workspace_root = workspace_roots.get(root_selector)
+    if workspace_root is None:
+        raise _error(
+            "TOOL_EXECUTION_FAILED",
+            "Existing project root selector is malformed.",
+        )
     candidate = workspace_root / relative_root
     try:
         resolved = candidate.resolve(strict=require_existing)
@@ -262,15 +262,22 @@ def _resolve_existing_root(
 
 def _validate_against_registry(
     data: dict[str, Any],
-    workspace_root: Path,
+    workspace_roots: dict[str, Path],
     *,
     project_id: str,
     root: str,
+    root_selector: str,
     parent: str | None,
 ) -> None:
     projects = data["projects"]
     if project_id in projects:
         raise _error("ALREADY_EXISTS", "project_id is already registered.")
+
+    workspace_root = workspace_roots.get(root_selector)
+    if workspace_root is None:
+        raise _error("INVALID_INPUT", "root_selector is not configured.")
+    if not workspace_root.is_dir():
+        raise _error("INVALID_INPUT", "Selected project root is unavailable.")
 
     candidate = _resolve_candidate(workspace_root, root)
     for existing_cfg in projects.values():
@@ -279,10 +286,14 @@ def _validate_against_registry(
         existing_root = existing_cfg.get("root")
         if not isinstance(existing_root, str) or not existing_root.strip():
             continue
+        existing_selector = existing_cfg.get("root_selector", "default")
+        if not isinstance(existing_selector, str):
+            continue
         try:
             resolved = _resolve_existing_root(
-                workspace_root,
+                workspace_roots,
                 existing_root.strip(),
+                root_selector=existing_selector,
                 require_existing=False,
             )
         except ProjectRegistrationError:
@@ -297,12 +308,18 @@ def _validate_against_registry(
     if not isinstance(parent_cfg, dict):
         raise _error("INVALID_INPUT", "parent is not a registered project.")
     parent_root = parent_cfg.get("root")
-    if not isinstance(parent_root, str) or not parent_root.strip():
+    parent_selector = parent_cfg.get("root_selector", "default")
+    if (
+        not isinstance(parent_root, str)
+        or not parent_root.strip()
+        or not isinstance(parent_selector, str)
+    ):
         raise _error("TOOL_EXECUTION_FAILED", "Parent registry entry is malformed.")
 
     parent_resolved = _resolve_existing_root(
-        workspace_root,
+        workspace_roots,
         parent_root.strip(),
+        root_selector=parent_selector,
         require_existing=True,
     )
     try:
@@ -318,6 +335,7 @@ def _append_entry(
     *,
     project_id: str,
     root: str,
+    root_selector: str,
     project_type: str,
     description: str,
     tags: list[str],
@@ -329,6 +347,10 @@ def _append_entry(
         f"  {project_id}:",
         f"    root: {json.dumps(root, ensure_ascii=False)}",
     ]
+    if root_selector != "default":
+        lines.append(
+            f"    root_selector: {json.dumps(root_selector, ensure_ascii=False)}"
+        )
     if parent is not None:
         lines.append(f"    parent: {parent}")
     lines.extend(
@@ -392,6 +414,23 @@ def _read_or_create_runtime_registry(path: Path) -> bytes:
     return seed
 
 
+def _load_existing_runtime_registry_data(config_dir: Path) -> dict[str, Any]:
+    """Read the runtime overlay for cross-store validation without creating it."""
+    runtime_path = resolve_runtime_registry_path(config_dir / "projects.yaml")
+    if runtime_path is None or not runtime_path.exists():
+        return {"version": 1, "projects": {}}
+    if not runtime_path.is_file():
+        raise _error("TOOL_EXECUTION_FAILED", "Runtime project registry overlay is not a file.")
+    try:
+        original = runtime_path.read_bytes()
+        data = yaml.safe_load(original) or {}
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raise _error("TOOL_EXECUTION_FAILED", "Runtime project registry overlay cannot be read.") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("projects", {}), dict):
+        raise _error("TOOL_EXECUTION_FAILED", "Runtime project registry overlay is malformed.")
+    return data
+
+
 def _load_runtime_registry(config_dir: Path) -> tuple[bytes, dict[str, Any], Path]:
     runtime_path = resolve_runtime_registry_path(config_dir / "projects.yaml")
     if runtime_path is None:
@@ -431,6 +470,7 @@ def _register_project_unlocked(
     journal_root: Path,
     project_id: str,
     root: str,
+    root_selector: str = "default",
     project_type: str = "unknown",
     description: str = "",
     tags: list[str] | None = None,
@@ -440,6 +480,11 @@ def _register_project_unlocked(
     """Validate and append one project entry to the selected registry store."""
 
     config_dir = config_dir.resolve()
+    if not isinstance(root_selector, str) or not _ROOT_SELECTOR_RE.fullmatch(
+        root_selector.strip()
+    ):
+        raise _error("INVALID_INPUT", "root_selector has an invalid format.")
+    root_selector = root_selector.strip()
     (
         project_id,
         root,
@@ -456,10 +501,11 @@ def _register_project_unlocked(
         parent,
     )
 
-    original, data, workspace_root = _load_registry(config_dir)
+    original, data, workspace_roots = _load_registry(config_dir)
     storage = "source_registry" if persist_to_source else "runtime_overlay"
     if persist_to_source:
-        validation_data = data
+        runtime_data = _load_existing_runtime_registry_data(config_dir)
+        validation_data = _merged_registry_data(data, runtime_data)
         target_root = config_dir
         target_relative = "projects.yaml"
         target_original = original
@@ -472,15 +518,17 @@ def _register_project_unlocked(
 
     _validate_against_registry(
         validation_data,
-        workspace_root,
+        workspace_roots,
         project_id=project_id,
         root=root,
+        root_selector=root_selector,
         parent=parent,
     )
     updated = _append_entry(
         target_original,
         project_id=project_id,
         root=root,
+        root_selector=root_selector,
         project_type=project_type,
         description=description,
         tags=normalized_tags,
@@ -497,6 +545,7 @@ def _register_project_unlocked(
     return ProjectRegistrationResult(
         project_id=project_id,
         root=root,
+        root_selector=root_selector,
         project_type=project_type,
         description=description,
         tags=normalized_tags,
@@ -512,6 +561,7 @@ def register_project(
     journal_root: Path,
     project_id: str,
     root: str,
+    root_selector: str = "default",
     project_type: str = "unknown",
     description: str = "",
     tags: list[str] | None = None,
@@ -525,6 +575,7 @@ def register_project(
             journal_root=journal_root,
             project_id=project_id,
             root=root,
+            root_selector=root_selector,
             project_type=project_type,
             description=description,
             tags=tags,
@@ -540,6 +591,7 @@ def _unregister_project_exact_unlocked(
     project_id: str,
     expected_root: str,
     expected_type: str,
+    expected_root_selector: str = "default",
 ) -> ProjectUnregistrationResult:
     """CAS-remove one exact project entry after identity and descendant checks."""
     config_dir = config_dir.resolve()
@@ -557,11 +609,24 @@ def _unregister_project_exact_unlocked(
     if not isinstance(expected_type, str) or not expected_type.strip():
         raise _error("INVALID_INPUT", "expected_type is invalid.")
     expected_type = expected_type.strip()
+    if (
+        not isinstance(expected_root_selector, str)
+        or not _ROOT_SELECTOR_RE.fullmatch(expected_root_selector.strip())
+    ):
+        raise _error("INVALID_INPUT", "expected_root_selector has an invalid format.")
+    expected_root_selector = expected_root_selector.strip()
 
-    source_original, source_data, _workspace_root = _load_registry(config_dir)
+    source_original, source_data, workspace_roots = _load_registry(config_dir)
     source_projects = source_data.get("projects", {})
     if not isinstance(source_projects, dict):
         raise _error("TOOL_EXECUTION_FAILED", "Workspace registry is malformed.")
+
+    expected_workspace_root = workspace_roots.get(expected_root_selector)
+    if expected_workspace_root is None:
+        raise _error(
+            "WORKSPACE_CONTENDED",
+            "Project root selector does not match cleanup expectations.",
+        )
 
     runtime_path = resolve_runtime_registry_path(config_dir / "projects.yaml")
     runtime_original: bytes | None = None
@@ -594,7 +659,14 @@ def _unregister_project_exact_unlocked(
         )
     if not isinstance(entry, dict):
         raise _error("TOOL_EXECUTION_FAILED", "Project registry entry is malformed.")
-    if entry.get("root") != expected_root or entry.get("type") != expected_type:
+    entry_selector = entry.get("root_selector", "default")
+    if not isinstance(entry_selector, str):
+        raise _error("TOOL_EXECUTION_FAILED", "Project registry entry is malformed.")
+    if (
+        entry.get("root") != expected_root
+        or entry.get("type") != expected_type
+        or entry_selector != expected_root_selector
+    ):
         raise _error(
             "WORKSPACE_CONTENDED",
             "Project registry identity does not match cleanup expectations.",
@@ -610,8 +682,21 @@ def _unregister_project_exact_unlocked(
         if other_entry.get("parent") == project_id:
             raise _error("WORKSPACE_CONTENDED", "Candidate project still has registered descendants.")
         other_root = other_entry.get("root")
-        if isinstance(other_root, str) and other_root.startswith(descendant_prefix):
-            raise _error("WORKSPACE_CONTENDED", "Candidate project still has registered descendants.")
+        other_selector = other_entry.get("root_selector", "default")
+        if not isinstance(other_selector, str):
+            raise _error("TOOL_EXECUTION_FAILED", "Project registry entry is malformed.")
+        other_workspace_root = workspace_roots.get(other_selector)
+        if other_workspace_root is None:
+            raise _error("TOOL_EXECUTION_FAILED", "Project registry entry is malformed.")
+        if (
+            other_workspace_root == expected_workspace_root
+            and isinstance(other_root, str)
+            and other_root.startswith(descendant_prefix)
+        ):
+            raise _error(
+                "WORKSPACE_CONTENDED",
+                "Candidate project still has registered descendants.",
+            )
 
     if runtime_entry is not None:
         if runtime_path is None or runtime_original is None:
@@ -651,6 +736,7 @@ def unregister_project_exact(
     project_id: str,
     expected_root: str,
     expected_type: str,
+    expected_root_selector: str = "default",
 ) -> ProjectUnregistrationResult:
     """Serialize and CAS-remove one exact project entry."""
     with project_registry_mutation_lock(journal_root):
@@ -660,4 +746,5 @@ def unregister_project_exact(
             project_id=project_id,
             expected_root=expected_root,
             expected_type=expected_type,
+            expected_root_selector=expected_root_selector,
         )
