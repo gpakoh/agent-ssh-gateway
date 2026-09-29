@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from control_plane_git import git_push_control_plane
+from control_plane_git import git_fetch_ref_control_plane, git_push_control_plane
 from gateway_client import GatewayClient, GatewayClientError
 from git_write_capabilities import probe_git_write_capabilities
 from tool_results import build_command_result, tool_error, tool_success
@@ -2181,6 +2181,212 @@ def _validate_git_name(value: str, field: str) -> str:
     if not value or not _GIT_NAME_RE.match(value):
         raise ValueError(f"INVALID_INPUT: {field} {value!r} is not a valid git remote/branch name")
     return value
+
+
+def git_fetch_ref(
+    client: GatewayClient,
+    project: str,
+    remote: str = "origin",
+    branch: str = "master",
+    expected_remote_head: str | None = None,
+) -> dict[str, Any]:
+    """Fetch one trusted remote branch into refs/remotes/<remote>/<branch>."""
+    project = _validate_project(project)
+    remote = _validate_git_name(remote, "remote")
+    branch = _validate_git_name(branch, "branch")
+    expected_remote_head = _validate_expected_git_head(expected_remote_head)
+    preflight_error, _preflight = _git_write_preflight(
+        client,
+        project,
+        tool_name="git_fetch_ref",
+        action="fetch_guarded_remote_ref",
+        required_components=("objects", "refs"),
+    )
+    if preflight_error is not None:
+        return preflight_error
+    return git_fetch_ref_control_plane(
+        project=project,
+        remote=remote,
+        branch=branch,
+        expected_remote_head=expected_remote_head,
+    )
+
+
+def git_refresh_branch_to_head(
+    client: GatewayClient,
+    project: str,
+    branch: str,
+    expected_current_head: str,
+    target_head: str,
+) -> dict[str, Any]:
+    """Fast-forward the current clean local branch to one exact fetched commit."""
+    branch = _validate_git_name(branch, "branch")
+    normalized_current_head = _validate_expected_git_head(expected_current_head)
+    normalized_target_head = _validate_expected_git_head(target_head)
+    if normalized_current_head is None or normalized_target_head is None:
+        raise ValueError("INVALID_INPUT: expected_current_head and target_head are required")
+    expected_current_head = normalized_current_head
+    target_head = normalized_target_head
+
+    project = _validate_project(project)
+    resolved = _resolve_project(project)
+    state = _project_git_state(resolved)
+    if not state.get("available"):
+        return tool_error(
+            tool="git_refresh_branch_to_head",
+            code="CHECK_FAILED",
+            message="Current project git state is unavailable; refusing workspace refresh.",
+            retryable=True,
+            hint="Refresh info(project) and verify the project is a readable Git worktree before retrying.",
+            details={"project": project, "state": state},
+            source="gateway",
+        )
+    if state.get("dirty"):
+        return tool_error(
+            tool="git_refresh_branch_to_head",
+            code="WORKSPACE_CONTENDED",
+            message="Working tree is dirty; refusing exact-head refresh.",
+            retryable=False,
+            hint="Commit, stash, or discard local changes before refreshing the workspace.",
+            details={
+                "project": project,
+                "branch": state.get("branch"),
+                "head": state.get("head"),
+                "status_entries": state.get("status_entries"),
+            },
+            source="gateway",
+        )
+    if state.get("detached") or state.get("branch") == "HEAD":
+        return tool_error(
+            tool="git_refresh_branch_to_head",
+            code="GIT_DETACHED_HEAD",
+            message="Workspace is detached; refusing to move a local branch implicitly.",
+            retryable=False,
+            details={"project": project, "head": state.get("head")},
+            source="gateway",
+        )
+
+    current_branch = str(state.get("branch") or "")
+    current_head = str(state.get("head") or "").strip().lower()
+    if current_branch != branch:
+        return tool_error(
+            tool="git_refresh_branch_to_head",
+            code="WORKSPACE_CONTENDED",
+            message="Workspace is not currently on the requested branch; refusing implicit branch switch.",
+            retryable=True,
+            details={
+                "project": project,
+                "expected_branch": branch,
+                "actual_branch": current_branch,
+                "actual_head": current_head,
+            },
+            source="gateway",
+        )
+    if current_head != expected_current_head:
+        return tool_error(
+            tool="git_refresh_branch_to_head",
+            code="HEAD_MISMATCH",
+            message="Current branch HEAD does not match expected_current_head; refusing refresh.",
+            retryable=True,
+            details={
+                "project": project,
+                "branch": branch,
+                "expected_current_head": expected_current_head,
+                "actual_head": current_head,
+            },
+            source="gateway",
+        )
+
+    target_commit = _local_git_output(resolved, ["rev-parse", "--verify", f"{target_head}^{{commit}}"])
+    if target_commit is None or target_commit.strip().lower() != target_head:
+        return tool_error(
+            tool="git_refresh_branch_to_head",
+            code="GIT_LOCAL_REF_MISSING",
+            message="Target commit is not available locally; fetch it before requesting workspace refresh.",
+            retryable=False,
+            details={"project": project, "branch": branch, "target_head": target_head},
+            source="gateway",
+        )
+
+    if _local_git_output(resolved, ["merge-base", "--is-ancestor", current_head, target_head]) is None:
+        return tool_error(
+            tool="git_refresh_branch_to_head",
+            code="GIT_NON_FAST_FORWARD",
+            message="Target commit is not a descendant of the current HEAD; refusing history rewrite.",
+            retryable=False,
+            details={
+                "project": project,
+                "branch": branch,
+                "current_head": current_head,
+                "target_head": target_head,
+            },
+            source="gateway",
+        )
+
+    preflight_error, preflight = _git_write_preflight(
+        client,
+        project,
+        tool_name="git_refresh_branch_to_head",
+        action="refresh_current_branch_to_exact_head",
+        required_components=("index", "refs", "head"),
+        branch=branch,
+    )
+    if preflight_error is not None:
+        return preflight_error
+
+    result = run_project_command(
+        client,
+        project,
+        f"git reset --hard {shlex.quote(target_head)}",
+    )
+    if result.get("exit_code") != 0:
+        return _git_mutation_result(
+            tool_name="git_refresh_branch_to_head",
+            project=project,
+            action="refresh_current_branch_to_exact_head",
+            required_components=("index", "refs", "head"),
+            preflight=preflight,
+            result=result,
+        )
+
+    final_state = _project_git_state(resolved)
+    final_head = str(final_state.get("head") or "").strip().lower()
+    if (
+        not final_state.get("available")
+        or final_state.get("dirty")
+        or final_state.get("branch") != branch
+        or final_head != target_head
+    ):
+        return tool_error(
+            tool="git_refresh_branch_to_head",
+            code="WORKSPACE_VERIFICATION_FAILED",
+            message="Exact-head refresh command returned success but workspace postconditions were not met.",
+            retryable=False,
+            details={
+                "project": project,
+                "branch": branch,
+                "previous_head": current_head,
+                "target_head": target_head,
+                "final_state": final_state,
+            },
+            source="gateway",
+        )
+
+    return {
+        "outcome": "passed",
+        "exit_code": 0,
+        "stdout": str(result.get("stdout", "")),
+        "stderr": str(result.get("stderr", "")),
+        "execution_duration_ms": _execution_duration_ms(result),
+        "job_id": result.get("job_id"),
+        "project": project,
+        "branch": branch,
+        "previous_head": current_head,
+        "target_head": target_head,
+        "new_head": final_head,
+        "clean": True,
+        "fast_forward_only": True,
+    }
 
 
 def git_create_branch(
