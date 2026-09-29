@@ -179,7 +179,7 @@ def test_live_example_is_tracked() -> None:
 def test_main_compose_has_no_hardcoded_private_values() -> None:
     compose = ROOT / "docker" / "docker-compose.yml"
     content = compose.read_text(encoding="utf-8")
-    forbidden = ["198.51.100.", "192.168.", "/media/1TB/", "docker_macvlan_example"]
+    forbidden = ["10.10.10.", "192.168.", "/media/1TB/", "docker_macvlan_example"]
     found = [p for p in forbidden if p in content]
     assert not found, (
         f"docker-compose.yml contains hardcoded private values: {found}"

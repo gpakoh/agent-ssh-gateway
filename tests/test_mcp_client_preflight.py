@@ -1054,7 +1054,7 @@ class TestPrivateStreamableHttpTransportDesign:
             sanitized,
         )
         assert not re.search(r"\b[A-F0-9]{20,}\b", content)
-        assert "example" not in content.lower()
+        assert "xloud" not in content.lower()
 
 
 class TestStreamableHttpDocsEnvSync:
@@ -1178,7 +1178,7 @@ class TestStreamableHttpDocsEnvSync:
                 sanitized,
             )
             assert not re.search(r"\b[A-F0-9]{20,}\b", content)
-            assert "example" not in content.lower()
+            assert "xloud" not in content.lower()
 
 
 class TestPublicMcpConnectorRiskReview:
@@ -1266,7 +1266,7 @@ class TestPublicMcpConnectorRiskReview:
             sanitized,
         )
         assert not re.search(r"\b[A-F0-9]{20,}\b", content)
-        assert "example" not in content.lower()
+        assert "xloud" not in content.lower()
 
 
 class TestPublicMcpOAuthDecision:
@@ -1345,4 +1345,4 @@ class TestPublicMcpOAuthDecision:
             sanitized,
         )
         assert not re.search(r"\b[A-F0-9]{20,}\b", content)
-        assert "example" not in content.lower()
+        assert "xloud" not in content.lower()

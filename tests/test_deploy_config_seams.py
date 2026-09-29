@@ -1447,7 +1447,7 @@ class TestInstallPackageNetworkResilience:
             assert "https_proxy=$package_https_proxy" in run
             assert "NO_PROXY=$package_no_proxy" in run
             assert "no_proxy=$package_no_proxy" in run
-            assert "192.0.2.199" not in run
+            assert "192.168.1.199" not in run
             assert "CI package proxy enabled" in run
 
     def test_package_proxy_does_not_turn_dependency_or_audit_failures_optional(self):

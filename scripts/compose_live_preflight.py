@@ -28,7 +28,7 @@ ENV_EXAMPLE = DOCKER_DIR / ".env.example"
 
 # Patterns that should NOT appear in tracked compose
 _FORBIDDEN_IN_TRACKED = [
-    "198.51.100.",
+    "10.10.10.",
     "192.168.",
     "/media/1TB/",
     "docker_macvlan_example",
