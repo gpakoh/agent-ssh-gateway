@@ -175,13 +175,13 @@ def test_git_fetch_ref_control_plane_fetches_exact_remote_head(monkeypatch: pyte
     monkeypatch.setattr(cpg, "_parse_gitea_remote", lambda url: ("git.example.com", "gpakoh", "repo"))
     monkeypatch.setattr(cpg, "_repo_https_target", lambda owner, repo, token: ("gpakoh", "https://git.example.com/gpakoh/repo.git"))
     monkeypatch.setattr(cpg, "_gitea_get", lambda path, token: {"commit": {"id": remote_head}})
-    reads = iter(["b" * 40, remote_head])
+    previous_head = "b" * 40
+    reads = iter([previous_head, remote_head, remote_head])
     monkeypatch.setattr(cpg, "_read_ref", lambda cwd, ref: next(reads))
-    seen: dict[str, object] = {}
+    seen: list[tuple[list[str], dict[str, str] | None]] = []
 
     def fake_run(argv, *, cwd, env=None, timeout=60):
-        seen["argv"] = argv
-        seen["env"] = env
+        seen.append((argv, env))
         return subprocess.CompletedProcess(argv, 0, stdout="fetched\n", stderr="")
 
     monkeypatch.setattr(cpg, "_run_git", fake_run)
@@ -191,18 +191,33 @@ def test_git_fetch_ref_control_plane_fetches_exact_remote_head(monkeypatch: pyte
 
     assert result["ok"] is True
     payload = result["result"]
-    assert payload["previous_head"] == "b" * 40
+    assert payload["previous_head"] == previous_head
     assert payload["remote_head"] == remote_head
     assert payload["fetched_head"] == remote_head
     assert payload["local_ref"] == "refs/remotes/origin/main"
-    assert seen["argv"] == [
+
+    fetch_argv, fetch_env = seen[0]
+    assert fetch_argv[:5] == [
         "git",
         "fetch",
         "--no-tags",
         "https://git.example.com/gpakoh/repo.git",
-        "refs/heads/main:refs/remotes/origin/main",
+        fetch_argv[4],
     ]
-    assert seen["env"]["GIT_PASSWORD"] == "tok"
+    assert fetch_argv[4].startswith("refs/heads/main:refs/mcp-fetch/")
+    assert fetch_env is not None
+    assert fetch_env["GIT_PASSWORD"] == "tok"
+
+    update_argv, _ = seen[1]
+    temp_ref = fetch_argv[4].split(":", 1)[1]
+    assert update_argv == [
+        "git",
+        "update-ref",
+        "refs/remotes/origin/main",
+        remote_head,
+        previous_head,
+    ]
+    assert seen[2][0] == ["git", "update-ref", "-d", temp_ref]
 
 
 def test_git_fetch_ref_control_plane_rejects_stale_expected_remote_head(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -239,17 +254,30 @@ def test_git_fetch_ref_control_plane_detects_remote_head_race(monkeypatch: pytes
     monkeypatch.setattr(cpg, "_gitea_get", lambda path, token: {"commit": {"id": remote_head}})
     reads = iter([None, "c" * 40])
     monkeypatch.setattr(cpg, "_read_ref", lambda cwd, ref: next(reads))
-    monkeypatch.setattr(
-        cpg,
-        "_run_git",
-        lambda argv, *, cwd, env=None, timeout=60: subprocess.CompletedProcess(argv, 0, stdout="", stderr=""),
-    )
+    seen: list[list[str]] = []
+
+    def fake_run(argv, *, cwd, env=None, timeout=60):
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(cpg, "_run_git", fake_run)
 
     result = cpg.git_fetch_ref_control_plane("proj", remote="origin", branch="main")
 
     assert result["ok"] is False
     assert result["error"]["code"] == "HEAD_MISMATCH"
     assert result["error"]["details"]["phase"] == "post_fetch_remote_head_race"
+    assert result["error"]["details"]["local_ref_unchanged"] is True
+    assert seen[0][0:4] == [
+        "git",
+        "fetch",
+        "--no-tags",
+        "https://git.example.com/gpakoh/repo.git",
+    ]
+    temp_ref = seen[0][4].split(":", 1)[1]
+    assert temp_ref.startswith("refs/mcp-fetch/")
+    assert seen[1] == ["git", "update-ref", "-d", temp_ref]
+    assert all("refs/remotes/origin/main" not in " ".join(argv) for argv in seen)
 
 
 def test_git_push_control_plane_requires_token(monkeypatch: pytest.MonkeyPatch) -> None:
