@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 import pytest
-from mcp_client_tools import git_add, git_create_branch, git_push, git_update_branch_by_merge
+from mcp_client_tools import (
+    git_add,
+    git_create_branch,
+    git_fetch_ref,
+    git_push,
+    git_refresh_branch_to_head,
+    git_update_branch_by_merge,
+)
 
 
 class _LocalGitClient:
@@ -112,6 +119,84 @@ def test_git_push_well_formed():
     with patch("mcp_client_tools.git_push_control_plane", return_value={"ok": True}) as push:
         git_push(client, "proj", remote="origin", branch="feature/x")
     push.assert_called_once_with(project="proj", remote="origin", branch="feature/x")
+    assert client.commands == []
+
+
+def test_git_fetch_ref_rejects_option_or_refspec_injection():
+    client = _StubClient()
+    for value in ("--all", "origin:main", "has space"):
+        with pytest.raises(ValueError, match="INVALID_INPUT"):
+            git_fetch_ref(client, "proj", remote=value)
+    assert client.commands == []
+
+
+def test_git_refresh_branch_to_head_fast_forwards_clean_current_branch(tmp_path):
+    repo, feature_head = _init_merge_repo(tmp_path)
+    _git(repo, "switch", "feature/update")
+    (repo / "next.txt").write_text("next\n", encoding="utf-8")
+    _git(repo, "add", "next.txt")
+    _git(repo, "commit", "-m", "next")
+    target_head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "reset", "--hard", feature_head)
+    client = _LocalGitClient(repo)
+    from unittest.mock import patch
+
+    with patch("mcp_client_tools._resolve_project", return_value=repo):
+        result = git_refresh_branch_to_head(
+            client,
+            "proj",
+            branch="feature/update",
+            expected_current_head=feature_head,
+            target_head=target_head,
+        )
+
+    assert result["exit_code"] == 0
+    assert result["previous_head"] == feature_head
+    assert result["new_head"] == target_head
+    assert result["clean"] is True
+    assert _git(repo, "rev-parse", "HEAD") == target_head
+    assert client.commands == [f"git reset --hard {target_head}"]
+
+
+def test_git_refresh_branch_to_head_rejects_non_fast_forward(tmp_path):
+    repo, feature_head = _init_merge_repo(tmp_path)
+    _git(repo, "switch", "feature/update")
+    master_head = _git(repo, "rev-parse", "master")
+    client = _LocalGitClient(repo)
+    from unittest.mock import patch
+
+    with patch("mcp_client_tools._resolve_project", return_value=repo):
+        result = git_refresh_branch_to_head(
+            client,
+            "proj",
+            branch="feature/update",
+            expected_current_head=feature_head,
+            target_head=master_head,
+        )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "GIT_NON_FAST_FORWARD"
+    assert client.commands == []
+    assert _git(repo, "rev-parse", "HEAD") == feature_head
+
+
+def test_git_refresh_branch_to_head_rejects_stale_expected_head(tmp_path):
+    repo, feature_head = _init_merge_repo(tmp_path)
+    _git(repo, "switch", "feature/update")
+    client = _LocalGitClient(repo)
+    from unittest.mock import patch
+
+    with patch("mcp_client_tools._resolve_project", return_value=repo):
+        result = git_refresh_branch_to_head(
+            client,
+            "proj",
+            branch="feature/update",
+            expected_current_head="0" * 40,
+            target_head=feature_head,
+        )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "HEAD_MISMATCH"
     assert client.commands == []
 
 

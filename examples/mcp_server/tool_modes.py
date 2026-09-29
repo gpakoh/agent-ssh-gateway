@@ -280,6 +280,8 @@ TOOL_NAMES_BY_MODE["mcp_client_write"] = (
     "git_add",
     "git_commit",
     "git_create_branch",
+    "git_fetch_ref",
+    "git_refresh_branch_to_head",
     "git_update_branch_by_merge",
     "git_push",
     "gitea_create_pull_request",

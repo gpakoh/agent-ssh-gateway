@@ -33,7 +33,9 @@ from mcp_client_tools import (
     git_diff,
     git_diff_cached,
     git_diff_stat,
+    git_fetch_ref,
     git_push,
+    git_refresh_branch_to_head,
     git_status,
     git_update_branch_by_merge,
     git_write_capabilities,
@@ -937,6 +939,48 @@ def gateway_git_commit(
     )
 
 
+def gateway_git_fetch_ref(
+    project: str,
+    remote: str = "origin",
+    branch: str = "master",
+    expected_remote_head: str | None = None,
+) -> dict[str, Any]:
+    """Fetch one trusted remote branch into its remote-tracking ref."""
+    return run_tool(
+        tool="git_fetch_ref",
+        title="git fetch ref",
+        fn=lambda: git_fetch_ref(
+            _server_client(),
+            project,
+            remote=remote,
+            branch=branch,
+            expected_remote_head=expected_remote_head,
+        ),
+        success_text="Fetched guarded remote ref.",
+    )
+
+
+def gateway_git_refresh_branch_to_head(
+    project: str,
+    branch: str,
+    expected_current_head: str,
+    target_head: str,
+) -> dict[str, Any]:
+    """Fast-forward the current clean branch to one exact fetched commit."""
+    return run_tool(
+        tool="git_refresh_branch_to_head",
+        title="git refresh branch to head",
+        fn=lambda: git_refresh_branch_to_head(
+            _server_client(),
+            project,
+            branch,
+            expected_current_head,
+            target_head,
+        ),
+        success_text="Refreshed branch to exact head.",
+    )
+
+
 def gateway_git_create_branch(project: str, branch: str) -> dict[str, Any]:
     """Create and switch to a new non-protected local branch."""
     return run_tool(
@@ -1289,6 +1333,8 @@ def register_all() -> None:
     register_tool("git_add")(gateway_git_add)
     register_tool("git_commit")(gateway_git_commit)
     register_tool("git_create_branch")(gateway_git_create_branch)
+    register_tool("git_fetch_ref")(gateway_git_fetch_ref)
+    register_tool("git_refresh_branch_to_head")(gateway_git_refresh_branch_to_head)
     register_tool("git_update_branch_by_merge")(gateway_git_update_branch_by_merge)
     register_tool("git_push")(gateway_git_push)
     register_tool("run_tests")(gateway_run_tests)

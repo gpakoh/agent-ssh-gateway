@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 from tool_results import build_command_result, tool_error, tool_success
@@ -282,6 +282,155 @@ def _push_staged_ref(staging_git_dir: Path, clone_url: str, branch: str, env: di
         cwd=staging_git_dir.parent,
         env=env,
         timeout=_GIT_TIMEOUT,
+    )
+
+
+def _full_commit_id(value: str | None, field: str) -> str | None:
+    if value is None or value == "":
+        return None
+    normalized = value.strip().lower()
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", normalized):
+        raise ValueError(f"INVALID_INPUT: {field} must be a full 40- or 64-character hex commit id")
+    return normalized
+
+
+def _read_ref(cwd: Path, ref: str) -> str | None:
+    result = _run_git(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=cwd)
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip().lower()
+    return value or None
+
+
+def git_fetch_ref_control_plane(
+    project: str,
+    remote: str = "origin",
+    branch: str = "master",
+    expected_remote_head: str | None = None,
+) -> dict[str, Any]:
+    """Fetch one trusted remote branch into its remote-tracking ref with SHA guards."""
+    remote = _validate_name(remote, "remote")
+    branch = _validate_name(branch, "branch")
+    expected_remote_head = _full_commit_id(expected_remote_head, "expected_remote_head")
+    token = os.environ.get("GITEA_TOKEN", "").strip()
+    if not token:
+        return tool_error(tool="git_fetch_ref", code="GIT_AUTH_FAILED", message="GITEA_TOKEN not configured", retryable=False, source="gitea")
+
+    try:
+        project_root = _resolve_project_root(project)
+        remote_url = _remote_url(project_root, remote)
+        _host, owner, repo = _parse_gitea_remote(remote_url)
+        username, clone_url = _repo_https_target(owner, repo, token=token)
+        branch_data = _gitea_get(
+            f"/repos/{owner}/{repo}/branches/{quote(branch, safe='')}", token=token
+        )
+        remote_head = _full_commit_id(
+            str((branch_data.get("commit") or {}).get("id") or ""), "remote_head"
+        )
+        if remote_head is None:
+            raise RuntimeError("SOURCE_REF_NOT_AVAILABLE")
+    except (RuntimeError, ValueError) as exc:
+        code = str(exc)
+        allowed = {
+            "GIT_REMOTE_NOT_ALLOWED",
+            "GIT_AUTH_FAILED",
+            "GIT_REMOTE_UNAVAILABLE",
+            "SOURCE_REF_NOT_AVAILABLE",
+        }
+        return tool_error(
+            tool="git_fetch_ref",
+            code=code if code in allowed else "GIT_OPERATION_FAILED",
+            message="Could not resolve trusted remote branch for fetch.",
+            retryable=code == "GIT_REMOTE_UNAVAILABLE",
+            source="gitea",
+        )
+
+    if expected_remote_head and remote_head != expected_remote_head:
+        return tool_error(
+            tool="git_fetch_ref",
+            code="HEAD_MISMATCH",
+            message="Remote branch HEAD does not match expected_remote_head; refusing fetch.",
+            retryable=True,
+            details={
+                "project": project,
+                "remote": remote,
+                "branch": branch,
+                "expected_remote_head": expected_remote_head,
+                "actual_remote_head": remote_head,
+            },
+            source="gitea",
+        )
+
+    local_ref = f"refs/remotes/{remote}/{branch}"
+    previous_head = _read_ref(project_root, local_ref)
+    askpass = _write_askpass()
+    try:
+        env = {
+            "GIT_ASKPASS": askpass,
+            "GIT_USERNAME": username,
+            "GIT_PASSWORD": token,
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+        refspec = f"refs/heads/{branch}:{local_ref}"
+        result = _run_git(
+            ["git", "fetch", "--no-tags", clone_url, refspec],
+            cwd=project_root,
+            env=env,
+            timeout=_GIT_TIMEOUT,
+        )
+    except FileNotFoundError:
+        return tool_error(tool="git_fetch_ref", code="GIT_DEPENDENCY_MISSING", message="git binary not found in MCP control plane image.", retryable=False)
+    except subprocess.TimeoutExpired:
+        return tool_error(tool="git_fetch_ref", code="TIMEOUT", message="git fetch timed out.", retryable=True)
+    finally:
+        Path(askpass).unlink(missing_ok=True)
+
+    stdout = _redact_text(result.stdout, token=token, project_root=project_root)
+    stderr = _redact_text(result.stderr, token=token, project_root=project_root)
+    if result.returncode != 0:
+        return tool_error(
+            tool="git_fetch_ref",
+            code="GIT_OPERATION_FAILED",
+            message=f"git fetch failed: {stderr.strip() or stdout.strip() or 'unknown error'}",
+            result=build_command_result(outcome="failed", exit_code=result.returncode, stdout=stdout, stderr=stderr),
+            retryable=True,
+            redacted=(stdout != result.stdout or stderr != result.stderr),
+            source="gitea",
+        )
+
+    fetched_head = _read_ref(project_root, local_ref)
+    if fetched_head != remote_head:
+        return tool_error(
+            tool="git_fetch_ref",
+            code="HEAD_MISMATCH",
+            message="Remote branch changed while fetch was in progress; fetched ref does not match the preflight SHA.",
+            retryable=True,
+            details={
+                "project": project,
+                "remote": remote,
+                "branch": branch,
+                "preflight_remote_head": remote_head,
+                "fetched_head": fetched_head,
+                "local_ref": local_ref,
+                "phase": "post_fetch_remote_head_race",
+            },
+            source="gitea",
+        )
+
+    return tool_success(
+        tool="git_fetch_ref",
+        result={
+            **build_command_result(outcome="passed", exit_code=0, stdout=stdout, stderr=stderr),
+            "project": project,
+            "remote": remote,
+            "branch": branch,
+            "local_ref": local_ref,
+            "previous_head": previous_head,
+            "remote_head": remote_head,
+            "fetched_head": fetched_head,
+        },
+        redacted=(stdout != result.stdout or stderr != result.stderr),
+        source="gitea",
     )
 
 
