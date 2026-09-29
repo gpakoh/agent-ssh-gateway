@@ -760,7 +760,7 @@ def test_resolve_trusted_remote_uses_named_trusted_remote_when_origin_missing(tm
             return subprocess.CompletedProcess(
                 argv,
                 0,
-                stdout="ssh://git@198.51.100.103:2222/gpakoh/agent-ssh-gateway.git\n",
+                stdout="ssh://git@192.0.2.103:2222/gpakoh/agent-ssh-gateway.git\n",
                 stderr="",
             )
         if argv == git_cmd("remote", "get-url", "--push", "mcp-gitea"):
@@ -796,7 +796,7 @@ def test_resolve_trusted_remote_accepts_configured_local_ssh_identity_only(
     project_root.mkdir()
     monkeypatch.setenv("GITEA_TOKEN", "fake-token")
     monkeypatch.setenv("GITEA_API_BASE", "http://gitea:3000/api/v1")
-    monkeypatch.setenv("GITEA_GIT_BASE", "http://198.51.100.103:3000")
+    monkeypatch.setenv("GITEA_GIT_BASE", "http://192.0.2.103:3000")
 
     def git_cmd(*args: str) -> list[str]:
         return ["git", "-c", f"safe.directory={project_root}", *args]
@@ -808,7 +808,7 @@ def test_resolve_trusted_remote_accepts_configured_local_ssh_identity_only(
             return subprocess.CompletedProcess(
                 argv,
                 0,
-                stdout="ssh://git@198.51.100.103:2222/gpakoh/agent-ssh-gateway.git\n",
+                stdout="ssh://git@192.0.2.103:2222/gpakoh/agent-ssh-gateway.git\n",
                 stderr="",
             )
         raise AssertionError(f"unexpected subprocess call: {argv!r}")
