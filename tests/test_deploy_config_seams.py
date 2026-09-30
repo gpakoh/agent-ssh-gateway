@@ -1393,6 +1393,43 @@ class TestPrBuildsAndSmokeTestsDockerArtifact:
                 found += 1
         assert found == len(build_and_smoke_names)
 
+    def test_pre_push_smoke_uses_immutable_local_image_ids(self):
+        """The smoke gate runs before registry push, so it must never fall
+        back to pulling an exact-SHA tag that does not exist remotely yet."""
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        steps = wf["jobs"]["build-and-push"]["steps"]
+        by_name = {step.get("name"): step for step in steps}
+
+        expected = {
+            "Build web-ssh-gateway image": (
+                "CI_SMOKE_GW_IMAGE_ID",
+                "agent-ssh-gateway:${{ github.sha }}",
+            ),
+            "Build mcp-server image": (
+                "CI_SMOKE_MCP_IMAGE_ID",
+                "mcp-server:${{ github.sha }}",
+            ),
+            "Build sshd executor image": (
+                "CI_SMOKE_SSHD_IMAGE_ID",
+                "ssh-gateway-sshd:${{ github.sha }}",
+            ),
+        }
+        for step_name, (env_name, exact_tag) in expected.items():
+            run = by_name[step_name]["run"]
+            assert "docker image inspect --format '{{.Id}}'" in run
+            assert exact_tag in run
+            assert "^sha256:[0-9a-f]{64}$" in run
+            assert f'echo "{env_name}=' in run
+            assert '" >> "$GITHUB_ENV"' in run
+
+        smoke = by_name[
+            "Smoke-test built images (before pushing, on a push; standalone, on a PR)"
+        ]["run"]
+        for env_name, exact_tag in expected.values():
+            assert f"${env_name}" in smoke
+            assert exact_tag not in smoke
+        assert "manifest unknown" in smoke
+
 
 class TestInstallPackageNetworkResilience:
     """CI dependency installation must tolerate the same runner egress
@@ -1722,7 +1759,8 @@ class TestSshdVersionedArtifact:
             for s in steps
             if s.get("name") == "Smoke-test built images (before pushing, on a push; standalone, on a PR)"
         )
-        assert "ssh-gateway-sshd:${{ github.sha }}" in smoke["run"]
+        assert "$CI_SMOKE_SSHD_IMAGE_ID" in smoke["run"]
+        assert "ssh-gateway-sshd:${{ github.sha }}" not in smoke["run"]
         assert "sshd -t" in smoke["run"]
 
     def test_ci_pushes_sshd_only_on_push_events(self):
