@@ -176,12 +176,24 @@ def _mcp_call(token: str, method: str, params: dict[str, Any], sid: str | None =
     return payload.get("result", {}), ret_sid
 
 
+def _terminate_session(token: str, sid: str) -> None:
+    status, _, _, _ = _req("DELETE", "/mcp", sid=sid, token=token)
+    if status not in (200, 204):
+        raise SmokeError(f"mcp session termination: http {status}")
+
+
 def main() -> int:
     password = os.environ.get("MCP_AUTHORIZE_PASSWORD", "")
     if not password:
         print("mcp_oauth_black_box_smoke: MCP_AUTHORIZE_PASSWORD not set", file=sys.stderr)
         return 1
 
+    client_id = ""
+    token = ""
+    sid = ""
+    outcome: Any = None
+    exit_code: Any = None
+    rc = 1
     try:
         client_id = _register_client()
         token = _oauth_flow(client_id, password)
@@ -218,16 +230,26 @@ def main() -> int:
         # + exit_code=0 (executed via /api/ssh/execute-argv -> sshd).
         if outcome != "passed" or exit_code != 0:
             raise SmokeError(f"git_status unexpected result: {payload}")
-
-        print(f"mcp_oauth_black_box_smoke: OK client={client_id} "
-              f"outcome={outcome} exit_code={exit_code}")
-        return 0
+        rc = 0
     except SmokeError as exc:
         print(f"mcp_oauth_black_box_smoke: {exc}", file=sys.stderr)
-        return 1
     except Exception as exc:
         print(f"mcp_oauth_black_box_smoke: {exc}", file=sys.stderr)
-        return 1
+    finally:
+        if token and sid:
+            try:
+                _terminate_session(token, sid)
+            except Exception as exc:
+                print(
+                    f"mcp_oauth_black_box_smoke: session cleanup failed: {exc}",
+                    file=sys.stderr,
+                )
+                rc = 1
+
+    if rc == 0:
+        print(f"mcp_oauth_black_box_smoke: OK client={client_id} "
+              f"outcome={outcome} exit_code={exit_code}")
+    return rc
 
 
 if __name__ == "__main__":

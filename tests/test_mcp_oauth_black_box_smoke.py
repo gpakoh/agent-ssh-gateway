@@ -103,11 +103,16 @@ class TestMcpOauthBlackBoxSmoke:
                     "content": [{"type": "text", "text": GIT_STATUS_TEXT}],
                 },
             }),
+            _FakeResponse(200, b""),
         ]
         fake_conn = MagicMock()
         fake_conn.getresponse.side_effect = responses
         with patch.object(smoke.http.client, "HTTPConnection", return_value=fake_conn):
             assert smoke.main() == 0
+        method, path, _body, headers = fake_conn.request.call_args_list[-1].args
+        assert (method, path) == ("DELETE", "/mcp")
+        assert headers["Mcp-Session-Id"] == "sid-1"
+        assert headers["Authorization"] == "Bearer at-1"
 
     def test_register_failure_fails(self, monkeypatch):
         monkeypatch.setenv("MCP_AUTHORIZE_PASSWORD", "secret")
@@ -157,6 +162,7 @@ class TestMcpOauthBlackBoxSmoke:
                     "content": [{"type": "text", "text": '{"error": "boom"}'}],
                 },
             }),
+            _FakeResponse(204, b""),
         ]
         fake_conn = MagicMock()
         fake_conn.getresponse.side_effect = responses
@@ -185,6 +191,7 @@ class TestMcpOauthBlackBoxSmoke:
                     )}],
                 },
             }),
+            _FakeResponse(204, b""),
         ]
         fake_conn = MagicMock()
         fake_conn.getresponse.side_effect = responses
@@ -211,11 +218,38 @@ class TestMcpOauthBlackBoxSmoke:
                     )}],
                 },
             }),
+            _FakeResponse(204, b""),
         ]
         fake_conn = MagicMock()
         fake_conn.getresponse.side_effect = responses
         with patch.object(smoke.http.client, "HTTPConnection", return_value=fake_conn):
             assert smoke.main() == 1
+
+    def test_session_cleanup_failure_fails_closed(self, monkeypatch, capsys):
+        monkeypatch.setenv("MCP_AUTHORIZE_PASSWORD", "secret")
+        responses = [
+            _json(201, {"client_id": "cid"}),
+            _FakeResponse(302, b"", location="http://localhost" + CONSENT_URL),
+            _FakeResponse(303, b"", location=CALLBACK_URL),
+            _json(200, {"access_token": "at-1"}),
+            _sse({"jsonrpc": "2.0", "id": 1, "result": {}}, sid="sid-1"),
+            _sse({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "isError": False,
+                    "content": [{"type": "text", "text": GIT_STATUS_TEXT}],
+                },
+            }),
+            _FakeResponse(500, b""),
+        ]
+        fake_conn = MagicMock()
+        fake_conn.getresponse.side_effect = responses
+        with patch.object(smoke.http.client, "HTTPConnection", return_value=fake_conn):
+            assert smoke.main() == 1
+        captured = capsys.readouterr()
+        assert "session cleanup failed" in captured.err
+        assert "OK" not in captured.out
 
     def test_transport_error_fails(self, monkeypatch):
         monkeypatch.setenv("MCP_AUTHORIZE_PASSWORD", "secret")
