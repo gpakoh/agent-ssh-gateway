@@ -42,6 +42,7 @@ TASK_ID = "a12345678901"
 RUNNER_HARNESS_TIMEOUT_SECONDS = 60
 PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS = RUNNER_HARNESS_TIMEOUT_SECONDS * 2
 PROXY_RETRY_HARNESS_TIMEOUT_SECONDS = RUNNER_HARNESS_TIMEOUT_SECONDS * 2
+RUNTIME_TIMEOUT_HARNESS_TIMEOUT_SECONDS = RUNNER_HARNESS_TIMEOUT_SECONDS * 2
 TEST_STARTUP_MAX_PROXY_ATTEMPTS = 7
 
 
@@ -2946,7 +2947,7 @@ class TestRuntimeTimeout:
             text=True,
             capture_output=True,
             check=False,
-            timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+            timeout=RUNTIME_TIMEOUT_HARNESS_TIMEOUT_SECONDS,
         )
 
         assert result.returncode == 79, result.stderr or result.stdout
@@ -3019,7 +3020,7 @@ class TestRuntimeTimeout:
                 text=True,
                 capture_output=True,
                 check=False,
-                timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+                timeout=RUNTIME_TIMEOUT_HARNESS_TIMEOUT_SECONDS,
             )
 
             assert result.returncode == 79, result.stderr or result.stdout

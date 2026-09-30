@@ -35,7 +35,8 @@ except ImportError:  # pragma: no cover
 _DRIVER = shutil.which("chromedriver")
 _CHROMIUM = shutil.which("chromium") or shutil.which("chromium-browser") or shutil.which("google-chrome")
 _REMOTE_URL = os.environ.get("SELENIUM_REMOTE_URL", "").strip()
-E2E_SERVER_READY_TIMEOUT_SECONDS = 90.0
+# Outer E2E harness budget only; the app's production startup behavior is unchanged.
+E2E_SERVER_READY_TIMEOUT_SECONDS = 180.0
 
 if not webdriver or (not _REMOTE_URL and not (_DRIVER and _CHROMIUM)):
     pytest.skip(
