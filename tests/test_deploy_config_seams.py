@@ -941,6 +941,10 @@ class TestE2eFailsClosedWithoutBrowserToolchain:
         assert "e2e" in needs
         assert "test" in needs
 
+    def test_e2e_waits_for_python_matrix_before_starting(self):
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        assert wf["jobs"]["e2e"].get("needs") == ["test"]
+
 
 class TestE2eActuallyRunsSomewhere:
     """MAJOR audit finding: pytest -m "not host_smoke and not e2e" in

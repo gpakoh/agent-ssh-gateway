@@ -259,6 +259,7 @@ jobs:
     # a digest-pinned Selenium Chromium sidecar sharing only this job's network
     # namespace. The tests boot their own loopback uvicorn server and need no
     # host-specific nginx/SSH/media infrastructure.
+    needs: [test]
     name: E2E (Selenium)
     runs-on: ubuntu-latest
     timeout-minutes: 15
