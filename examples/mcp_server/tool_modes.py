@@ -162,6 +162,7 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "docker_run",
         "docker_rmi",
         "docker_volume_rm",
+        "docker_deploy_contract",
         "postgres_health",
         "postgres_list_schemas",
         "postgres_list_tables",
@@ -234,6 +235,7 @@ MCP_CLIENT_BLOCKED_TOOLS: frozenset[str] = frozenset({
     "docker_run",
     "docker_rmi",
     "docker_volume_rm",
+    "docker_deploy_contract",
     # Agent task write
     "write_agent_task",
     "archive_agent_task",
