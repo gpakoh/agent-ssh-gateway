@@ -359,6 +359,7 @@ def _unavailable_tool_reasons() -> dict[str, str]:
         "docker_compose_build",
         "docker_compose_logs",
         "docker_compose_down",
+        "docker_deploy_contract",
     }
 
     reasons: dict[str, str] = {}
@@ -600,6 +601,7 @@ docker_exec = docker.docker_exec
 docker_run = docker.docker_run
 docker_rmi = docker.docker_rmi
 docker_volume_rm = docker.docker_volume_rm
+docker_deploy_contract = docker.docker_deploy_contract
 confirm_operation = docker.confirm_operation
 docker_pending_actions = docker.docker_pending_actions
 _CONFIRM_HANDLERS = docker._CONFIRM_HANDLERS
@@ -618,6 +620,7 @@ _docker_compose_restart_impl = docker._docker_compose_restart_impl
 _docker_compose_build_impl = docker._docker_compose_build_impl
 _docker_rmi_impl = docker._docker_rmi_impl
 _docker_volume_rm_impl = docker._docker_volume_rm_impl
+_docker_deploy_contract_impl = docker._docker_deploy_contract_impl
 
 if __name__ == "__main__":
     prepare_oauth_token_store()

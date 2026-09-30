@@ -14,9 +14,11 @@ ARG BUILD_TIME
 
 # Security: Install only necessary packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
     git \
     openssh-client \
     curl \
+    util-linux \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 

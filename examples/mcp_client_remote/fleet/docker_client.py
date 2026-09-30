@@ -864,6 +864,151 @@ class DockerClient:
         lines = [self._sanitize_string(line) for line in result.splitlines()]
         return {"lines": lines, "count": len(lines)}
 
+    async def image_id(self, image: str) -> str:
+        """Resolve one already-local image reference to its immutable image ID."""
+        if not isinstance(image, str) or not image or not image.isascii():
+            raise ValueError("image must be a non-empty ASCII reference")
+        result = (
+            await self._run(
+                [DOCKER_BIN, "image", "inspect", "--format", "{{.Id}}", image],
+                timeout=60.0,
+            )
+        ).strip()
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", result):
+            raise RuntimeError("docker returned an invalid image ID")
+        return result
+
+    async def container_image_id(self, container: str) -> str:
+        """Resolve a running/stopped container to the exact image ID it uses."""
+        self._validate_container_name(container)
+        result = (
+            await self._run(
+                [DOCKER_BIN, "inspect", "--format", "{{.Image}}", container],
+                timeout=30.0,
+            )
+        ).strip()
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", result):
+            raise RuntimeError("docker returned an invalid container image ID")
+        return result
+
+    async def volume_metadata(self, volume: str) -> dict:
+        """Return raw metadata for one explicitly named Docker volume.
+
+        This is an internal planning primitive. Public tools must sanitize or
+        reduce the returned mountpoint before exposing it to callers.
+        """
+        self._validate_volume_name(volume)
+        raw = await self._run(
+            [DOCKER_BIN, "volume", "inspect", "--format", "{{json .}}", volume],
+            timeout=30.0,
+        )
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("docker returned invalid volume metadata") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("docker returned invalid volume metadata")
+        return payload
+
+    @staticmethod
+    def _validate_deploy_mount_path(path: str, label: str) -> str:
+        if not isinstance(path, str) or not path.startswith("/"):
+            raise ValueError(f"{label} must be an absolute path")
+        if any(ch in path for ch in ("\x00", "\n", "\r", ",")):
+            raise ValueError(f"{label} contains an unsafe character")
+        return path
+
+    async def run_deploy_contract_helper(
+        self,
+        *,
+        helper_image_id: str,
+        candidate_root: str,
+        infra_root: str,
+        script_path: str,
+        state_file: str,
+        image_env: str,
+        image_ref: str,
+        profile_volume: str,
+        profile_mountpoint: str,
+        timeout: int = 420,
+    ) -> RunResult:
+        """Run one already-authorized deploy contract in a constrained helper.
+
+        No arbitrary command is accepted. The argv is fixed here; policy and
+        source/script identity are validated by the MCP adapter immediately
+        before this method is called.
+        """
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", helper_image_id):
+            raise ValueError("helper_image_id must be an immutable sha256 image ID")
+        if image_env not in {"GPT_BRIDGE_TARGET_IMAGE", "GPT_BRIDGE_RELEASE_IMAGE"}:
+            raise ValueError("unsupported deploy image environment key")
+        if not isinstance(image_ref, str) or not image_ref or not image_ref.isascii():
+            raise ValueError("image_ref must be a non-empty ASCII image reference")
+        self._validate_volume_name(profile_volume)
+        candidate_root = self._validate_deploy_mount_path(candidate_root, "candidate_root")
+        infra_root = self._validate_deploy_mount_path(infra_root, "infra_root")
+        script_path = self._validate_deploy_mount_path(script_path, "script_path")
+        state_file = self._validate_deploy_mount_path(state_file, "state_file")
+        profile_mountpoint = self._validate_deploy_mount_path(
+            profile_mountpoint, "profile_mountpoint"
+        )
+        timeout = max(30, min(timeout, 600))
+
+        mount_candidate = f"type=bind,src={candidate_root},dst={candidate_root},readonly"
+        mount_infra = f"type=bind,src={infra_root},dst={infra_root}"
+        mount_socket = "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock"
+        mount_profile = (
+            f"type=volume,src={profile_volume},dst={profile_mountpoint}"
+        )
+        argv = [
+            DOCKER_BIN,
+            "run",
+            "--rm",
+            "--network",
+            "host",
+            "--user",
+            "0:0",
+            "--cap-drop",
+            "ALL",
+            "--cap-add",
+            "DAC_OVERRIDE",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--read-only",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,nodev,size=64m",
+            "--mount",
+            mount_socket,
+            "--mount",
+            mount_candidate,
+            "--mount",
+            mount_infra,
+            "--mount",
+            mount_profile,
+            "--env",
+            f"INFRA_ROOT={infra_root}",
+            "--env",
+            f"{image_env}={image_ref}",
+            "--env",
+            "HOME=/tmp",
+            helper_image_id,
+            "python3",
+            "/app/scripts/deploy_contract_runner.py",
+            "--script",
+            script_path,
+            "--infra-root",
+            infra_root,
+            "--state-file",
+            state_file,
+            "--image-env",
+            image_env,
+            "--image-ref",
+            image_ref,
+            "--timeout",
+            str(max(30, timeout - 30)),
+        ]
+        return await self._run_with_result(argv, timeout=float(timeout))
+
     async def rm(self, container: str, force: bool = False) -> RunResult:
         self._validate_container_name(container)
         argv = [DOCKER_BIN, "rm"]
