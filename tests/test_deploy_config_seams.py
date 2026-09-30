@@ -25,6 +25,7 @@ MCP_SERVER_DOCKERFILE = ROOT / "docker" / "Dockerfile.mcp-server"
 GATEWAY_DOCKERFILE = ROOT / "docker" / "Dockerfile"
 SSHD_DOCKERFILE = ROOT / "docker" / "sshd" / "Dockerfile"
 DEPLOY_SCRIPT = ROOT / "scripts" / "deploy-from-registry.sh"
+REGISTRY_LOGIN_RETRY_SCRIPT = ROOT / "scripts" / "ci-docker-login-retry.sh"
 CI_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
 HOST_SMOKE_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "host-smoke.yml"
 MCP_OAUTH_SMOKE_TEST = ROOT / "tests" / "test_mcp_oauth_host_smoke.py"
@@ -1376,6 +1377,34 @@ class TestPrBuildsAndSmokeTestsDockerArtifact:
                 assert step.get("if") == "github.event_name == 'push'", (
                     f"{step['name']!r} must be gated to push events only"
                 )
+
+    def test_registry_login_uses_shared_bounded_retry_helper(self):
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        build_steps = wf["jobs"]["build-and-push"]["steps"]
+        deploy_steps = wf["jobs"]["deploy"]["steps"]
+        build_login = next(step for step in build_steps if step.get("name") == "Log in to the Gitea container registry")
+        deploy_login = next(step for step in deploy_steps if step.get("name") == "Log in to the Gitea container registry")
+
+        for step in (build_login, deploy_login):
+            run = step["run"]
+            assert "ci-docker-login-retry.sh" in run
+            assert "--password-stdin" not in run
+            assert "REGISTRY_TOKEN" in run
+
+        script = REGISTRY_LOGIN_RETRY_SCRIPT.read_text(encoding="utf-8")
+        assert 'IFS= read -r password' in script
+        assert 'max_attempts=3' in script
+        assert 'docker login "$registry" -u "$username" --password-stdin' in script
+        assert "is_transient_failure" in script
+        assert "non-transient error; not retrying" in script
+        assert 'registry login failed after ${max_attempts} transient attempts' in script
+        syntax = subprocess.run(
+            ["bash", "-n", str(REGISTRY_LOGIN_RETRY_SCRIPT)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert syntax.returncode == 0, syntax.stderr
 
     def test_build_and_smoke_test_steps_run_unconditionally(self):
         """The actual new coverage (build + smoke-test) must NOT be

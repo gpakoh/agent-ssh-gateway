@@ -522,7 +522,7 @@ jobs:
         # need REGISTRY_TOKEN available to it.
         if: github.event_name == 'push'
         run: |
-          echo "${{ secrets.REGISTRY_TOKEN }}" | docker login "$REGISTRY" -u gpakoh --password-stdin
+          printf '%s\n' "${{ secrets.REGISTRY_TOKEN }}" | bash scripts/ci-docker-login-retry.sh "$REGISTRY" gpakoh
       - name: Build web-ssh-gateway image
         run: |
           bash scripts/ci-docker-build-retry.sh -f docker/Dockerfile \
@@ -785,7 +785,7 @@ jobs:
       # login doesn't carry over, even on the same runner.
       - name: Log in to the Gitea container registry
         run: |
-          echo "${{ secrets.REGISTRY_TOKEN }}" | docker login "$REGISTRY" -u gpakoh --password-stdin
+          printf '%s\n' "${{ secrets.REGISTRY_TOKEN }}" | bash scripts/ci-docker-login-retry.sh "$REGISTRY" gpakoh
       - name: Deploy, smoke-test, roll back on failure
         # DEPLOY_SHA pins deploy-from-registry.sh to the exact commit that
         # triggered this run (build-and-push already tagged images with
