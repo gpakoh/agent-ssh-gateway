@@ -43,7 +43,7 @@ dependencies = [
   "PyJWT>=2.14.0",
   "requests",
   "sseclient-py",
-  "urllib3",
+  "urllib3>=2.8.0",
   "websockets",
   "unidiff",
   "pyyaml",
