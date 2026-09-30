@@ -123,6 +123,8 @@ class FakeMergeClient:
         post_merge_read_failures: int = 0,
         workflow_payload: object | None = None,
         second_ci_run: dict[str, object] | None = None,
+        default_branch: str = "master",
+        base_ref: str = "master",
     ):
         assert token == "token"
         self.ci_conclusion = ci_conclusion
@@ -140,6 +142,8 @@ class FakeMergeClient:
             else {"total_count": 1, "workflows": [{}]}
         )
         self.second_ci_run = second_ci_run
+        self.default_branch = default_branch
+        self.base_ref = base_ref
         self.merged = False
         self.compare_calls: list[tuple[str, str]] = []
         self.merge_calls: list[dict] = []
@@ -172,9 +176,12 @@ class FakeMergeClient:
             "mergeable": True,
             "merge_commit_sha": "b" * 40 if self.merged else None,
             "head": {"sha": current_head_sha, "ref": "feat/x"},
-            "base": {"sha": current_base_sha, "ref": "master"},
+            "base": {"sha": current_base_sha, "ref": self.base_ref},
             "html_url": "https://git.example/pr/25",
         }
+
+    async def get_repo(self, owner: str, repo: str):
+        return {"default_branch": self.default_branch}
 
     async def list_workflows(self, owner: str, repo: str):
         self.workflow_reads += 1
@@ -676,6 +683,54 @@ async def test_adapter_merges_only_expected_green_head_and_confirms_result(monke
     assert client.action_run_pages == [1, 1, 1, 1]
     assert client.operations[-2:] == ["list_action_runs:1", "merge"]
     assert "token" not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_adapter_allows_repository_default_branch_even_when_nonstandard(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    base_ref = "fix/deep-review-upgrade-backfill-20260911"
+    client = FakeMergeClient(
+        "token",
+        default_branch=base_ref,
+        base_ref=base_ref,
+    )
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request(
+        "owner",
+        "repo",
+        25,
+        SHA,
+        expected_base_sha=BASE_SHA,
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["base"] == base_ref
+    assert result["result"]["branch_tracking"]["base_ref"] == base_ref
+    assert len(client.merge_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_adapter_rejects_non_default_nonstandard_base_branch(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient(
+        "token",
+        default_branch="release/stable",
+        base_ref="feature/not-default",
+    )
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request(
+        "owner",
+        "repo",
+        25,
+        SHA,
+        expected_base_sha=BASE_SHA,
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "POLICY_DENIED"
+    assert client.merge_calls == []
 
 
 @pytest.mark.asyncio
