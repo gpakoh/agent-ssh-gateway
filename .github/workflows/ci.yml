@@ -537,6 +537,9 @@ jobs:
             -t "$REGISTRY/gpakoh/agent-ssh-gateway:${{ github.sha }}" \
             -t "$REGISTRY/gpakoh/agent-ssh-gateway:latest" \
             .
+          GW_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$REGISTRY/gpakoh/agent-ssh-gateway:${{ github.sha }}")"
+          printf '%s\n' "$GW_IMAGE_ID" | grep -Eq '^sha256:[0-9a-f]{64}$' || { echo "::error::invalid local gateway image id: $GW_IMAGE_ID"; exit 1; }
+          echo "CI_SMOKE_GW_IMAGE_ID=$GW_IMAGE_ID" >> "$GITHUB_ENV"
       - name: Build mcp-server image
         run: |
           bash scripts/ci-docker-build-retry.sh -f docker/Dockerfile.mcp-server \
@@ -551,6 +554,9 @@ jobs:
             -t "$REGISTRY/gpakoh/mcp-server:${{ github.sha }}" \
             -t "$REGISTRY/gpakoh/mcp-server:latest" \
             .
+          MCP_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$REGISTRY/gpakoh/mcp-server:${{ github.sha }}")"
+          printf '%s\n' "$MCP_IMAGE_ID" | grep -Eq '^sha256:[0-9a-f]{64}$' || { echo "::error::invalid local mcp-server image id: $MCP_IMAGE_ID"; exit 1; }
+          echo "CI_SMOKE_MCP_IMAGE_ID=$MCP_IMAGE_ID" >> "$GITHUB_ENV"
       - name: Build sshd executor image
         run: |
           bash scripts/ci-docker-build-retry.sh -f docker/sshd/Dockerfile \
@@ -565,6 +571,9 @@ jobs:
             -t "$REGISTRY/gpakoh/ssh-gateway-sshd:${{ github.sha }}" \
             -t "$REGISTRY/gpakoh/ssh-gateway-sshd:latest" \
             docker/sshd
+          SSHD_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$REGISTRY/gpakoh/ssh-gateway-sshd:${{ github.sha }}")"
+          printf '%s\n' "$SSHD_IMAGE_ID" | grep -Eq '^sha256:[0-9a-f]{64}$' || { echo "::error::invalid local sshd image id: $SSHD_IMAGE_ID"; exit 1; }
+          echo "CI_SMOKE_SSHD_IMAGE_ID=$SSHD_IMAGE_ID" >> "$GITHUB_ENV"
       - name: Smoke-test built images (before pushing, on a push; standalone, on a PR)
         # M18: until now, the freshly built image was never actually
         # started anywhere before landing in production -- the `test` job
@@ -590,6 +599,15 @@ jobs:
           }
           trap cleanup EXIT
 
+          : "${CI_SMOKE_GW_IMAGE_ID:?local gateway image id was not recorded by the build step}"
+          : "${CI_SMOKE_MCP_IMAGE_ID:?local mcp-server image id was not recorded by the build step}"
+          : "${CI_SMOKE_SSHD_IMAGE_ID:?local sshd image id was not recorded by the build step}"
+
+          # Smoke immutable local image IDs captured immediately after each
+          # successful build. Never fall back to pulling the exact-SHA tag:
+          # push happens only after this gate, so a missing local image must
+          # fail locally instead of producing a misleading registry
+          # "manifest unknown" error.
           # No -p port mappings: health probes use docker exec inside the
           # container's own namespace (see comments above), and hardcoded
           # host ports collide when two CI runs share a runner — the step
@@ -599,7 +617,7 @@ jobs:
             -e API_KEY=ci-smoke-only-not-a-real-secret \
             -e AGENT_TOKEN=ci-smoke-only-not-a-real-secret \
             -e JWT_SECRET=ci-smoke-only-not-a-real-secret \
-            "$REGISTRY/gpakoh/agent-ssh-gateway:${{ github.sha }}"
+            "$CI_SMOKE_GW_IMAGE_ID"
 
           docker run -d --name "$MCP_NAME" \
             -e MCP_CLIENT_SAFE_MODE=true \
@@ -609,7 +627,7 @@ jobs:
             -e MCP_STREAMABLE_HTTP_BEARER_TOKEN=ci-smoke-only-not-a-real-secret \
             -e GATEWAY_BASE_URL=http://localhost:8085 \
             -e GATEWAY_API_KEY=ci-smoke-only-not-a-real-secret \
-            "$REGISTRY/gpakoh/mcp-server:${{ github.sha }}"
+            "$CI_SMOKE_MCP_IMAGE_ID"
 
           # `curl localhost:$port` (an earlier approach here) is exactly
           # the anti-pattern deploy-from-registry.sh's own smoke() already
@@ -688,7 +706,7 @@ jobs:
           fi
 
           echo "Validating sshd executor image..."
-          if ! docker run --rm "$REGISTRY/gpakoh/ssh-gateway-sshd:${{ github.sha }}" sshd -t; then
+          if ! docker run --rm "$CI_SMOKE_SSHD_IMAGE_ID" sshd -t; then
             echo "::error::sshd executor image failed sshd -t"
             fail=true
           else
