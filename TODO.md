@@ -73,6 +73,44 @@ Open backlog count after cleanup: **41**
    env names and Compose project, while redacting secrets and reconciling
    ambiguous Docker outcomes.
 
+   **GPT Browser Bridge production evidence, 2026-09-30:** the current green
+   release was published from `main@f28e49763e58d69421a05cc05172870c6a50aede`
+   as image ID
+   `sha256:e8668bd0189c282467f2b8c2986f2600a6887de81dabd6740e708675aa9b2fe3`
+   and registry digest
+   `sha256:c5f6554ab94fc100f41e32f5309412de240d33a723e194e88fcee04447aec223`,
+   while production still ran old digest
+   `sha256:7a543f4be9e12208b17eaef8d2975e57cd993ad02c3a3e284cbee3dc878f72e5`
+   with `RestartCount=25`, Docker health `unhealthy`, and a large failing
+   streak. The repository's official `deploy/deploy-gpt-browser-bridge.sh`
+   owns the required deployment transaction: release-image binding, lock and
+   contract preflight, stale profile-lock cleanup, replay-stable Compose
+   invocation, health smoke, deploy-state/LKG write and rollback. The available
+   execution surfaces could not run that transaction safely: the default SSH
+   session was an ephemeral `/home/mcpuser` environment with no checkout and
+   no `docker`; the managed OpenCode workspace likewise had no Docker or
+   `infra-quart` operator root and hit rootless/userns denial; Docker/Compose
+   primitives could see the production daemon and exact image but did not inherit
+   the operator-owned Compose environment, with raw Compose preflight failing on
+   missing `BROWSER_SERVICE_INTERNAL_API_KEY`. Calling raw
+   `docker_compose_up` / restart would also bypass the repository's LKG/state
+   and rollback contract.
+
+   Extend this item with a guarded `run_deploy_contract`-style capability:
+   accept a registered repository plus exact source/ref, allowlisted deploy
+   script identity/content hash, exact immutable release digest and expected
+   Compose project/service; execute on the Docker-capable operator plane with
+   operator-owned env available only inside the execution boundary; require
+   confirmation for mutation; and return bounded preflight, image identity,
+   health/readiness, restart stability, deploy-state/LKG and rollback evidence.
+   Fail closed when the caller resolves only to an ephemeral non-Docker session,
+   required Compose env cannot be proven, the release digest does not match the
+   published/local artifact, or execution would fall back to raw Docker/Compose
+   outside the declared deploy contract. Acceptance must include the Browser
+   Bridge case above: production rebinds to digest `c5f6554a...`, the deploy
+   state records the new LKG, unrelated services are not recreated, and an
+   induced failed health/readiness gate proves rollback remains available.
+
 9. ⬜ **Add one-shot Compose/Docker execution with secret-safe env inheritance.**
     Operators need to run migrations, readiness commands and read-only database
     inventory against Compose-backed services without exposing DSNs or mutating
