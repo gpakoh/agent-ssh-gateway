@@ -178,12 +178,13 @@ def driver():
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
+    opts.add_argument("--window-size=1400,1000")
     if _REMOTE_URL:
         drv = webdriver.Remote(command_executor=_REMOTE_URL, options=opts)
     else:
         opts.binary_location = _CHROMIUM
         drv = webdriver.Chrome(options=opts)
-    drv.set_window_size(1400, 1000)
+        drv.set_window_size(1400, 1000)
     yield drv
     drv.quit()
 
