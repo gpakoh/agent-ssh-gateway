@@ -1078,7 +1078,12 @@ async def gitea_merge_pull_request(
                     },
                     source="gitea",
                 )
-            if base_ref not in {"main", "master"}:
+            metadata = await client.get_repo(owner, repo)
+            default_branch = str(metadata.get("default_branch") or "").strip()
+            allowed_merge_bases = {"main", "master"}
+            if default_branch:
+                allowed_merge_bases.add(default_branch)
+            if base_ref not in allowed_merge_bases:
                 return tool_error(
                     tool="gitea_merge_pull_request",
                     code="POLICY_DENIED",

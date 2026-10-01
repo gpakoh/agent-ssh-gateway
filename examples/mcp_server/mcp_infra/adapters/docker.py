@@ -14,11 +14,17 @@ instance.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
+import json
 import os
+import re
+import stat
+import subprocess
 import time as _time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from tool_results import tool_error, tool_success, validate_pagination
@@ -42,6 +48,240 @@ def _confirm_store():
 
 def _get_audit_logger():
     return server_attr("get_audit_logger")()
+
+
+_DEPLOY_STABILITY_SECONDS = 90
+_DEPLOY_HELPER_CONTAINER = "mcp-oauth"
+_DEPLOY_CONTRACTS: dict[str, dict[str, str]] = {
+    "gpt-browser-bridge": {
+        "source_project": "gpt-browser-bridge",
+        "infra_project": "infra-quart",
+        "script_path": "deploy/deploy-gpt-browser-bridge.sh",
+        "state_path": ".gpt-browser-bridge-state/deploy.json",
+        "image_env": "GPT_BRIDGE_TARGET_IMAGE",
+        "image_repo": "192.168.1.103:3005/gpakoh/gpt-browser-bridge",
+        "compose_project": "infra-quart",
+        "profile_volume": "infra-quart_gpt-browser-bridge-profile",
+        "logical_volume": "gpt-browser-bridge-profile",
+        "verify_container": "infra-quart-gpt-browser-bridge-1",
+        "generation_label": "io.xloud.gpt-browser-bridge.deploy-generation",
+    }
+}
+
+
+def _git_capture(root: Path, *args: str) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), *args],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+            check=False,
+            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("candidate git identity check failed") from exc
+    if result.returncode != 0:
+        raise RuntimeError("candidate git identity check failed")
+    return result.stdout.strip()
+
+
+def _safe_registered_root(info: dict[str, Any], *, expected_type: str | None = None) -> Path:
+    if expected_type is not None and info.get("type") != expected_type:
+        raise ValueError(f"registered project must have type {expected_type!r}")
+    raw = info.get("root")
+    if not isinstance(raw, str) or not raw:
+        raise ValueError("registered project root is unavailable")
+    try:
+        root = Path(raw).resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("registered project root is unavailable") from exc
+    if not root.is_dir():
+        raise ValueError("registered project root is unavailable")
+    return root
+
+
+def _read_candidate_metadata(root: Path) -> dict[str, Any]:
+    path = root / ".git" / "mcp-candidate-clone.json"
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise ValueError("candidate metadata is unavailable") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise ValueError("candidate metadata is unsafe")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("candidate metadata is unreadable") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("candidate metadata is invalid")
+    return payload
+
+
+def _sanitize_deploy_tail(client: Any, text: str) -> str:
+    lines = [client._sanitize_string(line) for line in text.splitlines()]
+    return "\n".join(lines)[-8192:]
+
+
+async def _prepare_deploy_contract(
+    *,
+    contract: str,
+    candidate_project: str,
+    expected_head_sha: str,
+    expected_script_blob_sha: str,
+    expected_script_sha256: str,
+    target_image: str,
+) -> dict[str, Any]:
+    spec = _DEPLOY_CONTRACTS.get(contract)
+    if spec is None:
+        raise ValueError("unknown deploy contract")
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_head_sha):
+        raise ValueError("expected_head_sha must be a 40-character lowercase SHA")
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_script_blob_sha):
+        raise ValueError("expected_script_blob_sha must be a 40-character lowercase SHA")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_script_sha256):
+        raise ValueError("expected_script_sha256 must be a 64-character lowercase SHA-256")
+    expected_image_prefix = re.escape(spec["image_repo"])
+    if not re.fullmatch(expected_image_prefix + r"@sha256:[0-9a-f]{64}", target_image):
+        raise ValueError("target_image must be an immutable digest for the contract repository")
+
+    registry = server_attr("_get_workspace_registry")()
+    candidate_info = registry.project_info(candidate_project)
+    candidate_root = _safe_registered_root(candidate_info, expected_type="candidate-clone")
+    metadata = _read_candidate_metadata(candidate_root)
+    if metadata.get("project_id") != candidate_project:
+        raise ValueError("candidate metadata project identity mismatch")
+    if metadata.get("source_project") != spec["source_project"]:
+        raise ValueError("candidate source project is not authorized for this deploy contract")
+    if metadata.get("head") != expected_head_sha or metadata.get("base_sha") != expected_head_sha:
+        raise ValueError("candidate metadata is not pinned to the expected deploy head")
+
+    head = _git_capture(candidate_root, "rev-parse", "HEAD").lower()
+    if head != expected_head_sha:
+        raise ValueError("candidate HEAD changed")
+    if _git_capture(candidate_root, "status", "--porcelain=v1", "--untracked-files=all"):
+        raise ValueError("candidate workspace must be clean")
+
+    script = candidate_root / spec["script_path"]
+    try:
+        script_info = script.lstat()
+        resolved_script = script.resolve(strict=True)
+        resolved_script.relative_to(candidate_root)
+    except (OSError, ValueError) as exc:
+        raise ValueError("deploy script is unavailable or escapes candidate root") from exc
+    if stat.S_ISLNK(script_info.st_mode) or not stat.S_ISREG(script_info.st_mode):
+        raise ValueError("deploy script is not a safe regular file")
+    blob_sha = _git_capture(candidate_root, "rev-parse", f"{expected_head_sha}:{spec['script_path']}")
+    if blob_sha != expected_script_blob_sha:
+        raise ValueError("deploy script Git blob identity mismatch")
+    raw_sha = hashlib.sha256(script.read_bytes()).hexdigest()
+    if raw_sha != expected_script_sha256:
+        raise ValueError("deploy script SHA-256 identity mismatch")
+
+    infra_info = registry.project_info(spec["infra_project"])
+    infra_root = _safe_registered_root(infra_info)
+    state_file = infra_root / spec["state_path"]
+    try:
+        state_file.resolve(strict=False).relative_to(infra_root)
+    except ValueError as exc:
+        raise ValueError("deploy state path escapes infra root") from exc
+
+    client = _docker_client()
+    target_image_id = await client.image_id(target_image)
+    helper_container = os.environ.get("MCP_DEPLOY_HELPER_CONTAINER", _DEPLOY_HELPER_CONTAINER).strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", helper_container):
+        raise ValueError("MCP_DEPLOY_HELPER_CONTAINER is invalid")
+    helper_image_id = await client.container_image_id(helper_container)
+    volume = await client.volume_metadata(spec["profile_volume"])
+    if volume.get("Name") != spec["profile_volume"] or volume.get("Driver") not in (None, "", "local"):
+        raise RuntimeError("deploy profile volume identity mismatch")
+    if volume.get("Options") not in (None, {}, []):
+        raise RuntimeError("deploy profile volume has unsupported driver options")
+    labels = volume.get("Labels")
+    if not isinstance(labels, dict):
+        raise RuntimeError("deploy profile volume labels are unavailable")
+    if labels.get("com.docker.compose.project") != spec["compose_project"]:
+        raise RuntimeError("deploy profile volume Compose project mismatch")
+    if labels.get("com.docker.compose.volume") != spec["logical_volume"]:
+        raise RuntimeError("deploy profile logical volume mismatch")
+    mountpoint = volume.get("Mountpoint")
+    if not isinstance(mountpoint, str) or not mountpoint.startswith("/"):
+        raise RuntimeError("deploy profile volume mountpoint is unavailable")
+    if any(ch in mountpoint for ch in ("\x00", "\n", "\r", ",")):
+        raise RuntimeError("deploy profile volume mountpoint is unsafe")
+
+    return {
+        "spec": spec,
+        "candidate_root": str(candidate_root),
+        "infra_root": str(infra_root),
+        "script_path": str(resolved_script),
+        "state_file": str(state_file),
+        "target_image": target_image,
+        "target_image_id": target_image_id,
+        "helper_image_id": helper_image_id,
+        "profile_mountpoint": mountpoint,
+    }
+
+
+def _single_inspect(payload: Any) -> dict[str, Any]:
+    if isinstance(payload, list) and len(payload) == 1 and isinstance(payload[0], dict):
+        return payload[0]
+    if isinstance(payload, dict):
+        return payload
+    raise RuntimeError("deployment verification returned invalid container metadata")
+
+
+def _verify_deploy_evidence(
+    *,
+    spec: dict[str, str],
+    inspected: dict[str, Any],
+    target_image: str,
+    target_image_id: str,
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    if inspected.get("Image") != target_image_id:
+        raise RuntimeError("deployed container image ID does not match target")
+    config = inspected.get("Config")
+    runtime_state = inspected.get("State")
+    if not isinstance(config, dict) or not isinstance(runtime_state, dict):
+        raise RuntimeError("deployed container metadata is incomplete")
+    if config.get("Image") != target_image:
+        raise RuntimeError("deployed container image reference does not match target")
+    health = runtime_state.get("Health")
+    if not isinstance(health, dict) or health.get("Status") != "healthy":
+        raise RuntimeError("deployed container is not Docker-healthy")
+    labels = config.get("Labels")
+    if not isinstance(labels, dict):
+        raise RuntimeError("deployed container labels are unavailable")
+    generation = labels.get(spec["generation_label"])
+    if not isinstance(generation, str) or not generation:
+        raise RuntimeError("deployed container generation label is missing")
+    container_id = inspected.get("Id")
+    if state.get("gpt_browser_bridge_image") != target_image:
+        raise RuntimeError("deployment state image does not match target")
+    if state.get("gpt_browser_bridge_image_id") != target_image_id:
+        raise RuntimeError("deployment state image ID does not match target")
+    if state.get("gpt_browser_bridge_container_id") != container_id:
+        raise RuntimeError("deployment state container identity does not match runtime")
+    if state.get("gpt_browser_bridge_deploy_generation") != generation:
+        raise RuntimeError("deployment state generation does not match runtime")
+    fingerprint = state.get("gpt_browser_bridge_compose_config_fingerprint")
+    if not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        raise RuntimeError("deployment state Compose fingerprint is invalid")
+    return {
+        "container_id": container_id,
+        "image_id": target_image_id,
+        "image": target_image,
+        "health": "healthy",
+        "restart_count": inspected.get("RestartCount"),
+        "started_at": runtime_state.get("StartedAt"),
+        "deploy_generation": generation,
+        "compose_config_fingerprint": fingerprint,
+        "deployed_at": state.get("deployed_at"),
+    }
 
 
 async def docker_ps(all: bool = False, limit: int = 50) -> dict[str, Any]:
@@ -347,6 +587,247 @@ async def _docker_rmi_impl(images: list[str]) -> RunResult:
 async def _docker_volume_rm_impl(volumes: list[str]) -> RunResult:
     return await _docker_client().volume_rm(volumes)
 
+
+async def docker_deploy_contract(
+    contract: str,
+    candidate_project: str,
+    expected_head_sha: str,
+    expected_script_blob_sha: str,
+    expected_script_sha256: str,
+    target_image: str,
+    timeout: int = 480,
+) -> dict[str, Any]:
+    """Prepare one allowlisted repository deploy contract.
+
+    ADMIN + DANGEROUS: this call is read-only preflight and returns a
+    confirmation action. Confirmation revalidates the exact candidate HEAD,
+    Git blob, script SHA-256, immutable local image and operator volume.
+    """
+    timeout = max(120, min(timeout, 600))
+    try:
+        await _prepare_deploy_contract(
+            contract=contract,
+            candidate_project=candidate_project,
+            expected_head_sha=expected_head_sha,
+            expected_script_blob_sha=expected_script_blob_sha,
+            expected_script_sha256=expected_script_sha256,
+            target_image=target_image,
+        )
+    except ValueError as exc:
+        return tool_error(
+            tool="docker_deploy_contract",
+            code="INVALID_INPUT",
+            message=str(exc),
+            source="docker",
+            retryable=False,
+        )
+    except RuntimeError as exc:
+        return tool_error(
+            tool="docker_deploy_contract",
+            code="DEPLOY_CONTRACT_PRECONDITION_FAILED",
+            message=str(exc),
+            source="docker",
+            retryable=False,
+        )
+
+    summary = (
+        f"Deploy contract {contract} from {candidate_project}@{expected_head_sha[:12]} "
+        f"to {target_image}"
+    )
+    action = _confirm_store().create_action(
+        "docker_deploy_contract",
+        {
+            "contract": contract,
+            "candidate_project": candidate_project,
+            "expected_head_sha": expected_head_sha,
+            "expected_script_blob_sha": expected_script_blob_sha,
+            "expected_script_sha256": expected_script_sha256,
+            "target_image": target_image,
+            "timeout": timeout,
+        },
+        summary,
+        risk="high",
+        required_scope="mcp:docker:admin",
+    )
+    return _confirmation_response(action)
+
+
+async def _docker_deploy_contract_impl(
+    contract: str,
+    candidate_project: str,
+    expected_head_sha: str,
+    expected_script_blob_sha: str,
+    expected_script_sha256: str,
+    target_image: str,
+    timeout: int = 480,
+) -> dict[str, Any]:
+    """Execute one confirmed deploy plan and return verified evidence."""
+    try:
+        plan = await _prepare_deploy_contract(
+            contract=contract,
+            candidate_project=candidate_project,
+            expected_head_sha=expected_head_sha,
+            expected_script_blob_sha=expected_script_blob_sha,
+            expected_script_sha256=expected_script_sha256,
+            target_image=target_image,
+        )
+    except (ValueError, RuntimeError) as exc:
+        return tool_error(
+            tool="docker_deploy_contract",
+            code="DEPLOY_CONTRACT_PRECONDITION_FAILED",
+            message=str(exc),
+            source="docker",
+            retryable=False,
+        )
+
+    client = _docker_client()
+    spec = plan["spec"]
+    run = await client.run_deploy_contract_helper(
+        helper_image_id=plan["helper_image_id"],
+        candidate_root=plan["candidate_root"],
+        infra_root=plan["infra_root"],
+        script_path=plan["script_path"],
+        state_file=plan["state_file"],
+        image_env=spec["image_env"],
+        image_ref=target_image,
+        profile_volume=spec["profile_volume"],
+        profile_mountpoint=plan["profile_mountpoint"],
+        timeout=timeout,
+    )
+
+    if run.exit_code == -1:
+        return tool_error(
+            tool="docker_deploy_contract",
+            code="DEPLOY_CONTRACT_OUTCOME_AMBIGUOUS",
+            message=(
+                "deploy helper exceeded the outer Docker execution budget; "
+                "the deploy transaction may still have reached the host daemon"
+            ),
+            result={
+                "output_tail": _sanitize_deploy_tail(
+                    client, (run.stdout or "") + "\n" + (run.stderr or "")
+                ),
+                "target_image": target_image,
+                "verify_container": spec["verify_container"],
+            },
+            source="docker",
+            retryable=True,
+            hint=(
+                "Reconcile the target container identity/health and deployment state "
+                "before retrying the exact same contract."
+            ),
+        )
+
+    try:
+        parsed = json.loads((run.stdout or "").strip())
+    except json.JSONDecodeError:
+        parsed = None
+    helper_payload = parsed if isinstance(parsed, dict) else None
+    if helper_payload is None:
+        return tool_error(
+            tool="docker_deploy_contract",
+            code="DEPLOY_CONTRACT_EVIDENCE_INVALID",
+            message="deploy helper returned invalid evidence",
+            result={
+                "exit_code": run.exit_code,
+                "output_tail": _sanitize_deploy_tail(
+                    client, (run.stdout or "") + "\n" + (run.stderr or "")
+                ),
+            },
+            source="docker",
+            retryable=False,
+        )
+
+    output_tail = _sanitize_deploy_tail(
+        client, str(helper_payload.get("output_tail") or "")
+    )
+    helper_exit = helper_payload.get("exit_code")
+    if run.exit_code != 0 or helper_exit != 0:
+        return tool_error(
+            tool="docker_deploy_contract",
+            code="DEPLOY_CONTRACT_FAILED",
+            message=str(helper_payload.get("error") or "deploy contract failed"),
+            result={
+                "exit_code": helper_exit if isinstance(helper_exit, int) else run.exit_code,
+                "output_tail": output_tail,
+            },
+            source="docker",
+            retryable=False,
+        )
+
+    state = helper_payload.get("state")
+    if not isinstance(state, dict):
+        return tool_error(
+            tool="docker_deploy_contract",
+            code="DEPLOY_CONTRACT_EVIDENCE_INVALID",
+            message="deploy helper returned invalid deployment state evidence",
+            source="docker",
+            retryable=False,
+        )
+
+    try:
+        first = _verify_deploy_evidence(
+            spec=spec,
+            inspected=_single_inspect(
+                await client.inspect(spec["verify_container"], max_lines=10)
+            ),
+            target_image=target_image,
+            target_image_id=plan["target_image_id"],
+            state=state,
+        )
+        await asyncio.sleep(_DEPLOY_STABILITY_SECONDS)
+        second = _verify_deploy_evidence(
+            spec=spec,
+            inspected=_single_inspect(
+                await client.inspect(spec["verify_container"], max_lines=10)
+            ),
+            target_image=target_image,
+            target_image_id=plan["target_image_id"],
+            state=state,
+        )
+    except RuntimeError as exc:
+        return tool_error(
+            tool="docker_deploy_contract",
+            code="DEPLOY_CONTRACT_VERIFICATION_FAILED",
+            message=str(exc),
+            result={"output_tail": output_tail},
+            source="docker",
+            retryable=False,
+        )
+
+    for field in ("container_id", "restart_count", "started_at", "deploy_generation"):
+        if first.get(field) != second.get(field):
+            return tool_error(
+                tool="docker_deploy_contract",
+                code="DEPLOY_CONTRACT_UNSTABLE",
+                message=f"deployment changed during {_DEPLOY_STABILITY_SECONDS}s stability window",
+                result={
+                    "field": field,
+                    "before": first.get(field),
+                    "after": second.get(field),
+                    "output_tail": output_tail,
+                },
+                source="docker",
+                retryable=False,
+            )
+
+    return tool_success(
+        "docker_deploy_contract",
+        result={
+            "contract": contract,
+            "source_head_sha": expected_head_sha,
+            "script_blob_sha": expected_script_blob_sha,
+            "script_sha256": expected_script_sha256,
+            "stability_seconds": _DEPLOY_STABILITY_SECONDS,
+            "deployment": second,
+            "output_tail": output_tail,
+        },
+        source="docker",
+        dangerous=True,
+        redacted=True,
+    )
+
+
 _CONFIRM_HANDLERS: dict[str, Callable[..., Any]] = {
     "docker_start": _docker_start_impl,
     "docker_stop": _docker_stop_impl,
@@ -361,6 +842,7 @@ _CONFIRM_HANDLERS: dict[str, Callable[..., Any]] = {
     "docker_run": _docker_run_impl,
     "docker_rmi": _docker_rmi_impl,
     "docker_volume_rm": _docker_volume_rm_impl,
+    "docker_deploy_contract": _docker_deploy_contract_impl,
 }
 
 
@@ -1018,6 +1500,7 @@ def register_all() -> None:
         "docker_run",
         "docker_rmi",
         "docker_volume_rm",
+        "docker_deploy_contract",
         "confirm_operation",
         "docker_pending_actions",
     ):
