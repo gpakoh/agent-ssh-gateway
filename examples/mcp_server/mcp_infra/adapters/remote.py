@@ -538,10 +538,7 @@ async def _gitea_ci_evidence(
     expected_head_sha: str,
 ) -> str:
     workflow_payload = await client.list_workflows(owner, repo)
-    configured_count = _configured_workflow_count(workflow_payload)
-    if configured_count == 0:
-        return "CI_NOT_CONFIGURED"
-    if configured_count is None:
+    if _configured_workflow_count(workflow_payload) is None:
         return "CI_EVIDENCE_INCOMPLETE"
 
     try:
