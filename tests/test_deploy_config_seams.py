@@ -1683,10 +1683,10 @@ class TestMakeCheckMirrorsCiExactly:
         makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
         wf = _load_workflow(CI_WORKFLOW_PATH)
 
-        assert "PYTEST_UNIT_TIMEOUT ?= 45m" in makefile
+        assert "PYTEST_UNIT_TIMEOUT ?= 70m" in makefile
         assert "timeout --signal=TERM --kill-after=30s $(PYTEST_UNIT_TIMEOUT) uv run pytest" in makefile
         assert "timeout --signal=TERM --kill-after=30s 25m uv run pytest" not in makefile
-        assert wf["jobs"]["test"]["timeout-minutes"] == 60
+        assert wf["jobs"]["test"]["timeout-minutes"] == 90
 
     def test_unit_runner_emits_keepalive_while_pytest_is_silent(self):
         makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
