@@ -2162,6 +2162,11 @@ class TestCanonicalGiteaEnvironmentNames:
 
         assert not any("MCP_OAUTH_GITEA_" in value for value in env.values())
 
+    def test_mcp_oauth_exposes_trusted_remote_host_allowlist(self):
+        env = _env_dict(_load_compose()["services"]["mcp-oauth"]["environment"])
+
+        assert env.get("GITEA_TRUSTED_REMOTE_HOSTS") == "${GITEA_TRUSTED_REMOTE_HOSTS:-}"
+
     def test_docker_env_example_documents_canonical_gitea_env_names(self):
         text = ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
 

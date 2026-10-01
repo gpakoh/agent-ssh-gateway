@@ -72,6 +72,10 @@ Verifies:
   live `gitea_*` MCP tools will fail with remote-unavailable errors.
 - Keep `GITEA_FORWARDED_HOST` / `GITEA_FORWARDED_PROTO` aligned with the public Gitea
   origin when the client is expected to emit public-facing PR URLs.
+- If registered project Git remotes use an additional internal Gitea hostname or IP,
+  set `GITEA_TRUSTED_REMOTE_HOSTS` to a comma/space-separated allowlist of those hosts.
+  The control plane uses this only to recognize the repository identity; authenticated
+  fetches are re-resolved through the Gitea API and do not reuse checkout credentials.
 
 ## Adding a New Private Value
 
