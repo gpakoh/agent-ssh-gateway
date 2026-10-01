@@ -836,6 +836,58 @@ async def test_adapter_blocks_bootstrap_pull_request_without_exact_head_run(monk
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "run_page",
+    [
+        pytest.param({"total_count": 0, "workflow_runs": []}, id="no-actions-runs"),
+        pytest.param(
+            {
+                "total_count": 1,
+                "workflow_runs": [
+                    {
+                        "id": 11,
+                        "event": "pull_request",
+                        "head_sha": "c" * 40,
+                        "status": "completed",
+                        "conclusion": "success",
+                    }
+                ],
+            },
+            id="green-run-on-other-head",
+        ),
+    ],
+)
+async def test_adapter_bootstrap_merge_fails_closed_without_exact_head_pull_request_run(
+    monkeypatch,
+    run_page,
+):
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient("token", workflow_payload={"total_count": 0, "workflows": []})
+    list_action_runs = client.list_action_runs
+
+    async def runs_for_page(owner: str, repo: str, status: str | None, limit: int, page: int):
+        await list_action_runs(owner, repo, status, limit, page)
+        return run_page
+
+    client.list_action_runs = runs_for_page  # type: ignore[method-assign]
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request("owner", "repo", 25, SHA)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "NO_REQUIRED_RUN_FOUND"
+    assert result["error"]["retryable"] is False
+    assert client.merge_calls == []
+    assert client.merged is False
+    assert "merge" not in client.operations
+    assert client.pr_reads == 1
+    assert client.workflow_reads == 1
+    assert client.action_run_pages == [1, 1]
+    assert client.operations[-1] == "list_action_runs:1"
+    assert "token" not in repr(result).lower()
+
+
+@pytest.mark.asyncio
 async def test_adapter_blocks_bootstrap_pull_request_with_non_green_run(monkeypatch):
     monkeypatch.setenv("GITEA_TOKEN", "token")
     client = FakeMergeClient(
