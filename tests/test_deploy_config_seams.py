@@ -953,20 +953,29 @@ class TestE2eFailsClosedWithoutBrowserToolchain:
 
         job_timeout_seconds = wf["jobs"]["e2e"]["timeout-minutes"] * 60
         for run in runs:
-            match = re.search(r"SE_SESSION_TIMEOUT=(\d+)", run)
-            assert match, (
-                "sidecar must set SE_SESSION_TIMEOUT explicitly; the Grid 300s "
-                "default reaps a live session when the host is slow and "
-                "cascades unrelated tests into invalid-session failures"
+            # Only actual `-e NAME=...` flags count; the explanatory comment
+            # above them names the rejected variable deliberately.
+            env_flags = re.findall(r"-e\s+([A-Z_]+)=", run)
+            assert "SE_SESSION_TIMEOUT" not in env_flags, (
+                "SE_SESSION_TIMEOUT is not a variable the pinned Selenium "
+                "entrypoint recognises; use SE_SESSION_REQUEST_TIMEOUT"
             )
-            session_timeout = int(match.group(1))
+            assert "SE_SESSION_REQUEST_TIMEOUT" in env_flags, (
+                "sidecar must set SE_SESSION_REQUEST_TIMEOUT explicitly; the "
+                "Grid 300s default reaps a live session when the host is slow "
+                "and cascades unrelated tests into invalid-session failures"
+            )
+            session_timeout = int(
+                re.search(r"-e\s+SE_SESSION_REQUEST_TIMEOUT=(\d+)", run).group(1)
+            )
             assert session_timeout >= 600, (
-                f"SE_SESSION_TIMEOUT={session_timeout}s leaves no headroom over "
-                "the 300s default that killed run #13456"
+                f"SE_SESSION_REQUEST_TIMEOUT={session_timeout}s leaves no "
+                "headroom over the 300s default that killed run #13456"
             )
             assert session_timeout < job_timeout_seconds, (
-                f"SE_SESSION_TIMEOUT={session_timeout}s must stay below the job "
-                f"timeout {job_timeout_seconds}s or the session outlives the job"
+                f"SE_SESSION_REQUEST_TIMEOUT={session_timeout}s must stay below "
+                f"the job timeout {job_timeout_seconds}s or a stale session "
+                "outlives the job that owns it"
             )
 
             assert "--cpus=" in run, (
