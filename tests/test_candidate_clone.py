@@ -2884,3 +2884,100 @@ def test_missing_metadata_in_same_lineage_remains_actionable(registry_fixture) -
     assert "repair_action" in err.details
     assert tool_error(code=err.code)["error"]["code"] == err.code
     assert (config_dir / "projects.yaml").read_bytes() == registry_before
+
+@pytest.mark.parametrize("identity", ["foreign", "same", "unavailable", "empty"])
+def test_legacy_candidate_requires_proven_foreign_repository(
+    registry_fixture, monkeypatch: pytest.MonkeyPatch, identity: str,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, source, config_dir, journal_root, base = registry_fixture
+    legacy = workspace / ".mcp-candidate-clones" / "candidate-legacy-manual"
+    _init_repo(legacy)
+    before = (config_dir / "projects.yaml").read_bytes()
+    requested = "https://trusted.invalid/owner/requested.git"
+
+    def resolve(root: Path) -> tuple[str, str]:
+        if root == source:
+            return requested, "unused-test-token"
+        assert root == legacy
+        if identity == "unavailable":
+            raise ManagedSourceBundleError("ambiguous or untrusted repository")
+        if identity == "empty":
+            return "", "unused-test-token"
+        return (
+            "https://trusted.invalid/owner/foreign.git" if identity == "foreign" else requested,
+            "unused-test-token",
+        )
+
+    monkeypatch.setattr(module, "_resolve_trusted_remote", resolve)
+    if identity == "foreign":
+        receipt = prepare_candidate_clone(
+            "source-project", "candidate/legacy-isolation", base,
+            config_dir=config_dir, journal_root=journal_root,
+        )
+        assert receipt.head == base
+        assert receipt.clean
+        assert legacy.is_dir()
+        assert not (legacy / ".git" / "mcp-candidate-clone.json").exists()
+    else:
+        with pytest.raises(CandidateCloneError) as caught:
+            prepare_candidate_clone(
+                "source-project", "candidate/legacy-isolation", base,
+                config_dir=config_dir, journal_root=journal_root,
+            )
+        assert caught.value.code == "CANDIDATE_LINEAGE_SCAN_FAILED"
+        assert caught.value.details["candidate_project_id"] == legacy.name
+        assert (config_dir / "projects.yaml").read_bytes() == before
+
+
+def test_matching_managed_lineage_cannot_be_excluded_by_foreign_remote(
+    registry_fixture, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/matching-remote"
+    first = prepare_candidate_clone(
+        "source-project", branch, base,
+        config_dir=config_dir, journal_root=journal_root,
+    )
+    metadata = workspace / ".mcp-candidate-clones" / first.project_id / ".git" / "mcp-candidate-clone.json"
+    metadata.unlink()
+    newer = _commit(source, "new matching base")
+
+    def forbidden_probe(*args) -> bool:
+        raise AssertionError("matching managed ids must not use a remote exclusion")
+
+    monkeypatch.setattr(module, "_is_verified_foreign_repository", forbidden_probe)
+    with pytest.raises(CandidateCloneError) as caught:
+        prepare_candidate_clone(
+            "source-project", branch, newer,
+            config_dir=config_dir, journal_root=journal_root,
+        )
+    assert caught.value.code == "CANDIDATE_LINEAGE_SCAN_FAILED"
+
+
+def test_legacy_candidate_git_symlink_cannot_use_remote_exclusion(
+    registry_fixture, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    legacy = workspace / ".mcp-candidate-clones" / "candidate-legacy-symlink"
+    _init_repo(legacy)
+    (legacy / ".git").rename(legacy / ".git-backup")
+    (legacy / ".git").symlink_to(legacy / ".git-backup")
+
+    def forbidden_probe(root: Path) -> tuple[str, str]:
+        if root == legacy:
+            raise AssertionError("unsafe git metadata must not be probed")
+        raise ManagedSourceBundleError("test source has no trusted remote")
+
+    monkeypatch.setattr(module, "_resolve_trusted_remote", forbidden_probe)
+    with pytest.raises(CandidateCloneError) as caught:
+        prepare_candidate_clone(
+            "source-project", "candidate/safe-legacy", base,
+            config_dir=config_dir, journal_root=journal_root,
+        )
+    assert caught.value.code == "CANDIDATE_LINEAGE_SCAN_FAILED"
