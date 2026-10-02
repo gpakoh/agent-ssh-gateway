@@ -354,9 +354,21 @@ jobs:
           job_container="$(hostname)"
           docker inspect "$job_container" >/dev/null
           selenium_image="ghcr.io/seleniumhq/standalone-chromium:150.0.7871.114-chromedriver-150.0.7871.114-grid-4.46.0-20260707@sha256:3400b92f1cddb2dfaaf358654e8f7d83d7be45192fb73c5f28c25faa28d36504"
+          # SE_SESSION_TIMEOUT: Grid's 300s default reaped the browser session
+          # mid-run ("session timed out due to inactivity") whenever a loaded
+          # runner stretched one WebDriver command past that window, cascading
+          # four tests into invalid-session failures. 600s stays inside this
+          # job's 15-minute timeout while tolerating a slow host.
+          #
+          # --cpus/--memory: the sidecar is a sibling container, so it
+          # inherited none of the job's limits and could pull the whole runner
+          # host's CPU into Chromium. Budget it like the job itself.
           selenium_id="$(docker run -d \
             --network "container:${job_container}" \
             --shm-size=2g \
+            --cpus=2 \
+            --memory=3g \
+            -e SE_SESSION_TIMEOUT=600 \
             "$selenium_image")"
           echo "E2E_SELENIUM_IMAGE=$selenium_image" >> "$GITHUB_ENV"
           echo "E2E_SELENIUM_CONTAINER=$selenium_id" >> "$GITHUB_ENV"
@@ -427,6 +439,9 @@ jobs:
               selenium_id="$(docker run -d \
                 --network "container:${job_container}" \
                 --shm-size=2g \
+                --cpus=2 \
+                --memory=3g \
+                -e SE_SESSION_TIMEOUT=600 \
                 "$E2E_SELENIUM_IMAGE")"
               E2E_SELENIUM_CONTAINER="$selenium_id"
               echo "E2E_SELENIUM_CONTAINER=$selenium_id" >> "$GITHUB_ENV"
