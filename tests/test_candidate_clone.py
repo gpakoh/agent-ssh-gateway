@@ -2931,6 +2931,162 @@ def test_legacy_candidate_requires_proven_foreign_repository(
         assert (config_dir / "projects.yaml").read_bytes() == before
 
 
+def test_legacy_candidate_follows_safe_sibling_origin_to_foreign_repository(
+    registry_fixture, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, source, config_dir, journal_root, base = registry_fixture
+    candidates = workspace / ".mcp-candidate-clones"
+    terminal = candidates / "candidate-legacy-terminal"
+    chained = candidates / "candidate-legacy-chained"
+    _init_repo(terminal)
+    _init_repo(chained)
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(terminal)],
+        cwd=chained,
+        check=True,
+        capture_output=True,
+    )
+    requested = "https://trusted.invalid/owner/requested.git"
+    foreign = "https://trusted.invalid/owner/foreign.git"
+
+    def resolve(root: Path) -> tuple[str, str]:
+        if root == source:
+            return requested, "unused-test-token"
+        if root == terminal:
+            return foreign, "unused-test-token"
+        if root == chained:
+            raise ManagedSourceBundleError("legacy clone has only a local origin")
+        raise AssertionError(f"unexpected repository root: {root}")
+
+    monkeypatch.setattr(module, "_resolve_trusted_remote", resolve)
+    receipt = prepare_candidate_clone(
+        "source-project",
+        "candidate/chained-legacy-isolation",
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    assert receipt.head == base
+    assert receipt.clean
+    assert terminal.is_dir()
+    assert chained.is_dir()
+
+
+def test_legacy_candidate_local_chain_with_same_identity_fails_closed(
+    registry_fixture, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, source, _config_dir, _journal_root, _base = registry_fixture
+    candidates = workspace / ".mcp-candidate-clones"
+    terminal = candidates / "candidate-legacy-same-terminal"
+    chained = candidates / "candidate-legacy-same-chained"
+    _init_repo(terminal)
+    _init_repo(chained)
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(terminal)],
+        cwd=chained,
+        check=True,
+        capture_output=True,
+    )
+    requested = "https://trusted.invalid/owner/requested.git"
+
+    def resolve(root: Path) -> tuple[str, str]:
+        if root in (source, terminal):
+            return requested, "unused-test-token"
+        if root == chained:
+            raise ManagedSourceBundleError("legacy clone has only a local origin")
+        raise AssertionError(f"unexpected repository root: {root}")
+
+    monkeypatch.setattr(module, "_resolve_trusted_remote", resolve)
+    assert not module._is_verified_foreign_repository(chained, source)
+
+
+def test_legacy_candidate_local_origin_cycle_fails_closed(
+    registry_fixture, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, _config_dir, _journal_root, _base = registry_fixture
+    candidates = workspace / ".mcp-candidate-clones"
+    first = candidates / "candidate-legacy-cycle-a"
+    second = candidates / "candidate-legacy-cycle-b"
+    _init_repo(first)
+    _init_repo(second)
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(second)],
+        cwd=first,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(first)],
+        cwd=second,
+        check=True,
+        capture_output=True,
+    )
+
+    def unavailable(_root: Path) -> tuple[str, str]:
+        raise ManagedSourceBundleError("legacy clone has only a local origin")
+
+    monkeypatch.setattr(module, "_resolve_trusted_remote", unavailable)
+    assert module._legacy_trusted_remote(first) is None
+
+
+def test_legacy_candidate_local_origin_symlink_fails_closed(
+    registry_fixture, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, _config_dir, _journal_root, _base = registry_fixture
+    candidates = workspace / ".mcp-candidate-clones"
+    chained = candidates / "candidate-legacy-symlink-source"
+    terminal = candidates / "candidate-legacy-symlink-terminal"
+    linked = candidates / "candidate-legacy-symlink-target"
+    _init_repo(chained)
+    _init_repo(terminal)
+    linked.symlink_to(terminal, target_is_directory=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(linked)],
+        cwd=chained,
+        check=True,
+        capture_output=True,
+    )
+
+    def unavailable(_root: Path) -> tuple[str, str]:
+        raise ManagedSourceBundleError("legacy clone has only a local origin")
+
+    monkeypatch.setattr(module, "_resolve_trusted_remote", unavailable)
+    assert module._legacy_trusted_remote(chained) is None
+
+
+def test_legacy_candidate_local_origin_outside_sibling_root_fails_closed(
+    registry_fixture, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, _config_dir, _journal_root, _base = registry_fixture
+    candidates = workspace / ".mcp-candidate-clones"
+    chained = candidates / "candidate-legacy-external"
+    outside = workspace / "candidate-outside"
+    _init_repo(chained)
+    _init_repo(outside)
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(outside)],
+        cwd=chained,
+        check=True,
+        capture_output=True,
+    )
+
+    def unavailable(_root: Path) -> tuple[str, str]:
+        raise ManagedSourceBundleError("legacy clone has only a local origin")
+
+    monkeypatch.setattr(module, "_resolve_trusted_remote", unavailable)
+    assert module._legacy_trusted_remote(chained) is None
+
+
 def test_matching_managed_lineage_cannot_be_excluded_by_foreign_remote(
     registry_fixture, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
