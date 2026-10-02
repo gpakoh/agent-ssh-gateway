@@ -1194,8 +1194,8 @@ def _legacy_local_origin(candidate_dir: Path) -> Path | None:
         if not raw_target.is_absolute():
             return None
         sibling_root = candidate_dir.parent.resolve(strict=True)
+        target_stat = raw_target.lstat()
         target = raw_target.resolve(strict=True)
-        target_stat = target.lstat()
         git_stat = (target / ".git").lstat()
     except (CandidateCloneError, OSError):
         return None

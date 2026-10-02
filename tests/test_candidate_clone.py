@@ -3035,6 +3035,33 @@ def test_legacy_candidate_local_origin_cycle_fails_closed(
     assert module._legacy_trusted_remote(first) is None
 
 
+def test_legacy_candidate_local_origin_symlink_fails_closed(
+    registry_fixture, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, _config_dir, _journal_root, _base = registry_fixture
+    candidates = workspace / ".mcp-candidate-clones"
+    chained = candidates / "candidate-legacy-symlink-source"
+    terminal = candidates / "candidate-legacy-symlink-terminal"
+    linked = candidates / "candidate-legacy-symlink-target"
+    _init_repo(chained)
+    _init_repo(terminal)
+    linked.symlink_to(terminal, target_is_directory=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(linked)],
+        cwd=chained,
+        check=True,
+        capture_output=True,
+    )
+
+    def unavailable(_root: Path) -> tuple[str, str]:
+        raise ManagedSourceBundleError("legacy clone has only a local origin")
+
+    monkeypatch.setattr(module, "_resolve_trusted_remote", unavailable)
+    assert module._legacy_trusted_remote(chained) is None
+
+
 def test_legacy_candidate_local_origin_outside_sibling_root_fails_closed(
     registry_fixture, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
