@@ -2818,3 +2818,69 @@ def test_candidate_cleanup_never_registered_fails_closed_without_guard(
     assert guard_calls == []
     assert never_project_id not in (config_dir / "projects.yaml").read_text(encoding="utf-8")
     assert not (workspace / ".mcp-candidate-clones" / never_project_id).exists()
+
+
+@pytest.mark.parametrize("corruption", ["missing", "malformed", "git-dir-symlink"])
+@pytest.mark.parametrize("base_ref_kind", ["exact", "symbolic"])
+def test_candidate_preparation_isolated_from_unrelated_lineage(
+    registry_fixture, corruption: str, base_ref_kind: str,
+) -> None:
+    workspace, source, config_dir, journal_root, base = registry_fixture
+    unrelated = prepare_candidate_clone(
+        "source-project", "candidate/other-lineage", base,
+        config_dir=config_dir, journal_root=journal_root,
+    )
+    other_root = workspace / ".mcp-candidate-clones" / unrelated.project_id
+    metadata = other_root / ".git" / "mcp-candidate-clone.json"
+    if corruption == "missing":
+        metadata.unlink()
+    elif corruption == "malformed":
+        metadata.write_text("{ invalid", encoding="utf-8")
+    else:
+        git_dir = other_root / ".git"
+        backup = other_root / ".git-backup"
+        git_dir.rename(backup)
+        git_dir.symlink_to(backup)
+    _git(source, "branch", "trusted-base", base)
+    source_status = _git(source, "status", "--porcelain=v1")
+    ref = base if base_ref_kind == "exact" else "trusted-base"
+    first = prepare_candidate_clone(
+        "source-project", "candidate/unblocked", ref,
+        config_dir=config_dir, journal_root=journal_root,
+    )
+    second = prepare_candidate_clone(
+        "source-project", "candidate/unblocked", ref,
+        config_dir=config_dir, journal_root=journal_root,
+    )
+    assert first.head == base
+    assert first.clean
+    assert second.project_id == first.project_id
+    assert second.recovered
+    assert _git(source, "status", "--porcelain=v1") == source_status
+    assert _git(source, "rev-parse", "HEAD") == base
+    assert other_root.exists()
+
+
+def test_missing_metadata_in_same_lineage_remains_actionable(registry_fixture) -> None:
+    from examples.mcp_server.tool_results import tool_error
+
+    workspace, source, config_dir, journal_root, base = registry_fixture
+    first = prepare_candidate_clone(
+        "source-project", "candidate/missing-metadata", base,
+        config_dir=config_dir, journal_root=journal_root,
+    )
+    (workspace / ".mcp-candidate-clones" / first.project_id /
+     ".git" / "mcp-candidate-clone.json").unlink()
+    newer = _commit(source, "new base")
+    registry_before = (config_dir / "projects.yaml").read_bytes()
+    with pytest.raises(CandidateCloneError) as caught:
+        prepare_candidate_clone(
+            "source-project", "candidate/missing-metadata", newer,
+            config_dir=config_dir, journal_root=journal_root,
+        )
+    err = caught.value
+    assert err.code == "CANDIDATE_LINEAGE_SCAN_FAILED"
+    assert err.details["candidate_project_id"] == first.project_id
+    assert "repair_action" in err.details
+    assert tool_error(code=err.code)["error"]["code"] == err.code
+    assert (config_dir / "projects.yaml").read_bytes() == registry_before

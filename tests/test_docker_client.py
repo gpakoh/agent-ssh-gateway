@@ -984,3 +984,58 @@ def test_sanitize_labels_string_redacts_url_email_sha_values():
     assert "0123456789abcdef" not in out
     assert "1.2.3" in out
     assert out.count(REDACTED) == 3
+
+
+def test_compose_runner_pins_image_and_limits_mounts(tmp_path, monkeypatch):
+    from examples.mcp_server import config
+
+    root = tmp_path / "infra"
+    root.mkdir()
+    env_file = root / ".env"
+    env_file.write_text("TEST_SECRET=private", encoding="utf-8")
+    env_file.chmod(0o600)
+    image = "registry.invalid/mcp-server@sha256:" + "a" * 64
+    monkeypatch.setenv("MCP_COMPOSE_RUNNER_IMAGE", image)
+    monkeypatch.setattr(config, "ALLOWED_PROJECT_ROOTS", [str(root)])
+    argv = _client()._compose_base_argv(str(root))
+    assert argv[:3] == ["/usr/bin/docker", "run", "--rm"]
+    assert argv[argv.index("--user") + 1] == "0:0"
+    assert argv[argv.index("--network") + 1] == "none"
+    assert "--read-only" in argv
+    assert argv[argv.index("--cap-drop") + 1] == "ALL"
+    mounts = [argv[i + 1] for i, item in enumerate(argv) if item == "--mount"]
+    assert mounts == [
+        f"type=bind,src={root},dst={root},readonly",
+        "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock",
+    ]
+    assert argv[-4:] == [image, "compose", "--project-directory", str(root)]
+    assert "TEST_SECRET" not in " ".join(argv)
+    assert env_file.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("image", ["mcp-server:latest", "registry.invalid/mcp:abc", "bad@sha256:123"])
+def test_compose_runner_refuses_unpinned_image(tmp_path, monkeypatch, image):
+    monkeypatch.setenv("MCP_COMPOSE_RUNNER_IMAGE", image)
+    with pytest.raises(ValueError, match="digest-pinned"):
+        _client()._compose_base_argv(str(tmp_path))
+
+
+def test_compose_runner_preserves_allowed_root_boundary(tmp_path, monkeypatch):
+    from examples.mcp_server import config
+
+    monkeypatch.setenv("MCP_COMPOSE_RUNNER_IMAGE", "mcp@sha256:" + "a" * 64)
+    monkeypatch.setattr(config, "ALLOWED_PROJECT_ROOTS", [str(tmp_path / "allowed")])
+    with pytest.raises(ValueError, match="outside allowed roots"):
+        _client()._compose_base_argv(str(tmp_path))
+
+
+@pytest.mark.parametrize("suffix", [",readwrite", "\nreadwrite", "\rreadwrite", ":readwrite"])
+def test_compose_runner_rejects_mount_option_injection(tmp_path, monkeypatch, suffix):
+    from examples.mcp_server import config
+
+    root = tmp_path / ("infra" + suffix)
+    root.mkdir()
+    monkeypatch.setenv("MCP_COMPOSE_RUNNER_IMAGE", "mcp@sha256:" + "a" * 64)
+    monkeypatch.setattr(config, "ALLOWED_PROJECT_ROOTS", [str(tmp_path)])
+    with pytest.raises(ValueError, match="safe for a Compose runner mount"):
+        _client()._compose_base_argv(str(root))

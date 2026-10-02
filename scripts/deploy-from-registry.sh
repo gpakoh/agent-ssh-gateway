@@ -313,7 +313,7 @@ deploy_services() {
   SSH_GATEWAY_SSHD_IMAGE="$sshd_image" WEB_SSH_GATEWAY_IMAGE="$gateway_image" run_compose_up $COMPOSE up -d --no-deps --no-build sshd web-ssh-gateway || return $?
   SSH_GATEWAY_SSHD_IMAGE="$sshd_image" run_compose_up $COMPOSE up -d --no-deps --no-build agent-sshd || return $?
   MCP_SERVER_IMAGE="$mcp_image" run_compose_up $COMPOSE up -d --no-deps --no-build mcp-server || return $?
-  SSH_GATEWAY_SSHD_IMAGE="$sshd_image" MCP_SERVER_IMAGE="$mcp_image" run_compose_up $COMPOSE up -d --no-deps --no-build mcp-oauth || return $?
+  SSH_GATEWAY_SSHD_IMAGE="$sshd_image" MCP_SERVER_IMAGE="$mcp_image" MCP_COMPOSE_RUNNER_IMAGE="$mcp_image" run_compose_up $COMPOSE up -d --no-deps --no-build mcp-oauth || return $?
 }
 
 # Independently reconstruct a produced source bundle exactly as a consuming
