@@ -354,9 +354,23 @@ jobs:
           job_container="$(hostname)"
           docker inspect "$job_container" >/dev/null
           selenium_image="ghcr.io/seleniumhq/standalone-chromium:150.0.7871.114-chromedriver-150.0.7871.114-grid-4.46.0-20260707@sha256:3400b92f1cddb2dfaaf358654e8f7d83d7be45192fb73c5f28c25faa28d36504"
+          # SE_SESSION_REQUEST_TIMEOUT: Grid's 300s default reaped the browser
+          # session mid-run ("session timed out due to inactivity") whenever a
+          # loaded runner stretched one WebDriver command past that window,
+          # cascading four tests into invalid-session failures. The pinned
+          # image wires this env var to `--session-request-timeout`; note the
+          # name -- SE_SESSION_TIMEOUT is not recognised by the entrypoint.
+          # 600s stays inside this job's 15-minute timeout.
+          #
+          # --cpus/--memory: the sidecar is a sibling container, so it
+          # inherited none of the job's limits and could pull the whole runner
+          # host's CPU into Chromium. Budget it like the job itself.
           selenium_id="$(docker run -d \
             --network "container:${job_container}" \
             --shm-size=2g \
+            --cpus=2 \
+            --memory=3g \
+            -e SE_SESSION_REQUEST_TIMEOUT=600 \
             "$selenium_image")"
           echo "E2E_SELENIUM_IMAGE=$selenium_image" >> "$GITHUB_ENV"
           echo "E2E_SELENIUM_CONTAINER=$selenium_id" >> "$GITHUB_ENV"
@@ -387,7 +401,16 @@ jobs:
           remote = os.environ["SELENIUM_REMOTE_URL"]
           status_url = remote.removesuffix("/wd/hub") + "/status"
           last_error = None
-          for _ in range(60):
+          # Budget must outlast the sidecar's real cold start on the runner
+          # pool. Measured on master run #13456 (E2E job #55854): the pinned
+          # standalone-chromium image needed ~22s just to reach "Starting
+          # Selenium Grid Standalone..." and was still not answering /status
+          # 41s later. A 60x1s probe expired at 62s, both attempts failed, and
+          # a perfectly healthy browser was reported as a missing toolchain
+          # (Connection refused x2). 180x1s keeps >2x headroom over the
+          # observed worst case while still fitting twice inside the job's
+          # 15-minute timeout alongside the container restarts.
+          for _ in range(180):
               try:
                   with urllib.request.urlopen(status_url, timeout=2) as response:
                       payload = json.load(response)
@@ -418,6 +441,9 @@ jobs:
               selenium_id="$(docker run -d \
                 --network "container:${job_container}" \
                 --shm-size=2g \
+                --cpus=2 \
+                --memory=3g \
+                -e SE_SESSION_REQUEST_TIMEOUT=600 \
                 "$E2E_SELENIUM_IMAGE")"
               E2E_SELENIUM_CONTAINER="$selenium_id"
               echo "E2E_SELENIUM_CONTAINER=$selenium_id" >> "$GITHUB_ENV"
