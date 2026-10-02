@@ -1158,12 +1158,26 @@ def _read_candidate_metadata(candidate_dir: Path) -> dict[str, Any]:
     return data
 
 
+def _is_verified_foreign_repository(candidate_dir: Path, source_root: Path) -> bool:
+    """Exclude a legacy clone only on two unambiguous trusted repo identities."""
+    try:
+        git_stat = (candidate_dir / ".git").lstat()
+        if stat.S_ISLNK(git_stat.st_mode) or not stat.S_ISDIR(git_stat.st_mode):
+            return False
+        requested_url, _ = _resolve_trusted_remote(source_root)
+        candidate_url, _ = _resolve_trusted_remote(candidate_dir)
+    except (OSError, ManagedSourceBundleError):
+        return False
+    return bool(requested_url and candidate_url and requested_url != candidate_url)
+
+
 def _find_lineage_claimant(
     workspace_root: Path,
     *,
     source_project: str,
     branch: str,
     exclude_project_id: str,
+    source_root: Path,
 ) -> dict[str, Any] | None:
     clones_root = _candidate_clones_root(workspace_root)
     try:
@@ -1187,6 +1201,11 @@ def _find_lineage_claimant(
                         raise _lineage_scan_failure("candidate lineage entry is unsafe")
                 except OSError as exc:
                     raise _lineage_scan_failure("candidate lineage entry cannot be inspected") from exc
+                # Legacy manually registered clones lack the managed id suffix.
+                # Their names alone prove nothing; only a trusted, distinct Git
+                # repository identity can exclude them from this lineage.
+                if suffix is None and _is_verified_foreign_repository(Path(entry.path), source_root):
+                    continue
                 try:
                     metadata = _read_candidate_metadata(Path(entry.path))
                 except CandidateCloneError as exc:
@@ -1299,6 +1318,7 @@ def _prepare_candidate_locked(
             source_project=project,
             branch=branch,
             exclude_project_id=project_id,
+            source_root=source_root,
         )
         if claimant is not None:
             details: dict[str, Any] = {
