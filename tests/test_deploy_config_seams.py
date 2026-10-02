@@ -891,6 +891,101 @@ class TestE2eFailsClosedWithoutBrowserToolchain:
         assert "GITHUB_OUTPUT" not in run
         assert "available=false" not in run
 
+    def test_readiness_budget_outlives_observed_selenium_cold_start(self):
+        """The remote-Grid readiness probe must outlast the sidecar's real
+        cold start on the runner pool. Measured from run #13456 (master merge
+        of PR #430, E2E job #55854): the pinned standalone-chromium image needs
+        ~22s just to reach "Starting Selenium Grid Standalone..." and was still
+        not serving /status 41s later -- the 60x1s probe gave out at 62s and
+        both attempts failed, so a healthy browser was reported as a missing
+        toolchain. The budget must leave headroom over that observed cost."""
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        steps = wf["jobs"]["e2e"]["steps"]
+        check = next(s for s in steps if s.get("name") == "Check browser runtime")
+        run = check["run"]
+
+        budget = re.search(r"for _ in range\((\d+)\):", run)
+        assert budget, "readiness probe must declare an explicit attempt budget"
+        attempts = int(budget.group(1))
+
+        # Worst observed cost of one attempt: sidecar start (~22s) plus Grid
+        # still not ready 41s after that. 63s measured, rounded up.
+        observed_worst_case_seconds = 90
+        assert attempts >= observed_worst_case_seconds, (
+            f"readiness probe allows {attempts}s but the sidecar took ~63s to "
+            f"serve /status on the runner pool; budget must be >= "
+            f"{observed_worst_case_seconds}s or healthy browsers get reported "
+            "as unavailable"
+        )
+
+        # A second container start must also fit inside the job timeout, so
+        # the two-attempt retry loop cannot be silently truncated by it.
+        timeout = wf["jobs"]["e2e"]["timeout-minutes"]
+        assert timeout * 60 >= 2 * attempts + 120, (
+            f"two full {attempts}s probes plus container restarts must fit in "
+            f"timeout-minutes={timeout}"
+        )
+
+    def test_remote_selenium_sidecar_bounds_session_and_cpu(self):
+        """Every ``docker run`` of the Selenium sidecar must bound the Grid
+        session lifetime and the browser's CPU/RAM appetite.
+
+        From run #13456 (job #55860) the Grid reaped a live session mid-run:
+        ``reason: session timed out due to inactivity`` at the 300s default,
+        which turned the first test's slow ``drv.get`` into a
+        TimeoutException and cascaded the remaining three into invalid-session
+        failures. The sidecar is also a *sibling* container, so it inherited
+        none of the job's ``--cpus``/``--memory`` and could pull the whole
+        runner host into Chromium."""
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        steps = wf["jobs"]["e2e"]["steps"]
+
+        runs = [
+            s["run"]
+            for s in steps
+            if "docker run -d" in s.get("run", "")
+            and "selenium" in s.get("run", "").lower()
+        ]
+        assert len(runs) == 2, (
+            "expected the initial sidecar start and its retry restart to be "
+            f"the only selenium container launches, found {len(runs)}"
+        )
+
+        job_timeout_seconds = wf["jobs"]["e2e"]["timeout-minutes"] * 60
+        for run in runs:
+            # Only actual `-e NAME=...` flags count; the explanatory comment
+            # above them names the rejected variable deliberately.
+            env_flags = re.findall(r"-e\s+([A-Z_]+)=", run)
+            assert "SE_SESSION_TIMEOUT" not in env_flags, (
+                "SE_SESSION_TIMEOUT is not a variable the pinned Selenium "
+                "entrypoint recognises; use SE_SESSION_REQUEST_TIMEOUT"
+            )
+            assert "SE_SESSION_REQUEST_TIMEOUT" in env_flags, (
+                "sidecar must set SE_SESSION_REQUEST_TIMEOUT explicitly; the "
+                "Grid 300s default reaps a live session when the host is slow "
+                "and cascades unrelated tests into invalid-session failures"
+            )
+            session_timeout = int(
+                re.search(r"-e\s+SE_SESSION_REQUEST_TIMEOUT=(\d+)", run).group(1)
+            )
+            assert session_timeout >= 600, (
+                f"SE_SESSION_REQUEST_TIMEOUT={session_timeout}s leaves no "
+                "headroom over the 300s default that killed run #13456"
+            )
+            assert session_timeout < job_timeout_seconds, (
+                f"SE_SESSION_REQUEST_TIMEOUT={session_timeout}s must stay below "
+                f"the job timeout {job_timeout_seconds}s or a stale session "
+                "outlives the job that owns it"
+            )
+
+            assert "--cpus=" in run, (
+                "sidecar must carry --cpus; as a sibling container it inherits "
+                "no job limit and can starve the runner host"
+            )
+            assert "--memory=" in run, (
+                "sidecar must carry --memory for the same reason as --cpus"
+            )
+
     def test_remote_selenium_readiness_dumps_diagnostics_and_retries_once(self):
         wf = _load_workflow(CI_WORKFLOW_PATH)
         steps = wf["jobs"]["e2e"]["steps"]
