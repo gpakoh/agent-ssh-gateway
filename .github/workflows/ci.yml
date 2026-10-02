@@ -387,7 +387,16 @@ jobs:
           remote = os.environ["SELENIUM_REMOTE_URL"]
           status_url = remote.removesuffix("/wd/hub") + "/status"
           last_error = None
-          for _ in range(60):
+          # Budget must outlast the sidecar's real cold start on the runner
+          # pool. Measured on master run #13456 (E2E job #55854): the pinned
+          # standalone-chromium image needed ~22s just to reach "Starting
+          # Selenium Grid Standalone..." and was still not answering /status
+          # 41s later. A 60x1s probe expired at 62s, both attempts failed, and
+          # a perfectly healthy browser was reported as a missing toolchain
+          # (Connection refused x2). 180x1s keeps >2x headroom over the
+          # observed worst case while still fitting twice inside the job's
+          # 15-minute timeout alongside the container restarts.
+          for _ in range(180):
               try:
                   with urllib.request.urlopen(status_url, timeout=2) as response:
                       payload = json.load(response)

@@ -891,6 +891,41 @@ class TestE2eFailsClosedWithoutBrowserToolchain:
         assert "GITHUB_OUTPUT" not in run
         assert "available=false" not in run
 
+    def test_readiness_budget_outlives_observed_selenium_cold_start(self):
+        """The remote-Grid readiness probe must outlast the sidecar's real
+        cold start on the runner pool. Measured from run #13456 (master merge
+        of PR #430, E2E job #55854): the pinned standalone-chromium image needs
+        ~22s just to reach "Starting Selenium Grid Standalone..." and was still
+        not serving /status 41s later -- the 60x1s probe gave out at 62s and
+        both attempts failed, so a healthy browser was reported as a missing
+        toolchain. The budget must leave headroom over that observed cost."""
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        steps = wf["jobs"]["e2e"]["steps"]
+        check = next(s for s in steps if s.get("name") == "Check browser runtime")
+        run = check["run"]
+
+        budget = re.search(r"for _ in range\((\d+)\):", run)
+        assert budget, "readiness probe must declare an explicit attempt budget"
+        attempts = int(budget.group(1))
+
+        # Worst observed cost of one attempt: sidecar start (~22s) plus Grid
+        # still not ready 41s after that. 63s measured, rounded up.
+        observed_worst_case_seconds = 90
+        assert attempts >= observed_worst_case_seconds, (
+            f"readiness probe allows {attempts}s but the sidecar took ~63s to "
+            f"serve /status on the runner pool; budget must be >= "
+            f"{observed_worst_case_seconds}s or healthy browsers get reported "
+            "as unavailable"
+        )
+
+        # A second container start must also fit inside the job timeout, so
+        # the two-attempt retry loop cannot be silently truncated by it.
+        timeout = wf["jobs"]["e2e"]["timeout-minutes"]
+        assert timeout * 60 >= 2 * attempts + 120, (
+            f"two full {attempts}s probes plus container restarts must fit in "
+            f"timeout-minutes={timeout}"
+        )
+
     def test_remote_selenium_readiness_dumps_diagnostics_and_retries_once(self):
         wf = _load_workflow(CI_WORKFLOW_PATH)
         steps = wf["jobs"]["e2e"]["steps"]
