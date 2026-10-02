@@ -1173,12 +1173,28 @@ def _find_lineage_claimant(
                     continue
                 if not entry.name.startswith("candidate-"):
                     continue
+                # Candidate ids encode a fixed project/branch prefix followed
+                # by base and identity hashes. A well-formed id outside that
+                # prefix cannot claim this lineage; do not let abandoned
+                # clones for other lineages poison every new preparation.
+                # Unknown names and matching prefixes still fail closed.
+                suffix = re.fullmatch(r"(candidate-.+)-[0-9a-f]{12}-[0-9a-f]{12}", entry.name)
+                requested_prefix = _project_id(source_project, branch, "0" * 40).rsplit("-", 2)[0]
+                if suffix is not None and suffix.group(1) != requested_prefix:
+                    continue
                 try:
                     if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
                         raise _lineage_scan_failure("candidate lineage entry is unsafe")
                 except OSError as exc:
                     raise _lineage_scan_failure("candidate lineage entry cannot be inspected") from exc
-                metadata = _read_candidate_metadata(Path(entry.path))
+                try:
+                    metadata = _read_candidate_metadata(Path(entry.path))
+                except CandidateCloneError as exc:
+                    exc.details = {
+                        "candidate_project_id": entry.name,
+                        "repair_action": "Reconcile this candidate through the guarded cleanup workflow; do not delete or rewrite lineage metadata blindly.",
+                    }
+                    raise
                 if metadata.get("source_project") == source_project and metadata.get("branch") == branch:
                     return metadata
     except CandidateCloneError:
