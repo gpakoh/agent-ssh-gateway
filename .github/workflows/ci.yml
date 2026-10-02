@@ -354,13 +354,27 @@ jobs:
           job_container="$(hostname)"
           docker inspect "$job_container" >/dev/null
           selenium_image="ghcr.io/seleniumhq/standalone-chromium:150.0.7871.114-chromedriver-150.0.7871.114-grid-4.46.0-20260707@sha256:3400b92f1cddb2dfaaf358654e8f7d83d7be45192fb73c5f28c25faa28d36504"
-          # SE_SESSION_REQUEST_TIMEOUT: Grid's 300s default reaped the browser
-          # session mid-run ("session timed out due to inactivity") whenever a
-          # loaded runner stretched one WebDriver command past that window,
-          # cascading four tests into invalid-session failures. The pinned
-          # image wires this env var to `--session-request-timeout`; note the
-          # name -- SE_SESSION_TIMEOUT is not recognised by the entrypoint.
-          # 600s stays inside this job's 15-minute timeout.
+          # SE_OPTS carries `--session-timeout`, the idle-session reaper. This is the
+          # knob that actually caused the cascade in runs #13484/#13486: Grid's
+          # 300s default killed a live session while one `drv.get` was still in
+          # flight, so the first test failed and the next three died with
+          # InvalidSessionIdException. Two traps worth recording:
+          #   * SE_SESSION_TIMEOUT is not read by the entrypoint at all.
+          #   * SE_SESSION_REQUEST_TIMEOUT is a different knob -- how long the
+          #     router waits for a new-session request, not an inactivity
+          #     reaper -- so raising it alone changes nothing.
+          # The image exposes no dedicated env var for the reaper, so SE_OPTS
+          # (appended verbatim to the java command) is the only hook. It must
+          # stay above the client's pageLoadTimeout, or the reaper still wins
+          # the race and the cascade returns; and below this job's timeout.
+          #
+          # SE_SESSION_REQUEST_TIMEOUT is required but is NOT the reaper: the
+          # entrypoint emits `--session-request-timeout ${SE_SESSION_REQUEST_TIMEOUT}`
+          # unconditionally, so it must stay set or that flag is left valueless.
+          # It must not be repeated inside SE_OPTS -- doing so makes Grid
+          # answer "Can only specify option --session-request-timeout once.",
+          # print its usage text and exit 0, which surfaces as a sidecar that
+          # never becomes ready. Only the reaper travels via SE_OPTS.
           #
           # --cpus/--memory: the sidecar is a sibling container, so it
           # inherited none of the job's limits and could pull the whole runner
@@ -371,6 +385,7 @@ jobs:
             --cpus=2 \
             --memory=3g \
             -e SE_SESSION_REQUEST_TIMEOUT=600 \
+            -e SE_OPTS="--session-timeout 840" \
             "$selenium_image")"
           echo "E2E_SELENIUM_IMAGE=$selenium_image" >> "$GITHUB_ENV"
           echo "E2E_SELENIUM_CONTAINER=$selenium_id" >> "$GITHUB_ENV"
@@ -444,6 +459,7 @@ jobs:
                 --cpus=2 \
                 --memory=3g \
                 -e SE_SESSION_REQUEST_TIMEOUT=600 \
+            -e SE_OPTS="--session-timeout 840" \
                 "$E2E_SELENIUM_IMAGE")"
               E2E_SELENIUM_CONTAINER="$selenium_id"
               echo "E2E_SELENIUM_CONTAINER=$selenium_id" >> "$GITHUB_ENV"
