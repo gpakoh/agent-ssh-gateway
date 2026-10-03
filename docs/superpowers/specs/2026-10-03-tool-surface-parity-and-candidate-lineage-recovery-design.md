@@ -85,7 +85,24 @@ writeability** (index, objects, refs, `HEAD`) — not whether a required tool is
 callable. It is not reusable as a surface-parity gate and must not be conflated
 with one.
 
-### 1.5 Existing reusable primitive
+### 1.5 Verified guard-dependency analysis
+
+Signatures were read individually, because the intuitive grouping is wrong:
+
+- `git_push` (`mcp_client_tools.py:2723`) accepts only `project`, `remote`,
+  `branch`. There is **no** `expected_head` and no CAS of any kind.
+- `gitea_push_verified_commit` (`mcp_infra/adapters/remote.py:2536`) is **not** a
+  local Git push — it pushes through the Gitea API using `GITEA_TOKEN`, from a
+  registered clean workspace, and requires both `expected_base_sha` and
+  `expected_head_sha`.
+- `git_update_branch_by_merge` (`mcp_client_tools.py`) takes an **optional**
+  `expected_head` that refers to the **local** branch HEAD, not a remote ref.
+- `git_fetch_ref` (`mcp_client_tools.py`) is itself the tool that pins a trusted
+  remote ref, subject to the filesystem preflight.
+
+This is the input to §2.5, and it is deliberately narrow.
+
+### 1.6 Existing reusable primitive
 
 `compute_toolset_hash(mcp_instance)` already exists (`tool_registry.py:157`); it
 is a `sha256:` over the canonical sorted list of `{name, inputSchema}`. It is
@@ -193,13 +210,33 @@ until a caller positively asserts it has enumerated the whole surface — which 
 the correct bias, since a false `REQUIRED_PREFLIGHT_UNAVAILABLE` blocks legitimate
 work while a missing one merely loses a diagnostic.
 
-Mapping:
+Verified map — a guarded dependency exists only where the mutation's
+compare-and-swap precondition is established by another tool. This was
+determined by reading each signature, not by assuming a workflow shape:
 
-| Guarded mutation | Guard dependency |
-|---|---|
-| `git_update_branch_by_merge` | `git_fetch_ref` |
-| `git_push` (verified-commit path) | `git_refresh_branch_to_head` |
-| `gitea_push_verified_commit` | `git_refresh_branch_to_head` |
+| Guarded mutation | CAS precondition | Tool establishing it |
+|---|---|---|
+| `gitea_push_verified_commit` | `expected_base_sha` **and** `expected_head_sha`, both **required** | `git_fetch_ref` — pins a trusted remote ref whose SHA becomes `expected_base_sha` |
+| `git_update_branch_by_merge` | `expected_head`, **optional**, and **local** | none — the local HEAD is readable via `info(project)` |
+| `git_push` | **none** | none |
+
+Consequences, all of them narrowing:
+
+- Only `gitea_push_verified_commit` has a genuine cross-tool guard dependency.
+- `git_refresh_branch_to_head` gates **nothing**. It is a workflow convenience for
+  placing a branch on a fetched commit; no mutation's precondition requires it, so
+  treating its absence as a safety failure would be a fabricated dependency.
+- `git_update_branch_by_merge` is **not** gated on `git_fetch_ref`. Its
+  precondition is local state, so a caller without `git_fetch_ref` can still merge
+  safely against a known local HEAD.
+- `git_push` carries no exact-head guard whatsoever (`mcp_client_tools.py:2723`
+  takes only `project`, `remote`, `branch`). This is a real observation about the
+  tool surface, recorded in §8; fixing it is **out of scope** for PR-A, which
+  measures rather than redesigns.
+
+The gate therefore applies to a single mutation today. That is the correct
+consequence of the dependency analysis, and it is precisely why PR-A cannot be
+used as a broad Git lockout.
 
 When **no** bound observation exists, the mutation **proceeds** and returns
 `preflight_surface_unverified` as an advisory. This is the explicit prohibition
@@ -388,6 +425,9 @@ preservation, cleanup is forbidden. There is no third path.
 - Any server-side inference of what an external client retained.
 - Automatic cleanup. Recovery is always explicit and opt-in.
 - Fetching to establish a reachability claim.
+- Adding a CAS precondition to `git_push`. Its total lack of one (§1.5) is recorded
+  as a finding, not fixed here — PR-A measures the surface, it does not redesign
+  the tools.
 - Modifying or merging `quart-core #227`.
 
 ## 5. Regression coverage
@@ -418,9 +458,11 @@ not require an archive ref.
 PR-A must cover: unbound report ⇒ `not_supplied`; report bound to a different
 identity ⇒ discarded; report bound to a stale `toolset_hash` ⇒ discarded; full
 diff reported while `guard_coverage` remains satisfied ⇒ mutation **not** blocked;
-complete bound report missing a guard dependency ⇒ `REQUIRED_PREFLIGHT_UNAVAILABLE`
-raised **before** any mutation; **incomplete** bound report omitting a guard
-dependency ⇒ mutation **not** blocked (unknown ≠ absent); no report at all ⇒
+complete bound report missing `git_fetch_ref` ⇒ `gitea_push_verified_commit` fails
+with `REQUIRED_PREFLIGHT_UNAVAILABLE` **before** any push attempt; **incomplete**
+bound report omitting `git_fetch_ref` ⇒ `gitea_push_verified_commit` **not** blocked
+(unknown ≠ absent); `git_update_branch_by_merge` and `git_push` **never** gated on
+`git_fetch_ref` absence, per the verified dependency map; no report at all ⇒
 mutation proceeds with `preflight_surface_unverified`.
 
 ## 6. `TODO.md` updates
