@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shlex
 from dataclasses import dataclass
@@ -758,7 +759,32 @@ class DockerClient:
     # ── Compose write operations (Session 160) ─────────────────────
 
     def _compose_base_argv(self, project_dir: str | None = None) -> list[str]:
+        runner_image = os.environ.get("MCP_COMPOSE_RUNNER_IMAGE", "").strip()
         argv = [DOCKER_BIN, "compose"]
+        if runner_image and project_dir is not None:
+            # Operator-controlled, immutable helper. Only the validated project
+            # is mounted, read-only, at its host path so Compose bind mounts and
+            # labels retain their real deployment identity.
+            if not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}",
+                runner_image,
+            ):
+                raise ValueError("MCP_COMPOSE_RUNNER_IMAGE must be a digest-pinned image")
+            self._validate_project_dir(project_dir)
+            resolved = str(Path(project_dir).resolve())
+            if any(character in resolved for character in (",", "\n", "\r", ":")):
+                raise ValueError("project directory is not safe for a Compose runner mount")
+            argv = [
+                DOCKER_BIN, "run", "--rm", "--network", "none",
+                "--read-only", "--cap-drop", "ALL",
+                "--security-opt", "no-new-privileges:true",
+                "--user", "0:0",
+                "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m",
+                "--mount", f"type=bind,src={resolved},dst={resolved},readonly",
+                "--mount", "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock",
+                "--entrypoint", "/usr/bin/docker", runner_image, "compose",
+            ]
+            project_dir = resolved
         if project_dir:
             argv.extend(["--project-directory", project_dir])
         return argv

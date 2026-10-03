@@ -27,6 +27,7 @@ DIVERGENT_ROOT_TREE = [
     {"path": "README.md", "type": "file", "sha": "3" * 40},
     {"path": "app", "type": "dir", "sha": "2" * 40},
 ]
+CLEANUP_REASON = "abandoned superseded spike branch per maintainer sign-off"
 
 
 class RecordingAuditLogger:
@@ -404,6 +405,7 @@ async def _call_delete(
     audit_logger: RecordingAuditLogger | None = None,
     fingerprint: str | None = FINGERPRINT,
     order_log: list[str] | None = None,
+    cleanup_reason: str | None = None,
 ):
     monkeypatch.setenv("GITEA_TOKEN", "token")
     monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
@@ -432,7 +434,9 @@ async def _call_delete(
             raise helper_error
 
     monkeypatch.setattr(remote, "delete_remote_branch_with_lease", fake_delete)
-    result = await remote.gitea_delete_branch("owner", "repo", BRANCH, SHA)
+    result = await remote.gitea_delete_branch(
+        "owner", "repo", BRANCH, SHA, cleanup_reason
+    )
     return result, delete_calls
 
 
@@ -610,6 +614,150 @@ async def test_adapter_closed_unmerged_pr_head_blocks_when_root_tree_unproven(mo
     assert result["error"]["code"] == "POLICY_DENIED"
     assert "could not prove root tree equivalence" in result["error"]["message"]
     assert delete_calls == []
+
+
+def _divergent_closed_unmerged_client(number: int = 23) -> FakeDeleteClient:
+    return FakeDeleteClient(
+        "token",
+        open_prs=[
+            {
+                "number": number,
+                "head": {"ref": BRANCH, "repo": {"full_name": "owner/repo"}},
+                "state": "closed",
+                "merged": False,
+            }
+        ],
+        root_trees={SHA: DIVERGENT_ROOT_TREE, "master": ROOT_TREE},
+    )
+
+
+@pytest.mark.asyncio
+async def test_adapter_divergent_closed_unmerged_without_reason_stays_denied(monkeypatch):
+    """A divergent closed-unmerged head is still refused when no explicit
+    cleanup reason is supplied: optional means opt-in, never default-allow."""
+    order: list[str] = []
+    logger = RecordingAuditLogger(order_log=order)
+    client = _divergent_closed_unmerged_client()
+    result, delete_calls = await _call_delete(
+        monkeypatch, client, audit_logger=logger, order_log=order
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "POLICY_DENIED"
+    assert "explicit cleanup decision" in result["error"]["message"]
+    assert result["error"]["details"]["root_tree_equivalent_to_default"] is False
+    assert result["error"]["details"]["mutation_occurred"] is False
+    assert delete_calls == []
+    assert logger.required_events == []
+    assert logger.append_events == []
+    assert order == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_divergent_closed_unmerged_allowed_with_valid_reason(monkeypatch):
+    """A validated explicit reason permits exactly this case: the decision and
+    the stripped reason are recorded in the destructive-intent audit (written
+    before the git delete) and echoed in the result metadata."""
+    order: list[str] = []
+    logger = RecordingAuditLogger(order_log=order)
+    client = _divergent_closed_unmerged_client(number=23)
+    result, delete_calls = await _call_delete(
+        monkeypatch,
+        client,
+        audit_logger=logger,
+        order_log=order,
+        cleanup_reason=f"  {CLEANUP_REASON}  ",
+    )
+
+    assert result["ok"] is True
+    assert len(delete_calls) == 1
+    assert delete_calls[0]["expected_sha"] == SHA
+    assert order == ["audit:intent", "delete", "audit:success"]
+
+    expected_cleanup = [
+        {
+            "number": 23,
+            "state": "closed",
+            "merged": False,
+            "default_branch": "master",
+            "head_sha": SHA,
+            "root_tree_equivalent_to_default": False,
+            "explicit_cleanup_decision": True,
+            "cleanup_reason": CLEANUP_REASON,
+        }
+    ]
+    assert result["result"]["closed_unmerged_pr_cleanup"] == expected_cleanup
+    assert len(logger.required_events) == 1
+    intent = logger.required_events[0]
+    assert intent.event_type == "mcp.gitea_destructive_intent"
+    assert intent.metadata["closed_unmerged_pr_cleanup"] == expected_cleanup
+    assert logger.append_events[0].metadata["closed_unmerged_pr_cleanup"] == expected_cleanup
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reason", "message"),
+    [
+        ("superseded", "at least 20 characters"),
+        ("   ", "at least 20 characters"),
+        ("short\treason padded out to pass", "control characters"),
+        ("x" * 501, "500 characters or fewer"),
+    ],
+)
+async def test_adapter_rejects_malformed_cleanup_reason_without_mutation(
+    monkeypatch, reason, message
+):
+    """Too-short, blank, control-character and over-long reasons are rejected
+    as INVALID_INPUT before any remote read, audit write or git mutation."""
+    order: list[str] = []
+    logger = RecordingAuditLogger(order_log=order)
+    client = FakeDeleteClient("token")
+    result, delete_calls = await _call_delete(
+        monkeypatch, client, audit_logger=logger, order_log=order, cleanup_reason=reason
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INVALID_INPUT"
+    assert message in result["error"]["message"]
+    assert result["error"]["details"]["mutation_occurred"] is False
+    assert delete_calls == []
+    assert client.branch_reads == 0
+    assert client.pull_request_pages == []
+    assert logger.required_events == []
+    assert logger.append_events == []
+    assert order == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_open_unmerged_pr_stays_denied_with_cleanup_reason(monkeypatch):
+    """The explicit reason is scoped to CLOSED unmerged heads: an open pull
+    request on the branch is refused even with a valid reason."""
+    order: list[str] = []
+    logger = RecordingAuditLogger(order_log=order)
+    client = FakeDeleteClient(
+        "token",
+        open_prs=[
+            {
+                "number": 24,
+                "head": {"ref": BRANCH, "repo": {"full_name": "owner/repo"}},
+                "state": "open",
+                "merged": False,
+            }
+        ],
+        root_trees={SHA: DIVERGENT_ROOT_TREE, "master": ROOT_TREE},
+    )
+    result, delete_calls = await _call_delete(
+        monkeypatch, client, audit_logger=logger, order_log=order, cleanup_reason=CLEANUP_REASON
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "POLICY_DENIED"
+    assert "still the head of an unmerged pull request" in result["error"]["message"]
+    assert delete_calls == []
+    assert client.pull_request_pages == [1]
+    assert logger.required_events == []
+    assert logger.append_events == []
+    assert order == []
 
 
 @pytest.mark.asyncio

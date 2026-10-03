@@ -538,10 +538,7 @@ async def _gitea_ci_evidence(
     expected_head_sha: str,
 ) -> str:
     workflow_payload = await client.list_workflows(owner, repo)
-    configured_count = _configured_workflow_count(workflow_payload)
-    if configured_count == 0:
-        return "CI_NOT_CONFIGURED"
-    if configured_count is None:
+    if _configured_workflow_count(workflow_payload) is None:
         return "CI_EVIDENCE_INCOMPLETE"
 
     try:
@@ -1620,6 +1617,50 @@ async def gitea_close_pull_request(
 
 
 
+# An explicit cleanup decision for a divergent closed-unmerged pull request
+# head discards work that was never merged, so the reason is persisted verbatim
+# in the destructive-intent audit trail. It must be real operator prose: a bare
+# token cannot explain why unreviewed commits are being dropped, and it is far
+# cheaper to reject a placeholder than to discover later that the audit trail
+# records "yes" instead of a decision.
+CLOSED_UNMERGED_CLEANUP_REASON_MIN_CHARS = 20
+CLOSED_UNMERGED_CLEANUP_REASON_MAX_CHARS = 500
+
+
+def _validated_closed_unmerged_cleanup_reason(
+    value: str | None,
+) -> tuple[str | None, str | None]:
+    """Normalize an explicit closed-PR cleanup decision reason.
+
+    Returns ``(reason, error)``. ``(None, None)`` means the caller supplied no
+    reason, which keeps the fail-closed default for divergent closed-unmerged
+    pull request heads. An error message is returned instead of a reason when a
+    supplied value fails the length bounds or is not plain human text; the
+    caller rejects the request before any remote read or mutation.
+    """
+    if value is None:
+        return None, None
+    reason = str(value).strip()
+    if not reason:
+        return None, (
+            "closed_unmerged_cleanup_reason must be omitted or contain at least "
+            f"{CLOSED_UNMERGED_CLEANUP_REASON_MIN_CHARS} characters of human text"
+        )
+    if len(reason) < CLOSED_UNMERGED_CLEANUP_REASON_MIN_CHARS:
+        return None, (
+            "closed_unmerged_cleanup_reason must be at least "
+            f"{CLOSED_UNMERGED_CLEANUP_REASON_MIN_CHARS} characters after stripping"
+        )
+    if len(reason) > CLOSED_UNMERGED_CLEANUP_REASON_MAX_CHARS:
+        return None, (
+            "closed_unmerged_cleanup_reason must be "
+            f"{CLOSED_UNMERGED_CLEANUP_REASON_MAX_CHARS} characters or fewer"
+        )
+    if _contains_ascii_control(reason):
+        return None, "closed_unmerged_cleanup_reason must not contain control characters"
+    return reason, None
+
+
 def _same_gitea_repo_from_pr_head(
     head: dict[str, Any], *, owner: str, repo: str
 ) -> bool | None:
@@ -1701,8 +1742,29 @@ async def gitea_delete_branch(
     repo: str,
     branch: str,
     expected_head_sha: str,
+    closed_unmerged_cleanup_reason: str | None = None,
 ) -> dict[str, Any]:
-    """Delete one remote feature branch with an exact-SHA server-side Git lease."""
+    """Delete one remote feature branch with an exact-SHA server-side Git lease.
+
+    ``closed_unmerged_cleanup_reason`` is an optional, audited escape hatch for
+    the single case that is otherwise refused: a branch that is the head of a
+    CLOSED, merged=false pull request in this same repository, whose exact head
+    SHA is unchanged, is neither the default nor a protected branch, and whose
+    root tree provably differs from the default branch. That means unreviewed
+    commits are about to be discarded, so deletion still requires an explicit
+    reason of at least
+    ``CLOSED_UNMERGED_CLEANUP_REASON_MIN_CHARS`` and at most
+    ``CLOSED_UNMERGED_CLEANUP_REASON_MAX_CHARS`` characters of human text; the
+    validated reason is recorded in ``closed_unmerged_pr_cleanup`` audit
+    metadata alongside ``explicit_cleanup_decision=true`` before the delete.
+
+    The reason is not a general override: omitting it keeps the previous
+    POLICY_DENIED for divergent closed-unmerged heads, and no reason ever
+    permits deleting a branch that is the head of an OPEN unmerged pull
+    request, when root-tree equivalence is unknown, or when the default/protected
+    branch, head-SHA lease, push permission, identity or audit guards fail. A
+    malformed reason is rejected as INVALID_INPUT before any remote call.
+    """
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
@@ -1717,6 +1779,24 @@ async def gitea_delete_branch(
         expected_head_sha = validate_expected_sha(expected_head_sha)
     except ValueError as exc:
         return _remote_api_error("gitea_delete_branch", "gitea", exc)
+
+    cleanup_reason, cleanup_reason_error = _validated_closed_unmerged_cleanup_reason(
+        closed_unmerged_cleanup_reason
+    )
+    if cleanup_reason_error is not None:
+        return tool_error(
+            tool="gitea_delete_branch",
+            code="INVALID_INPUT",
+            message=cleanup_reason_error,
+            details={
+                "branch": branch,
+                "expected_head_sha": expected_head_sha,
+                "min_chars": CLOSED_UNMERGED_CLEANUP_REASON_MIN_CHARS,
+                "max_chars": CLOSED_UNMERGED_CLEANUP_REASON_MAX_CHARS,
+                "mutation_occurred": False,
+            },
+            source="gitea",
+        )
 
     try:
         async with _server_gitea_client()(token) as client:
@@ -1810,6 +1890,20 @@ async def gitea_delete_branch(
                             )
                             continue
                         if root_tree_matches is False:
+                            if cleanup_reason is not None:
+                                closed_unmerged_pr_cleanup.append(
+                                    {
+                                        "number": pr.get("number"),
+                                        "state": "closed",
+                                        "merged": False,
+                                        "default_branch": default_branch,
+                                        "head_sha": expected_head_sha,
+                                        "root_tree_equivalent_to_default": False,
+                                        "explicit_cleanup_decision": True,
+                                        "cleanup_reason": cleanup_reason,
+                                    }
+                                )
+                                continue
                             return tool_error(
                                 tool="gitea_delete_branch",
                                 code="POLICY_DENIED",

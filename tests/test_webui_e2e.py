@@ -37,6 +37,14 @@ _CHROMIUM = shutil.which("chromium") or shutil.which("chromium-browser") or shut
 _REMOTE_URL = os.environ.get("SELENIUM_REMOTE_URL", "").strip()
 # Outer E2E harness budget only; the app's production startup behavior is unchanged.
 E2E_SERVER_READY_TIMEOUT_SECONDS = 180.0
+# Explicit page-load budget. Selenium's implicit default is 300s, which is the
+# same window as the Grid idle-session reaper, so a slow `drv.get` under runner
+# load could lose the race and have its session reaped mid-command. Declaring
+# it here keeps the client's timeout strictly below the reaper configured by
+# the CI sidecar (`--session-timeout 840`), so a genuinely slow load fails as
+# one honest timeout instead of poisoning the remaining tests.
+E2E_PAGE_LOAD_TIMEOUT_SECONDS = 600.0
+E2E_SCRIPT_TIMEOUT_SECONDS = 120.0
 
 if not webdriver or (not _REMOTE_URL and not (_DRIVER and _CHROMIUM)):
     pytest.skip(
@@ -185,6 +193,9 @@ def driver():
         opts.binary_location = _CHROMIUM
         drv = webdriver.Chrome(options=opts)
         drv.set_window_size(1400, 1000)
+    # Must stay below the Grid reaper window; see E2E_PAGE_LOAD_TIMEOUT_SECONDS.
+    drv.set_page_load_timeout(E2E_PAGE_LOAD_TIMEOUT_SECONDS)
+    drv.set_script_timeout(E2E_SCRIPT_TIMEOUT_SECONDS)
     yield drv
     drv.quit()
 

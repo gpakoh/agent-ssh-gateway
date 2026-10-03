@@ -31,10 +31,13 @@ PYTEST_UNIT_ARGS ?=
 # Keep this deterministic process-level guard inside the workflow's outer
 # budget so pytest terminates with evidence before the runner kills the job.
 # The suite is normally much faster, but shared self-hosted runner contention
-# has repeatedly stretched healthy 6.5k-test runs from ~22m past the old 35m
-# guard. Keep a bounded 45m process guard and a larger outer CI job budget so
-# pytest can still emit its real failure/coverage summary before job teardown.
-PYTEST_UNIT_TIMEOUT ?= 45m
+# keeps stretching healthy 6.5k-test runs: successful runs are landing around
+# 33-40m, and one loaded run reached the old 45m guard with only 84-86% of the
+# tests collected-and-passed. Keep a bounded 70m process guard and a larger
+# outer CI job budget so pytest can still emit its real failure/coverage
+# summary before job teardown; 70m remains far below the outer job's own
+# ceiling, so a genuine runaway still fails instead of hanging.
+PYTEST_UNIT_TIMEOUT ?= 70m
 PYTEST_UNIT_KEEPALIVE_SECONDS ?= 60
 test-unit:
 	@set -u; \

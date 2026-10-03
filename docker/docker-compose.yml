@@ -275,6 +275,9 @@ services:
       - MCP_GATEWAY_PROJECT_ROOT=${MCP_OAUTH_PROJECT_ROOT:-}
       - MCP_PROJECT_MAP_JSON=${MCP_OAUTH_PROJECT_MAP_JSON:-}
       - MCP_GATEWAY_TOOL_MODE=mcp_client_write
+      # Only the admin OAuth plane may delegate Compose configuration reads.
+      # deploy-from-registry sets this to the exact MCP image digest.
+      - MCP_COMPOSE_RUNNER_IMAGE=${MCP_COMPOSE_RUNNER_IMAGE:-}
       - MCP_GATEWAY_WRITE_MODE=full
       - MCP_CLIENT_SAFE_MODE=true
       - MCP_ACCESS_PROFILE=full
@@ -322,6 +325,7 @@ services:
       - GITEA_API_BASE=${GITEA_API_BASE:-}
       - GITEA_FORWARDED_HOST=${GITEA_FORWARDED_HOST:-}
       - GITEA_FORWARDED_PROTO=${GITEA_FORWARDED_PROTO:-}
+      - GITEA_TRUSTED_REMOTE_HOSTS=${GITEA_TRUSTED_REMOTE_HOSTS:-}
       - GITHUB_TOKEN=${MCP_OAUTH_GITHUB_TOKEN:-}
       - PGHOST=mcp-postgres
       - PGPORT=5432

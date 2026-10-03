@@ -27,6 +27,25 @@ SSHD_DOCKERFILE = ROOT / "docker" / "sshd" / "Dockerfile"
 DEPLOY_SCRIPT = ROOT / "scripts" / "deploy-from-registry.sh"
 REGISTRY_LOGIN_RETRY_SCRIPT = ROOT / "scripts" / "ci-docker-login-retry.sh"
 CI_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
+E2E_WEBUI_PATH = ROOT / "tests" / "test_webui_e2e.py"
+
+
+def _e2e_page_load_timeout_seconds() -> int:
+    """Read the client's page-load budget from the E2E test itself.
+
+    The reaper/page-load ordering is a race between two files, so the contract
+    has to read the real constant instead of restating it -- otherwise the two
+    can drift apart and the check would keep passing while the cascade returns.
+    """
+    text = E2E_WEBUI_PATH.read_text(encoding="utf-8")
+    match = re.search(
+        r"^E2E_PAGE_LOAD_TIMEOUT_SECONDS\s*=\s*([0-9.]+)", text, re.MULTILINE
+    )
+    assert match, (
+        "tests/test_webui_e2e.py must declare E2E_PAGE_LOAD_TIMEOUT_SECONDS so "
+        "the CI reaper window can be checked against it"
+    )
+    return int(float(match.group(1)))
 HOST_SMOKE_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "host-smoke.yml"
 MCP_OAUTH_SMOKE_TEST = ROOT / "tests" / "test_mcp_oauth_host_smoke.py"
 MCP_OAUTH_SMOKE_SCRIPT = ROOT / "scripts" / "mcp_oauth_black_box_smoke.py"
@@ -891,6 +910,137 @@ class TestE2eFailsClosedWithoutBrowserToolchain:
         assert "GITHUB_OUTPUT" not in run
         assert "available=false" not in run
 
+    def test_readiness_budget_outlives_observed_selenium_cold_start(self):
+        """The remote-Grid readiness probe must outlast the sidecar's real
+        cold start on the runner pool. Measured from run #13456 (master merge
+        of PR #430, E2E job #55854): the pinned standalone-chromium image needs
+        ~22s just to reach "Starting Selenium Grid Standalone..." and was still
+        not serving /status 41s later -- the 60x1s probe gave out at 62s and
+        both attempts failed, so a healthy browser was reported as a missing
+        toolchain. The budget must leave headroom over that observed cost."""
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        steps = wf["jobs"]["e2e"]["steps"]
+        check = next(s for s in steps if s.get("name") == "Check browser runtime")
+        run = check["run"]
+
+        budget = re.search(r"for _ in range\((\d+)\):", run)
+        assert budget, "readiness probe must declare an explicit attempt budget"
+        attempts = int(budget.group(1))
+
+        # Worst observed cost of one attempt: sidecar start (~22s) plus Grid
+        # still not ready 41s after that. 63s measured, rounded up.
+        observed_worst_case_seconds = 90
+        assert attempts >= observed_worst_case_seconds, (
+            f"readiness probe allows {attempts}s but the sidecar took ~63s to "
+            f"serve /status on the runner pool; budget must be >= "
+            f"{observed_worst_case_seconds}s or healthy browsers get reported "
+            "as unavailable"
+        )
+
+        # A second container start must also fit inside the job timeout, so
+        # the two-attempt retry loop cannot be silently truncated by it.
+        timeout = wf["jobs"]["e2e"]["timeout-minutes"]
+        assert timeout * 60 >= 2 * attempts + 120, (
+            f"two full {attempts}s probes plus container restarts must fit in "
+            f"timeout-minutes={timeout}"
+        )
+
+    def test_remote_selenium_sidecar_bounds_session_and_cpu(self):
+        """Every ``docker run`` of the Selenium sidecar must bound the Grid
+        session lifetime and the browser's CPU/RAM appetite.
+
+        From run #13456 (job #55860) the Grid reaped a live session mid-run:
+        ``reason: session timed out due to inactivity`` at the 300s default,
+        which turned the first test's slow ``drv.get`` into a
+        TimeoutException and cascaded the remaining three into invalid-session
+        failures. The sidecar is also a *sibling* container, so it inherited
+        none of the job's ``--cpus``/``--memory`` and could pull the whole
+        runner host into Chromium."""
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        steps = wf["jobs"]["e2e"]["steps"]
+
+        runs = [
+            s["run"]
+            for s in steps
+            if "docker run -d" in s.get("run", "")
+            and "selenium" in s.get("run", "").lower()
+        ]
+        assert len(runs) == 2, (
+            "expected the initial sidecar start and its retry restart to be "
+            f"the only selenium container launches, found {len(runs)}"
+        )
+
+        job_timeout_seconds = wf["jobs"]["e2e"]["timeout-minutes"] * 60
+        page_load_timeout = _e2e_page_load_timeout_seconds()
+
+        for run in runs:
+            # Only actual `-e NAME=...` flags count; the explanatory comment
+            # above them names rejected variables deliberately.
+            env_flags = re.findall(r"-e\s+([A-Z_]+)=", run)
+            assert "SE_SESSION_TIMEOUT" not in env_flags, (
+                "SE_SESSION_TIMEOUT is not a variable the pinned Selenium "
+                "entrypoint recognises"
+            )
+
+            # Required, but it is the router's new-session wait, not the
+            # reaper. The entrypoint always emits
+            # `--session-request-timeout ${SE_SESSION_REQUEST_TIMEOUT}`, so
+            # leaving it unset hands that flag no value at all.
+            assert "SE_SESSION_REQUEST_TIMEOUT" in env_flags, (
+                "SE_SESSION_REQUEST_TIMEOUT must stay set: the entrypoint emits "
+                "--session-request-timeout unconditionally and an unset value "
+                "leaves the flag valueless"
+            )
+
+            # The image exposes no dedicated env var for the reaper, so it has
+            # to travel inside SE_OPTS, which the entrypoint appends verbatim.
+            opts_match = re.search(r'-e\s+SE_OPTS="([^"]+)"', run)
+            assert opts_match, (
+                "sidecar must set SE_OPTS to carry --session-timeout; it is the "
+                "only hook the pinned entrypoint offers for the reaper"
+            )
+            se_opts = opts_match.group(1)
+
+            # A repeat here is fatal: Grid answers "Can only specify option
+            # --session-request-timeout once.", prints usage and exits 0, so
+            # the sidecar never becomes ready and the run dies in "Check
+            # browser runtime" instead of anywhere near a Selenium test.
+            assert "--session-request-timeout" not in se_opts, (
+                "--session-request-timeout is already emitted by the entrypoint "
+                "and must not be repeated in SE_OPTS; the duplicate makes Grid "
+                "exit 0 after printing usage, which reads as an unready Grid"
+            )
+
+            reaper_match = re.search(r"--session-timeout\s+(\d+)", se_opts)
+            assert reaper_match, (
+                "SE_OPTS must include --session-timeout; without it Grid uses "
+                "its 300s idle-session reaper, which kills a live session "
+                "mid-run and cascades every remaining test"
+            )
+            reaper_seconds = int(reaper_match.group(1))
+
+            # The race that produced the cascade: a slow page load outlived the
+            # reaper window, so Grid removed the session while the command was
+            # still in flight.
+            assert reaper_seconds > page_load_timeout, (
+                f"reaper {reaper_seconds}s must exceed the client page-load "
+                f"budget {page_load_timeout}s; otherwise the reaper wins the "
+                "race and one slow drv.get still cascades the suite"
+            )
+            assert reaper_seconds < job_timeout_seconds, (
+                f"reaper {reaper_seconds}s must stay below the job timeout "
+                f"{job_timeout_seconds}s or a stale session outlives the job "
+                "that owns it"
+            )
+
+            assert "--cpus=" in run, (
+                "sidecar must carry --cpus; as a sibling container it inherits "
+                "no job limit and can starve the runner host"
+            )
+            assert "--memory=" in run, (
+                "sidecar must carry --memory for the same reason as --cpus"
+            )
+
     def test_remote_selenium_readiness_dumps_diagnostics_and_retries_once(self):
         wf = _load_workflow(CI_WORKFLOW_PATH)
         steps = wf["jobs"]["e2e"]["steps"]
@@ -1687,10 +1837,10 @@ class TestMakeCheckMirrorsCiExactly:
         makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
         wf = _load_workflow(CI_WORKFLOW_PATH)
 
-        assert "PYTEST_UNIT_TIMEOUT ?= 45m" in makefile
+        assert "PYTEST_UNIT_TIMEOUT ?= 70m" in makefile
         assert "timeout --signal=TERM --kill-after=30s $(PYTEST_UNIT_TIMEOUT) uv run pytest" in makefile
         assert "timeout --signal=TERM --kill-after=30s 25m uv run pytest" not in makefile
-        assert wf["jobs"]["test"]["timeout-minutes"] == 60
+        assert wf["jobs"]["test"]["timeout-minutes"] == 90
 
     def test_unit_runner_emits_keepalive_while_pytest_is_silent(self):
         makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
@@ -2165,6 +2315,11 @@ class TestCanonicalGiteaEnvironmentNames:
             assert env.get(key) == expected
 
         assert not any("MCP_OAUTH_GITEA_" in value for value in env.values())
+
+    def test_mcp_oauth_exposes_trusted_remote_host_allowlist(self):
+        env = _env_dict(_load_compose()["services"]["mcp-oauth"]["environment"])
+
+        assert env.get("GITEA_TRUSTED_REMOTE_HOSTS") == "${GITEA_TRUSTED_REMOTE_HOSTS:-}"
 
     def test_docker_env_example_documents_canonical_gitea_env_names(self):
         text = ENV_EXAMPLE_PATH.read_text(encoding="utf-8")

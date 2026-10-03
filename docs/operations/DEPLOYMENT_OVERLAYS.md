@@ -72,6 +72,10 @@ Verifies:
   live `gitea_*` MCP tools will fail with remote-unavailable errors.
 - Keep `GITEA_FORWARDED_HOST` / `GITEA_FORWARDED_PROTO` aligned with the public Gitea
   origin when the client is expected to emit public-facing PR URLs.
+- If registered project Git remotes use an additional internal Gitea hostname or IP,
+  set `GITEA_TRUSTED_REMOTE_HOSTS` to a comma/space-separated allowlist of those hosts.
+  The control plane uses this only to recognize the repository identity; authenticated
+  fetches are re-resolved through the Gitea API and do not reuse checkout credentials.
 
 ## Adding a New Private Value
 
@@ -91,3 +95,27 @@ compose-interpolation time if the key is absent from `docker/.env`.
 | Committing `docker/.env` | Secrets in git history | Add to `.gitignore`, rotate secrets |
 | Committing `docker-compose.live.yml` | Leaks network topology | Add to `.gitignore` |
 | Using `docker compose -e` | Not supported, silent failure | Use `.env` file or env vars |
+
+## Compose access to root-owned deployment secrets
+
+The admin OAuth service can set `MCP_COMPOSE_RUNNER_IMAGE` to an exact
+`repository@sha256:digest` MCP server image. Registry deployment passes the same
+verified MCP image digest to this setting, including rollback.
+
+For an explicit allowed project directory, Compose then runs in a short-lived
+helper as UID 0 with no capabilities, no network, a read-only root filesystem,
+a bounded tmpfs and only that project directory mounted read-only at its host
+path plus the existing Docker socket. This allows Compose to read a root-owned
+0600 `.env` without changing ownership or permissions or returning its contents.
+The daemon still creates service volumes at their original host paths.
+
+Existing admin scope checks, pending-action confirmation, service binding,
+operation receipts and output redaction still apply. No helper is used for an
+implicit project directory or when the setting is empty. Mutable image tags are
+rejected. Compose builds that need sources outside the selected project need a
+separately prepared image; the helper does not mount a parent workspace.
+
+Candidate preparation scans only deterministic ids that can belong to the
+requested project and branch. Missing or unsafe metadata in that lineage still
+fails closed with `CANDIDATE_LINEAGE_SCAN_FAILED`, the candidate id and a repair
+action; unrelated abandoned clones no longer block all registered projects.

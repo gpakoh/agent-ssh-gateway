@@ -1158,12 +1158,105 @@ def _read_candidate_metadata(candidate_dir: Path) -> dict[str, Any]:
     return data
 
 
+_MAX_LEGACY_REMOTE_HOPS = 8
+
+
+def _legacy_local_origin(candidate_dir: Path) -> Path | None:
+    """Return one safe sibling-clone origin, or fail closed.
+
+    Some pre-lineage candidate clones were cloned from another candidate
+    instead of directly from Gitea. A local path is not itself a repository
+    identity, so it is useful only as a bounded link to a sibling clone whose
+    trusted Gitea identity can be resolved independently.
+    """
+    try:
+        names = {
+            line.strip()
+            for line in _run_git(
+                candidate_dir,
+                ["remote"],
+                operation="inspect legacy candidate remotes",
+            ).splitlines()
+            if line.strip()
+        }
+        urls = {
+            _run_git(
+                candidate_dir,
+                ["remote", "get-url", "--push", name],
+                operation="inspect legacy candidate remote",
+            ).strip()
+            for name in names
+        }
+        urls.discard("")
+        if len(urls) != 1:
+            return None
+        raw_target = Path(next(iter(urls)))
+        if not raw_target.is_absolute():
+            return None
+        sibling_root = candidate_dir.parent.resolve(strict=True)
+        target_stat = raw_target.lstat()
+        target = raw_target.resolve(strict=True)
+        git_stat = (target / ".git").lstat()
+    except (CandidateCloneError, OSError):
+        return None
+    if target.parent != sibling_root or target == candidate_dir.resolve():
+        return None
+    if not target.name.startswith("candidate-"):
+        return None
+    if stat.S_ISLNK(target_stat.st_mode) or not stat.S_ISDIR(target_stat.st_mode):
+        return None
+    if stat.S_ISLNK(git_stat.st_mode) or not stat.S_ISDIR(git_stat.st_mode):
+        return None
+    return target
+
+
+def _legacy_trusted_remote(candidate_dir: Path) -> str | None:
+    """Resolve a legacy clone's trusted Gitea identity through safe local hops."""
+    current = candidate_dir
+    visited: set[Path] = set()
+    for _ in range(_MAX_LEGACY_REMOTE_HOPS):
+        try:
+            resolved = current.resolve(strict=True)
+            git_stat = (resolved / ".git").lstat()
+        except OSError:
+            return None
+        if resolved in visited:
+            return None
+        visited.add(resolved)
+        if stat.S_ISLNK(git_stat.st_mode) or not stat.S_ISDIR(git_stat.st_mode):
+            return None
+        try:
+            candidate_url, _ = _resolve_trusted_remote(resolved)
+        except ManagedSourceBundleError:
+            next_root = _legacy_local_origin(resolved)
+            if next_root is None:
+                return None
+            current = next_root
+            continue
+        return candidate_url or None
+    return None
+
+
+def _is_verified_foreign_repository(candidate_dir: Path, source_root: Path) -> bool:
+    """Exclude a legacy clone only on two unambiguous trusted repo identities."""
+    try:
+        git_stat = (candidate_dir / ".git").lstat()
+        if stat.S_ISLNK(git_stat.st_mode) or not stat.S_ISDIR(git_stat.st_mode):
+            return False
+        requested_url, _ = _resolve_trusted_remote(source_root)
+        candidate_url = _legacy_trusted_remote(candidate_dir)
+    except (OSError, ManagedSourceBundleError):
+        return False
+    return bool(requested_url and candidate_url and requested_url != candidate_url)
+
+
 def _find_lineage_claimant(
     workspace_root: Path,
     *,
     source_project: str,
     branch: str,
     exclude_project_id: str,
+    source_root: Path,
 ) -> dict[str, Any] | None:
     clones_root = _candidate_clones_root(workspace_root)
     try:
@@ -1173,12 +1266,33 @@ def _find_lineage_claimant(
                     continue
                 if not entry.name.startswith("candidate-"):
                     continue
+                # Candidate ids encode a fixed project/branch prefix followed
+                # by base and identity hashes. A well-formed id outside that
+                # prefix cannot claim this lineage; do not let abandoned
+                # clones for other lineages poison every new preparation.
+                # Unknown names and matching prefixes still fail closed.
+                suffix = re.fullmatch(r"(candidate-.+)-[0-9a-f]{12}-[0-9a-f]{12}", entry.name)
+                requested_prefix = _project_id(source_project, branch, "0" * 40).rsplit("-", 2)[0]
+                if suffix is not None and suffix.group(1) != requested_prefix:
+                    continue
                 try:
                     if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
                         raise _lineage_scan_failure("candidate lineage entry is unsafe")
                 except OSError as exc:
                     raise _lineage_scan_failure("candidate lineage entry cannot be inspected") from exc
-                metadata = _read_candidate_metadata(Path(entry.path))
+                # Legacy manually registered clones lack the managed id suffix.
+                # Their names alone prove nothing; only a trusted, distinct Git
+                # repository identity can exclude them from this lineage.
+                if suffix is None and _is_verified_foreign_repository(Path(entry.path), source_root):
+                    continue
+                try:
+                    metadata = _read_candidate_metadata(Path(entry.path))
+                except CandidateCloneError as exc:
+                    exc.details = {
+                        "candidate_project_id": entry.name,
+                        "repair_action": "Reconcile this candidate through the guarded cleanup workflow; do not delete or rewrite lineage metadata blindly.",
+                    }
+                    raise
                 if metadata.get("source_project") == source_project and metadata.get("branch") == branch:
                     return metadata
     except CandidateCloneError:
@@ -1283,6 +1397,7 @@ def _prepare_candidate_locked(
             source_project=project,
             branch=branch,
             exclude_project_id=project_id,
+            source_root=source_root,
         )
         if claimant is not None:
             details: dict[str, Any] = {
