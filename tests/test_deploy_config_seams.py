@@ -945,6 +945,17 @@ class TestE2eFailsClosedWithoutBrowserToolchain:
             f"timeout-minutes={timeout}"
         )
 
+    def test_e2e_driver_uses_eager_page_load_strategy(self):
+        """The UI assertions wait on concrete DOM state after navigation.
+
+        Waiting for Chrome's full ``load`` event made one otherwise healthy
+        E2E run sit inside ``drv.get`` until the 600s renderer timeout.  Eager
+        navigation returns after DOMContentLoaded, while the existing explicit
+        waits still prove the UI actually became usable.
+        """
+        text = E2E_WEBUI_PATH.read_text(encoding="utf-8")
+        assert 'opts.page_load_strategy = "eager"' in text
+
     def test_remote_selenium_sidecar_bounds_session_and_cpu(self):
         """Every ``docker run`` of the Selenium sidecar must bound the Grid
         session lifetime and the browser's CPU/RAM appetite.
