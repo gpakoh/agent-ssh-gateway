@@ -119,16 +119,21 @@ second fingerprint mechanism.**
 - **`server_surface`** — authoritative. `toolset_hash`, `registered_tool_count`,
   `total_schema_bytes`, and the sorted registered names. The Gateway asserts
   these without qualification; they describe this process.
-- **`client_observation`** — **unverified until bound**. The set of tool names the
-  caller reports it can actually invoke, plus the identity it was bound to and
-  the `toolset_hash` it was bound against. Absent report ⇒
-  `status: "not_supplied"`.
-- **`guard_coverage`** — derived **only** from a bound `client_observation`.
-  States, per guarded mutation, whether its specific guard dependency is covered
-  by the observed surface. Absent report ⇒ `status: "unknown"`, never `"ok"`.
+- **`client_observation`** — a **client-reported attestation, never independently
+  verified by the Gateway**. It records the tool names the caller says it can
+  invoke, whether the caller claims the list is complete, and the server-side
+  session/build binding under which that report was received. Binding proves
+  provenance/freshness only; it does **not** prove the report is truthful.
+  Absent report ⇒ `status: "not_supplied"`.
+- **`guard_coverage`** — diagnostic coverage derived **only** from the current
+  session-bound client attestation. States `reported_present`, `reported_absent`,
+  or `unknown` for guard tools that a concrete workflow actually requires.
+  Absent report ⇒ `status: "unknown"`, never `"ok"` or `"verified"`.
 
-A caller may never assert its own safety. `guard_coverage` is computed by the
-Gateway from the observation; a caller cannot submit a coverage claim.
+A caller may never assert its own safety. The Gateway may derive diagnostics from
+the attestation, but no field named `verified` may be set true merely because a
+client report is bound to a session. `external_resource_catalog_verified` remains
+`false` unless a future mechanism independently observes the external catalog.
 
 ### 2.2 The observation channel
 
@@ -149,34 +154,48 @@ client-supplied:
 - No new tool is added — the observation rides an existing read-only tool, which
   keeps the catalog unchanged and avoids perturbing the very thing being measured.
 
-### 2.3 Binding (why a report cannot be spoofed)
+**Input bounds.** `client_visible_tool_names` is untrusted request data and is
+validated before any state is retained. One attestation may contain at most 256
+names and at most 16 KiB of UTF-8 name bytes in aggregate; each name is stripped
+of surrounding ASCII whitespace, must match the Gateway tool-name grammar and be
+at most 128 bytes, then exact-string deduplicated and sorted. Unknown-but-valid
+names are retained only for `unexpected_in_client` diagnostics. An invalid or
+over-limit report returns `INVALID_INPUT` and performs **no** session-store write.
+These bounds are intentionally above the current 134-tool catalog while preventing
+one session from creating unbounded process state.
 
-An unbound report is worthless as a safety input: any other authenticated caller
-could submit a fabricated list to unlock mutations for itself or for a peer.
-Each observation is therefore bound to:
+### 2.3 Binding and lifetime
 
-- `_current_auth_reuse_key()` — the authenticated identity of the submitting
-  caller, so one caller's observation never gates another caller's mutations;
-- `server_toolset_hash` — so a report is invalidated by any redeploy or catalog
-  change and cannot outlive the build it described.
+A report is useful only as a diagnostic about the **same MCP transport/session**
+that submitted it. `_current_auth_reuse_key()` identifies an OAuth client (or a
+static-token fingerprint); it is deliberately reusable across transports and is
+therefore **insufficient** as the storage key. Two parallel MCP sessions for the
+same OAuth client may import different external catalogs and must never overwrite
+or gate one another.
 
-A report is discarded and treated as `not_supplied` when its binding does not
-match the current identity **or** the current `toolset_hash`. Either mismatch is
-independently disqualifying: a stale hash catches a redeploy or catalog change, a
-mismatched identity catches a caller submitting on someone else's behalf.
+Each attestation is bound to all three of:
 
-**Storage and lifetime.** Bound observations live in a small in-process store
-keyed by `_current_auth_reuse_key()`, holding `{names, complete, toolset_hash}`.
-The most recent submission for an identity replaces its predecessor. Nothing is
-persisted: a stored observation would outlive the connector state it describes,
-which is precisely the staleness the `toolset_hash` binding exists to catch.
-Process-local storage also matches the existing process-global tool mode; a
-per-connection store would be the better long-term design but is out of scope for
-PR-A.
+- `_current_auth_reuse_key()` — authenticated identity;
+- a **server-created MCP lifecycle/session owner** obtained from the active
+  `FastMCP` request context (the existing `_current_mcp_lifecycle_owner()` /
+  SDK-created `ServerSession` lifecycle), never from the raw client-controlled
+  `Mcp-Session-Id` header;
+- `server_toolset_hash` — invalidates the attestation after any catalog change.
 
-The gate in §2.5 resolves its input by reading this store under
-`_current_auth_reuse_key()` and re-validating the hash on **every** mutation, so
-the check cannot be satisfied once and then relied upon after a redeploy.
+The in-process store is keyed by the server-created lifecycle owner and stores
+`{auth_identity, names, complete, toolset_hash}`. The lifecycle owner is stable
+for exactly one MCP transport and is removed in `_mcp_lifespan` teardown. A
+second session with the same OAuth identity gets a distinct entry. On every read,
+the current auth identity and `toolset_hash` are rechecked; either mismatch makes
+the attestation unavailable.
+
+If no server-created MCP session/lifecycle owner exists (startup helpers, stdio
+unit seams, code outside a request), the attestation is **not stored at all** and
+is returned only as an unbound one-shot diagnostic. There is no process-global or
+auth-identity-only fallback. Raw `Mcp-Session-Id` is never accepted as a key.
+
+This binding prevents cross-session reuse and stale-build reuse; it still does
+**not** make the submitted tool list truthful or independently verified.
 
 ### 2.4 Diagnostics
 
@@ -188,60 +207,43 @@ the check cannot be satisfied once and then relied upon after a redeploy.
 - `preflight_surface_unverified` — **advisory** field, never an error, present on
   mutation results when no bound observation exists.
 
-### 2.5 The gate: guard dependencies only
+### 2.5 Guard diagnostics are call-context-specific, not a static tool map
 
 `EXTERNAL_RESOURCE_CATALOG_MISMATCH` reporting the full diff does **not** imply a
-full-equality requirement. A caller missing 90 unrelated tools must not be
-blocked from merging if every guard dependency it needs is present.
+full-equality requirement and, by itself, never blocks a mutation.
 
-`REQUIRED_PREFLIGHT_UNAVAILABLE` is raised by a guarded mutation **only** when
-all three of the following hold:
+A missing external tool may justify `REQUIRED_PREFLIGHT_UNAVAILABLE` only when the
+**concrete call path currently executing** requires that tool to establish a
+precondition that is otherwise unavailable. This cannot be represented by a
+static `mutation -> guard tool` table: the same mutation can be safe in one call
+context and require an extra fetch/refresh in another.
 
-1. a bound `client_observation` exists for the current identity **and**
-   `toolset_hash`; **and**
-2. that observation is declared **complete**; **and**
-3. that complete observation **lacks the specific guard tool** this mutation
-   depends on.
+The verified signatures imply:
 
-Dropping condition 2 would make the gate fire on unproven absence: a partial
-report that simply never mentions `git_fetch_ref` is not evidence that the caller
-cannot reach it. Because completeness defaults to `false`, the gate is inert
-until a caller positively asserts it has enumerated the whole surface — which is
-the correct bias, since a false `REQUIRED_PREFLIGHT_UNAVAILABLE` blocks legitimate
-work while a missing one merely loses a diagnostic.
+- `gitea_push_verified_commit` receives `expected_base_sha` and
+  `expected_head_sha` as explicit required inputs. Once the caller has those exact
+  values, the mutation itself does **not** require `git_fetch_ref`; the SHA may
+  have been established earlier by another trusted path.
+- `git_update_branch_by_merge` may operate on already-local exact refs/objects.
+  The absence of `git_fetch_ref` is not a failure unless this particular workflow
+  first needs to obtain a remote ref that is not already available locally.
+- `git_push` has no exact-head CAS precondition today. That is a separate design
+  debt and is not repaired by parity attestation.
+- `git_refresh_branch_to_head` is a workflow convenience and must never be treated
+  as a universal prerequisite.
 
-Verified map — a guarded dependency exists only where the mutation's
-compare-and-swap precondition is established by another tool. This was
-determined by reading each signature, not by assuming a workflow shape:
+Therefore PR-A ships **measurement and a reusable evaluator**, not a hard-coded
+mutation gate. The evaluator accepts an explicit `required_guard_tools` set from
+the call site that actually knows the workflow state. It may return
+`reported_absent` only when the current session-bound attestation is complete and
+claims a required tool is missing. Existing mutation entry points are not wired to
+this evaluator unless their implementation itself has a concrete unmet
+cross-tool precondition.
 
-| Guarded mutation | CAS precondition | Tool establishing it |
-|---|---|---|
-| `gitea_push_verified_commit` | `expected_base_sha` **and** `expected_head_sha`, both **required** | `git_fetch_ref` — pins a trusted remote ref whose SHA becomes `expected_base_sha` |
-| `git_update_branch_by_merge` | `expected_head`, **optional**, and **local** | none — the local HEAD is readable via `info(project)` |
-| `git_push` | **none** | none |
-
-Consequences, all of them narrowing:
-
-- Only `gitea_push_verified_commit` has a genuine cross-tool guard dependency.
-- `git_refresh_branch_to_head` gates **nothing**. It is a workflow convenience for
-  placing a branch on a fetched commit; no mutation's precondition requires it, so
-  treating its absence as a safety failure would be a fabricated dependency.
-- `git_update_branch_by_merge` is **not** gated on `git_fetch_ref`. Its
-  precondition is local state, so a caller without `git_fetch_ref` can still merge
-  safely against a known local HEAD.
-- `git_push` carries no exact-head guard whatsoever (`mcp_client_tools.py:2723`
-  takes only `project`, `remote`, `branch`). This is a real observation about the
-  tool surface, recorded in §8; fixing it is **out of scope** for PR-A, which
-  measures rather than redesigns.
-
-The gate therefore applies to a single mutation today. That is the correct
-consequence of the dependency analysis, and it is precisely why PR-A cannot be
-used as a broad Git lockout.
-
-When **no** bound observation exists, the mutation **proceeds** and returns
-`preflight_surface_unverified` as an advisory. This is the explicit prohibition
-on converting "an adjacent tool happens to be missing" into a global Git
-lockout: without evidence of absence there is no failure.
+If no current session-bound attestation exists, if it is incomplete, or if the
+call site has no concrete required guard, the result is `unknown`/advisory and the
+mutation is not blocked. This avoids both a process-wide lockout and a false
+per-tool dependency.
 
 ### 2.6 Establishing the root cause — one observation, no redeploy
 
@@ -355,8 +357,9 @@ these trusted mechanisms suffices to establish it:
 
 - the **exact remote feature branch** equals the candidate HEAD;
 - the **exact open PR head** equals the candidate HEAD;
-- the HEAD is already **reachable from a freshly resolved protected branch**
-  (resolved and pinned exactly as in §3.5 — never inferred from the symbolic name).
+- the HEAD is already **reachable from a branch that the trusted Gitea adapter has
+  freshly proven is protected**, with both the protection state and exact branch
+  SHA pinned as in §3.5. The symbolic name `main`/`master` is never protection evidence.
 
 Protected-branch reachability is thus one option among several, never a
 prerequisite. Recorded as advisory, it also becomes the natural fast path: a
@@ -371,19 +374,65 @@ recoverable?". Exactly two constructors are permitted:
 **`from_archive_ref`** — existing behaviour. `preserved_ref` matching
 `archive/candidate-*`, verified by `_require_preserved_head` (`:879`).
 
-**`from_protected_branch_reachability`** — new. Steps:
+**`from_protected_branch_reachability`** — new. It is constructed only from
+trusted adapter evidence, not from an operator assertion or branch-name policy.
+The adapter must query Gitea and return a `ProtectedBranchEvidence` value carrying
+`branch`, `protected=true`, and the branch's **fresh exact SHA**. Core candidate
+code receives this evidence (or a required verifier callback) by injection; it
+must not treat `_PROTECTED_BRANCHES = {"main", "master"}` or a
+`protected_branch="main"` argument as proof.
 
-1. Freshly resolve the protected branch through `_probe_remote_ref` (`:403`).
-   It must return `FOUND`; `UNKNOWN` or `ABSENT` ⇒ fail closed.
-2. Pin the **exact resolved SHA**. No conclusion is ever drawn from the symbolic
-   name `main`/`master`.
-3. Prove `candidate HEAD` is an ancestor of that exact SHA via
-   `git merge-base --is-ancestor`.
-4. If the required object is not present locally, **fail closed**. No fetch is
-   performed; a reachability claim must rest on evidence already in hand.
+Verification steps:
 
-If the HEAD is not delivered to a protected branch **and** has no archive
-preservation, cleanup is forbidden. There is no third path.
+1. Freshly query the trusted Gitea branch endpoint and require the branch to be
+   reported protected. Missing, unprotected, or unverifiable ⇒ fail closed.
+2. Pin the exact SHA returned by that same fresh query.
+3. Require the candidate HEAD object to exist locally, then prove it is an
+   ancestor of the pinned SHA with `git merge-base --is-ancestor`. No fetch is
+   performed.
+4. Immediately before `shutil.rmtree`, repeat the trusted Gitea protection+SHA
+   query and the ancestor proof. The branch must still be protected and its SHA
+   must still equal the pinned SHA. If it moved, protection became unknown, or
+   reachability can no longer be proven, deletion is forbidden.
+
+This second verification is part of the destructive boundary, not an optional
+extra. A test must move the protected branch between the initial proof and the
+filesystem delete and prove the directory remains.
+
+If the HEAD is not delivered to a genuinely protected branch **and** has no
+archive preservation, cleanup is forbidden. There is no third path.
+
+### 3.6 Versioned tombstone compatibility
+
+The current cleanup journal stores `preserved_ref` in a version-1 tombstone and
+may be resumed from `prepared`, `registry_removed`, or `complete`. PR-B must not
+strand an interrupted cleanup merely because the new code represents preservation
+as a discriminated object.
+
+The reader therefore supports both shapes:
+
+- **legacy v1**: `preserved_ref: "archive/candidate-*"` is normalized in memory to
+  `preservation = {"kind": "archive_ref", "preserved_ref": ...}`;
+- **new v2**: `preservation.kind` is exactly `archive_ref` or
+  `protected_branch_reachability`, with kind-specific fields validated strictly.
+
+New writes use v2. Legacy tombstones are never rewritten just to migrate them;
+they are normalized on read and may continue/resume through all three existing
+phases. The identity comparison is performed against the normalized preservation
+identity, not by blindly comparing the raw on-disk dictionary. Regression tests
+must cover v1 tombstones in `prepared`, `registry_removed`, and `complete` across
+the new code. A deployment-time assertion that no tombstones exist is **not** a
+substitute for this compatibility contract.
+
+### 3.7 Reconstructed metadata provenance
+
+Adopt may prove the candidate's **current** repository identity, branch and exact
+HEAD, but it cannot reconstruct the historical `base_ref` or `base_sha` from
+which a legacy clone was originally created. The adopted metadata therefore uses
+a new schema/reconstruction marker and records historical provenance as unknown;
+it must not synthesize `base_ref = expected_branch`, `base_sha = HEAD`, or any
+other invented history. Current facts (`source_project`, `branch`, `head`, safe
+`root`) remain explicit and are the only facts used for identity/cleanup.
 
 ### 3.8 Scan behaviour for an unreadable legacy candidate
 
@@ -474,21 +523,24 @@ PR-B must preserve all #430/#434 behaviour and add the new cases.
 | 11 | Candidate with active task or delivery | untouched |
 | 12 | Remote branch / HEAD mismatch | fail-closed |
 | 13 | **Same-repo clean legacy candidate, HEAD not in `main`, exact remote feature branch or open PR preserves HEAD** | **adopt allowed; cleanup forbidden** |
-| 14 | **Same-repo legacy candidate, HEAD reachable from freshly resolved protected branch** | **adopt and explicit cleanup allowed without an archive ref** |
+| 14 | **Same-repo legacy candidate, exact HEAD reachable from a branch freshly proven protected by trusted Gitea evidence, delivery branch absent** | **adopt and explicit cleanup allowed without an archive ref; registry already-absent tolerated** |
+| 14-race | **Protected branch moves or loses/obscures protection after initial proof but before delete** | **cleanup fails closed; candidate directory remains** |
 
 Cases 13 and 14 are the pair that distinguishes a correct design from the
 rejected `main-reachability-first` variant: 13 must not be blocked, and 14 must
 not require an archive ref.
 
-PR-A must cover: unbound report ⇒ `not_supplied`; report bound to a different
-identity ⇒ discarded; report bound to a stale `toolset_hash` ⇒ discarded; full
-diff reported while `guard_coverage` remains satisfied ⇒ mutation **not** blocked;
-complete bound report missing `git_fetch_ref` ⇒ `gitea_push_verified_commit` fails
-with `REQUIRED_PREFLIGHT_UNAVAILABLE` **before** any push attempt; **incomplete**
-bound report omitting `git_fetch_ref` ⇒ `gitea_push_verified_commit` **not** blocked
-(unknown ≠ absent); `git_update_branch_by_merge` and `git_push` **never** gated on
-`git_fetch_ref` absence, per the verified dependency map; no report at all ⇒
-mutation proceeds with `preflight_surface_unverified`.
+PR-A must cover: no-session report ⇒ one-shot/unbound and never process-global;
+two simultaneous MCP sessions with the same OAuth identity and different catalogs
+remain isolated; teardown removes only that session's attestation; stale
+`toolset_hash` or changed auth identity invalidates the session attestation; raw
+`Mcp-Session-Id` cannot select storage; input count/byte/name bounds reject before
+state write; full server/client diff is reported while
+`external_resource_catalog_verified` stays `false`; incomplete reports leave
+omitted names `unknown`; complete reports may mark an explicitly requested
+call-context guard `reported_absent`; and `gitea_push_verified_commit`,
+`git_update_branch_by_merge`, and `git_push` are **not** hard-gated merely because
+`git_fetch_ref` is absent from the report. No static mutation→guard map is allowed.
 
 ## 6. `TODO.md` updates
 
