@@ -1013,6 +1013,41 @@ def test_compose_runner_pins_image_and_limits_mounts(tmp_path, monkeypatch):
     assert env_file.stat().st_mode & 0o777 == 0o600
 
 
+def test_compose_runner_mounts_registry_auth_volume_read_only(tmp_path, monkeypatch):
+    from examples.mcp_server import config
+
+    root = tmp_path / "infra"
+    root.mkdir()
+    image = "registry.invalid/mcp-server@sha256:" + "a" * 64
+    monkeypatch.setenv("MCP_COMPOSE_RUNNER_IMAGE", image)
+    monkeypatch.setenv("MCP_COMPOSE_DOCKER_CONFIG_VOLUME", "mcp-compose-registry-auth")
+    monkeypatch.setattr(config, "ALLOWED_PROJECT_ROOTS", [str(root)])
+
+    argv = _client()._compose_base_argv(str(root))
+
+    mounts = [argv[i + 1] for i, item in enumerate(argv) if item == "--mount"]
+    assert mounts == [
+        f"type=bind,src={root},dst={root},readonly",
+        "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock",
+        "type=volume,src=mcp-compose-registry-auth,dst=/run/mcp-docker-config,readonly",
+    ]
+    env_values = [argv[i + 1] for i, item in enumerate(argv) if item == "--env"]
+    assert env_values == ["DOCKER_CONFIG=/run/mcp-docker-config"]
+
+
+def test_compose_runner_rejects_invalid_registry_auth_volume(tmp_path, monkeypatch):
+    from examples.mcp_server import config
+
+    root = tmp_path / "infra"
+    root.mkdir()
+    monkeypatch.setenv("MCP_COMPOSE_RUNNER_IMAGE", "mcp@sha256:" + "a" * 64)
+    monkeypatch.setenv("MCP_COMPOSE_DOCKER_CONFIG_VOLUME", "../../host")
+    monkeypatch.setattr(config, "ALLOWED_PROJECT_ROOTS", [str(root)])
+
+    with pytest.raises(ValueError, match="Invalid volume name"):
+        _client()._compose_base_argv(str(root))
+
+
 @pytest.mark.parametrize("image", ["mcp-server:latest", "registry.invalid/mcp:abc", "bad@sha256:123"])
 def test_compose_runner_refuses_unpinned_image(tmp_path, monkeypatch, image):
     monkeypatch.setenv("MCP_COMPOSE_RUNNER_IMAGE", image)
