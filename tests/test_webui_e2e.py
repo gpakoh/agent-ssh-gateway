@@ -182,6 +182,11 @@ def server():
 @pytest.fixture(scope="module")
 def driver():
     opts = ChromeOptions()
+    # Every navigation below is followed by an explicit wait for the DOM state
+    # the test actually needs. Waiting for Chrome's full load event adds no
+    # coverage and can wedge remote Chromium in drv.get() until the 600s
+    # renderer timeout under shared-runner pressure.
+    opts.page_load_strategy = "eager"
     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")

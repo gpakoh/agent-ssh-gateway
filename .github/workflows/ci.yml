@@ -806,6 +806,10 @@ jobs:
         - /media/1TB/Python/web_ssh/web-ssh-gateway/.state:/deploy/web-ssh-gateway-state
     env:
       REGISTRY: ${{ secrets.REGISTRY_HOST }}
+      # Non-secret selector consumed by mcp-oauth/Compose. The credential itself
+      # never enters MCP args or tracked files; the deploy job provisions the
+      # operator-owned volume below from the Actions secret store.
+      MCP_COMPOSE_DOCKER_CONFIG_VOLUME: mcp-compose-registry-auth
     steps:
       - uses: actions/checkout@v7
         with:
@@ -829,6 +833,45 @@ jobs:
       - name: Log in to the Gitea container registry
         run: |
           printf '%s\n' "${{ secrets.REGISTRY_TOKEN }}" | bash scripts/ci-docker-login-retry.sh "$REGISTRY" gpakoh
+      - name: Provision Compose registry auth volume
+        env:
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          auth_volume="${MCP_COMPOSE_DOCKER_CONFIG_VOLUME:?MCP_COMPOSE_DOCKER_CONFIG_VOLUME must be set}"
+          : "${REGISTRY:?REGISTRY must be set}"
+          : "${REGISTRY_TOKEN:?REGISTRY_TOKEN must be set}"
+
+          # Reuse the exact MCP artifact from this workflow run as the Docker
+          # CLI helper. It already contains /usr/bin/docker; resolving its
+          # RepoDigest after an authenticated pull makes the credential writer
+          # immutable too, instead of trusting a mutable helper tag.
+          runner_tag="$REGISTRY/gpakoh/mcp-server:${{ github.sha }}"
+          docker pull "$runner_tag" >/dev/null
+          runner_ref="$(docker image inspect --format '{{index .RepoDigests 0}}' "$runner_tag")"
+          case "$runner_ref" in
+            "$REGISTRY/gpakoh/mcp-server@sha256:"*) ;;
+            *)
+              echo "::error::mcp-server registry digest is missing or from an unexpected repository" >&2
+              exit 1
+              ;;
+          esac
+          runner_digest="${runner_ref##*@sha256:}"
+          printf '%s\n' "$runner_digest" | grep -Eq '^[0-9a-f]{64}$' || {
+            echo "::error::mcp-server registry digest is not sha256:64hex" >&2
+            exit 1
+          }
+
+          docker volume create "$auth_volume" >/dev/null
+          printf '%s\n' "$REGISTRY_TOKEN" | docker run --rm -i \
+            --user 0:0 \
+            -e DOCKER_CONFIG=/docker-config \
+            -v "$auth_volume:/docker-config" \
+            --entrypoint /usr/bin/docker \
+            "$runner_ref" \
+            login "$REGISTRY" --username gpakoh --password-stdin
+          REGISTRY_TOKEN=""
+          unset REGISTRY_TOKEN
       - name: Deploy, smoke-test, roll back on failure
         # DEPLOY_SHA pins deploy-from-registry.sh to the exact commit that
         # triggered this run (build-and-push already tagged images with

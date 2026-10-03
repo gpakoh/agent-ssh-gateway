@@ -945,6 +945,17 @@ class TestE2eFailsClosedWithoutBrowserToolchain:
             f"timeout-minutes={timeout}"
         )
 
+    def test_e2e_driver_uses_eager_page_load_strategy(self):
+        """The UI assertions wait on concrete DOM state after navigation.
+
+        Waiting for Chrome's full ``load`` event made one otherwise healthy
+        E2E run sit inside ``drv.get`` until the 600s renderer timeout.  Eager
+        navigation returns after DOMContentLoaded, while the existing explicit
+        waits still prove the UI actually became usable.
+        """
+        text = E2E_WEBUI_PATH.read_text(encoding="utf-8")
+        assert 'opts.page_load_strategy = "eager"' in text
+
     def test_remote_selenium_sidecar_bounds_session_and_cpu(self):
         """Every ``docker run`` of the Selenium sidecar must bound the Grid
         session lifetime and the browser's CPU/RAM appetite.
@@ -1612,6 +1623,64 @@ class TestPrBuildsAndSmokeTestsDockerArtifact:
             assert f"${env_name}" in smoke
             assert exact_tag not in smoke
         assert "manifest unknown" in smoke
+
+
+class TestDeployProvisionsComposeRegistryAuth:
+    """The post-merge deploy lane owns private-registry auth provisioning.
+
+    The registry token must stay in Gitea Actions secrets and reach Docker only
+    over stdin.  MCP receives only the non-secret operator volume name.
+    """
+
+    @staticmethod
+    def _job() -> dict:
+        return _load_workflow(CI_WORKFLOW_PATH)["jobs"]["deploy"]
+
+    def test_deploy_job_declares_only_the_nonsecret_auth_volume_name(self):
+        env = self._job()["env"]
+        assert env["MCP_COMPOSE_DOCKER_CONFIG_VOLUME"] == "mcp-compose-registry-auth"
+        assert "REGISTRY_TOKEN" not in env
+
+    def test_provisioning_runs_after_registry_login_and_before_deploy(self):
+        names = [step.get("name") for step in self._job()["steps"]]
+        assert names.index("Log in to the Gitea container registry") < names.index(
+            "Provision Compose registry auth volume"
+        ) < names.index("Deploy, smoke-test, roll back on failure")
+
+    def test_provisioning_uses_secret_via_stdin_and_digest_pinned_mcp_image(self):
+        step = next(
+            step
+            for step in self._job()["steps"]
+            if step.get("name") == "Provision Compose registry auth volume"
+        )
+        assert step["env"] == {"REGISTRY_TOKEN": "${{ secrets.REGISTRY_TOKEN }}"}
+
+        run = step["run"]
+        assert "${{ secrets.REGISTRY_TOKEN }}" not in run
+        assert "set -euo pipefail" in run
+        assert 'auth_volume="${MCP_COMPOSE_DOCKER_CONFIG_VOLUME:?' in run
+        assert 'docker volume create "$auth_volume"' in run
+        assert 'runner_tag="$REGISTRY/gpakoh/mcp-server:${{ github.sha }}"' in run
+        assert 'docker pull "$runner_tag"' in run
+        assert "RepoDigests" in run
+        assert "@sha256:" in run
+        assert "--user 0:0" in run
+        assert "-e DOCKER_CONFIG=/docker-config" in run
+        assert '-v "$auth_volume:/docker-config"' in run
+        assert "--entrypoint /usr/bin/docker" in run
+        assert "--password-stdin" in run
+        assert 'printf \'%s\\n\' "$REGISTRY_TOKEN"' in run
+        assert 'REGISTRY_TOKEN=""' in run
+        assert "unset REGISTRY_TOKEN" in run
+
+        syntax = subprocess.run(
+            ["bash", "-n"],
+            input=run.replace("${{ github.sha }}", "0" * 40),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert syntax.returncode == 0, syntax.stderr
 
 
 class TestInstallPackageNetworkResilience:
