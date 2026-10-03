@@ -836,6 +836,7 @@ jobs:
       - name: Provision Compose registry auth volume
         env:
           REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        shell: bash
         run: |
           set -euo pipefail
           auth_volume="${MCP_COMPOSE_DOCKER_CONFIG_VOLUME:?MCP_COMPOSE_DOCKER_CONFIG_VOLUME must be set}"
