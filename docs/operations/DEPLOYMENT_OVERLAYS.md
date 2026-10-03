@@ -115,29 +115,40 @@ implicit project directory or when the setting is empty. Mutable image tags are
 rejected. Compose builds that need sources outside the selected project need a
 separately prepared image; the helper does not mount a parent workspace.
 
-For private registries, provision an operator-owned Docker config volume and set
-`MCP_COMPOSE_DOCKER_CONFIG_VOLUME` in the private `docker/.env` to that volume
-name. The pinned Compose helper mounts the volume read-only at
-`/run/mcp-docker-config` and sets `DOCKER_CONFIG` to that directory. Only the
-validated volume name is passed through the MCP service; the registry username
-and token never become MCP tool arguments, Compose variables, or tracked files.
+For private registries, the production deploy job owns an operator Docker
+config volume named `mcp-compose-registry-auth`. After its normal registry
+login, CI resolves the exact just-published MCP image to a registry digest,
+uses that immutable image only as a Docker CLI helper, and rotates the volume
+with `docker login --password-stdin` from the Gitea Actions `REGISTRY_TOKEN`
+secret. The deploy job exports only
+`MCP_COMPOSE_DOCKER_CONFIG_VOLUME=mcp-compose-registry-auth` to Compose, so the
+recreated `mcp-oauth` receives the non-secret selector while the registry token
+never becomes an MCP tool argument, Compose variable, tracked file, or
+container environment value.
 
-Populate or rotate that volume outside ChatGPT/MCP using an approved,
-digest-pinned Docker CLI image and `docker login --password-stdin`, for example:
+The pinned Compose helper later mounts that volume read-only at
+`/run/mcp-docker-config` and sets `DOCKER_CONFIG` to that directory. The volume
+must contain Docker client `config.json`; it is deliberately not mounted into
+`mcp-oauth` itself, only into the short-lived pinned Compose helper when a
+validated project directory is used.
+
+For a manual/non-CI deployment, provision or rotate the same operator-owned
+volume outside ChatGPT/MCP using an approved digest-pinned Docker CLI image and
+`docker login --password-stdin`, then set the selector in the private
+`docker/.env`, for example:
 
 ```bash
 docker volume create mcp-compose-registry-auth
 printf '%s' "$REGISTRY_TOKEN" | docker run --rm -i \
-  -v mcp-compose-registry-auth:/root/.docker \
+  --user 0:0 \
+  -e DOCKER_CONFIG=/docker-config \
+  -v mcp-compose-registry-auth:/docker-config \
   --entrypoint /usr/bin/docker "$MCP_COMPOSE_RUNNER_IMAGE" \
   login "$REGISTRY" --username "$REGISTRY_USER" --password-stdin
 ```
 
 Then set `MCP_COMPOSE_DOCKER_CONFIG_VOLUME=mcp-compose-registry-auth` in
-`docker/.env` and recreate `mcp-oauth`. The volume must contain the Docker
-client `config.json`; it is deliberately not mounted into `mcp-oauth` itself,
-only into the short-lived pinned Compose helper when a validated project
-directory is used.
+`docker/.env` and recreate `mcp-oauth`.
 
 Candidate preparation scans only deterministic ids that can belong to the
 requested project and branch. Missing or unsafe metadata in that lineage still
