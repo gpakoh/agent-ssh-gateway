@@ -1654,6 +1654,10 @@ class TestDeployProvisionsComposeRegistryAuth:
             if step.get("name") == "Provision Compose registry auth volume"
         )
         assert step["env"] == {"REGISTRY_TOKEN": "${{ secrets.REGISTRY_TOKEN }}"}
+        assert step.get("shell") == "bash", (
+            "the provisioning script uses set -o pipefail and must run under bash, "
+            "not the runner's default /bin/sh"
+        )
 
         run = step["run"]
         assert "${{ secrets.REGISTRY_TOKEN }}" not in run
