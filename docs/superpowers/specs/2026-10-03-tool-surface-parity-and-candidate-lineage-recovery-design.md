@@ -571,7 +571,7 @@ Baseline for step 4, before the update: `main` was
 never modified or merged by this work.
 
 PR #433 (`chore/reconcile-pr400-stale-20261003`, worktree
-`/media/ssd120/tmp/opencode/asg-reconcile`) and its stale `#400` branch are
+`<workspace-root>/asg-reconcile`) and its stale `#400` branch are
 updated to current `master` **after** this verification succeeds.
 
 ## 8. Risks and open questions
