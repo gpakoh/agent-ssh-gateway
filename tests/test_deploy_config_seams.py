@@ -1653,7 +1653,10 @@ class TestDeployProvisionsComposeRegistryAuth:
             for step in self._job()["steps"]
             if step.get("name") == "Provision Compose registry auth volume"
         )
-        assert step["env"] == {"REGISTRY_TOKEN": "${{ secrets.REGISTRY_TOKEN }}"}
+        assert step.get("env", {}) == {}, (
+            "the provisioning step must not receive REGISTRY_TOKEN; it should reuse "
+            "the authenticated Docker config created by the preceding login step"
+        )
         assert step.get("shell") == "bash", (
             "the provisioning script uses set -o pipefail and must run under bash, "
             "not the runner's default /bin/sh"
@@ -1661,21 +1664,25 @@ class TestDeployProvisionsComposeRegistryAuth:
 
         run = step["run"]
         assert "${{ secrets.REGISTRY_TOKEN }}" not in run
+        assert "REGISTRY_TOKEN" not in run
         assert "set -euo pipefail" in run
         assert 'auth_volume="${MCP_COMPOSE_DOCKER_CONFIG_VOLUME:?' in run
+        assert 'auth_config="${DOCKER_CONFIG:-$HOME/.docker}/config.json"' in run
+        assert 'test -s "$auth_config"' in run
         assert 'docker volume create "$auth_volume"' in run
         assert 'runner_tag="$REGISTRY/gpakoh/mcp-server:${{ github.sha }}"' in run
         assert 'docker pull "$runner_tag"' in run
         assert "RepoDigests" in run
         assert "@sha256:" in run
         assert "--user 0:0" in run
-        assert "-e DOCKER_CONFIG=/docker-config" in run
         assert '-v "$auth_volume:/docker-config"' in run
-        assert "--entrypoint /usr/bin/docker" in run
-        assert "--password-stdin" in run
-        assert 'printf \'%s\\n\' "$REGISTRY_TOKEN"' in run
-        assert 'REGISTRY_TOKEN=""' in run
-        assert "unset REGISTRY_TOKEN" in run
+        assert "--entrypoint /bin/sh" in run
+        assert "cat > /docker-config/config.json" in run
+        assert "chmod 600 /docker-config/config.json" in run
+        assert '< "$auth_config"' in run
+        assert 'login "$REGISTRY"' not in run
+        assert "--entrypoint /usr/bin/docker" not in run
+        assert "--password-stdin" not in run
 
         syntax = subprocess.run(
             ["bash", "-n"],

@@ -834,19 +834,20 @@ jobs:
         run: |
           printf '%s\n' "${{ secrets.REGISTRY_TOKEN }}" | bash scripts/ci-docker-login-retry.sh "$REGISTRY" gpakoh
       - name: Provision Compose registry auth volume
-        env:
-          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
           auth_volume="${MCP_COMPOSE_DOCKER_CONFIG_VOLUME:?MCP_COMPOSE_DOCKER_CONFIG_VOLUME must be set}"
           : "${REGISTRY:?REGISTRY must be set}"
-          : "${REGISTRY_TOKEN:?REGISTRY_TOKEN must be set}"
+          auth_config="${DOCKER_CONFIG:-$HOME/.docker}/config.json"
+          test -s "$auth_config"
 
-          # Reuse the exact MCP artifact from this workflow run as the Docker
-          # CLI helper. It already contains /usr/bin/docker; resolving its
-          # RepoDigest after an authenticated pull makes the credential writer
-          # immutable too, instead of trusting a mutable helper tag.
+          # Reuse the exact MCP artifact from this workflow run as the immutable
+          # helper container, but do not perform a second registry login here.
+          # The preceding host-side login already succeeded with this runner's
+          # registry transport policy (including HTTP/insecure registries).
+          # Stream that authenticated Docker config over stdin into the
+          # operator-owned volume so no credential value enters MCP args/env.
           runner_tag="$REGISTRY/gpakoh/mcp-server:${{ github.sha }}"
           docker pull "$runner_tag" >/dev/null
           runner_ref="$(docker image inspect --format '{{index .RepoDigests 0}}' "$runner_tag")"
@@ -864,15 +865,13 @@ jobs:
           }
 
           docker volume create "$auth_volume" >/dev/null
-          printf '%s\n' "$REGISTRY_TOKEN" | docker run --rm -i \
+          docker run --rm -i \
             --user 0:0 \
-            -e DOCKER_CONFIG=/docker-config \
             -v "$auth_volume:/docker-config" \
-            --entrypoint /usr/bin/docker \
+            --entrypoint /bin/sh \
             "$runner_ref" \
-            login "$REGISTRY" --username gpakoh --password-stdin
-          REGISTRY_TOKEN=""
-          unset REGISTRY_TOKEN
+            -c 'set -eu; umask 077; cat > /docker-config/config.json; chmod 600 /docker-config/config.json' \
+            < "$auth_config"
       - name: Deploy, smoke-test, roll back on failure
         # DEPLOY_SHA pins deploy-from-registry.sh to the exact commit that
         # triggered this run (build-and-push already tagged images with
