@@ -278,6 +278,10 @@ services:
       # Only the admin OAuth plane may delegate Compose configuration reads.
       # deploy-from-registry sets this to the exact MCP image digest.
       - MCP_COMPOSE_RUNNER_IMAGE=${MCP_COMPOSE_RUNNER_IMAGE:-}
+      # Optional operator-owned Docker config volume for private-registry
+      # pulls performed by the pinned Compose runner. Only the volume name
+      # crosses this boundary; registry credentials never enter Compose args.
+      - MCP_COMPOSE_DOCKER_CONFIG_VOLUME=${MCP_COMPOSE_DOCKER_CONFIG_VOLUME:-}
       - MCP_GATEWAY_WRITE_MODE=full
       - MCP_CLIENT_SAFE_MODE=true
       - MCP_ACCESS_PROFILE=full

@@ -760,6 +760,7 @@ class DockerClient:
 
     def _compose_base_argv(self, project_dir: str | None = None) -> list[str]:
         runner_image = os.environ.get("MCP_COMPOSE_RUNNER_IMAGE", "").strip()
+        registry_auth_volume = os.environ.get("MCP_COMPOSE_DOCKER_CONFIG_VOLUME", "").strip()
         argv = [DOCKER_BIN, "compose"]
         if runner_image and project_dir is not None:
             # Operator-controlled, immutable helper. Only the validated project
@@ -782,8 +783,18 @@ class DockerClient:
                 "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m",
                 "--mount", f"type=bind,src={resolved},dst={resolved},readonly",
                 "--mount", "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock",
-                "--entrypoint", "/usr/bin/docker", runner_image, "compose",
             ]
+            if registry_auth_volume:
+                self._validate_volume_name(registry_auth_volume)
+                argv.extend(
+                    [
+                        "--mount",
+                        f"type=volume,src={registry_auth_volume},dst=/run/mcp-docker-config,readonly",
+                        "--env",
+                        "DOCKER_CONFIG=/run/mcp-docker-config",
+                    ]
+                )
+            argv.extend(["--entrypoint", "/usr/bin/docker", runner_image, "compose"])
             project_dir = resolved
         if project_dir:
             argv.extend(["--project-directory", project_dir])
