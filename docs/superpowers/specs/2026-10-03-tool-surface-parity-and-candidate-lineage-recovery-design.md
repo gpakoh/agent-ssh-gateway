@@ -385,7 +385,32 @@ recoverable?". Exactly two constructors are permitted:
 If the HEAD is not delivered to a protected branch **and** has no archive
 preservation, cleanup is forbidden. There is no third path.
 
-### 3.6 Adopt semantics
+### 3.8 Scan behaviour for an unreadable legacy candidate
+
+`_find_lineage_claimant` (`:1288-1295`) re-raises, so one unreadable candidate
+aborts the scan for **every** lineage. That is the availability half of the
+deadlock; the safety half is that simply skipping such a candidate would be wrong,
+because it might genuinely claim the lineage being prepared, and skipping would
+let a second clone be created for the same `source_project` + `branch`.
+
+The resolution is to separate *cannot claim* from *cannot prove*, using git
+objects rather than the directory name (per §3.3, identity never comes from the
+name):
+
+- For a legacy candidate whose metadata is unreadable or incomplete, read its
+  **actual current branch** from git.
+- If that branch differs from the requested branch, the candidate **cannot claim
+  this lineage** ⇒ skip it. Unrelated preparations stop being poisoned, which is
+  the availability fix.
+- If that branch equals the requested branch, the candidate **may claim it** and
+  its identity cannot be proven ⇒ **fail closed**, with a typed error naming the
+  specific candidate and a `repair_action` pointing at the adopt tool from §3.3.
+
+This is strictly narrower than today's behaviour: unrelated lineages are unblocked,
+same-branch ambiguity still blocks, and no candidate is ever silently ignored while
+it could be a claimant.
+
+### 3.9 Adopt semantics
 
 - **Non-destructive** and **idempotent**.
 - Writes canonical metadata via `_write_metadata` (`:569`) **only after** the full
@@ -402,7 +427,7 @@ preservation, cleanup is forbidden. There is no third path.
   does not match the scanning branch.
 - Never deletes, never renames, never moves a branch, never touches `HEAD`.
 
-### 3.7 Cleanup semantics
+### 3.10 Cleanup semantics
 
 - Explicit, opt-in, and separate from adopt. Reuses the existing
   `_cleanup_candidate_locked` (`:1712`) path unchanged in structure: lineage lock,
