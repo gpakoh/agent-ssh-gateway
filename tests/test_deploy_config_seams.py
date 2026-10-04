@@ -973,6 +973,17 @@ class TestE2eFailsClosedWithoutBrowserToolchain:
         assert "time.sleep(E2E_REMOTE_SESSION_RETRY_DELAY_SECONDS)" in text
         assert "drv = _new_remote_driver(opts)" in text
 
+    def test_e2e_browser_never_uses_runner_proxy_for_loopback_fixture(self):
+        """Chromium itself must bypass any inherited CI/package proxy.
+
+        Run #13693 had a healthy uvicorn fixture and Selenium session but all
+        four browser tests timed out waiting for the loopback login form. The
+        browser only needs 127.0.0.1 in this suite, so force direct navigation
+        instead of relying on runner- or container-level proxy inheritance.
+        """
+        text = E2E_WEBUI_PATH.read_text(encoding="utf-8")
+        assert 'opts.add_argument("--no-proxy-server")' in text
+
     def test_remote_selenium_sidecar_bounds_session_and_cpu(self):
         """Every ``docker run`` of the Selenium sidecar must bound the Grid
         session lifetime and the browser's CPU/RAM appetite.

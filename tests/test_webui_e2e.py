@@ -212,6 +212,10 @@ def driver():
     # contract and provide the bounded readiness signal we need.
     opts.page_load_strategy = "none"
     opts.add_argument("--headless=new")
+    # These E2E tests only navigate to the loopback uvicorn fixture. Make that
+    # contract explicit at the browser layer so inherited runner/Docker proxy
+    # settings cannot route 127.0.0.1 through an external package proxy.
+    opts.add_argument("--no-proxy-server")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
