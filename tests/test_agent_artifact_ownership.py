@@ -388,6 +388,10 @@ def test_sentence_like_model_prose_transitions_proxy_to_runtime(
     monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "true")
     monkeypatch.setenv("OPENCODE_STARTUP_RESERVE_BYTES", "0")
     monkeypatch.setenv("OPENCODE_ADMISSION_WAIT_SECONDS", "0")
+    # This test verifies the proxy->runtime state transition, not dependency
+    # bootstrap. Keep supervisor post-run hermetic so a slow package index
+    # cannot consume the communicate() budget after the fake worker exits.
+    monkeypatch.setenv("UV_OFFLINE", "1")
     source = tmp_path / "source"
     _init_repo(source)
     artifacts = tmp_path / "artifacts"
