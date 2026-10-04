@@ -6,22 +6,14 @@ This file is the active backlog only. Completed audit notes, fixed CI blockers,
 merged PR evidence, and superseded diagnostics should live in PR history,
 changelogs, or dedicated audit archives — not in TODO.
 
-Open backlog count after cleanup: **41**
+Open backlog count after cleanup: **40**
 
-- **P1 / critical:** 12
+- **P1 / critical:** 11
 - **P2 / important:** 22
 - **P3 / capability / wishlist:** 7
 
 ## P1 / Critical blockers
 
-
-1. ⬜ **Add guarded `git_fetch` and exact-head workspace refresh.**
-   Gateway can detect stale PR branches and outdated local refs, but cannot update
-   remote-tracking refs or refresh a clean workspace to an exact Gitea SHA through
-   a typed tool. Add an audited fetch/refresh path with clean-worktree and
-   expected-state guards, no implicit checkout/merge by default, before/after SHA
-   evidence, and typed errors for dirty trees, disallowed remotes, and network
-   failures.
 
 2. ⬜ **Provide a canonical write-plane recovery path.**
    Some projects report candidate fallback while task policy requires canonical
