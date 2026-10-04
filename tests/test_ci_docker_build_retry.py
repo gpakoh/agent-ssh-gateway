@@ -58,6 +58,16 @@ case "$FAKE_DOCKER_MODE" in
     fi
     exit 0
     ;;
+  proxy_502_until_direct)
+    if [ -z "${HTTP_PROXY:-}" ] && [ -z "${HTTPS_PROXY:-}" ] && \
+       [ -z "${http_proxy:-}" ] && [ -z "${https_proxy:-}" ] && \
+       [[ "$*" == *"--build-arg http_proxy= --build-arg https_proxy= --build-arg HTTP_PROXY= --build-arg HTTPS_PROXY="* ]]; then
+      exit 0
+    fi
+    echo 'Err:1 http://deb.debian.org/debian trixie InRelease' >&2
+    echo '  502  Bad Gateway [IP: 192.168.1.199 3128]' >&2
+    exit 1
+    ;;
   deterministic_failure)
     echo 'Dockerfile:42: unknown instruction: BROKEN' >&2
     exit 1
@@ -102,6 +112,49 @@ def _run_wrapper(tmp_path: Path, mode: str) -> tuple[subprocess.CompletedProcess
     return result, counter
 
 
+def _run_wrapper_with_proxy_args(
+    tmp_path: Path,
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    env, counter = _fake_docker(tmp_path, "proxy_502_until_direct")
+    proxy = "http://proxy.example:3128"
+    env.update(
+        {
+            "HTTP_PROXY": proxy,
+            "HTTPS_PROXY": proxy,
+            "http_proxy": proxy,
+            "https_proxy": proxy,
+        }
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "-f",
+            "Dockerfile.test",
+            "--build-arg",
+            f"http_proxy={proxy}",
+            "--build-arg",
+            f"https_proxy={proxy}",
+            "--build-arg",
+            f"HTTP_PROXY={proxy}",
+            "--build-arg",
+            f"HTTPS_PROXY={proxy}",
+            "--build-arg",
+            "KEEP=1",
+            "-t",
+            "example/image:test",
+            ".",
+        ],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    return result, counter
+
+
 def test_transient_registry_failure_retries_and_recovers(tmp_path: Path) -> None:
     result, counter = _run_wrapper(tmp_path, "transient_then_success")
 
@@ -126,6 +179,29 @@ def test_apt_proxy_502_is_classified_as_transient_even_with_secondary_dependency
     assert result.returncode == 0
     assert counter.read_text(encoding="utf-8").strip() == "2"
     assert "transient network/registry error; retrying" in result.stderr
+
+
+def test_persistent_proxy_502_falls_back_once_with_proxy_args_cleared(
+    tmp_path: Path,
+) -> None:
+    result, counter = _run_wrapper_with_proxy_args(tmp_path)
+    args_lines = (tmp_path / "args.log").read_text(encoding="utf-8").splitlines()
+
+    assert result.returncode == 0
+    assert counter.read_text(encoding="utf-8").strip() == "4"
+    assert len(args_lines) == 4
+    assert args_lines[:3] == [args_lines[0]] * 3
+    assert "http://proxy.example:3128" in args_lines[0]
+    assert "http://proxy.example:3128" not in args_lines[3]
+    assert "--build-arg http_proxy=" in args_lines[3]
+    assert "--build-arg https_proxy=" in args_lines[3]
+    assert "--build-arg HTTP_PROXY=" in args_lines[3]
+    assert "--build-arg HTTPS_PROXY=" in args_lines[3]
+    assert "--build-arg KEEP=1" in args_lines[3]
+    assert "-t example/image:test ." in args_lines[3]
+    assert "proxy retries exhausted; trying one direct fallback" in result.stderr
+    assert "docker-build-direct-fallback-end" in result.stderr
+    assert "status=success" in result.stderr
 
 
 def test_deterministic_build_failure_is_not_retried(tmp_path: Path) -> None:

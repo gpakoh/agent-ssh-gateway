@@ -23,6 +23,47 @@ is_transient_network_failure() {
     "$log_file"
 }
 
+original_args=("$@")
+proxy_build_arg_present=0
+direct_args=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --build-arg)
+      direct_args+=("$1")
+      shift
+      if [ "$#" -eq 0 ]; then
+        break
+      fi
+      case "$1" in
+        http_proxy|https_proxy|all_proxy|ftp_proxy|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|FTP_PROXY)
+          proxy_build_arg_present=1
+          direct_args+=("$1=")
+          ;;
+        http_proxy=*|https_proxy=*|all_proxy=*|ftp_proxy=*|HTTP_PROXY=*|HTTPS_PROXY=*|ALL_PROXY=*|FTP_PROXY=*)
+          proxy_build_arg_present=1
+          direct_args+=("${1%%=*}=")
+          ;;
+        *)
+          direct_args+=("$1")
+          ;;
+      esac
+      ;;
+    --build-arg=http_proxy|--build-arg=https_proxy|--build-arg=all_proxy|--build-arg=ftp_proxy|--build-arg=HTTP_PROXY|--build-arg=HTTPS_PROXY|--build-arg=ALL_PROXY|--build-arg=FTP_PROXY)
+      proxy_build_arg_present=1
+      direct_args+=("$1=")
+      ;;
+    --build-arg=http_proxy=*|--build-arg=https_proxy=*|--build-arg=all_proxy=*|--build-arg=ftp_proxy=*|--build-arg=HTTP_PROXY=*|--build-arg=HTTPS_PROXY=*|--build-arg=ALL_PROXY=*|--build-arg=FTP_PROXY=*)
+      proxy_build_arg_present=1
+      payload="${1#--build-arg=}"
+      direct_args+=("--build-arg=${payload%%=*}=")
+      ;;
+    *)
+      direct_args+=("$1")
+      ;;
+  esac
+  shift
+done
+
 sanitize() {
   local value="${1:-}"
   if [ -z "$value" ]; then
@@ -34,7 +75,7 @@ sanitize() {
 
 phase="unknown"
 expect_dockerfile=0
-for arg in "$@"; do
+for arg in "${original_args[@]}"; do
   if [ "$expect_dockerfile" -eq 1 ]; then
     phase=$(sanitize "$arg")
     expect_dockerfile=0
@@ -65,7 +106,7 @@ while [ "$attempt" -le "$max_attempts" ]; do
   : > "$log_file"
   start_epoch=$(date +%s)
   notice start "phase=${phase} runner=${runner} run_id=${run_id} job=${job} attempt=${attempt}/${max_attempts}"
-  docker build "$@" 2>&1 | tee "$log_file"
+  docker build "${original_args[@]}" 2>&1 | tee "$log_file"
   rc=${PIPESTATUS[0]}
   duration_s=$(( $(date +%s) - start_epoch ))
 
@@ -83,6 +124,23 @@ while [ "$attempt" -le "$max_attempts" ]; do
   notice end "phase=${phase} runner=${runner} run_id=${run_id} job=${job} attempt=${attempt}/${max_attempts} status=transient_failure duration_s=${duration_s}"
 
   if [ "$attempt" -ge "$max_attempts" ]; then
+    if [ "$proxy_build_arg_present" -eq 1 ]; then
+      echo "::warning::docker build proxy retries exhausted; trying one direct fallback with proxy build args cleared" >&2
+      : > "$log_file"
+      start_epoch=$(date +%s)
+      notice direct-fallback-start "phase=${phase} runner=${runner} run_id=${run_id} job=${job}"
+      env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy \
+        docker build "${direct_args[@]}" 2>&1 | tee "$log_file"
+      direct_rc=${PIPESTATUS[0]}
+      duration_s=$(( $(date +%s) - start_epoch ))
+      if [ "$direct_rc" -eq 0 ]; then
+        notice direct-fallback-end "phase=${phase} runner=${runner} run_id=${run_id} job=${job} status=success duration_s=${duration_s}"
+        exit 0
+      fi
+      notice direct-fallback-end "phase=${phase} runner=${runner} run_id=${run_id} job=${job} status=failure duration_s=${duration_s}"
+      echo "docker build direct fallback failed after ${attempt}/${max_attempts} transient-network proxy attempts" >&2
+      exit "$direct_rc"
+    fi
     echo "docker build failed after ${attempt}/${max_attempts} transient-network attempts" >&2
     exit "$rc"
   fi
