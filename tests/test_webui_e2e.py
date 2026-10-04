@@ -183,10 +183,12 @@ def server():
 def driver():
     opts = ChromeOptions()
     # Every navigation below is followed by an explicit wait for the DOM state
-    # the test actually needs. Waiting for Chrome's full load event adds no
-    # coverage and can wedge remote Chromium in drv.get() until the 600s
-    # renderer timeout under shared-runner pressure.
-    opts.page_load_strategy = "eager"
+    # the test actually needs. Even Selenium's "eager" strategy can leave a
+    # remote Chrome navigation blocked inside the renderer lifecycle until the
+    # page-load timeout under shared-runner pressure. Do not wait for browser
+    # load milestones here; the explicit element waits below are the real test
+    # contract and provide the bounded readiness signal we need.
+    opts.page_load_strategy = "none"
     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
