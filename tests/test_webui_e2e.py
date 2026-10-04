@@ -183,6 +183,15 @@ def server():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def _configure_browser_api_key(drv):
+    """Attach the fixture's API key to every browser HTTP request."""
+    drv.execute_cdp_cmd("Network.enable", {})
+    drv.execute_cdp_cmd(
+        "Network.setExtraHTTPHeaders",
+        {"headers": {"X-API-Key": "e2e-master-key"}},
+    )
+
+
 def _new_remote_driver(opts, base):
     """Create a remote session and prove it can render the loopback fixture.
 
@@ -196,6 +205,7 @@ def _new_remote_driver(opts, base):
         drv = None
         try:
             drv = webdriver.Remote(command_executor=_REMOTE_URL, options=opts)
+            _configure_browser_api_key(drv)
             drv.get(f"{base}/")
             WebDriverWait(drv, E2E_REMOTE_FIXTURE_READY_TIMEOUT_SECONDS).until(
                 EC.presence_of_element_located((By.ID, "appShell"))
@@ -239,6 +249,7 @@ def driver(server):
     else:
         opts.binary_location = _CHROMIUM
         drv = webdriver.Chrome(options=opts)
+        _configure_browser_api_key(drv)
         drv.set_window_size(1400, 1000)
     # Must stay below the Grid reaper window; see E2E_PAGE_LOAD_TIMEOUT_SECONDS.
     drv.set_page_load_timeout(E2E_PAGE_LOAD_TIMEOUT_SECONDS)

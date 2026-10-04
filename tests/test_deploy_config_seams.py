@@ -973,6 +973,9 @@ class TestE2eFailsClosedWithoutBrowserToolchain:
         assert "if attempt >= E2E_REMOTE_SESSION_ATTEMPTS" in text
         assert "time.sleep(E2E_REMOTE_SESSION_RETRY_DELAY_SECONDS)" in text
         assert 'EC.presence_of_element_located((By.ID, "appShell"))' in text
+        assert '"Network.setExtraHTTPHeaders"' in text
+        assert '"X-API-Key": "e2e-master-key"' in text
+        assert text.index("_configure_browser_api_key(drv)") < text.index('drv.get(f"{base}/")')
         assert "drv.quit()" in text
         assert "drv = _new_remote_driver(opts, base)" in text
 
