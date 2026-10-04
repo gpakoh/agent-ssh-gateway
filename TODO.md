@@ -45,10 +45,14 @@ Open backlog count after cleanup: **40**
 
 6. ⬜ **Keep ChatGPT-visible tool schemas in parity with server manifests.**
    Tools can appear available in `tools_manifest` while missing or having a
-   different callable schema in the ChatGPT resource catalog. Safety-required
-   preflight tools must be invokable from the same client surface as the mutation
-   they guard, or the mutation must fail early with a typed
-   `REQUIRED_PREFLIGHT_UNAVAILABLE` diagnostic.
+   different callable schema in the ChatGPT resource catalog. PR-A measurement
+   now accepts a bounded client-reported tool list, binds retained attestations to
+   the server-created MCP lifecycle + opaque auth identity + live toolset hash,
+   emits complete server/client diff diagnostics, and keeps incomplete omissions
+   explicitly unknown. Client reports remain unverified and do not gate existing
+   Git mutations. This item stays open until a real external connector submits a
+   complete report and identifies the filtering/caching/allowlist mechanism; do
+   not add a curated catalog workaround before that evidence exists.
 
 7. ⬜ **Reconcile Gitea Actions lifecycle, stranded jobs and cancellable runs.**
    CI runs/jobs can remain `waiting` / `in_progress` after all useful work is

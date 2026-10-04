@@ -63,6 +63,14 @@ from examples.mcp_server.mcp_audit import (
     get_audit_logger,  # noqa: F401 (facade: tests patch this name)
 )
 from examples.mcp_server.mcp_infra import auth_setup, gateway_errors, runtime, tool_registry
+from examples.mcp_server.surface_parity import (
+    ClientSurfaceAttestation,
+    clear_session_attestation,
+    load_session_attestation,
+    normalize_client_visible_tool_names,
+    normalize_required_guard_tool_names,
+    record_session_attestation,
+)
 
 _auth_settings, _auth_provider, _agent_router = auth_setup.setup()
 
@@ -90,6 +98,11 @@ async def _mcp_lifespan(_server: FastMCP) -> AsyncIterator[Any]:
     try:
         yield lifecycle_owner
     finally:
+        # Attestation ownership is purely local and must end before any
+        # cancellable network cleanup so a torn-down transport cannot leak
+        # client-reported catalog state into a later lifecycle.
+        clear_session_attestation(lifecycle_owner)
+
         gateway_pool = globals().get("_gateway_client_sessions")
         agent_pool = globals().get("_agent_client_sessions")
 
@@ -416,22 +429,59 @@ def gateway_tools_manifest(
     include_descriptions: bool = True,
     offset: int = 0,
     limit: int | None = None,
+    client_visible_tool_names: list[str] | None = None,
+    client_visible_tool_names_complete: bool = False,
+    required_guard_tool_names: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Return a read-only manifest of registered tools, modes, scopes, and access profiles.
-    No secrets, no env dumps, no network calls, no tool execution.
+    """Return the server tool manifest plus optional client-reported diagnostics.
 
-    Optional filters (scope/mode/name_prefix) and include_descriptions/
-    offset/limit keep the response small -- the unfiltered manifest lists
-    every registered tool's full description, which is expensive context
-    for an agent that only needs, say, the docker_* tool names. Each
-    entry also reports "available" (and "unavailable_reason" when false)
-    -- distinct from "enabled": a tool can be registered/enabled for this
-    mode yet still not actually work in this deployment (missing docker/
-    npx binary, Postgres not configured).
+    Client-visible tool names are bounded attestations only; they are never
+    independently verified and never become implicit mutation preconditions.
+    Reports are retained only when bound to the current server-created MCP
+    lifecycle, authenticated identity, and live toolset hash.
     """
-    return _run_gateway(
-        tool="tools_manifest",
-        fn=lambda: _build_manifest(
+
+    def _manifest() -> dict[str, Any]:
+        toolset_hash = compute_toolset_hash(mcp)
+        lifecycle_owner = _current_mcp_lifecycle_owner()
+        auth_identity = _current_auth_reuse_key()
+
+        # Validate every caller-controlled name before any state write.
+        required_guard_tools = normalize_required_guard_tool_names(
+            required_guard_tool_names or []
+        )
+
+        attestation: ClientSurfaceAttestation | None = None
+        observation_status = "not_supplied"
+        if client_visible_tool_names is not None:
+            normalized = normalize_client_visible_tool_names(client_visible_tool_names)
+            if lifecycle_owner is not None and auth_identity is not None and toolset_hash:
+                attestation = record_session_attestation(
+                    lifecycle_owner,
+                    auth_identity,
+                    toolset_hash,
+                    list(normalized),
+                    client_visible_tool_names_complete,
+                )
+                observation_status = "supplied_bound"
+            else:
+                attestation = ClientSurfaceAttestation(
+                    auth_identity="",
+                    toolset_hash=toolset_hash,
+                    names=normalized,
+                    complete=bool(client_visible_tool_names_complete),
+                )
+                observation_status = "supplied_unbound"
+        else:
+            attestation = load_session_attestation(
+                lifecycle_owner,
+                auth_identity,
+                toolset_hash,
+            )
+            if attestation is not None:
+                observation_status = "supplied_bound"
+
+        return _build_manifest(
             registered_tools=mcp._tool_manager.list_tools(),
             scope_enforcement=_scope_enforcement,
             scope=scope,
@@ -441,8 +491,13 @@ def gateway_tools_manifest(
             offset=offset,
             limit=limit,
             unavailable_tool_reasons=_unavailable_tool_reasons(),
-        ),
-    )
+            server_toolset_hash=toolset_hash,
+            client_attestation=attestation,
+            client_observation_status=observation_status,
+            required_guard_tools=required_guard_tools,
+        )
+
+    return _run_gateway(tool="tools_manifest", fn=_manifest)
 
 
 # ── Main ─────────────────────────────────────────────────────────

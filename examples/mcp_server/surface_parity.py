@@ -1,0 +1,180 @@
+"""Session-scoped diagnostics for external MCP tool-surface parity.
+
+The server-local MCP tool manager remains authoritative for registration.  Any
+external tool list supplied by a client is an unverified attestation used only
+for diagnostics; it must never become process-global truth or an implicit
+mutation precondition.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from typing import Any
+
+MAX_CLIENT_VISIBLE_TOOL_NAMES = 256
+MAX_CLIENT_VISIBLE_TOOL_NAME_BYTES = 128
+MAX_CLIENT_VISIBLE_TOOL_NAMES_BYTES = 16 * 1024
+MAX_REQUIRED_GUARD_TOOL_NAMES = 32
+
+_TOOL_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+
+
+@dataclass(frozen=True)
+class ClientSurfaceAttestation:
+    """One client-reported tool catalog bound to one server lifecycle."""
+
+    auth_identity: str
+    toolset_hash: str
+    names: tuple[str, ...]
+    complete: bool
+
+
+_SESSION_ATTESTATIONS: dict[object, ClientSurfaceAttestation] = {}
+
+
+def _normalize_tool_names(names: list[str], *, max_names: int) -> tuple[str, ...]:
+    if not isinstance(names, list):
+        raise ValueError("tool names must be a list")
+    if len(names) > max_names:
+        raise ValueError(f"tool names exceed maximum count {max_names}")
+
+    total_bytes = 0
+    normalized: list[str] = []
+    for name in names:
+        if not isinstance(name, str):
+            raise ValueError("tool name must be a string")
+        encoded = name.encode("utf-8")
+        if not encoded:
+            raise ValueError("tool name must not be empty")
+        if len(encoded) > MAX_CLIENT_VISIBLE_TOOL_NAME_BYTES:
+            raise ValueError(
+                f"tool name exceeds {MAX_CLIENT_VISIBLE_TOOL_NAME_BYTES} UTF-8 bytes"
+            )
+        total_bytes += len(encoded)
+        if total_bytes > MAX_CLIENT_VISIBLE_TOOL_NAMES_BYTES:
+            raise ValueError(
+                f"tool names exceed {MAX_CLIENT_VISIBLE_TOOL_NAMES_BYTES} aggregate UTF-8 bytes"
+            )
+        if _TOOL_NAME_RE.fullmatch(name) is None:
+            raise ValueError(f"invalid tool name: {name!r}")
+        normalized.append(name)
+
+    return tuple(sorted(set(normalized)))
+
+
+def normalize_client_visible_tool_names(names: list[str]) -> tuple[str, ...]:
+    """Validate, deduplicate, and sort one client-visible tool report."""
+
+    return _normalize_tool_names(names, max_names=MAX_CLIENT_VISIBLE_TOOL_NAMES)
+
+
+def normalize_required_guard_tool_names(names: list[str]) -> tuple[str, ...]:
+    """Validate bounded call-context guard requirements."""
+
+    return _normalize_tool_names(names, max_names=MAX_REQUIRED_GUARD_TOOL_NAMES)
+
+
+def record_session_attestation(
+    lifecycle_owner: object,
+    auth_identity: str,
+    toolset_hash: str,
+    names: list[str],
+    complete: bool,
+) -> ClientSurfaceAttestation:
+    """Store a validated attestation under the server-created lifecycle object."""
+
+    if lifecycle_owner is None:
+        raise ValueError("lifecycle_owner is required")
+    if not isinstance(auth_identity, str) or not auth_identity:
+        raise ValueError("auth_identity is required")
+    if not isinstance(toolset_hash, str) or not toolset_hash:
+        raise ValueError("toolset_hash is required")
+    normalized = normalize_client_visible_tool_names(names)
+    attestation = ClientSurfaceAttestation(
+        auth_identity=auth_identity,
+        toolset_hash=toolset_hash,
+        names=normalized,
+        complete=bool(complete),
+    )
+    _SESSION_ATTESTATIONS[lifecycle_owner] = attestation
+    return attestation
+
+
+def load_session_attestation(
+    lifecycle_owner: object | None,
+    auth_identity: str | None,
+    toolset_hash: str | None,
+) -> ClientSurfaceAttestation | None:
+    """Load only an attestation still bound to the current identity/toolset."""
+
+    if lifecycle_owner is None or auth_identity is None or toolset_hash is None:
+        return None
+    attestation = _SESSION_ATTESTATIONS.get(lifecycle_owner)
+    if attestation is None:
+        return None
+    if attestation.auth_identity != auth_identity or attestation.toolset_hash != toolset_hash:
+        return None
+    return attestation
+
+
+def clear_session_attestation(lifecycle_owner: object) -> None:
+    """Forget exactly one lifecycle's client attestation."""
+
+    _SESSION_ATTESTATIONS.pop(lifecycle_owner, None)
+
+
+def clear_all_attestations_for_tests() -> None:
+    """Reset process-local test state."""
+
+    _SESSION_ATTESTATIONS.clear()
+
+
+def evaluate_required_guards(
+    attestation: ClientSurfaceAttestation | None,
+    required_guard_tools: tuple[str, ...],
+) -> dict[str, Any]:
+    """Evaluate only explicitly declared call-context guard requirements.
+
+    Results deliberately use "reported" wording because the external catalog
+    is client-supplied and never independently verified by this server.
+    """
+
+    required = normalize_required_guard_tool_names(list(required_guard_tools))
+    if not required:
+        return {
+            "status": "no_dependency",
+            "required": [],
+            "reported_present": [],
+            "reported_absent": [],
+            "unknown": [],
+        }
+
+    if attestation is None:
+        return {
+            "status": "unknown",
+            "required": list(required),
+            "reported_present": [],
+            "reported_absent": [],
+            "unknown": list(required),
+        }
+
+    reported = set(attestation.names)
+    present = [name for name in required if name in reported]
+    omitted = [name for name in required if name not in reported]
+    if attestation.complete:
+        absent = omitted
+        unknown: list[str] = []
+        status = "reported_absent" if absent else "reported_present"
+    else:
+        absent = []
+        unknown = omitted
+        status = "unknown" if unknown else "reported_present"
+
+    return {
+        "status": status,
+        "required": list(required),
+        "reported_present": present,
+        "reported_absent": absent,
+        "unknown": unknown,
+    }
