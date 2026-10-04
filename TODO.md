@@ -1,15 +1,15 @@
 # Agent SSH Gateway — TODO
 
-Last cleaned: 2026-09-29.
+Last cleaned: 2026-10-04.
 
 This file is the active backlog only. Completed audit notes, fixed CI blockers,
 merged PR evidence, and superseded diagnostics should live in PR history,
 changelogs, or dedicated audit archives — not in TODO.
 
-Open backlog count after cleanup: **40**
+Open backlog count after cleanup: **32**
 
-- **P1 / critical:** 11
-- **P2 / important:** 22
+- **P1 / critical:** 10
+- **P2 / important:** 15
 - **P3 / capability / wishlist:** 7
 
 ## P1 / Critical blockers
@@ -21,13 +21,6 @@ Open backlog count after cleanup: **40**
    maintenance succeeds. Expose exact write capability for code, Git and handoff
    surfaces, and return `CANONICAL_WRITE_PLANE_UNAVAILABLE` with safe recovery
    steps when a clean writeable canonical workspace cannot be provisioned.
-
-3. ⬜ **Create a trusted exact-source delivery/materialization path.**
-   Operators need to review or deliver from an exact authorized Gitea commit or
-   an externally prepared clean workspace without mutating a stale canonical
-   checkout or requiring task-bound artifacts that are impossible to create from
-   the visible surface. The path must bind owner/repo/SHA, allowed files, clean
-   tree proof, checks, and push/PR evidence.
 
 4. ⬜ **Reconcile stale unbound fleet leases without duplicate work.**
    Historical `attempted` / `legacy_unknown` lease rows can consume all fleet
@@ -159,30 +152,6 @@ Open backlog count after cleanup: **40**
     such as `lost_after_restart`, `orphaned_attempt` or `artifact_incomplete`,
     including last useful activity and safe recovery guidance.
 
-17. ⬜ **Expose bounded agent logs and structured artifacts consistently.**
-    Fixed artifacts such as `opencode-output.log`, `agent-status.md`,
-    `agent-report.md`, `implementation-diff.patch`, heartbeat/proxy sidecars and
-    OpenCode upgrade receipts should be readable through bounded, redacted,
-    path-safe helpers that return structured `log_unavailable` / unsupported
-    diagnostics rather than raw shell requirements.
-
-18. ⬜ **Bootstrap local Git identity for managed delivery workspaces.**
-    Fresh managed/supervisor workspaces can reach `git commit` and fail with
-    `Author identity unknown`. Candidate creation or commit helpers should set a
-    safe local-only committer identity without touching global config.
-
-19. ⬜ **Preflight per-component Git write capability before mutations.**
-    Workspaces may have index/object writes available while refs are unwritable,
-    or vice versa. Branch creation, staging, commit and cleanup helpers must
-    check index, objects, refs and HEAD separately and return typed ownership or
-    permission diagnostics before partial mutation.
-
-20. ⬜ **Handle Git safe-directory ownership in all source-clone paths.**
-    `prepare_candidate_clone` and verifier/materializer source resolution can
-    fail on Git dubious-ownership checks. Use scoped/non-global safe-directory
-    configuration for approved registered sources or return a typed
-    `SOURCE_REPO_OWNERSHIP_BLOCKED` before registering partial candidates.
-
 21. ⬜ **Bind `gitea_get_file` content to the requested ref.**
     File reads must resolve branch/tag/SHA to an exact commit, fetch content from
     that exact commit, and return `requested_ref` plus `resolved_commit_sha`.
@@ -204,11 +173,6 @@ Open backlog count after cleanup: **40**
     API boundary with allowed values and typed diagnostics, not after long router
     or backend latency.
 
-25. ⬜ **Minimize `gitea_get_action_run` payloads.**
-    Single-run reads should use the same compact allowlisted shape as run lists,
-    avoiding raw nested Gitea actor/repository/user payloads unrelated to CI
-    gating.
-
 26. ⬜ **Add retry metadata and coalescing for rate-limit responses.**
     Rate-limit errors should expose retry-after, bucket identity and lower-cost
     alternate read guidance. Repeated schema/status reads should be coalesced
@@ -225,11 +189,6 @@ Open backlog count after cleanup: **40**
     release downstream jobs, or fail/reconcile explicitly rather than leaving the
     workflow indefinitely `in_progress`.
 
-29. ⬜ **Capture Selenium sidecar readiness diagnostics.**
-    E2E infrastructure failures before tests should preserve sidecar container
-    status/logs and distinguish startup crash, image/runtime failure and product
-    E2E failure. Retrying infra failures must not require source changes.
-
 30. ⬜ **Add Gitea Actions artifact listing and bounded download.**
     Operators can inspect runs/jobs/logs, but need first-class artifact metadata
     and safe archive/file retrieval with run/head provenance, size limits,
@@ -240,12 +199,6 @@ Open backlog count after cleanup: **40**
     or PR recreation. Require expected run id/head SHA/terminal failed state,
     reconcile ambiguous mutation responses, and return previous/new attempt plus
     selected jobs.
-
-32. ⬜ **Allow audited cleanup of superseded closed-unmerged PR branches.**
-    Branch deletion should support stale same-repo heads of closed-unmerged PRs
-    when the caller supplies exact branch SHA, verifies no open PR uses it, and
-    provides explicit superseding merged PR/ref evidence. Keep separate from the
-    narrower tree-equivalent cleanup already implemented.
 
 33. ⬜ **Align outer `run_agent` success envelopes with non-submission results.**
     Pre-submit validation failures, blocked terminal replays and other
