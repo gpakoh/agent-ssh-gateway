@@ -956,22 +956,25 @@ class TestE2eFailsClosedWithoutBrowserToolchain:
         text = E2E_WEBUI_PATH.read_text(encoding="utf-8")
         assert 'opts.page_load_strategy = "none"' in text
 
-    def test_remote_driver_retries_only_session_creation_failures(self):
-        """A ready Grid can still lose one Chromium DevTools startup race.
+    def test_remote_driver_retries_only_startup_and_fixture_readiness_failures(self):
+        """A ready Grid can still yield one unusable Chromium session.
 
-        Run #13675 reached a healthy /status endpoint, then the sole module
-        fixture attempt failed with SessionNotCreatedException and converted
-        all four tests into fixture errors. Retry must be bounded and limited
-        to that startup exception; real Web UI failures remain fail-closed.
+        Runs #13675 and #13725 reached a healthy Grid but respectively hit a
+        session-creation race and a session that never rendered the loopback
+        fixture. Retry is bounded to those startup/readiness failures; the real
+        Web UI assertions remain outside this loop and fail closed normally.
         """
         text = E2E_WEBUI_PATH.read_text(encoding="utf-8")
         assert "E2E_REMOTE_SESSION_ATTEMPTS = 3" in text
         assert "E2E_REMOTE_SESSION_RETRY_DELAY_SECONDS = 2.0" in text
-        assert "except SessionNotCreatedException" in text
+        assert "E2E_REMOTE_FIXTURE_READY_TIMEOUT_SECONDS = 20.0" in text
+        assert "except (SessionNotCreatedException, TimeoutException)" in text
         assert "for attempt in range(1, E2E_REMOTE_SESSION_ATTEMPTS + 1)" in text
         assert "if attempt >= E2E_REMOTE_SESSION_ATTEMPTS" in text
         assert "time.sleep(E2E_REMOTE_SESSION_RETRY_DELAY_SECONDS)" in text
-        assert "drv = _new_remote_driver(opts)" in text
+        assert 'EC.presence_of_element_located((By.ID, "appShell"))' in text
+        assert "drv.quit()" in text
+        assert "drv = _new_remote_driver(opts, base)" in text
 
     def test_e2e_browser_never_uses_runner_proxy_for_loopback_fixture(self):
         """Chromium itself must bypass any inherited CI/package proxy.

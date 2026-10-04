@@ -25,7 +25,7 @@ pytestmark = pytest.mark.e2e
 
 try:
     from selenium import webdriver
-    from selenium.common.exceptions import SessionNotCreatedException
+    from selenium.common.exceptions import SessionNotCreatedException, TimeoutException
     from selenium.webdriver.chrome.options import Options as ChromeOptions
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support import expected_conditions as EC
@@ -48,6 +48,7 @@ E2E_PAGE_LOAD_TIMEOUT_SECONDS = 600.0
 E2E_SCRIPT_TIMEOUT_SECONDS = 120.0
 E2E_REMOTE_SESSION_ATTEMPTS = 3
 E2E_REMOTE_SESSION_RETRY_DELAY_SECONDS = 2.0
+E2E_REMOTE_FIXTURE_READY_TIMEOUT_SECONDS = 20.0
 
 if not webdriver or (not _REMOTE_URL and not (_DRIVER and _CHROMIUM)):
     pytest.skip(
@@ -182,19 +183,31 @@ def server():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def _new_remote_driver(opts):
-    """Create one remote browser session with a bounded startup retry.
+def _new_remote_driver(opts, base):
+    """Create a remote session and prove it can render the loopback fixture.
 
-    Selenium Grid may report ready while Chromium still loses a single
-    DevToolsActivePort startup race. Retry only that session-construction
-    failure; all navigation and UI assertions remain fail-closed.
+    A Grid can report ready and accept a session while the newly-started
+    Chromium renderer is still wedged. Treat that as startup failure only when
+    the browser cannot see the fixture's static ``#appShell`` marker; real UI
+    assertions remain outside this retry loop and stay fail-closed.
     """
     last_error = None
     for attempt in range(1, E2E_REMOTE_SESSION_ATTEMPTS + 1):
+        drv = None
         try:
-            return webdriver.Remote(command_executor=_REMOTE_URL, options=opts)
-        except SessionNotCreatedException as exc:
+            drv = webdriver.Remote(command_executor=_REMOTE_URL, options=opts)
+            drv.get(f"{base}/")
+            WebDriverWait(drv, E2E_REMOTE_FIXTURE_READY_TIMEOUT_SECONDS).until(
+                EC.presence_of_element_located((By.ID, "appShell"))
+            )
+            return drv
+        except (SessionNotCreatedException, TimeoutException) as exc:
             last_error = exc
+            if drv is not None:
+                try:
+                    drv.quit()
+                except Exception:
+                    pass
             if attempt >= E2E_REMOTE_SESSION_ATTEMPTS:
                 raise
             time.sleep(E2E_REMOTE_SESSION_RETRY_DELAY_SECONDS)
@@ -202,7 +215,7 @@ def _new_remote_driver(opts):
 
 
 @pytest.fixture(scope="module")
-def driver():
+def driver(server):
     opts = ChromeOptions()
     # Every navigation below is followed by an explicit wait for the DOM state
     # the test actually needs. Even Selenium's "eager" strategy can leave a
@@ -220,8 +233,9 @@ def driver():
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--window-size=1400,1000")
+    base, _ = server
     if _REMOTE_URL:
-        drv = _new_remote_driver(opts)
+        drv = _new_remote_driver(opts, base)
     else:
         opts.binary_location = _CHROMIUM
         drv = webdriver.Chrome(options=opts)
