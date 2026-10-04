@@ -1728,9 +1728,11 @@ class TestInstallPackageNetworkResilience:
             assert "UV_HTTP_TIMEOUT=60 uv sync --frozen --extra dev" in run
             assert "uv sync attempt ${attempt}/5 failed" in run
             assert 'sleep "$delay"' in run
-            assert "package proxy exhausted for pip install uv; trying one direct fallback" in run
-            assert "package proxy exhausted for uv sync; trying one direct fallback" in run
+            assert "pip install uv retries exhausted; trying one direct fallback without proxy env" in run
+            assert "uv sync retries exhausted; trying one direct fallback without proxy env" in run
             assert "env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy" in run
+            assert 'if [ "$uv_ready" != "true" ] && [ -n "${CI_PACKAGE_HTTP_PROXY:-}${CI_PACKAGE_HTTPS_PROXY:-}" ]' not in run
+            assert 'if [ -n "${CI_PACKAGE_HTTP_PROXY:-}${CI_PACKAGE_HTTPS_PROXY:-}" ]; then\n            echo "::warning::uv sync retries exhausted' not in run
             assert run.rstrip().endswith("exit 1")
 
     def test_python_jobs_wire_optional_package_proxy_secrets(self):

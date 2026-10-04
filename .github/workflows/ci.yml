@@ -99,8 +99,8 @@ jobs:
               sleep "$delay"
             fi
           done
-          if [ "$uv_ready" != "true" ] && [ -n "${CI_PACKAGE_HTTP_PROXY:-}${CI_PACKAGE_HTTPS_PROXY:-}" ]; then
-            echo "::warning::package proxy exhausted for pip install uv; trying one direct fallback"
+          if [ "$uv_ready" != "true" ]; then
+            echo "::warning::pip install uv retries exhausted; trying one direct fallback without proxy env"
             if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy python -m pip install uv; then
               uv_ready=true
             fi
@@ -119,11 +119,9 @@ jobs:
               sleep "$delay"
             fi
           done
-          if [ -n "${CI_PACKAGE_HTTP_PROXY:-}${CI_PACKAGE_HTTPS_PROXY:-}" ]; then
-            echo "::warning::package proxy exhausted for uv sync; trying one direct fallback"
-            if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy UV_HTTP_TIMEOUT=60 uv sync --frozen --extra dev; then
-              exit 0
-            fi
+          echo "::warning::uv sync retries exhausted; trying one direct fallback without proxy env"
+          if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy UV_HTTP_TIMEOUT=60 uv sync --frozen --extra dev; then
+            exit 0
           fi
           exit 1
 
@@ -316,8 +314,8 @@ jobs:
               sleep "$delay"
             fi
           done
-          if [ "$uv_ready" != "true" ] && [ -n "${CI_PACKAGE_HTTP_PROXY:-}${CI_PACKAGE_HTTPS_PROXY:-}" ]; then
-            echo "::warning::package proxy exhausted for pip install uv; trying one direct fallback"
+          if [ "$uv_ready" != "true" ]; then
+            echo "::warning::pip install uv retries exhausted; trying one direct fallback without proxy env"
             if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy python -m pip install uv; then
               uv_ready=true
             fi
@@ -336,11 +334,9 @@ jobs:
               sleep "$delay"
             fi
           done
-          if [ -n "${CI_PACKAGE_HTTP_PROXY:-}${CI_PACKAGE_HTTPS_PROXY:-}" ]; then
-            echo "::warning::package proxy exhausted for uv sync; trying one direct fallback"
-            if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy UV_HTTP_TIMEOUT=60 uv sync --frozen --extra dev; then
-              exit 0
-            fi
+          echo "::warning::uv sync retries exhausted; trying one direct fallback without proxy env"
+          if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy UV_HTTP_TIMEOUT=60 uv sync --frozen --extra dev; then
+            exit 0
           fi
           exit 1
 
