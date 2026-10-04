@@ -956,6 +956,23 @@ class TestE2eFailsClosedWithoutBrowserToolchain:
         text = E2E_WEBUI_PATH.read_text(encoding="utf-8")
         assert 'opts.page_load_strategy = "none"' in text
 
+    def test_remote_driver_retries_only_session_creation_failures(self):
+        """A ready Grid can still lose one Chromium DevTools startup race.
+
+        Run #13675 reached a healthy /status endpoint, then the sole module
+        fixture attempt failed with SessionNotCreatedException and converted
+        all four tests into fixture errors. Retry must be bounded and limited
+        to that startup exception; real Web UI failures remain fail-closed.
+        """
+        text = E2E_WEBUI_PATH.read_text(encoding="utf-8")
+        assert "E2E_REMOTE_SESSION_ATTEMPTS = 3" in text
+        assert "E2E_REMOTE_SESSION_RETRY_DELAY_SECONDS = 2.0" in text
+        assert "except SessionNotCreatedException" in text
+        assert "for attempt in range(1, E2E_REMOTE_SESSION_ATTEMPTS + 1)" in text
+        assert "if attempt >= E2E_REMOTE_SESSION_ATTEMPTS" in text
+        assert "time.sleep(E2E_REMOTE_SESSION_RETRY_DELAY_SECONDS)" in text
+        assert "drv = _new_remote_driver(opts)" in text
+
     def test_remote_selenium_sidecar_bounds_session_and_cpu(self):
         """Every ``docker run`` of the Selenium sidecar must bound the Grid
         session lifetime and the browser's CPU/RAM appetite.

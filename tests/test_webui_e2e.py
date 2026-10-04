@@ -25,6 +25,7 @@ pytestmark = pytest.mark.e2e
 
 try:
     from selenium import webdriver
+    from selenium.common.exceptions import SessionNotCreatedException
     from selenium.webdriver.chrome.options import Options as ChromeOptions
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support import expected_conditions as EC
@@ -45,6 +46,8 @@ E2E_SERVER_READY_TIMEOUT_SECONDS = 180.0
 # one honest timeout instead of poisoning the remaining tests.
 E2E_PAGE_LOAD_TIMEOUT_SECONDS = 600.0
 E2E_SCRIPT_TIMEOUT_SECONDS = 120.0
+E2E_REMOTE_SESSION_ATTEMPTS = 3
+E2E_REMOTE_SESSION_RETRY_DELAY_SECONDS = 2.0
 
 if not webdriver or (not _REMOTE_URL and not (_DRIVER and _CHROMIUM)):
     pytest.skip(
@@ -179,6 +182,25 @@ def server():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def _new_remote_driver(opts):
+    """Create one remote browser session with a bounded startup retry.
+
+    Selenium Grid may report ready while Chromium still loses a single
+    DevToolsActivePort startup race. Retry only that session-construction
+    failure; all navigation and UI assertions remain fail-closed.
+    """
+    last_error = None
+    for attempt in range(1, E2E_REMOTE_SESSION_ATTEMPTS + 1):
+        try:
+            return webdriver.Remote(command_executor=_REMOTE_URL, options=opts)
+        except SessionNotCreatedException as exc:
+            last_error = exc
+            if attempt >= E2E_REMOTE_SESSION_ATTEMPTS:
+                raise
+            time.sleep(E2E_REMOTE_SESSION_RETRY_DELAY_SECONDS)
+    raise AssertionError(f"remote Selenium session retry exhausted: {last_error}")
+
+
 @pytest.fixture(scope="module")
 def driver():
     opts = ChromeOptions()
@@ -195,7 +217,7 @@ def driver():
     opts.add_argument("--disable-gpu")
     opts.add_argument("--window-size=1400,1000")
     if _REMOTE_URL:
-        drv = webdriver.Remote(command_executor=_REMOTE_URL, options=opts)
+        drv = _new_remote_driver(opts)
     else:
         opts.binary_location = _CHROMIUM
         drv = webdriver.Chrome(options=opts)
