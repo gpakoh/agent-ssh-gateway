@@ -49,6 +49,15 @@ case "$FAKE_DOCKER_MODE" in
     fi
     exit 0
     ;;
+  apt_proxy_502_then_success)
+    if [ "$count" -eq 1 ]; then
+      echo 'Err:1 http://deb.debian.org/debian trixie InRelease' >&2
+      echo '  502 Bad Gateway [IP: 192.168.1.199 3128]' >&2
+      echo 'openssh-client : Depends: libedit2 but it is not installable' >&2
+      exit 1
+    fi
+    exit 0
+    ;;
   deterministic_failure)
     echo 'Dockerfile:42: unknown instruction: BROKEN' >&2
     exit 1
@@ -103,6 +112,16 @@ def test_transient_registry_failure_retries_and_recovers(tmp_path: Path) -> None
 
 def test_uv_connect_timeout_is_classified_as_transient(tmp_path: Path) -> None:
     result, counter = _run_wrapper(tmp_path, "uv_connect_timeout_then_success")
+
+    assert result.returncode == 0
+    assert counter.read_text(encoding="utf-8").strip() == "2"
+    assert "transient network/registry error; retrying" in result.stderr
+
+
+def test_apt_proxy_502_is_classified_as_transient_even_with_secondary_dependency_error(
+    tmp_path: Path,
+) -> None:
+    result, counter = _run_wrapper(tmp_path, "apt_proxy_502_then_success")
 
     assert result.returncode == 0
     assert counter.read_text(encoding="utf-8").strip() == "2"
