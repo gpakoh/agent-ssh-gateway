@@ -841,26 +841,36 @@ class TestMcpOauthWorkspaceMount:
 
 
 class TestDocsOnlyPushDoesNotDeployRuntime:
-    """A docs-only master push must not rebuild/redeploy the live MCP stack.
+    """Docs PRs and pushes keep evidence without rebuilding the live stack."""
 
-    Production deploy recreates the ChatGPT-facing MCP containers, so an
-    innocuous TODO/docs commit must not disconnect every active client.  The
-    push-only paths-ignore filter preserves full pull-request checks while
-    suppressing the workflow only when *all* changed files are non-runtime
-    documentation.  Mixed docs + runtime changes still run normally.
-    """
-
-    def test_push_ignores_docs_only_changes_but_pull_requests_remain_unfiltered(self):
+    def test_unfiltered_events_have_a_dependency_free_scope_gate(self):
         wf = _load_workflow(CI_WORKFLOW_PATH)
-        triggers = wf[True]
-        push = triggers["push"]
-        ignored = set(push.get("paths-ignore", []))
+        for trigger in ("push", "pull_request"):
+            assert "paths-ignore" not in wf[True][trigger]
+            assert "paths" not in wf[True][trigger]
+        scope = wf["jobs"]["scope"]
+        assert scope["outputs"]["full_ci"] == "${{ steps.classify.outputs.full_ci }}"
+        checkout = scope["steps"][0]
+        assert checkout["with"]["fetch-depth"] == 0
+        assert checkout["with"]["ref"] == "${{ github.event.pull_request.head.sha || github.sha }}"
+        commands = "\n".join(step.get("run", "") for step in scope["steps"])
+        assert "python3 scripts/ci_change_scope.py" in commands
+        assert "python3 -m unittest tests.test_ci_change_scope" in commands
+        assert "uv sync" not in commands
+        assert "make test" not in commands
 
-        assert "TODO.md" in ignored
-        assert "docs/**" in ignored
-        assert "paths-ignore" not in triggers["pull_request"], (
-            "PR checks must remain unfiltered even when docs-only master pushes are suppressed"
-        )
+    def test_heavy_jobs_and_deploy_cannot_bypass_docs_gate(self):
+        jobs = _load_workflow(CI_WORKFLOW_PATH)["jobs"]
+        assert jobs["test"]["needs"] == ["scope"]
+        assert jobs["test"]["if"] == "needs.scope.outputs.full_ci == 'true'"
+        for job, dependencies in {
+            "e2e": ["test"],
+            "build-and-push": ["test", "e2e"],
+            "deploy": ["build-and-push"],
+            "host-smoke": ["deploy"],
+        }.items():
+            assert jobs[job]["needs"] == dependencies
+            assert "always()" not in jobs[job].get("if", "")
 
 
 class TestDeploymentConcurrencySerialization:
