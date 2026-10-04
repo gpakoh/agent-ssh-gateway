@@ -1282,8 +1282,20 @@ async def gitea_merge_pull_request(
     return tool_success("gitea_merge_pull_request", result=data, source="gitea")
 
 
+def _superseding_branch_name(superseding_ref: str) -> str:
+    """Normalize a branch-shaped superseding ref without policy classification."""
+    value = str(superseding_ref or "").strip()
+    if value.startswith("refs/heads/"):
+        value = value[len("refs/heads/") :]
+    elif value.startswith("refs/"):
+        raise ValueError("superseding_ref must be refs/heads/<branch> or a branch name")
+    if not value:
+        raise ValueError("superseding_ref must name a branch")
+    return value
+
+
 def _normalize_superseding_branch(superseding_ref: str) -> str:
-    """Validate/normalize a same-repo superseding branch name for PR close.
+    """Validate/normalize a same-repo feature branch name for PR close.
 
     Accepts ``refs/heads/<branch>`` or a plain feature branch name that
     passes the existing feature-branch validation. Rejects other ref
@@ -1292,12 +1304,7 @@ def _normalize_superseding_branch(superseding_ref: str) -> str:
     Returns the canonical branch name (without the ``refs/heads/`` prefix);
     the caller later re-prefixes it for audit metadata.
     """
-    value = str(superseding_ref or "").strip()
-    if value.startswith("refs/heads/"):
-        value = value[len("refs/heads/") :]
-    elif value.startswith("refs/"):
-        raise ValueError("superseding_ref must be refs/heads/<branch> or a branch name")
-    return validate_feature_branch(value)
+    return validate_feature_branch(_superseding_branch_name(superseding_ref))
 
 
 async def gitea_close_pull_request(
@@ -1319,16 +1326,19 @@ async def gitea_close_pull_request(
 
     A human-readable ``reason`` (1..500 chars) is required. The
     ``superseding_ref`` argument is required by the tool schema: callers
-    must always supply a ``refs/heads/<branch>`` or plain feature branch
-    name in the SAME repository (<=255 chars; strip-prefixed, non-empty,
-    validated only through the existing feature-branch rules); no default
-    ref is invented. For a REAL transition from open+unmerged to closed,
-    immediately before the destructive-intent audit and close mutation the
-    adapter freshly resolves that branch via the same Gitea client and
-    requires its exact head commit to equal ``expected_head_sha``. Missing
-    branch, malformed ref, moved/different head, or lookup ambiguity fails
-    closed with zero audit intent and zero close mutation. No arbitrary
-    URL/repo-qualified strings are accepted. A PR already closed whose
+    must always supply a ``refs/heads/<branch>`` or plain branch name in the
+    SAME repository (<=255 chars; strip-prefixed, non-empty). Normal closes
+    require a feature branch accepted by the existing feature-branch policy.
+    One narrow recovery exception allows the repository default branch only
+    when Gitea reports a degenerate zero-delta PR whose head ref and base ref
+    both equal that default branch and whose head/base SHAs both equal
+    ``expected_head_sha``. No default ref is invented. Immediately before a
+    real close, the adapter freshly resolves the supplied branch via the same
+    Gitea client and requires its exact head commit to equal
+    ``expected_head_sha``. Missing branch, malformed ref, moved/different head,
+    or ambiguous zero-delta proof fails closed with zero audit intent and zero
+    close mutation. No arbitrary URL/repo-qualified strings are accepted. A
+    PR already closed whose
     head still matches and is explicitly merged=false remains an idempotent
     success (already_closed=true): the argument is still required for schema
     compliance but is never resolved through the branch API and no
@@ -1417,6 +1427,8 @@ async def gitea_close_pull_request(
             head = pr.get("head") or {}
             base = pr.get("base") or {}
             actual_head_sha = str(head.get("sha") or "").lower()
+            actual_base_sha = str(base.get("sha") or "").lower()
+            head_ref = str(head.get("ref") or "")
             base_ref = str(base.get("ref") or "")
 
             if actual_head_sha != expected_head_sha:
@@ -1455,15 +1467,37 @@ async def gitea_close_pull_request(
                         ),
                         source="gitea",
                     )
+                degenerate_same_default_ref = False
                 try:
                     superseding_branch = _normalize_superseding_branch(normalized_superseding_ref)
                 except ValueError as exc:
-                    return tool_error(
-                        tool="gitea_close_pull_request",
-                        code="INVALID_INPUT",
-                        message=str(exc),
-                        source="gitea",
-                    )
+                    try:
+                        candidate_branch = _superseding_branch_name(normalized_superseding_ref)
+                    except ValueError:
+                        return tool_error(
+                            tool="gitea_close_pull_request",
+                            code="INVALID_INPUT",
+                            message=str(exc),
+                            source="gitea",
+                        )
+                    metadata = await client.get_repo(owner, repo)
+                    default_branch = str(metadata.get("default_branch") or "").strip()
+                    if not (
+                        candidate_branch
+                        and candidate_branch == default_branch
+                        and head_ref == default_branch
+                        and base_ref == default_branch
+                        and actual_head_sha == expected_head_sha
+                        and actual_base_sha == expected_head_sha
+                    ):
+                        return tool_error(
+                            tool="gitea_close_pull_request",
+                            code="INVALID_INPUT",
+                            message=str(exc),
+                            source="gitea",
+                        )
+                    superseding_branch = candidate_branch
+                    degenerate_same_default_ref = True
                 identity = await _require_gitea_identity(client)
                 if identity is None:
                     return tool_error(
@@ -1524,6 +1558,8 @@ async def gitea_close_pull_request(
                     "caller_fingerprint": fingerprint,
                     "correlation_id": correlation_id,
                 }
+                if degenerate_same_default_ref:
+                    audit_metadata["degenerate_same_default_ref"] = True
                 audit_logger = _get_gitea_audit_logger()
                 try:
                     audit_logger.append_required(

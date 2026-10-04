@@ -956,6 +956,40 @@ class TestE2eFailsClosedWithoutBrowserToolchain:
         text = E2E_WEBUI_PATH.read_text(encoding="utf-8")
         assert 'opts.page_load_strategy = "none"' in text
 
+    def test_remote_driver_retries_only_startup_and_fixture_readiness_failures(self):
+        """A ready Grid can still yield one unusable Chromium session.
+
+        Runs #13675 and #13725 reached a healthy Grid but respectively hit a
+        session-creation race and a session that never rendered the loopback
+        fixture. Retry is bounded to those startup/readiness failures; the real
+        Web UI assertions remain outside this loop and fail closed normally.
+        """
+        text = E2E_WEBUI_PATH.read_text(encoding="utf-8")
+        assert "E2E_REMOTE_SESSION_ATTEMPTS = 3" in text
+        assert "E2E_REMOTE_SESSION_RETRY_DELAY_SECONDS = 2.0" in text
+        assert "E2E_REMOTE_FIXTURE_READY_TIMEOUT_SECONDS = 20.0" in text
+        assert "except (SessionNotCreatedException, TimeoutException)" in text
+        assert "for attempt in range(1, E2E_REMOTE_SESSION_ATTEMPTS + 1)" in text
+        assert "if attempt >= E2E_REMOTE_SESSION_ATTEMPTS" in text
+        assert "time.sleep(E2E_REMOTE_SESSION_RETRY_DELAY_SECONDS)" in text
+        assert 'EC.presence_of_element_located((By.ID, "appShell"))' in text
+        assert '"Network.setExtraHTTPHeaders"' in text
+        assert '"X-API-Key": "e2e-master-key"' in text
+        assert text.index("_configure_browser_api_key(drv)") < text.index('drv.get(f"{base}/")')
+        assert "drv.quit()" in text
+        assert "drv = _new_remote_driver(opts, base)" in text
+
+    def test_e2e_browser_never_uses_runner_proxy_for_loopback_fixture(self):
+        """Chromium itself must bypass any inherited CI/package proxy.
+
+        Run #13693 had a healthy uvicorn fixture and Selenium session but all
+        four browser tests timed out waiting for the loopback login form. The
+        browser only needs 127.0.0.1 in this suite, so force direct navigation
+        instead of relying on runner- or container-level proxy inheritance.
+        """
+        text = E2E_WEBUI_PATH.read_text(encoding="utf-8")
+        assert 'opts.add_argument("--no-proxy-server")' in text
+
     def test_remote_selenium_sidecar_bounds_session_and_cpu(self):
         """Every ``docker run`` of the Selenium sidecar must bound the Grid
         session lifetime and the browser's CPU/RAM appetite.
@@ -1711,9 +1745,11 @@ class TestInstallPackageNetworkResilience:
             assert "UV_HTTP_TIMEOUT=60 uv sync --frozen --extra dev" in run
             assert "uv sync attempt ${attempt}/5 failed" in run
             assert 'sleep "$delay"' in run
-            assert "package proxy exhausted for pip install uv; trying one direct fallback" in run
-            assert "package proxy exhausted for uv sync; trying one direct fallback" in run
+            assert "pip install uv retries exhausted; trying one direct fallback without proxy env" in run
+            assert "uv sync retries exhausted; trying one direct fallback without proxy env" in run
             assert "env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy" in run
+            assert 'if [ "$uv_ready" != "true" ] && [ -n "${CI_PACKAGE_HTTP_PROXY:-}${CI_PACKAGE_HTTPS_PROXY:-}" ]' not in run
+            assert 'if [ -n "${CI_PACKAGE_HTTP_PROXY:-}${CI_PACKAGE_HTTPS_PROXY:-}" ]; then\n            echo "::warning::uv sync retries exhausted' not in run
             assert run.rstrip().endswith("exit 1")
 
     def test_python_jobs_wire_optional_package_proxy_secrets(self):
