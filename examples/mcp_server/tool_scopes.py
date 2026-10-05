@@ -147,6 +147,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "gitea_get_pull_request": ["mcp:repo"],
     "gitea_create_pull_request": ["mcp:repo", "mcp:admin"],
     "gitea_merge_pull_request": ["mcp:repo", "mcp:admin"],
+    "gitea_rerun_action_run": ["mcp:repo", "mcp:admin"],
     "gitea_close_pull_request": ["mcp:repo", "mcp:admin"],
     "gitea_delete_branch": ["mcp:repo", "mcp:admin"],
     "gitea_materialize_task_candidate": ["mcp:repo", "mcp:admin"],

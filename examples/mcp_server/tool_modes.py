@@ -264,6 +264,7 @@ MCP_CLIENT_WRITE_BLOCKED_TOOLS: frozenset[str] = frozenset()
 MCP_CLIENT_WRITE_ONLY_GITEA_TOOLS: frozenset[str] = frozenset({
     "gitea_create_pull_request",
     "gitea_merge_pull_request",
+    "gitea_rerun_action_run",
     "gitea_close_pull_request",
     "gitea_delete_branch",
     "gitea_materialize_task_candidate",
@@ -288,6 +289,7 @@ TOOL_NAMES_BY_MODE["mcp_client_write"] = (
     "git_push",
     "gitea_create_pull_request",
     "gitea_merge_pull_request",
+    "gitea_rerun_action_run",
     "gitea_close_pull_request",
     "gitea_delete_branch",
     "gitea_materialize_task_candidate",
