@@ -86,6 +86,13 @@ ALLOWED_CLOSE_ENDPOINTS = frozenset(
         "/repos/{owner}/{repo}/pulls/{number}",
     }
 )
+# Actions writes are isolated from PR writes: only rerunning one exact existing
+# workflow run is allowed, never workflow dispatch/edit/delete or a generic POST.
+ALLOWED_ACTION_WRITE_ENDPOINTS = frozenset(
+    {
+        "/repos/{owner}/{repo}/actions/runs/{run_id}/rerun",
+    }
+)
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 _SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
 MAX_PR_TITLE = 200
@@ -421,6 +428,43 @@ class GiteaClient:
                 "gitea mutation returned an undecodable success response"
             ) from exc
 
+    async def _post_action(
+        self,
+        endpoint: str,
+        **path_params: Any,
+    ) -> Any:
+        """POST one narrowly allowlisted Actions lifecycle operation."""
+        if endpoint not in ALLOWED_ACTION_WRITE_ENDPOINTS:
+            raise ValueError(f"Actions write endpoint not allowed: {endpoint}")
+        if "owner" in path_params:
+            validate_repo_owner_or_name(path_params["owner"], label="owner")
+        if "repo" in path_params:
+            validate_repo_owner_or_name(path_params["repo"], label="repo")
+        if "run_id" in path_params:
+            path_params = dict(path_params)
+            path_params["run_id"] = _validate_positive_int(path_params["run_id"], "run_id")
+        path = endpoint.format(**path_params)
+        resp = await self._client.post(path)
+        if resp.status_code in (401, 403):
+            detail = resp.json().get("message", "unauthorized")
+            raise PermissionError(f"gitea api {path}: {detail}")
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise httpx.HTTPStatusError(
+                f"gitea api {path}: {resp.status_code} {resp.reason_phrase}",
+                request=exc.request,
+                response=exc.response,
+            ) from None
+        if not resp.content:
+            return {}
+        try:
+            return resp.json()
+        except ValueError as exc:
+            raise GiteaMutationOutcomeUnknown(
+                "gitea actions mutation returned an undecodable success response"
+            ) from exc
+
     async def _patch(
         self,
         endpoint: str,
@@ -749,6 +793,22 @@ class GiteaClient:
     ) -> dict[str, Any]:
         run = await self._get(
             "/repos/{owner}/{repo}/actions/runs/{run_id}",
+            owner=owner,
+            repo=repo,
+            run_id=run_id,
+        )
+        return minimize_action_run_payload(run)
+
+    async def rerun_action_run(
+        self,
+        owner: str,
+        repo: str,
+        run_id: int,
+    ) -> dict[str, Any]:
+        """Rerun one existing workflow run via Gitea's dedicated endpoint."""
+        run_id = _validate_positive_int(run_id, "run_id")
+        run = await self._post_action(
+            "/repos/{owner}/{repo}/actions/runs/{run_id}/rerun",
             owner=owner,
             repo=repo,
             run_id=run_id,
