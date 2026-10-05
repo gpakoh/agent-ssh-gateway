@@ -144,8 +144,11 @@ class TestJobManagerEventLifecycle:
         )
 
         job_id = await jm.create_job("s1", "echo hi", owner_id="fp-a", submission_key="task:t:1")
-        job = await jm.get_job(job_id)
-        await asyncio.wait_for(job.completed_event.wait(), timeout=5)
+        job_task = jm._job_tasks[job_id]
+        # completed_event is set before terminal observability emission. This
+        # lifecycle test asserts the terminal event itself, so synchronize on
+        # the actual job task, which finishes only after lifecycle emission.
+        await asyncio.wait_for(job_task, timeout=30)
 
         events = emitter.store.get_events(job_id)
         types = [e.event_type for e in events]
