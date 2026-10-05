@@ -51,6 +51,11 @@ MCP_OAUTH_SMOKE_TEST = ROOT / "tests" / "test_mcp_oauth_host_smoke.py"
 MCP_OAUTH_SMOKE_SCRIPT = ROOT / "scripts" / "mcp_oauth_black_box_smoke.py"
 MAKEFILE_PATH = ROOT / "Makefile"
 
+_OCTET = r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
+RFC1918_LITERAL_RE = re.compile(
+    rf"\b(?:10\.{_OCTET}|172\.(?:1[6-9]|2\d|3[01])\.{_OCTET}|192\.168\.{_OCTET})\b"
+)
+
 
 def _load_compose() -> dict:
     return yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
@@ -1793,7 +1798,10 @@ class TestInstallPackageNetworkResilience:
             assert "https_proxy=$package_https_proxy" in run
             assert "NO_PROXY=$package_no_proxy" in run
             assert "no_proxy=$package_no_proxy" in run
-            assert "192.168.1.199" not in run
+            assert not RFC1918_LITERAL_RE.search(run), (
+                "Configure package proxy must carry the address through CI secrets, "
+                "never as a hardcoded RFC1918 literal"
+            )
             assert "CI package proxy enabled" in run
 
     def test_package_proxy_does_not_turn_dependency_or_audit_failures_optional(self):

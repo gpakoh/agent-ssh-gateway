@@ -203,6 +203,17 @@ services:
       # baked into the image). mcp_server_tokens is already mounted at
       # /app/data below -- no new volume needed.
       - MCP_AUDIT_LOG_PATH=/app/data/mcp_audit.jsonl
+      # Both are pass-through: set them in docker/.env for the features that
+      # need them. Left empty they stay fail-closed at the point of use rather
+      # than blocking the whole service at up-time --
+      # MCP_ALLOWED_PROJECT_ROOTS: comma-separated absolute roots under which
+      # project paths may resolve (examples/mcp_server/config.py has no
+      # built-in allowlist; project-scoped compose tools need this).
+      # GPT_BRIDGE_IMAGE_REPO: trusted registry prefix for the
+      # gpt-browser-bridge deploy contract; target_image must be an immutable
+      # digest under it.
+      - MCP_ALLOWED_PROJECT_ROOTS=${MCP_ALLOWED_PROJECT_ROOTS:-}
+      - GPT_BRIDGE_IMAGE_REPO=${GPT_BRIDGE_IMAGE_REPO:-}
     volumes:
       # Absolute host path via PROJECTS_YAML_PATH (docker/.env) -- a
       # relative "../projects.yaml" resolves inside the CI deploy

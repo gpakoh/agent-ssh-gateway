@@ -44,7 +44,7 @@ def _redact_project_root(text: str | None, project_dir: str) -> str:
 
     Runner fallbacks pass absolute host paths (mypy cannot read a relative
     path that resolves through a symlink), so pytest/mypy/ruff echo
-    /media/1TB/... in stdout/stderr while info/tree keep ``root: "."``.
+    <repo-root>/... in stdout/stderr while info/tree keep ``root: "."``.
     Redaction here keeps the same host-layout invariant for execution tools.
     """
     if not text or not project_dir:

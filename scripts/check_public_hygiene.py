@@ -35,6 +35,7 @@ TRACKED_PATHS = (
     "docker-compose*.yml",
     "docs/**/*.md",
     "scripts/**/*.py",
+    "examples/**/*.py",
 )
 
 IPV4_RE = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?(?![\w.])")
@@ -118,6 +119,12 @@ def _line_is_allowed(line: str) -> bool:
     return False
 
 
+DOCUMENTATION_NETWORKS = tuple(
+    ipaddress.ip_network(cidr)
+    for cidr in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24")
+)
+
+
 def _is_public_hygiene_ip(token: str) -> bool:
     address_text = token.split("/", 1)[0]
     try:
@@ -126,6 +133,11 @@ def _is_public_hygiene_ip(token: str) -> bool:
         return False
 
     if address.is_loopback or address.is_unspecified:
+        return False
+
+    # RFC 5737 TEST-NET-1/2/3 are reserved for documentation and are the
+    # canonical safe placeholders, so they never count as a topology leak.
+    if any(address in network for network in DOCUMENTATION_NETWORKS):
         return False
 
     return True

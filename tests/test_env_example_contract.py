@@ -140,6 +140,84 @@ def test_public_hygiene_scan_has_no_public_repo_topology_hints() -> None:
     )
 
 
+def _run_hygiene_scan() -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "check_public_hygiene.py")],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+
+
+def _is_gitignored_by_scan(relative_path: str) -> bool:
+    result = subprocess.run(
+        ["git", "check-ignore", relative_path],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+    return result.returncode == 0
+
+
+def _write_probe(relative_path: str) -> None:
+    probe = ROOT / relative_path
+    probe.write_text('HOST = "192.168.1.103:3005/gpakoh/example"\n', encoding="utf-8")
+    assert not _is_gitignored_by_scan(relative_path), (
+        f"{relative_path} must be visible to the scan, not gitignored"
+    )
+
+
+def _probe_leak_is_detected(relative_path: str) -> None:
+    """Scanner must reject the probe and name it in its report.
+
+    The report intentionally redacts values ("values intentionally omitted"), so
+    the assertion targets the file path and category rather than the address.
+    """
+    _write_probe(relative_path)
+    try:
+        result = _run_hygiene_scan()
+        assert result.returncode != 0, (
+            f"public hygiene scan accepted an internal RFC1918 address in "
+            f"{relative_path}:\n{result.stdout}\n{result.stderr}"
+        )
+        assert relative_path in result.stdout, (
+            f"scan output does not name {relative_path}:\n{result.stdout}"
+        )
+        assert "ip-literal" in result.stdout, (
+            f"scan output does not categorise the finding:\n{result.stdout}"
+        )
+        assert "192.168.1.103" not in result.stdout, (
+            f"scan output must not echo the leaked address:\n{result.stdout}"
+        )
+    finally:
+        (ROOT / relative_path).unlink(missing_ok=True)
+
+
+def test_public_hygiene_scan_rejects_internal_ip_in_examples_tree() -> None:
+    # The probe must sit in a nested directory: git pathspec ``examples/**/*.py``
+    # matches every tracked example file, but does not match a file created
+    # directly in ``examples/``.
+    _probe_leak_is_detected("examples/mcp_server/_hygiene_probe_tmp.py")
+
+
+def test_public_hygiene_scan_out_of_scope_tree_is_not_a_finding() -> None:
+    """Pin the scope boundary.
+
+    ``tests/`` is deliberately out of scope: the suite legitimately uses IP
+    literals as fixtures for access-control, IP-pinning and host-key logic
+    (502 findings across ~60 files). Widening the scan there produces only
+    false positives and would bury the real signals.
+    """
+    _write_probe("tests/_hygiene_probe_tmp.py")
+    try:
+        result = _run_hygiene_scan()
+        assert "tests/_hygiene_probe_tmp.py" not in result.stdout, (
+            f"tests/ must stay outside the public hygiene scope:\n{result.stdout}"
+        )
+    finally:
+        (ROOT / "tests/_hygiene_probe_tmp.py").unlink(missing_ok=True)
+
+
 # ---------------------------------------------------------------------------
 # Live overlay contract tests
 # ---------------------------------------------------------------------------

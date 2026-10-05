@@ -6,7 +6,7 @@ import os
 
 from dotenv import load_dotenv
 
-load_dotenv("/etc/agent-mcp-gitea.env")
+load_dotenv("/etc/agent-mcp-gitea.env")  # public-hygiene: allow — container config path, not host topology
 
 from .gitea_server import mcp  # noqa: E402 — load_dotenv must run first
 
