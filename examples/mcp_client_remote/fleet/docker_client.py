@@ -288,8 +288,8 @@ class DockerClient:
         # Deliberately does not list ALLOWED_PROJECT_ROOTS -- confirmed
         # live that doing so turned a routine validation error (e.g.
         # docker_compose_ps(project_dir="/tmp")) into a topology oracle,
-        # handing any caller the real host directories (/media/1TB/Python/,
-        # /var/www/) without needing any other access at all.
+        # handing any caller the real host directories without needing
+        # any other access at all.
         raise ValueError(f"Project directory {shlex.quote(project_dir)} is outside allowed roots")
 
     def _validate_prune_type(self, type: str, admin_scope: bool = False) -> str:

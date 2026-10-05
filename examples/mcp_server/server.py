@@ -299,7 +299,7 @@ def _build_pg_dsn(pg_vars: dict[str, str]) -> str | None:
 
 
 PG_DSN: str | None = None
-_pg_env = "/etc/agent-mcp-postgres.env"
+_pg_env = "/etc/agent-mcp-postgres.env"  # public-hygiene: allow — container config path, not host topology
 if os.path.exists(_pg_env):
     # Legacy systemd fleet-of-adapters convention: a separate systemd unit
     # (agent-mcp-postgres) owns this file, deliberately scoped down (e.g.
