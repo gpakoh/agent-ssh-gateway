@@ -19,6 +19,12 @@ os.environ.setdefault("API_KEY", "test-api-key-12345")
 os.environ.setdefault("AGENT_TOKEN", "test-agent-token-12345")
 os.environ.setdefault("WORKSPACE_READONLY", "false")
 os.environ.setdefault("SETUP_TOKEN", "test-setup-token-12345")
+# examples/mcp_server/config.py has no built-in project-root allowlist: it is a
+# security boundary and the roots are deployment configuration. Provide a
+# neutral, hermetic default so the suite does not depend on the ambient host
+# layout (tests that assert the fail-closed behaviour override this explicitly).
+os.environ.setdefault("MCP_ALLOWED_PROJECT_ROOTS", "/tmp/nod-test-project-roots/")
+os.environ.setdefault("GPT_BRIDGE_IMAGE_REPO", "registry.example.com/test/gpt-browser-bridge")
 
 
 @pytest.fixture(autouse=True)
