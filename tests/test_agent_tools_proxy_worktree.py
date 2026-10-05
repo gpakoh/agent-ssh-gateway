@@ -2578,7 +2578,7 @@ class TestScheduledOpenCodeUpgradeGate:
         state_path: Path,
     ) -> None:
         monkeypatch.setenv("OPENCODE_UPGRADE_GATE_ENABLED", "true")
-        monkeypatch.setenv("OPENCODE_UPGRADE_INTERVAL_SECONDS", "604800")
+        monkeypatch.setenv("OPENCODE_UPGRADE_INTERVAL_SECONDS", "86400")
         monkeypatch.setenv("OPENCODE_UPGRADE_TIMEOUT_SECONDS", "10")
         monkeypatch.setenv("OPENCODE_MANAGED_BIN", str(managed_bin))
         monkeypatch.setenv("OPENCODE_UPGRADE_STATE_PATH", str(state_path))
@@ -2786,6 +2786,64 @@ class TestScheduledOpenCodeUpgradeGate:
             check=False,
         ).stdout.strip() == "1.18.16"
         assert not list(state_path.parent.glob(".opencode-upgrade-home-*"))
+
+    def test_direct_managed_binary_corruption_rolls_back_last_known_good(
+        self, tmp_path, monkeypatch
+    ):
+        fake_bin = tmp_path / "upgrade-direct-corrupt-bin"
+        fake_bin.mkdir()
+        seed = fake_bin / "opencode"
+        seed.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            '  --version) echo "1.18.16"; exit 0 ;;\n'
+            "  upgrade)\n"
+            '    target="$OPENCODE_INSTALL_DIR/opencode"\n'
+            '    printf \'#!/bin/sh\\nexit 9\\n\' > "$target"\n'
+            '    chmod 755 "$target"\n'
+            '    echo "installer replaced managed binary directly"\n'
+            "    exit 0 ;;\n"
+            "  run)\n"
+            '    if [ "${2:-}" = "--help" ]; then echo "  --auto"; exit 0; fi\n'
+            "    exit 0 ;;\n"
+            "  *) exit 2 ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        seed.chmod(0o755)
+
+        runtime_root = tmp_path / "agent-runtime-direct-corrupt"
+        managed_bin = runtime_root / "managed" / "opencode"
+        state_path = runtime_root / "state" / "opencode-upgrade.json"
+
+        result = subprocess.run(
+            [
+                "python3",
+                "-c",
+                _OPENCODE_UPGRADE_GATE_PY,
+                str(seed),
+                str(managed_bin),
+                str(state_path),
+                "86400",
+                "10",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert result.returncode == 1
+        failure = json.loads(result.stdout)
+        assert failure["reason"] == "version_probe_failed"
+        assert failure["rollback_status"] == "restored"
+        assert subprocess.run(
+            [str(managed_bin), "--version"],
+            text=True,
+            capture_output=True,
+            check=False,
+        ).stdout.strip() == "1.18.16"
+        assert not list(managed_bin.parent.glob(".opencode-lkg-*"))
+        assert not list(managed_bin.parent.glob(".opencode-rollback-*"))
 
     def test_concurrent_launches_share_one_upgrade(self, tmp_path, monkeypatch):
         fake_bin = tmp_path / "concurrent-bin"

@@ -753,6 +753,13 @@ class TestBuildCurrentPlan:
             constraints="No model changes",
         )
         assert "## Scope" in result
+        assert "## Mutation ownership (write scope)" in result
+        assert "do not restrict read-only exploration" in result
+        assert (
+            "Inspect any repository file, call site, interface, test, or dependency"
+            in result
+        )
+        assert "## Forbidden mutations" in result
         assert "father-ui/src/**" in result
         assert "app/**" in result
         assert "polish: improve RAG search" in result
@@ -901,6 +908,46 @@ class TestReadAgentArtifactTail:
         assert result["artifact"] == "diff"
         assert result["filename"] == "implementation-diff.patch"
         assert result["stdout"] == "diff --git a/a b/a\n"
+
+    def test_reads_upgrade_status_artifact_through_bounded_redacted_surface(self):
+        calls: list[str] = []
+
+        def fake_run_cmd(project: str, command: str) -> dict:
+            calls.append(command)
+            if command.startswith("ls -ld -- "):
+                return {
+                    "stdout": "-rw------- 1 user user 1 path\n",
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            if command.startswith("tail -c "):
+                return {
+                    "stdout": (
+                        '{"status":"failed","reason":"upgrade_command_failed",'
+                        '"detail":"token=secret-value"}\n'
+                    ),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            raise AssertionError(f"unexpected command: {command}")
+
+        result = read_agent_artifact_tail(
+            fake_run_cmd,
+            project="my-proj",
+            task_id="a12345678901",
+            artifact="upgrade_status",
+            tail_lines=10,
+            max_bytes=400,
+        )
+
+        assert result["artifact"] == "upgrade_status"
+        assert result["filename"] == "opencode-upgrade.json"
+        assert result["available"] is True
+        assert "secret-value" not in result["stdout"]
+        assert "token=<redacted>" in result["stdout"]
+        assert calls[-1] == (
+            "tail -c 401 -- .ai-bridge/tasks/a12345678901/opencode-upgrade.json"
+        )
 
     def test_missing_or_unsafe_artifact_returns_structured_unavailable_without_tail(self):
         calls: list[str] = []
@@ -2717,6 +2764,89 @@ class TestInspectAgentTask:
         assert result["last_activity"]["source"] != "proxy_status"
         assert result["last_useful_activity"]["source"] == "status"
 
+
+    def test_short_low_entropy_utterance_loop_is_reasoning_loop(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: running\n", encoding="utf-8")
+        (td / "opencode-output.log").write_text(
+            "\n".join(
+                [
+                    "Let.",
+                    "Let go.",
+                    "Now.",
+                    "Let.",
+                    "Let to execute.",
+                    "Enough.",
+                    "Let.",
+                    "Let we do the edit.",
+                    "Let go.",
+                    "Let.",
+                    "Let to make the edit.",
+                    "Now.",
+                    "Let.",
+                    "Let.",
+                    "OK.",
+                    "Let to execute.",
+                    "Let go.",
+                    "Let.",
+                    "Enough.",
+                    "Let.",
+                    "Let we do the edit.",
+                    "Let to make the edit.",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (td / "attempt-state.json").write_text(
+            json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+            encoding="utf-8",
+        )
+        (td / "agent-heartbeat.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "state": "running",
+                    "phase": "loop",
+                    "updated_at": "2026-09-03T12:00:00Z",
+                    "updated_epoch": now - 5,
+                    "runner_pid": 123,
+                    "exit_code": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        for child in td.iterdir():
+            os.utime(child, (now - 500, now - 500))
+        os.utime(td / "opencode-output.log", (now - 1, now - 1))
+        os.utime(td / "agent-heartbeat.json", (now - 5, now - 5))
+
+        result = inspect_agent_task(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            reasoning_loop_after_seconds=60,
+            now_epoch=now,
+            job_status=lambda job_id: {"job_id": job_id, "status": "running"},
+        )
+
+        assert result["verdict"] == "reasoning_loop"
+        assert result["likely_hung"] is True
+        assert result["reasoning_loop"]["detected"] is True
+        micro = result["reasoning_loop"]["degenerate_micro_loop"]
+        assert micro["detected"] is True
+        assert micro["micro_line_ratio"] >= 0.75
+        assert micro["lexical_diversity"] <= 0.42
+        assert result["recovery"]["action"] == "cancel_then_recreate_from_supervisor_contract"
+        assert (
+            result["recovery"]["supervisor_recreate_after_termination"]["continuation_prompt"]
+            == "Продолжай"
+        )
 
     def test_running_repetitive_reasoning_without_progress_is_reasoning_loop(self, tmp_path, monkeypatch):
         monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
