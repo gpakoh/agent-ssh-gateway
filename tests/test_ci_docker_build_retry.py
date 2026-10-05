@@ -52,7 +52,7 @@ case "$FAKE_DOCKER_MODE" in
   apt_proxy_502_then_success)
     if [ "$count" -eq 1 ]; then
       echo 'Err:1 http://deb.debian.org/debian trixie InRelease' >&2
-      echo '  502  Bad Gateway [IP: 192.168.1.199 3128]' >&2
+      echo '  502  Bad Gateway [IP: 198.51.100.10 3128]' >&2
       echo 'openssh-client : Depends: libedit2 but it is not installable' >&2
       exit 1
     fi
@@ -65,7 +65,7 @@ case "$FAKE_DOCKER_MODE" in
       exit 0
     fi
     echo 'Err:1 http://deb.debian.org/debian trixie InRelease' >&2
-    echo '  502  Bad Gateway [IP: 192.168.1.199 3128]' >&2
+    echo '  502  Bad Gateway [IP: 198.51.100.10 3128]' >&2
     exit 1
     ;;
   deterministic_failure)

@@ -59,7 +59,7 @@ _DEPLOY_CONTRACTS: dict[str, dict[str, str]] = {
         "script_path": "deploy/deploy-gpt-browser-bridge.sh",
         "state_path": ".gpt-browser-bridge-state/deploy.json",
         "image_env": "GPT_BRIDGE_TARGET_IMAGE",
-        "image_repo": "192.168.1.103:3005/gpakoh/gpt-browser-bridge",
+        "image_repo_env": "GPT_BRIDGE_IMAGE_REPO",
         "compose_project": "infra-quart",
         "profile_volume": "infra-quart_gpt-browser-bridge-profile",
         "logical_volume": "gpt-browser-bridge-profile",
@@ -67,6 +67,23 @@ _DEPLOY_CONTRACTS: dict[str, dict[str, str]] = {
         "generation_label": "io.xloud.gpt-browser-bridge.deploy-generation",
     }
 }
+
+
+def _trusted_image_repo(spec: dict[str, str]) -> str:
+    """Resolve the trusted image repository for a deploy contract.
+
+    There is deliberately no built-in default: the trusted registry is
+    deployment configuration, so a missing or blank value must fail closed
+    rather than silently widening the accepted image prefix.
+    """
+    env_name = spec["image_repo_env"]
+    repo = os.environ.get(env_name, "").strip()
+    if not repo:
+        raise ValueError(
+            f"{env_name} must be set to the trusted image repository for "
+            f"contract {spec['source_project']!r}"
+        )
+    return repo
 
 
 def _git_capture(root: Path, *args: str) -> str:
@@ -144,7 +161,7 @@ async def _prepare_deploy_contract(
         raise ValueError("expected_script_blob_sha must be a 40-character lowercase SHA")
     if not re.fullmatch(r"[0-9a-f]{64}", expected_script_sha256):
         raise ValueError("expected_script_sha256 must be a 64-character lowercase SHA-256")
-    expected_image_prefix = re.escape(spec["image_repo"])
+    expected_image_prefix = re.escape(_trusted_image_repo(spec))
     if not re.fullmatch(expected_image_prefix + r"@sha256:[0-9a-f]{64}", target_image):
         raise ValueError("target_image must be an immutable digest for the contract repository")
 

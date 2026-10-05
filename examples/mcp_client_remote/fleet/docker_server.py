@@ -148,7 +148,7 @@ async def docker_compose_ps(
 
     Returns structured rows (docker's native --format json), sanitized and
     truncated.
-    project_dir: path to directory containing compose file (e.g. /media/1TB/Python/web_ssh/web-ssh-gateway/docker).
+    project_dir: path to directory containing compose file (e.g. <repo-root>/docker).
     limit: max services to return (default 50).
     """
     client = _get_client()

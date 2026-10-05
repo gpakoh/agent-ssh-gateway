@@ -22,14 +22,18 @@ from examples.mcp_server.mcp_infra.adapters import docker as docker_adapter  # n
 HEAD = "f" * 40
 BLOB = "a" * 40
 SCRIPT_SHA = "b" * 64
-TARGET = (
-    "192.168.1.103:3005/gpakoh/gpt-browser-bridge@sha256:"
-    + "c" * 64
-)
+IMAGE_REPO = "198.51.100.10/gpakoh/gpt-browser-bridge"
+TARGET = IMAGE_REPO + "@sha256:" + "c" * 64
 TARGET_ID = "sha256:" + "d" * 64
 CONTAINER_ID = "e" * 64
 GENERATION = "f" * 64
 FINGERPRINT = "1" * 64
+
+
+@pytest.fixture(autouse=True)
+def _trusted_image_repo(monkeypatch):
+    """Fail-closed env contract: the deploy adapter has no built-in registry."""
+    monkeypatch.setenv("GPT_BRIDGE_IMAGE_REPO", IMAGE_REPO)
 
 
 @pytest.fixture(autouse=True)
@@ -158,7 +162,42 @@ async def test_deploy_contract_rejects_mutable_image_before_workspace_lookup():
             expected_head_sha=HEAD,
             expected_script_blob_sha=BLOB,
             expected_script_sha256=SCRIPT_SHA,
-            target_image="192.168.1.103:3005/gpakoh/gpt-browser-bridge:latest",
+            target_image=IMAGE_REPO + ":latest",
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unset_value", [None, "", "   "])
+async def test_deploy_contract_fails_closed_without_trusted_image_repo(
+    monkeypatch, unset_value
+):
+    if unset_value is None:
+        monkeypatch.delenv("GPT_BRIDGE_IMAGE_REPO", raising=False)
+    else:
+        monkeypatch.setenv("GPT_BRIDGE_IMAGE_REPO", unset_value)
+
+    with pytest.raises(ValueError, match="GPT_BRIDGE_IMAGE_REPO"):
+        await docker_adapter._prepare_deploy_contract(
+            contract="gpt-browser-bridge",
+            candidate_project="unused",
+            expected_head_sha=HEAD,
+            expected_script_blob_sha=BLOB,
+            expected_script_sha256=SCRIPT_SHA,
+            target_image=TARGET,
+        )
+
+
+@pytest.mark.asyncio
+async def test_deploy_contract_rejects_image_outside_trusted_repo(monkeypatch):
+    monkeypatch.setenv("GPT_BRIDGE_IMAGE_REPO", IMAGE_REPO)
+    with pytest.raises(ValueError, match="immutable digest"):
+        await docker_adapter._prepare_deploy_contract(
+            contract="gpt-browser-bridge",
+            candidate_project="unused",
+            expected_head_sha=HEAD,
+            expected_script_blob_sha=BLOB,
+            expected_script_sha256=SCRIPT_SHA,
+            target_image="203.0.113.9/other/gpt-browser-bridge@sha256:" + "c" * 64,
         )
 
 
