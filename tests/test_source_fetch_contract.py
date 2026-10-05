@@ -90,7 +90,7 @@ def _install_managed_env(
         monkeypatch.setattr(
             agent_sources,
             "_resolve_trusted_remote",
-            lambda _root: (str(remote), "fixture-token"),
+            lambda _root: ("fixture-user", str(remote), "fixture-token"),
         )
 
 
@@ -238,7 +238,7 @@ def test_full_local_source_publishes_without_trusted_remote(
         project_root=origin,
     )
 
-    def forbidden_remote(_root: Path) -> tuple[str, str]:
+    def forbidden_remote(_root: Path) -> tuple[str, str, str]:
         raise AssertionError("full local source must not consult trusted remote")
 
     monkeypatch.setattr(agent_sources, "_resolve_trusted_remote", forbidden_remote)
@@ -262,7 +262,7 @@ def test_shallow_source_without_trusted_remote_fails_without_publication(
         project_root=shallow,
     )
 
-    def unavailable_remote(_root: Path) -> tuple[str, str]:
+    def unavailable_remote(_root: Path) -> tuple[str, str, str]:
         raise ManagedSourceBundleError("trusted remote resolution failed")
 
     monkeypatch.setattr(agent_sources, "_resolve_trusted_remote", unavailable_remote)
@@ -290,10 +290,10 @@ def test_generic_local_inspection_error_does_not_fallback(
     def failing_shallow_probe(_root: Path) -> bool:
         raise ManagedSourceBundleError("permission denied inspecting source repository")
 
-    def forbidden_remote(_root: Path) -> tuple[str, str]:
+    def forbidden_remote(_root: Path) -> tuple[str, str, str]:
         nonlocal remote_called
         remote_called = True
-        return ("/must/not/be/used", "fixture-token")
+        return ("fixture-user", "/must/not/be/used", "fixture-token")
 
     monkeypatch.setattr(agent_sources, "_source_is_shallow", failing_shallow_probe)
     monkeypatch.setattr(agent_sources, "_resolve_trusted_remote", forbidden_remote)

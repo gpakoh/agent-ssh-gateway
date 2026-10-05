@@ -134,6 +134,7 @@ class TestJobManagerEventLifecycle:
     @pytest.mark.asyncio
     async def test_success_lifecycle_started_heartbeat_completed(self, monkeypatch):
         """create job -> started -> heartbeat(s) while running -> completed."""
+        monkeypatch.setattr("app.state.agent_event_emitter", None)
         monkeypatch.setattr("app.job_manager.DURABLE_LEASE_TTL_SECONDS", 0.3)
         emitter = AgentEventEmitter()
         jm = _job_manager(
