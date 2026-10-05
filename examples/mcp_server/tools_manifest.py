@@ -16,6 +16,8 @@ from tool_modes import (
 from tool_results import validate_pagination
 from tool_scopes import ACCESS_PROFILES, get_required_scopes
 
+from examples.mcp_server.surface_parity import ClientSurfaceAttestation, evaluate_required_guards
+
 
 def _agent_guidance() -> dict[str, Any]:
     """Return static, host-path-free workflow guidance for tool users.
@@ -33,16 +35,40 @@ def _agent_guidance() -> dict[str, Any]:
     }
 
 
-def _operator_surface_contract(active_mode: str, scope_enforcement: str) -> dict[str, Any]:
-    """Describe which discovery surface this manifest can and cannot verify.
+def _operator_surface_contract(
+    active_mode: str,
+    scope_enforcement: str,
+    *,
+    registered_names: set[str],
+    server_toolset_hash: str | None,
+    client_attestation: ClientSurfaceAttestation | None,
+    client_observation_status: str,
+    required_guard_tools: tuple[str, ...],
+) -> dict[str, Any]:
+    """Render authoritative server state beside an unverified client report."""
 
-    ``tools_manifest`` is built inside the Gateway MCP server from FastMCP's live
-    tool manager plus repo-local mode/scope configuration.  It cannot observe an
-    external connector or ChatGPT resource catalog that may cache or filter the
-    same server's tools before the operator sees schemas.  Reporting that boundary
-    explicitly prevents a server-local ``available=true`` entry from being
-    mistaken for proof that another surface can invoke the tool.
-    """
+    server_names = sorted(registered_names)
+    client_names = list(client_attestation.names) if client_attestation is not None else []
+    complete = client_attestation.complete if client_attestation is not None else False
+    unexpected_in_client = sorted(set(client_names) - registered_names)
+    missing_from_client = (
+        sorted(registered_names - set(client_names))
+        if client_attestation is not None and complete
+        else []
+    )
+    mismatch = bool(missing_from_client or unexpected_in_client)
+    diagnostic_code = (
+        "EXTERNAL_RESOURCE_CATALOG_MISMATCH"
+        if mismatch
+        else "EXTERNAL_RESOURCE_CATALOG_UNVERIFIED"
+    )
+    if client_observation_status == "supplied_bound":
+        binding_status = "session_bound"
+    elif client_observation_status == "supplied_unbound":
+        binding_status = "unbound"
+    else:
+        binding_status = "not_supplied"
+
     return {
         "server_tool_manager_verified": True,
         "server_tool_manager_surface": "mcp.tools/list",
@@ -51,8 +77,26 @@ def _operator_surface_contract(active_mode: str, scope_enforcement: str) -> dict
         "external_resource_catalog": "api_tool.list_resources",
         "external_resource_catalog_verified": False,
         "authoritative_for_external_schema_visibility": False,
-        "diagnostic_code": "EXTERNAL_RESOURCE_CATALOG_UNVERIFIED",
-        "operator_guidance": "Use this manifest as the server-local MCP tool-manager view. Before assuming ChatGPT/api_tool invocation is possible, confirm the same tool name is present in the external resource catalog; if it is absent there, treat that as an external catalog mismatch, not proof that the MCP server failed to register the tool.",
+        "diagnostic_code": diagnostic_code,
+        "server_surface": {
+            "authoritative": True,
+            "surface": "mcp.tools/list",
+            "toolset_hash": server_toolset_hash,
+            "names": server_names,
+        },
+        "client_observation": {
+            "status": client_observation_status,
+            "complete": complete,
+            "binding_status": binding_status,
+            "reported_names": client_names,
+            "reported_name_count": len(client_names),
+            "independently_verified": False,
+            "omissions_prove_absence": bool(complete),
+        },
+        "missing_from_client": missing_from_client,
+        "unexpected_in_client": unexpected_in_client,
+        "guard_coverage": evaluate_required_guards(client_attestation, required_guard_tools),
+        "operator_guidance": "Server state is authoritative only for the local MCP tool manager. Client-visible names are client-reported and never independently verified; use missing/unexpected diagnostics to investigate the external resource catalog without treating the report as mutation authority. An externally missing tool is not proof that the MCP server failed to register it.",
     }
 
 
@@ -68,6 +112,10 @@ def build_manifest(
     offset: int = 0,
     limit: int | None = None,
     unavailable_tool_reasons: dict[str, str] | None = None,
+    server_toolset_hash: str | None = None,
+    client_attestation: ClientSurfaceAttestation | None = None,
+    client_observation_status: str | None = None,
+    required_guard_tools: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Build the tools manifest from registries.
 
@@ -202,6 +250,13 @@ def build_manifest(
         "unexpected_registered_tools": unexpected_registered_tools,
     }
 
+    if client_observation_status is None:
+        client_observation_status = (
+            "supplied_bound" if client_attestation is not None else "not_supplied"
+        )
+    if client_observation_status not in {"not_supplied", "supplied_bound", "supplied_unbound"}:
+        raise ValueError("invalid client_observation_status")
+
     # Build access profiles (scope lists only — no token values)
     profiles_dict: dict[str, list[str]] = {
         name: sorted(scopes) for name, scopes in ACCESS_PROFILES.items()
@@ -219,6 +274,14 @@ def build_manifest(
         "modes": modes_dict,
         "access_profiles": profiles_dict,
         "agent_guidance": _agent_guidance(),
-        "operator_surface_contract": _operator_surface_contract(active_mode, scope_enforcement),
+        "operator_surface_contract": _operator_surface_contract(
+            active_mode,
+            scope_enforcement,
+            registered_names=registered_names,
+            server_toolset_hash=server_toolset_hash,
+            client_attestation=client_attestation,
+            client_observation_status=client_observation_status,
+            required_guard_tools=required_guard_tools,
+        ),
         "catalog_consistency": catalog_consistency,
     }

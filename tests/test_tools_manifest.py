@@ -27,6 +27,8 @@ os.environ.pop("MCP_SCOPE_ENFORCEMENT", None)
 
 from tools_manifest import build_manifest  # noqa: E402
 
+from examples.mcp_server.surface_parity import ClientSurfaceAttestation  # noqa: E402
+
 
 @pytest.fixture
 def sample_tools() -> list[FakeTool]:
@@ -284,6 +286,132 @@ class TestBuildManifest:
                 "reason": "registered in live MCP tool manager but absent from active mode 'minimal' configuration",
             }
         ]
+
+
+class TestExternalSurfaceParityDiagnostics:
+    def test_no_client_report_keeps_external_catalog_unverified_and_guards_unknown(
+        self, sample_tools: list[FakeTool]
+    ) -> None:
+        result = build_manifest(
+            sample_tools,
+            mode_override="mcp_client_write",
+            server_toolset_hash="toolset-hash",
+            required_guard_tools=("git_fetch_ref",),
+        )
+
+        contract = result["operator_surface_contract"]
+        assert contract["external_resource_catalog_verified"] is False
+        assert contract["server_surface"]["authoritative"] is True
+        assert contract["server_surface"]["toolset_hash"] == "toolset-hash"
+        assert contract["server_surface"]["names"] == sorted(tool.name for tool in sample_tools)
+        assert contract["client_observation"]["status"] == "not_supplied"
+        assert contract["client_observation"]["independently_verified"] is False
+        assert contract["guard_coverage"]["status"] == "unknown"
+        assert contract["guard_coverage"]["unknown"] == ["git_fetch_ref"]
+
+    def test_complete_client_report_emits_full_diff_and_mismatch_diagnostic(
+        self, sample_tools: list[FakeTool]
+    ) -> None:
+        reported = tuple(
+            sorted({tool.name for tool in sample_tools if tool.name != "search_text"} | {"external_only"})
+        )
+        attestation = ClientSurfaceAttestation(
+            auth_identity="opaque-auth",
+            toolset_hash="toolset-hash",
+            names=reported,
+            complete=True,
+        )
+        result = build_manifest(
+            sample_tools,
+            mode_override="mcp_client_write",
+            server_toolset_hash="toolset-hash",
+            client_attestation=attestation,
+            client_observation_status="supplied_bound",
+        )
+
+        contract = result["operator_surface_contract"]
+        assert contract["external_resource_catalog_verified"] is False
+        assert contract["diagnostic_code"] == "EXTERNAL_RESOURCE_CATALOG_MISMATCH"
+        assert contract["client_observation"]["status"] == "supplied_bound"
+        assert contract["client_observation"]["binding_status"] == "session_bound"
+        assert contract["client_observation"]["complete"] is True
+        assert contract["client_observation"]["independently_verified"] is False
+        assert contract["missing_from_client"] == ["search_text"]
+        assert contract["unexpected_in_client"] == ["external_only"]
+        serialized = str(contract)
+        assert "opaque-auth" not in serialized
+
+    def test_incomplete_report_does_not_turn_omission_into_absence(
+        self, sample_tools: list[FakeTool]
+    ) -> None:
+        attestation = ClientSurfaceAttestation(
+            auth_identity="opaque-auth",
+            toolset_hash="toolset-hash",
+            names=("health",),
+            complete=False,
+        )
+        result = build_manifest(
+            sample_tools,
+            mode_override="mcp_client_write",
+            server_toolset_hash="toolset-hash",
+            client_attestation=attestation,
+            client_observation_status="supplied_bound",
+            required_guard_tools=("git_fetch_ref",),
+        )
+
+        contract = result["operator_surface_contract"]
+        assert contract["missing_from_client"] == []
+        assert contract["client_observation"]["omissions_prove_absence"] is False
+        assert contract["guard_coverage"]["status"] == "unknown"
+        assert contract["guard_coverage"]["reported_absent"] == []
+        assert contract["guard_coverage"]["unknown"] == ["git_fetch_ref"]
+
+    def test_unbound_report_is_explicit_and_never_verified(
+        self, sample_tools: list[FakeTool]
+    ) -> None:
+        names = tuple(sorted(tool.name for tool in sample_tools))
+        attestation = ClientSurfaceAttestation(
+            auth_identity="",
+            toolset_hash="toolset-hash",
+            names=names,
+            complete=True,
+        )
+        result = build_manifest(
+            sample_tools,
+            mode_override="mcp_client_write",
+            server_toolset_hash="toolset-hash",
+            client_attestation=attestation,
+            client_observation_status="supplied_unbound",
+        )
+
+        contract = result["operator_surface_contract"]
+        assert contract["client_observation"]["status"] == "supplied_unbound"
+        assert contract["client_observation"]["binding_status"] == "unbound"
+        assert contract["external_resource_catalog_verified"] is False
+        assert contract["missing_from_client"] == []
+        assert contract["unexpected_in_client"] == []
+
+    def test_matching_complete_report_still_never_flips_external_verification_true(
+        self, sample_tools: list[FakeTool]
+    ) -> None:
+        attestation = ClientSurfaceAttestation(
+            auth_identity="opaque-auth",
+            toolset_hash="toolset-hash",
+            names=tuple(sorted(tool.name for tool in sample_tools)),
+            complete=True,
+        )
+        result = build_manifest(
+            sample_tools,
+            mode_override="mcp_client_write",
+            server_toolset_hash="toolset-hash",
+            client_attestation=attestation,
+        )
+
+        contract = result["operator_surface_contract"]
+        assert contract["external_resource_catalog_verified"] is False
+        assert contract["missing_from_client"] == []
+        assert contract["unexpected_in_client"] == []
+        assert contract["client_observation"]["independently_verified"] is False
 
 
 class TestManifestAvailability:
