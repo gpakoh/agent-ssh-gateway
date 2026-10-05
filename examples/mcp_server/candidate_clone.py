@@ -410,7 +410,7 @@ def _probe_remote_ref(source_root: Path, ref: str) -> RemoteRefProbe:
     and fails closed retryably on UNKNOWN.
     """
     try:
-        clone_url, token = _resolve_trusted_remote(source_root)
+        username, clone_url, token = _resolve_trusted_remote(source_root)
     except ManagedSourceBundleError:
         return RemoteRefProbe(RemoteRefStatus.UNKNOWN)
     if re.fullmatch(r"[0-9a-f]{40}", ref):
@@ -425,7 +425,7 @@ def _probe_remote_ref(source_root: Path, ref: str) -> RemoteRefProbe:
             f"refs/tags/{ref}",
             f"refs/tags/{ref}^{{}}",
         ]
-    env = _minimal_git_env("_", token)
+    env = _minimal_git_env(username, token)
     try:
         result = subprocess.run(
             ["git", "ls-remote", "--exit-code", clone_url, *patterns],
@@ -1226,7 +1226,7 @@ def _legacy_trusted_remote(candidate_dir: Path) -> str | None:
         if stat.S_ISLNK(git_stat.st_mode) or not stat.S_ISDIR(git_stat.st_mode):
             return None
         try:
-            candidate_url, _ = _resolve_trusted_remote(resolved)
+            _username, candidate_url, _token = _resolve_trusted_remote(resolved)
         except ManagedSourceBundleError:
             next_root = _legacy_local_origin(resolved)
             if next_root is None:
@@ -1243,7 +1243,7 @@ def _is_verified_foreign_repository(candidate_dir: Path, source_root: Path) -> b
         git_stat = (candidate_dir / ".git").lstat()
         if stat.S_ISLNK(git_stat.st_mode) or not stat.S_ISDIR(git_stat.st_mode):
             return False
-        requested_url, _ = _resolve_trusted_remote(source_root)
+        _username, requested_url, _token = _resolve_trusted_remote(source_root)
         candidate_url = _legacy_trusted_remote(candidate_dir)
     except (OSError, ManagedSourceBundleError):
         return False

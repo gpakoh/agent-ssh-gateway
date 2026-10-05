@@ -436,8 +436,8 @@ def _is_missing_object_error(exc: ManagedSourceBundleError) -> bool:
     return bool(_BAD_OBJECT_RE.search(msg))
 
 
-def _resolve_trusted_remote(project_root: Path) -> tuple[str, str]:
-    """Return ``(clone_url, token)`` for the registered repo's trusted Gitea identity.
+def _resolve_trusted_remote(project_root: Path) -> tuple[str, str, str]:
+    """Return ``(username, clone_url, token)`` for the trusted Gitea identity.
 
     Remote *names* are not trust anchors.  Enumerate the registered checkout's
     configured remotes, keep only URLs accepted by the Gitea host allowlist,
@@ -502,17 +502,18 @@ def _resolve_trusted_remote(project_root: Path) -> tuple[str, str]:
             )
 
         owner, repo = next(iter(identities))
-        _username, clone_url = _repo_https_target(owner, repo, token=token)
+        username, clone_url = _repo_https_target(owner, repo, token=token)
     except ManagedSourceBundleError:
         raise
     except Exception as exc:
         raise ManagedSourceBundleError(
             "trusted remote resolution failed"
         ) from exc
-    return clone_url, token
+    return username, clone_url, token
 
 
 def _fetch_remote_object(
+    username: str,
     clone_url: str,
     token: str,
     expected: str,
@@ -526,7 +527,7 @@ def _fetch_remote_object(
     """
     from examples.mcp_server.managed_git import _minimal_git_env
 
-    env = _minimal_git_env("_", token)
+    env = _minimal_git_env(username, token)
     try:
         result = subprocess.run(
             [
@@ -569,7 +570,7 @@ def _materialize_from_remote(
     Returns the bound publication on success.  Raises on any failure.
     """
     project_root = Path(get_registry().project_info(project)["root"])
-    clone_url, token = _resolve_trusted_remote(project_root)
+    username, clone_url, token = _resolve_trusted_remote(project_root)
 
     temp_fd, temp_name = tempfile.mkstemp(
         prefix=f".{expected}.", suffix=".bundle.tmp", dir=bundle_path.parent
@@ -591,7 +592,7 @@ def _materialize_from_remote(
                 check=False,
             )
 
-            _fetch_remote_object(clone_url, token, expected, bare)
+            _fetch_remote_object(username, clone_url, token, expected, bare)
 
             fetched = subprocess.run(
                 ["git", f"--git-dir={bare}", "rev-parse", f"{expected}^{{commit}}"],

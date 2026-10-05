@@ -2885,6 +2885,50 @@ def test_missing_metadata_in_same_lineage_remains_actionable(registry_fixture) -
     assert tool_error(code=err.code)["error"]["code"] == err.code
     assert (config_dir / "projects.yaml").read_bytes() == registry_before
 
+def test_probe_remote_ref_uses_resolved_username_for_basic_auth(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    captured: dict[str, object] = {}
+    sha = "a" * 40
+    monkeypatch.setattr(
+        module,
+        "_resolve_trusted_remote",
+        lambda _root: (
+            "resolved-user",
+            "https://git.example.test/gpakoh/test-repo.git",
+            "fixture-token",
+        ),
+    )
+
+    def fake_env(username: str, token: str) -> dict[str, str]:
+        captured["auth"] = (username, token)
+        return {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = list(argv)
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=f"{sha}\trefs/heads/main\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(module, "_minimal_git_env", fake_env)
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    probe = module._probe_remote_ref(tmp_path, "main")
+
+    assert probe.status is module.RemoteRefStatus.FOUND
+    assert probe.sha == sha
+    assert captured["auth"] == ("resolved-user", "fixture-token")
+    argv = captured["argv"]
+    assert isinstance(argv, list)
+    assert argv[:3] == ["git", "ls-remote", "--exit-code"]
+    assert "fixture-token" not in " ".join(str(part) for part in argv)
+
+
 @pytest.mark.parametrize("identity", ["foreign", "same", "unavailable", "empty"])
 def test_legacy_candidate_requires_proven_foreign_repository(
     registry_fixture, monkeypatch: pytest.MonkeyPatch, identity: str,
@@ -2897,15 +2941,16 @@ def test_legacy_candidate_requires_proven_foreign_repository(
     before = (config_dir / "projects.yaml").read_bytes()
     requested = "https://trusted.invalid/owner/requested.git"
 
-    def resolve(root: Path) -> tuple[str, str]:
+    def resolve(root: Path) -> tuple[str, str, str]:
         if root == source:
-            return requested, "unused-test-token"
+            return "fixture-user", requested, "unused-test-token"
         assert root == legacy
         if identity == "unavailable":
             raise ManagedSourceBundleError("ambiguous or untrusted repository")
         if identity == "empty":
-            return "", "unused-test-token"
+            return "fixture-user", "", "unused-test-token"
         return (
+            "fixture-user",
             "https://trusted.invalid/owner/foreign.git" if identity == "foreign" else requested,
             "unused-test-token",
         )
@@ -2951,11 +2996,11 @@ def test_legacy_candidate_follows_safe_sibling_origin_to_foreign_repository(
     requested = "https://trusted.invalid/owner/requested.git"
     foreign = "https://trusted.invalid/owner/foreign.git"
 
-    def resolve(root: Path) -> tuple[str, str]:
+    def resolve(root: Path) -> tuple[str, str, str]:
         if root == source:
-            return requested, "unused-test-token"
+            return "fixture-user", requested, "unused-test-token"
         if root == terminal:
-            return foreign, "unused-test-token"
+            return "fixture-user", foreign, "unused-test-token"
         if root == chained:
             raise ManagedSourceBundleError("legacy clone has only a local origin")
         raise AssertionError(f"unexpected repository root: {root}")
@@ -2993,9 +3038,9 @@ def test_legacy_candidate_local_chain_with_same_identity_fails_closed(
     )
     requested = "https://trusted.invalid/owner/requested.git"
 
-    def resolve(root: Path) -> tuple[str, str]:
+    def resolve(root: Path) -> tuple[str, str, str]:
         if root in (source, terminal):
-            return requested, "unused-test-token"
+            return "fixture-user", requested, "unused-test-token"
         if root == chained:
             raise ManagedSourceBundleError("legacy clone has only a local origin")
         raise AssertionError(f"unexpected repository root: {root}")

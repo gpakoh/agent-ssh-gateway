@@ -467,13 +467,43 @@ def test_resolve_trusted_remote_enumerates_configured_gitea_remotes(
         "examples.mcp_server.control_plane_git._gitea_get", fake_gitea_get
     )
 
-    clone_url, token = _resolve_trusted_remote(project_root)
+    username, clone_url, token = _resolve_trusted_remote(project_root)
 
+    assert username == "testuser"
     assert clone_url == "https://git.example.test/gpakoh/test-repo.git"
     assert token == "fake-token"
     assert git_cmd("remote") in calls
     assert git_cmd("remote", "get-url", "--push", "origin") in calls
     assert git_cmd("remote", "get-url", "--push", "mcp-gitea") in calls
+
+
+def test_remote_fetch_uses_resolved_username_for_basic_auth(tmp_path, monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_env(username: str, token: str) -> dict[str, str]:
+        captured["auth"] = (username, token)
+        return {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = list(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("examples.mcp_server.managed_git._minimal_git_env", fake_env)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    agent_sources._fetch_remote_object(
+        "resolved-user",
+        "https://git.example.test/gpakoh/test-repo.git",
+        "fixture-token",
+        "a" * 40,
+        tmp_path,
+    )
+
+    assert captured["auth"] == ("resolved-user", "fixture-token")
+    argv = captured["argv"]
+    assert isinstance(argv, list)
+    assert argv[:2] == ["git", "fetch"]
+    assert "fixture-token" not in " ".join(str(part) for part in argv)
 
 
 def _make_bare_clone(tmp_path: Path, source_repo: Path) -> tuple[Path, str]:
@@ -563,7 +593,7 @@ def test_missing_object_fetches_from_trusted_remote(tmp_path, monkeypatch):
     # Mock _resolve_trusted_remote to return the bare clone URL
     monkeypatch.setattr(
         "examples.mcp_server.agent_sources._resolve_trusted_remote",
-        lambda _root: (str(bare_remote), "fake-token"),
+        lambda _root: ("testuser", str(bare_remote), "fake-token"),
     )
 
     result = ensure_managed_source_bundle("nod", remote_sha)
@@ -626,7 +656,7 @@ def test_wrong_sha_rejects_bundle(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "examples.mcp_server.agent_sources._resolve_trusted_remote",
-        lambda _root: (str(bare_remote), "fake-token"),
+        lambda _root: ("testuser", str(bare_remote), "fake-token"),
     )
 
     wrong_sha = "a" * 40
@@ -722,7 +752,7 @@ def test_token_never_in_url_or_config(tmp_path, monkeypatch):
     )
 
     try:
-        clone_url, token = _resolve_trusted_remote(project_root)
+        _username, clone_url, token = _resolve_trusted_remote(project_root)
     except ManagedSourceBundleError:
         # Expected: control_plane_git._parse_gitea_remote may fail on mock
         # The important check is that token never leaked
@@ -781,7 +811,8 @@ def test_resolve_trusted_remote_uses_named_trusted_remote_when_origin_missing(tm
         ),
     )
 
-    clone_url, token = _resolve_trusted_remote(project_root)
+    username, clone_url, token = _resolve_trusted_remote(project_root)
+    assert username == "gpakoh"
     assert clone_url == "https://git.example.test/gpakoh/agent-ssh-gateway.git"
     assert token == "fake-token"
 
@@ -822,7 +853,8 @@ def test_resolve_trusted_remote_accepts_configured_local_ssh_identity_only(
         ),
     )
 
-    clone_url, token = _resolve_trusted_remote(project_root)
+    username, clone_url, token = _resolve_trusted_remote(project_root)
+    assert username == "gpakoh"
     assert clone_url == "https://git.example.test/gpakoh/agent-ssh-gateway.git"
     assert token == "fake-token"
 
