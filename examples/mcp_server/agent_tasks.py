@@ -45,6 +45,7 @@ AGENT_ARTIFACT_FILENAMES: dict[str, str] = {
     "log": AGENT_LOG_FILENAME,
     "heartbeat": AGENT_HEARTBEAT_FILENAME,
     "proxy_status": AGENT_PROXY_STATUS_FILENAME,
+    "upgrade_status": "opencode-upgrade.json",
     "failure_status": AGENT_FAILURE_STATUS_FILENAME,
     "worker_status": "worker-status.md",
     "required_checks": "required-checks.log",
@@ -331,8 +332,8 @@ def build_gate_specs(
             "kind": "scope",
             "owner": "gateway",
             "outcome": (
-                "Implementation remains inside the declared file scope and "
-                "preserves guarded parent/source integrity."
+                "Source mutations remain inside the declared write scope and "
+                "preserve guarded parent/source integrity."
             ),
         },
         {
@@ -1088,8 +1089,11 @@ def build_current_plan(
         f"Current phase: `{phase}`. {WORKFLOW_PHASE_TRANSITIONS[phase]}\n\n"
         + convergence
         + f"## Scope\n\n{scope}\n\n"
-        + f"## Allowed files\n\n{allow}\n\n"
-        + f"## Forbidden\n\n{forbid}\n\n"
+        + "## Mutation ownership (write scope)\n\n"
+        + "These patterns constrain source mutations only; they do not restrict read-only exploration. "
+        + "Inspect any repository file, call site, interface, test, or dependency needed to reason correctly before editing.\n\n"
+        + f"{allow}\n\n"
+        + f"## Forbidden mutations\n\n{forbid}\n\n"
         + f"## Required checks\n\n{checks}\n\n"
         + f"## Acceptance criteria\n\n{criteria}\n"
         + (f"\n## Commit message\n\n```\n{commit_message}\n```\n" if commit_message else "")
@@ -2471,6 +2475,86 @@ def _merge_valid_runtime_activity(
     return semantic_activity
 
 
+def _reasoning_loop_micro_pattern(log_stdout: str) -> dict[str, Any]:
+    """Measure a low-information short-utterance loop in an agent log tail.
+
+    This deliberately does not key on literals such as ``Let`` or ``Now``.
+    It looks for a tail dominated by short natural-language utterances with
+    little lexical/line diversity and no tool-call syntax. That catches the
+    common OpenCode failure mode where wording jitters while the model emits
+    intent fragments instead of taking an observable action.
+    """
+    raw_tail = [line.strip() for line in log_stdout.splitlines() if line.strip()][-48:]
+    keys: list[str] = []
+    lead_tokens: list[str] = []
+    lexical_tokens: list[str] = []
+    for raw in raw_tail:
+        clean = _ANSI_ESCAPE_RE.sub("", raw).strip().lower()
+        if (
+            not clean
+            or len(clean) > 96
+            or re.match(r"^>\s*build\s*[·:-]", clean, re.I)
+            or re.match(r"^(?:→|←|\$|<\s*/?(?:invoke|parameter)\b)", clean, re.I)
+            or any(marker.lower() in clean for marker in _USEFUL_AGENT_ACTIVITY_MARKERS)
+            or any(ch in clean for ch in ("/", "\\", "=", "`"))
+        ):
+            continue
+        tokens = [
+            _reasoning_loop_stem(token)
+            for token in re.findall(r"[a-zа-яё][a-zа-яё'-]*", clean)
+        ]
+        if not 1 <= len(tokens) <= 8:
+            continue
+        key = " ".join(tokens)
+        keys.append(key)
+        lexical_tokens.extend(tokens)
+        important = [token for token in tokens if token not in _REASONING_LOOP_FILLER_WORDS]
+        if important:
+            lead_tokens.append(important[0])
+
+    if not raw_tail or not keys:
+        return {
+            "detected": False,
+            "window_lines": len(raw_tail),
+            "micro_lines": len(keys),
+            "micro_line_ratio": 0.0,
+            "unique_line_ratio": 1.0,
+            "lexical_diversity": 1.0,
+            "dominant_lead_token_coverage": 0.0,
+        }
+
+    micro_ratio = round(len(keys) / len(raw_tail), 3)
+    unique_line_ratio = round(len(set(keys)) / len(keys), 3)
+    lexical_diversity = round(
+        len(set(lexical_tokens)) / len(lexical_tokens), 3
+    ) if lexical_tokens else 1.0
+    lead_coverage = 0.0
+    if lead_tokens:
+        counts: dict[str, int] = {}
+        for token in lead_tokens:
+            counts[token] = counts.get(token, 0) + 1
+        lead_coverage = round(max(counts.values()) / len(lead_tokens), 3)
+
+    detected = bool(
+        len(keys) >= AGENT_REASONING_LOOP_MIN_LINES
+        and micro_ratio >= 0.75
+        and (
+            unique_line_ratio <= 0.5
+            or lexical_diversity <= 0.42
+            or lead_coverage >= 0.55
+        )
+    )
+    return {
+        "detected": detected,
+        "window_lines": len(raw_tail),
+        "micro_lines": len(keys),
+        "micro_line_ratio": micro_ratio,
+        "unique_line_ratio": unique_line_ratio,
+        "lexical_diversity": lexical_diversity,
+        "dominant_lead_token_coverage": lead_coverage,
+    }
+
+
 def _detect_agent_reasoning_loop(
     *,
     log_stdout: str,
@@ -2498,13 +2582,17 @@ def _detect_agent_reasoning_loop(
             for token in sig:
                 token_counts[token] = token_counts.get(token, 0) + 1
         coverage = round(max(token_counts.values()) / len(recent), 3) if token_counts else 0.0
+    micro_pattern = _reasoning_loop_micro_pattern(log_stdout)
     no_recent_progress = isinstance(progress_age, int) and progress_age >= reasoning_loop_after_seconds
+    semantic_loop_detected = bool(
+        len(recent) >= AGENT_REASONING_LOOP_MIN_LINES
+        and (coverage >= 0.72 or average_adjacent_similarity >= 0.34)
+    )
     detected = bool(
         active
         and not terminal
         and no_recent_progress
-        and len(recent) >= AGENT_REASONING_LOOP_MIN_LINES
-        and (coverage >= 0.72 or average_adjacent_similarity >= 0.34)
+        and (semantic_loop_detected or micro_pattern["detected"])
     )
     return {
         "detected": detected,
@@ -2513,6 +2601,7 @@ def _detect_agent_reasoning_loop(
         "window_lines": len(recent),
         "dominant_token_coverage": coverage,
         "average_adjacent_similarity": average_adjacent_similarity,
+        "degenerate_micro_loop": micro_pattern,
         "continuation_prompt": AGENT_REASONING_LOOP_CONTINUATION_PROMPT,
     }
 

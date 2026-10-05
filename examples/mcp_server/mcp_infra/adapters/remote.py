@@ -425,6 +425,8 @@ async def _gitea_pr_branch_tracking(
 
 _MERGE_RECONCILE_ATTEMPTS = 3
 _MERGE_RECONCILE_DELAY_SECONDS = 0.05
+_ACTION_RERUN_RECONCILE_ATTEMPTS = 3
+_ACTION_RERUN_RECONCILE_DELAY_SECONDS = 0.05
 _GITEA_CI_PAGE_LIMIT = 50
 _GITEA_CI_MAX_RUNS = 1000
 _GITEA_CI_MAX_PAGES = 20
@@ -2141,6 +2143,241 @@ async def gitea_get_action_run(owner: str, repo: str, run_id: int) -> dict[str, 
     return tool_success("gitea_get_action_run", result=data, source="gitea")
 
 
+def _action_run_id(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return value
+
+
+def _action_run_attempt(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _action_rerun_exception_is_ambiguous(exc: BaseException) -> bool:
+    if isinstance(
+        exc,
+        (GiteaMutationOutcomeUnknown, asyncio.CancelledError, httpx.TransportError, TimeoutError),
+    ):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        response = exc.response
+        return response is not None and response.status_code >= 500
+    return False
+
+
+async def _reconcile_action_rerun_postcondition(
+    client: Any,
+    owner: str,
+    repo: str,
+    run_id: int,
+    *,
+    expected_head_sha: str,
+    previous_attempt: int,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    last_observed: dict[str, Any] = {}
+    last_read_error_class: str | None = None
+    attempts = 0
+    for attempt in range(_ACTION_RERUN_RECONCILE_ATTEMPTS):
+        attempts = attempt + 1
+        try:
+            run = await client.get_action_run(owner, repo, run_id)
+        except Exception as exc:
+            last_read_error_class = type(exc).__name__
+        else:
+            observed_id = _action_run_id(run.get("id"))
+            observed_head_sha = _valid_commit_sha(run.get("head_sha"))
+            observed_attempt = _action_run_attempt(run.get("run_attempt"))
+            last_observed = {
+                "id": observed_id,
+                "head_sha": observed_head_sha,
+                "run_attempt": observed_attempt,
+                "status": run.get("status"),
+                "conclusion": run.get("conclusion"),
+            }
+            if (
+                observed_id == run_id
+                and observed_head_sha == expected_head_sha
+                and observed_attempt is not None
+                and observed_attempt > previous_attempt
+            ):
+                return run, {
+                    "reconciliation_attempts": attempts,
+                    "observed": last_observed,
+                }
+        if attempt + 1 < _ACTION_RERUN_RECONCILE_ATTEMPTS:
+            await asyncio.sleep(_ACTION_RERUN_RECONCILE_DELAY_SECONDS)
+    details: dict[str, Any] = {
+        "reconciliation_attempts": attempts,
+        "observed": last_observed,
+    }
+    if last_read_error_class:
+        details["last_read_error_class"] = last_read_error_class
+    return None, details
+
+
+async def gitea_rerun_action_run(
+    owner: str,
+    repo: str,
+    run_id: int,
+    expected_head_sha: str,
+) -> dict[str, Any]:
+    """Rerun one completed non-success Gitea Actions run on an exact head SHA.
+
+    The mutation is fenced by the run id plus ``expected_head_sha``. Successful
+    or still-active runs are refused. After crossing the POST boundary the tool
+    proves that the same run/head advanced to a higher ``run_attempt``; an
+    ambiguous transport/5xx response is reconciled by reads and is never blindly
+    replayed.
+    """
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return tool_error(
+            tool="gitea_rerun_action_run",
+            code="DEPENDENCY_MISSING",
+            message="GITEA_TOKEN not configured",
+            source="gitea",
+        )
+    if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id < 1:
+        return tool_error(
+            tool="gitea_rerun_action_run",
+            code="INVALID_INPUT",
+            message="run_id must be a positive integer",
+            source="gitea",
+        )
+    normalized_expected_head = _valid_commit_sha(expected_head_sha)
+    if normalized_expected_head is None:
+        return tool_error(
+            tool="gitea_rerun_action_run",
+            code="INVALID_INPUT",
+            message="expected_head_sha must be a 40-character SHA-1",
+            source="gitea",
+        )
+    expected_head_sha = normalized_expected_head
+
+    try:
+        async with _server_gitea_client()(token) as client:
+            before = await client.get_action_run(owner, repo, run_id)
+            actual_id = _action_run_id(before.get("id"))
+            actual_head_sha = _valid_commit_sha(before.get("head_sha"))
+            previous_attempt = _action_run_attempt(before.get("run_attempt"))
+            if actual_id != run_id:
+                return tool_error(
+                    tool="gitea_rerun_action_run",
+                    code="RUN_ID_MISMATCH",
+                    message="Gitea returned a different workflow run id; refusing rerun",
+                    source="gitea",
+                )
+            if actual_head_sha != expected_head_sha:
+                return tool_error(
+                    tool="gitea_rerun_action_run",
+                    code="HEAD_MISMATCH",
+                    message="workflow run head changed or differs from expected_head_sha",
+                    details={
+                        "run_id": run_id,
+                        "expected_head_sha": expected_head_sha,
+                        "observed_head_sha": actual_head_sha,
+                        "mutation_occurred": False,
+                    },
+                    source="gitea",
+                )
+            if previous_attempt is None:
+                return tool_error(
+                    tool="gitea_rerun_action_run",
+                    code="RUN_STATE_UNPROVEN",
+                    message="workflow run_attempt is unavailable or malformed; refusing rerun",
+                    source="gitea",
+                )
+            if before.get("status") != "completed":
+                return tool_error(
+                    tool="gitea_rerun_action_run",
+                    code="RUN_NOT_COMPLETED",
+                    message="workflow run is not completed; refusing duplicate execution",
+                    retryable=True,
+                    details={"run_id": run_id, "status": before.get("status")},
+                    source="gitea",
+                )
+            conclusion = before.get("conclusion")
+            if conclusion == "success":
+                return tool_error(
+                    tool="gitea_rerun_action_run",
+                    code="RUN_ALREADY_SUCCESSFUL",
+                    message="workflow run already succeeded; refusing unnecessary rerun",
+                    source="gitea",
+                )
+            if conclusion not in {"failure", "cancelled"}:
+                return tool_error(
+                    tool="gitea_rerun_action_run",
+                    code="RUN_NOT_RERUNNABLE",
+                    message="workflow run conclusion is not a proven rerunnable failure/cancellation",
+                    details={"run_id": run_id, "conclusion": conclusion},
+                    source="gitea",
+                )
+
+            mutation_error: BaseException | None = None
+            try:
+                await client.rerun_action_run(owner, repo, run_id)
+            except asyncio.CancelledError as exc:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    current_task.uncancel()
+                mutation_error = exc
+            except Exception as exc:
+                if not _action_rerun_exception_is_ambiguous(exc):
+                    raise
+                mutation_error = exc
+
+            rerun, reconciliation = await _reconcile_action_rerun_postcondition(
+                client,
+                owner,
+                repo,
+                run_id,
+                expected_head_sha=expected_head_sha,
+                previous_attempt=previous_attempt,
+            )
+            if rerun is None:
+                details: dict[str, Any] = {
+                    "run_id": run_id,
+                    "expected_head_sha": expected_head_sha,
+                    "previous_attempt": previous_attempt,
+                    "mutation_started": True,
+                    **reconciliation,
+                }
+                if mutation_error is not None:
+                    details["mutation_error_class"] = type(mutation_error).__name__
+                    if isinstance(mutation_error, httpx.HTTPStatusError):
+                        details["mutation_http_status"] = mutation_error.response.status_code
+                return tool_error(
+                    tool="gitea_rerun_action_run",
+                    code="MUTATION_OUTCOME_UNKNOWN",
+                    message="workflow rerun was attempted but a higher run_attempt could not be proven",
+                    retryable=False,
+                    hint="Do not replay the rerun mutation. Re-read this run until run_attempt/status are authoritative.",
+                    details=details,
+                    source="gitea",
+                )
+
+            data = {
+                "id": run_id,
+                "head_sha": expected_head_sha,
+                "previous_attempt": previous_attempt,
+                "run_attempt": rerun.get("run_attempt"),
+                "status": rerun.get("status"),
+                "conclusion": rerun.get("conclusion"),
+                "event": rerun.get("event"),
+                "html_url": rerun.get("html_url"),
+                "outcome": "started_after_ambiguous_response"
+                if mutation_error is not None
+                else "started",
+                "verified": True,
+                "reconciliation_attempts": reconciliation["reconciliation_attempts"],
+            }
+    except Exception as exc:
+        return _remote_api_error("gitea_rerun_action_run", "gitea", exc)
+    return tool_success("gitea_rerun_action_run", result=data, source="gitea")
+
+
 async def gitea_list_action_run_jobs(owner: str, repo: str, run_id: int) -> dict[str, Any]:
     """List jobs and steps for a Gitea Actions workflow run."""
     token = os.environ.get("GITEA_TOKEN", "")
@@ -2974,6 +3211,7 @@ def register_all() -> None:
     register_tool("gitea_push_verified_commit")(gitea_push_verified_commit)
     register_tool("gitea_list_action_runs")(gitea_list_action_runs)
     register_tool("gitea_get_action_run")(gitea_get_action_run)
+    register_tool("gitea_rerun_action_run")(gitea_rerun_action_run)
     register_tool("gitea_list_action_run_jobs")(gitea_list_action_run_jobs)
     register_tool("gitea_list_action_jobs")(gitea_list_action_jobs)
     register_tool("gitea_get_action_job_logs")(gitea_get_action_job_logs)

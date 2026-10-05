@@ -2251,7 +2251,7 @@ class TestOpenCodeProductionAdmission:
         assert "OPENCODE_UPGRADE_GATE_ENABLED=${OPENCODE_UPGRADE_GATE_ENABLED:-true}" in env
         assert (
             "OPENCODE_UPGRADE_INTERVAL_SECONDS="
-            "${OPENCODE_UPGRADE_INTERVAL_SECONDS:-604800}"
+            "${OPENCODE_UPGRADE_INTERVAL_SECONDS:-86400}"
         ) in env
         assert (
             "OPENCODE_MANAGED_BIN="
