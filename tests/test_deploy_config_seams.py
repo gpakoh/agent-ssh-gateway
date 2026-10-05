@@ -841,26 +841,36 @@ class TestMcpOauthWorkspaceMount:
 
 
 class TestDocsOnlyPushDoesNotDeployRuntime:
-    """A docs-only master push must not rebuild/redeploy the live MCP stack.
+    """Docs PRs and pushes keep evidence without rebuilding the live stack."""
 
-    Production deploy recreates the ChatGPT-facing MCP containers, so an
-    innocuous TODO/docs commit must not disconnect every active client.  The
-    push-only paths-ignore filter preserves full pull-request checks while
-    suppressing the workflow only when *all* changed files are non-runtime
-    documentation.  Mixed docs + runtime changes still run normally.
-    """
-
-    def test_push_ignores_docs_only_changes_but_pull_requests_remain_unfiltered(self):
+    def test_unfiltered_events_have_a_dependency_free_scope_gate(self):
         wf = _load_workflow(CI_WORKFLOW_PATH)
-        triggers = wf[True]
-        push = triggers["push"]
-        ignored = set(push.get("paths-ignore", []))
+        for trigger in ("push", "pull_request"):
+            assert "paths-ignore" not in wf[True][trigger]
+            assert "paths" not in wf[True][trigger]
+        scope = wf["jobs"]["scope"]
+        assert scope["outputs"]["full_ci"] == "${{ steps.classify.outputs.full_ci }}"
+        checkout = scope["steps"][0]
+        assert checkout["with"]["fetch-depth"] == 0
+        assert checkout["with"]["ref"] == "${{ github.event.pull_request.head.sha || github.sha }}"
+        commands = "\n".join(step.get("run", "") for step in scope["steps"])
+        assert "python3 scripts/ci_change_scope.py" in commands
+        assert "python3 -m unittest tests.test_ci_change_scope" in commands
+        assert "uv sync" not in commands
+        assert "make test" not in commands
 
-        assert "TODO.md" in ignored
-        assert "docs/**" in ignored
-        assert "paths-ignore" not in triggers["pull_request"], (
-            "PR checks must remain unfiltered even when docs-only master pushes are suppressed"
-        )
+    def test_heavy_jobs_and_deploy_cannot_bypass_docs_gate(self):
+        jobs = _load_workflow(CI_WORKFLOW_PATH)["jobs"]
+        assert jobs["test"]["needs"] == ["scope"]
+        assert jobs["test"]["if"] == "needs.scope.outputs.full_ci == 'true'"
+        for job, dependencies in {
+            "e2e": ["test"],
+            "build-and-push": ["test", "e2e"],
+            "deploy": ["build-and-push"],
+            "host-smoke": ["deploy"],
+        }.items():
+            assert jobs[job]["needs"] == dependencies
+            assert "always()" not in jobs[job].get("if", "")
 
 
 class TestDeploymentConcurrencySerialization:
@@ -955,6 +965,40 @@ class TestE2eFailsClosedWithoutBrowserToolchain:
         """
         text = E2E_WEBUI_PATH.read_text(encoding="utf-8")
         assert 'opts.page_load_strategy = "none"' in text
+
+    def test_remote_driver_retries_only_startup_and_fixture_readiness_failures(self):
+        """A ready Grid can still yield one unusable Chromium session.
+
+        Runs #13675 and #13725 reached a healthy Grid but respectively hit a
+        session-creation race and a session that never rendered the loopback
+        fixture. Retry is bounded to those startup/readiness failures; the real
+        Web UI assertions remain outside this loop and fail closed normally.
+        """
+        text = E2E_WEBUI_PATH.read_text(encoding="utf-8")
+        assert "E2E_REMOTE_SESSION_ATTEMPTS = 3" in text
+        assert "E2E_REMOTE_SESSION_RETRY_DELAY_SECONDS = 2.0" in text
+        assert "E2E_REMOTE_FIXTURE_READY_TIMEOUT_SECONDS = 20.0" in text
+        assert "except (SessionNotCreatedException, TimeoutException)" in text
+        assert "for attempt in range(1, E2E_REMOTE_SESSION_ATTEMPTS + 1)" in text
+        assert "if attempt >= E2E_REMOTE_SESSION_ATTEMPTS" in text
+        assert "time.sleep(E2E_REMOTE_SESSION_RETRY_DELAY_SECONDS)" in text
+        assert 'EC.presence_of_element_located((By.ID, "appShell"))' in text
+        assert '"Network.setExtraHTTPHeaders"' in text
+        assert '"X-API-Key": "e2e-master-key"' in text
+        assert text.index("_configure_browser_api_key(drv)") < text.index('drv.get(f"{base}/")')
+        assert "drv.quit()" in text
+        assert "drv = _new_remote_driver(opts, base)" in text
+
+    def test_e2e_browser_never_uses_runner_proxy_for_loopback_fixture(self):
+        """Chromium itself must bypass any inherited CI/package proxy.
+
+        Run #13693 had a healthy uvicorn fixture and Selenium session but all
+        four browser tests timed out waiting for the loopback login form. The
+        browser only needs 127.0.0.1 in this suite, so force direct navigation
+        instead of relying on runner- or container-level proxy inheritance.
+        """
+        text = E2E_WEBUI_PATH.read_text(encoding="utf-8")
+        assert 'opts.add_argument("--no-proxy-server")' in text
 
     def test_remote_selenium_sidecar_bounds_session_and_cpu(self):
         """Every ``docker run`` of the Selenium sidecar must bound the Grid
@@ -1711,9 +1755,11 @@ class TestInstallPackageNetworkResilience:
             assert "UV_HTTP_TIMEOUT=60 uv sync --frozen --extra dev" in run
             assert "uv sync attempt ${attempt}/5 failed" in run
             assert 'sleep "$delay"' in run
-            assert "package proxy exhausted for pip install uv; trying one direct fallback" in run
-            assert "package proxy exhausted for uv sync; trying one direct fallback" in run
+            assert "pip install uv retries exhausted; trying one direct fallback without proxy env" in run
+            assert "uv sync retries exhausted; trying one direct fallback without proxy env" in run
             assert "env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy" in run
+            assert 'if [ "$uv_ready" != "true" ] && [ -n "${CI_PACKAGE_HTTP_PROXY:-}${CI_PACKAGE_HTTPS_PROXY:-}" ]' not in run
+            assert 'if [ -n "${CI_PACKAGE_HTTP_PROXY:-}${CI_PACKAGE_HTTPS_PROXY:-}" ]; then\n            echo "::warning::uv sync retries exhausted' not in run
             assert run.rstrip().endswith("exit 1")
 
     def test_python_jobs_wire_optional_package_proxy_secrets(self):

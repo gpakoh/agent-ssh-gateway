@@ -3,16 +3,7 @@ name: CI
 on:
   push:
     branches: ["main", "master"]
-    # Runtime deploys recreate the live gateway/MCP containers. Pure
-    # documentation changes must not disconnect active MCP clients. Actions
-    # paths-ignore semantics suppress a push only when every changed path is
-    # ignored, so a mixed docs + runtime commit still runs the full pipeline.
-    paths-ignore:
-      - "TODO.md"
-      - "docs/**"
   pull_request:
-    # Keep PR validation unfiltered: documentation-only PRs still exercise the
-    # normal checks, while only post-merge docs-only pushes avoid deployment.
     branches: ["main", "master"]
 
 # MAJOR audit finding: this workflow's deploy job runs
@@ -34,7 +25,29 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
+  scope:
+    name: Change scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      full_ci: ${{ steps.classify.outputs.full_ci }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Check scope regression cases without application dependencies
+        run: python3 -m unittest tests.test_ci_change_scope
+      - name: Classify exact diff and check documentation whitespace
+        id: classify
+        run: python3 scripts/ci_change_scope.py
+
   test:
+    needs: [scope]
+    if: needs.scope.outputs.full_ci == 'true'
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     # No job in this workflow had a timeout at all -- a genuinely hung
@@ -99,8 +112,8 @@ jobs:
               sleep "$delay"
             fi
           done
-          if [ "$uv_ready" != "true" ] && [ -n "${CI_PACKAGE_HTTP_PROXY:-}${CI_PACKAGE_HTTPS_PROXY:-}" ]; then
-            echo "::warning::package proxy exhausted for pip install uv; trying one direct fallback"
+          if [ "$uv_ready" != "true" ]; then
+            echo "::warning::pip install uv retries exhausted; trying one direct fallback without proxy env"
             if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy python -m pip install uv; then
               uv_ready=true
             fi
@@ -119,11 +132,9 @@ jobs:
               sleep "$delay"
             fi
           done
-          if [ -n "${CI_PACKAGE_HTTP_PROXY:-}${CI_PACKAGE_HTTPS_PROXY:-}" ]; then
-            echo "::warning::package proxy exhausted for uv sync; trying one direct fallback"
-            if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy UV_HTTP_TIMEOUT=60 uv sync --frozen --extra dev; then
-              exit 0
-            fi
+          echo "::warning::uv sync retries exhausted; trying one direct fallback without proxy env"
+          if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy UV_HTTP_TIMEOUT=60 uv sync --frozen --extra dev; then
+            exit 0
           fi
           exit 1
 
@@ -316,8 +327,8 @@ jobs:
               sleep "$delay"
             fi
           done
-          if [ "$uv_ready" != "true" ] && [ -n "${CI_PACKAGE_HTTP_PROXY:-}${CI_PACKAGE_HTTPS_PROXY:-}" ]; then
-            echo "::warning::package proxy exhausted for pip install uv; trying one direct fallback"
+          if [ "$uv_ready" != "true" ]; then
+            echo "::warning::pip install uv retries exhausted; trying one direct fallback without proxy env"
             if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy python -m pip install uv; then
               uv_ready=true
             fi
@@ -336,11 +347,9 @@ jobs:
               sleep "$delay"
             fi
           done
-          if [ -n "${CI_PACKAGE_HTTP_PROXY:-}${CI_PACKAGE_HTTPS_PROXY:-}" ]; then
-            echo "::warning::package proxy exhausted for uv sync; trying one direct fallback"
-            if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy UV_HTTP_TIMEOUT=60 uv sync --frozen --extra dev; then
-              exit 0
-            fi
+          echo "::warning::uv sync retries exhausted; trying one direct fallback without proxy env"
+          if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy UV_HTTP_TIMEOUT=60 uv sync --frozen --extra dev; then
+            exit 0
           fi
           exit 1
 

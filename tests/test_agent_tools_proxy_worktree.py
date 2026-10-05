@@ -972,7 +972,8 @@ def test_managed_clone_requires_registry_root_at_git_toplevel(tmp_path, monkeypa
         text=True,
         capture_output=True,
         check=False,
-        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+        # Importing and verifying a pinned bundle needs the managed-worktree harness budget.
+        timeout=PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS,
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
@@ -1549,7 +1550,8 @@ def test_startup_stall_can_reach_third_distinct_proxy(tmp_path, monkeypatch):
             text=True,
             capture_output=True,
             check=False,
-            timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+            # Budget for three launches, two terminations and durable postrun evidence.
+            timeout=PROXY_RETRY_HARNESS_TIMEOUT_SECONDS,
         )
 
         assert result.returncode == 0, result.stderr or result.stdout

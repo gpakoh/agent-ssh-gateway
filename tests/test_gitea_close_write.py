@@ -7,12 +7,14 @@ checked against a freshly-fetched PR BEFORE any mutation, so any
 mismatch fails closed with zero writes.
 
 A real close must additionally be justified by a ``superseding_ref``:
-    a ``refs/heads/<branch>`` or plain feature branch in the SAME
-    repository that the adapter freshly resolves and whose exact head
-    commit equals ``expected_head_sha`` before any intent audit or close
-    mutation (missing/malformed/moved/short branch fails closed with zero
-    audit writes and zero mutation). It also requires a human-readable
-    reason and strict attributed audit attribution: the Gitea username and
+    normally a ``refs/heads/<branch>`` or plain feature branch in the SAME
+    repository that the adapter freshly resolves and whose exact head commit
+    equals ``expected_head_sha`` before any intent audit or close mutation.
+    The sole default-branch exception is a Gitea-degenerate zero-delta PR:
+    head ref == base ref == repository default branch and both SHAs equal the
+    exact expected head. Missing/malformed/moved/ambiguous evidence fails
+    closed with zero audit writes and zero mutation. It also requires a
+    human-readable reason and strict attributed audit attribution: the Gitea username and
     the authenticated caller fingerprint must both resolve, a
     destructive-intent audit event must persist (fail closed with
     AUDIT_UNAVAILABLE otherwise), and only then may the close mutation run.
@@ -92,6 +94,9 @@ class FakeCloseClient:
         user_payload: dict | None = None,
         superseding_head_sha: str | None = None,
         superseding_missing: bool = False,
+        head_ref: str = "feat/x",
+        base_sha: str = SHA,
+        default_branch: str = "master",
     ):
         assert token == "token"
         self.state = state
@@ -106,6 +111,9 @@ class FakeCloseClient:
             superseding_head_sha if superseding_head_sha is not None else SHA
         )
         self.superseding_missing = superseding_missing
+        self.head_ref = head_ref
+        self.base_sha = base_sha
+        self.default_branch = default_branch
         self.pr_reads = 0
         self.branch_lookups: list[str] = []
         self.close_calls: list[tuple[str, str, int]] = []
@@ -123,8 +131,8 @@ class FakeCloseClient:
             "number": pull_number,
             "state": state,
             "merged": merged,
-            "head": {"sha": head_sha, "ref": "feat/x"},
-            "base": {"ref": base},
+            "head": {"sha": head_sha, "ref": self.head_ref},
+            "base": {"ref": base, "sha": self.base_sha},
             "html_url": "https://git.example/pr/25",
         }
 
@@ -133,6 +141,9 @@ class FakeCloseClient:
         if payload is None:
             payload = {"login": "robot"}
         return payload
+
+    async def get_repo(self, owner: str, repo: str):
+        return {"default_branch": self.default_branch}
 
     async def get_branch(self, owner: str, repo: str, branch: str):
         if self.superseding_missing:
@@ -533,6 +544,40 @@ async def test_adapter_plain_superseding_branch_normalized_in_audit(monkeypatch)
     for event in (logger.required_events[0], logger.append_events[0]):
         assert event.metadata["superseding_ref"] == "refs/heads/new-design"
         assert event.metadata["superseding_head_sha"] == SHA
+
+
+@pytest.mark.asyncio
+async def test_adapter_allows_default_branch_only_for_degenerate_same_ref_pr(monkeypatch):
+    client = FakeCloseClient("token", head_ref="master")
+    logger = RecordingAuditLogger()
+    _setup_close(monkeypatch, client, audit_logger=logger)
+
+    result = await remote.gitea_close_pull_request(
+        "owner", "repo", 25, SHA, REASON, superseding_ref="master"
+    )
+
+    assert result["ok"] is True
+    assert client.branch_lookups == ["master"]
+    assert client.close_calls == [("owner", "repo", 25)]
+    for event in (logger.required_events[0], logger.append_events[0]):
+        assert event.metadata["superseding_ref"] == "refs/heads/master"
+        assert event.metadata["superseding_head_sha"] == SHA
+        assert event.metadata["degenerate_same_default_ref"] is True
+
+
+@pytest.mark.asyncio
+async def test_adapter_degenerate_default_ref_requires_exact_base_sha(monkeypatch):
+    client = FakeCloseClient("token", head_ref="master", base_sha="c" * 40)
+    logger = RecordingAuditLogger()
+
+    result = await _close(monkeypatch, client, superseding_ref="master", audit_logger=logger)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INVALID_INPUT"
+    assert client.branch_lookups == []
+    assert client.close_calls == []
+    assert logger.required_events == []
+    assert logger.append_events == []
 
 
 @pytest.mark.asyncio
