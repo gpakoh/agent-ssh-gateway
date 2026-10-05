@@ -1938,14 +1938,51 @@ interval = int(sys.argv[4])
 timeout = int(sys.argv[5])
 # Only the explicit serialized command may update the shared executable.
 os.environ["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
+rollback_path = None
+rollback_mode = None
+
+
+def restore_lkg():
+    # Atomically restore the pre-upgrade executable after a gate failure.
+    if rollback_path is None or rollback_mode is None or not rollback_path.exists():
+        return "not-needed"
+    fd = -1
+    tmp = None
+    try:
+        fd, tmp_raw = tempfile.mkstemp(prefix=".opencode-rollback-", dir=str(managed.parent))
+        tmp = Path(tmp_raw)
+        with rollback_path.open("rb") as source, os.fdopen(fd, "wb") as target:
+            fd = -1
+            shutil.copyfileobj(source, target)
+            target.flush()
+            os.fsync(target.fileno())
+        os.chmod(tmp, rollback_mode)
+        os.replace(tmp, managed)
+        tmp = None
+        directory_fd = os.open(managed.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        rollback_path.unlink(missing_ok=True)
+        return "restored"
+    except OSError as exc:
+        return "restore-failed:" + type(exc).__name__
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
 
 
 def fail(reason, detail):
+    rollback_status = restore_lkg()
     payload = {
         "version": 1,
         "status": "failed",
         "reason": reason,
         "detail": " ".join(str(detail).split())[-4096:],
+        "rollback_status": rollback_status,
     }
     print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
     raise SystemExit(1)
@@ -2088,6 +2125,29 @@ with os.fdopen(lock_fd, "a+") as lock_handle:
             raise SystemExit(0)
 
     version_before = binary_version(managed)
+    managed_info = regular_file(managed, "managed_binary")
+    rollback_mode = stat.S_IMODE(managed_info.st_mode)
+    rollback_fd = -1
+    try:
+        rollback_fd, rollback_raw = tempfile.mkstemp(
+            prefix=".opencode-lkg-", dir=str(managed.parent)
+        )
+        rollback_path = Path(rollback_raw)
+        with managed.open("rb") as source, os.fdopen(rollback_fd, "wb") as target:
+            rollback_fd = -1
+            shutil.copyfileobj(source, target)
+            target.flush()
+            os.fsync(target.fileno())
+        os.chmod(rollback_path, rollback_mode)
+        regular_file(rollback_path, "rollback_binary")
+    except OSError as exc:
+        if rollback_fd >= 0:
+            os.close(rollback_fd)
+        if rollback_path is not None:
+            rollback_path.unlink(missing_ok=True)
+            rollback_path = None
+        fail("rollback_snapshot_failed", exc)
+
     upgrade_env = os.environ.copy()
     upgrade_env.pop("OPENCODE_DISABLE_AUTOUPDATE", None)
     # Current OpenCode curl installers write to $HOME/.opencode/bin even when
@@ -2184,7 +2244,13 @@ with os.fdopen(lock_fd, "a+") as lock_handle:
         "upgrade_exit_code": upgraded.returncode,
         "upgrade_output_sha256": output_digest,
     }
-    atomic_json(state_path, receipt)
+    try:
+        atomic_json(state_path, receipt)
+    except OSError as exc:
+        fail("receipt_write_failed", exc)
+    if rollback_path is not None:
+        rollback_path.unlink(missing_ok=True)
+        rollback_path = None
     print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
 """
 
@@ -2381,7 +2447,7 @@ def _build_opencode_script(
         "OPENCODE_UPGRADE_GATE_ENABLED", "false"
     ).strip().lower() not in {"0", "false", "no", "off"}
     upgrade_interval_seconds = int(
-        os.environ.get("OPENCODE_UPGRADE_INTERVAL_SECONDS", "604800")
+        os.environ.get("OPENCODE_UPGRADE_INTERVAL_SECONDS", "86400")
     )
     upgrade_timeout_seconds = int(
         os.environ.get("OPENCODE_UPGRADE_TIMEOUT_SECONDS", "600")
