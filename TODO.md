@@ -61,6 +61,19 @@ Open backlog count after cleanup: **32**
    recreation of the damaged candidate must succeed without deleting its code.
    Exercise the reproducer above through the client-exposed recovery tools.
 
+   **Operator recovery report, 2026-10-07:** no task/lease registry was found;
+   removing the old directory broke
+   `candidate-quart-core-fix-ci-greenlet-test-job-20261001`, whose Git alternates
+   and origin depended on it. The operator restored the dependent clone's
+   objects/remote and reported successful `git fsck` with dirty work preserved.
+   Cleanup must inspect inbound Git alternates, origin and worktree dependencies
+   before directory removal. Preserve the source or first make dependants
+   self-contained against a trusted source, retaining local-only objects/refs;
+   verify them before deletion. Missing registry/leases is unknown, not proof of
+   inactivity. Add a regression with chained shared clones and unpushed commits:
+   recovery must preserve every dependent HEAD, ref and dirty file and leave
+   `git fsck` clean. Report metadata recovery and directory GC separately.
+
 4. ⬜ **Reconcile stale unbound fleet leases without duplicate work.**
    Historical `attempted` / `legacy_unknown` lease rows can consume all fleet
    capacity even when no lease has a recent heartbeat. Add fleet status that
