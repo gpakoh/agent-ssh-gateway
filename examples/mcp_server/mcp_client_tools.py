@@ -88,7 +88,7 @@ def _validate_depth(depth: int) -> int:
 # ── Safety helpers ──────────────────────────────────────────────
 
 _OUTPUT_LINE_LIMIT = 2000
-_ALLOWED_PATH_RE = re.compile(r"^[a-zA-Z0-9_./-]+$")
+_ALLOWED_PATH_RE = re.compile(r"^[a-zA-Z0-9_./\[\]-]+$")
 _ALLOWED_GLOB_RE = re.compile(r"^[a-zA-Z0-9_./*?\[\]-]+$")
 
 
