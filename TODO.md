@@ -15,12 +15,51 @@ Open backlog count after cleanup: **32**
 ## P1 / Critical blockers
 
 
-2. ⬜ **Provide a canonical write-plane recovery path.**
+2. ⬜ **Provide canonical and candidate write-plane recovery paths.**
    Some projects report candidate fallback while task policy requires canonical
    non-candidate execution. Others have handoff writes failing while archive/task
    maintenance succeeds. Expose exact write capability for code, Git and handoff
    surfaces, and return `CANONICAL_WRITE_PLANE_UNAVAILABLE` with safe recovery
    steps when a clean writeable canonical workspace cannot be provisioned.
+
+   **Candidate lineage recovery — observed during the RAG audit, 2026-10-06:**
+   `prepare_candidate_clone` for `quart-core`, branch
+   `fix/rag-citations-book-delivery-20261007`, returned
+   `CANDIDATE_LINEAGE_SCAN_FAILED` / "candidate lineage metadata is unavailable"
+   because of the older, different-branch candidate
+   `candidate-quart-core-feat-supervisor-read-knowledge-capabilities-20261001`.
+   Request: `b974b196-6532-49af-8b7e-772eb8bc762c`. The diagnostic directs
+   the caller to a guarded cleanup workflow, but no such candidate-record
+   recovery operation was exposed in this caller's callable tool catalog.
+   This blocked an independent branch of the same project; it does not prove
+   that candidate creation is broken for every project.
+
+   Provide a typed inspect/reconcile/remove-record-and-recreate workflow:
+   - Scope lineage lookup to the requested project/branch and isolate unrelated
+     corrupt entries. Quarantine/report an invalid record without treating it as
+     a valid candidate or disabling duplicate/path/ownership checks.
+   - Inspect the exact registry/lineage identity and revision, workspace path,
+     Git state, active jobs/leases and retained artifacts. Missing or corrupt
+     metadata must remain unknown until recovery establishes those facts.
+   - Allow guarded tombstoning/removal of a proven stale or irrecoverable
+     registration/lineage record, with an audit snapshot and CAS/fencing against
+     concurrent use. Preserve the directory, dirty files, commits and agent
+     artifacts; metadata cleanup must not implicitly delete workspace contents.
+     Active or ambiguous ownership requires an explicit fenced recovery decision.
+   - Recreate a fresh registered candidate from a verified exact remote base
+     after reconciliation, using a new directory when the old path is retained.
+     Record predecessor/replacement identities; recover trustworthy metadata
+     where possible instead of blindly fabricating or rewriting it.
+   - Make retries and crash recovery idempotent: no duplicate candidates,
+     orphan registrations, lost work or partially removed registry/lineage pairs.
+     Return the replacement id, exact base/head, recovery receipt and next steps.
+
+   Acceptance: cover missing/truncated/malformed lineage, unrelated stale rows,
+   dirty retained work, live/expired/unknown leases, concurrent prepare/recovery,
+   crash between cleanup and registration, and retry after an ambiguous timeout.
+   An unrelated damaged record must not block a new branch; guarded cleanup and
+   recreation of the damaged candidate must succeed without deleting its code.
+   Exercise the reproducer above through the client-exposed recovery tools.
 
 4. ⬜ **Reconcile stale unbound fleet leases without duplicate work.**
    Historical `attempted` / `legacy_unknown` lease rows can consume all fleet
