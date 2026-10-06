@@ -993,9 +993,14 @@ def _run_proxy_preflight_script(tmp_path: Path, monkeypatch, *, provider_body: s
     fake_bin = tmp_path / "proxy-bin"
     fake_bin.mkdir()
     marker = tmp_path / "opencode-ran"
+    http_proxy_marker = tmp_path / "opencode-http-proxy"
+    no_proxy_marker = tmp_path / "opencode-no-proxy"
     fake = fake_bin / "opencode"
     fake.write_text(
-        f"#!/bin/sh\nprintf ran > {shlex.quote(str(marker))}\nexit 0\n",
+        f"#!/bin/sh\nprintf ran > {shlex.quote(str(marker))}\n"
+        f"printf '%s' \"$HTTP_PROXY\" > {shlex.quote(str(http_proxy_marker))}\n"
+        f"printf '%s' \"$NO_PROXY\" > {shlex.quote(str(no_proxy_marker))}\n"
+        "exit 0\n",
         encoding="utf-8",
     )
     fake.chmod(0o755)
@@ -1054,6 +1059,7 @@ def test_malformed_proxy_blocks_before_opencode(tmp_path, monkeypatch):
 
 def test_valid_proxy_allows_opencode_and_is_not_logged(tmp_path, monkeypatch):
     proxy = "http://127.0.0.1:19999"
+    monkeypatch.setenv("NO_PROXY", "internal.example")
     result, artifacts, marker = _run_proxy_preflight_script(
         tmp_path, monkeypatch, provider_body=proxy + "\n"
     )
@@ -1071,6 +1077,14 @@ def test_valid_proxy_allows_opencode_and_is_not_logged(tmp_path, monkeypatch):
     assert proxy_status["finished_at"]
     assert "last_error_class" not in proxy_status
     assert proxy not in proxy_status_raw
+    assert (tmp_path / "opencode-http-proxy").read_text(encoding="utf-8") == proxy
+    bypass = (tmp_path / "opencode-no-proxy").read_text(encoding="utf-8").split(",")
+    assert "internal.example" in bypass
+    assert "localhost" in bypass
+    assert "127.0.0.1" in bypass
+    assert "pypi.org" in bypass
+    assert "files.pythonhosted.org" in bypass
+    assert "pythonhosted.org" in bypass
 
 
 def test_runner_final_proxy_status_overwrites_worker_authored_bytes(tmp_path, monkeypatch):
