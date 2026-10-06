@@ -258,6 +258,11 @@ services:
     # on the existing one.
     image: ${MCP_SERVER_IMAGE:-mcp-server:latest}
     command: ["python", "examples/mcp_client_remote/server.py"]
+    # PID 1 is the Python server itself, which only wait()s its own direct
+    # children -- orphaned grandchildren (short-lived `git ...` helpers whose
+    # intermediate shell exited) get reparented to it and stay <defunct>
+    # forever. docker-init/tini reaps them as PID 1.
+    init: true
     container_name: mcp-oauth
     hostname: mcp-oauth
     networks:

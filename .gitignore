@@ -81,3 +81,6 @@ app/static/monaco-config.js
 # CI/CD deploy rollback state (scripts/deploy-from-registry.sh)
 /.state/
 
+
+# Isolated agent worktrees
+.worktrees/
