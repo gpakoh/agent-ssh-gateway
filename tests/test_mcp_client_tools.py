@@ -208,6 +208,88 @@ class TestReadFileErrorCodes:
         assert result["error"]["code"] == "FILE_READ_ERROR"
 
 
+class TestReadFileBracketedFrameworkPaths:
+    """read_file must accept legitimate framework dynamic-route filenames such
+    as ``src/pages/[slug].astro``, while absolute paths, traversal/root escape
+    and shell metacharacters stay rejected."""
+
+    @pytest.fixture(autouse=True)
+    def _registry(self, tmp_path: Path):
+        import app.workspace.registry as registry_module
+        from app.workspace.registry import WorkspaceRegistry, reset_registry
+
+        project_root = tmp_path / "web-ssh-gateway"
+        page = project_root / "src" / "pages" / "[slug].astro"
+        page.parent.mkdir(parents=True)
+        page.write_text("---\nlayout: base\n---\n<h1>post</h1>\n", encoding="utf-8")
+        yaml_path = tmp_path / "projects.yaml"
+        yaml_path.write_text(
+            f"""
+registry_root: {tmp_path}
+projects:
+  web-ssh-gateway:
+    root: web-ssh-gateway
+    type: fastapi
+    description: test project
+    tags: []
+""",
+            encoding="utf-8",
+        )
+        reset_registry()
+        registry_module._registry = WorkspaceRegistry.load(yaml_path)
+        yield
+        reset_registry()
+
+    def test_bracketed_dynamic_route_path_is_readable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+
+        result = mod.read_file(
+            _FakeClient(), "web-ssh-gateway", "src/pages/[slug].astro"
+        )
+
+        assert result["ok"] is True
+        assert result["result"]["path"] == "src/pages/[slug].astro"
+        assert "<h1>post</h1>" in result["result"]["content"]
+
+    def test_traversal_component_still_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+
+        with pytest.raises(ValueError, match="path traversal not allowed"):
+            mod.read_file(
+                _FakeClient(), "web-ssh-gateway", "src/pages/../[slug].astro"
+            )
+
+    def test_leading_parent_escape_still_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+
+        with pytest.raises(ValueError, match="path traversal not allowed"):
+            mod.read_file(_FakeClient(), "web-ssh-gateway", "../[slug].astro")
+
+    def test_absolute_path_still_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+
+        with pytest.raises(ValueError, match="absolute path not allowed"):
+            mod.read_file(
+                _FakeClient(), "web-ssh-gateway", "/var/www/src/[slug].astro"
+            )
+
+    def test_shell_metacharacters_still_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+
+        with pytest.raises(ValueError, match="invalid characters in path"):
+            mod.read_file(_FakeClient(), "web-ssh-gateway", "src/pages/$(id).astro")
+
+
 class TestShowChangesErrorEnvelope:
     """show_changes must surface git diagnostics when both calls fail."""
 
