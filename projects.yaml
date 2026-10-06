@@ -27,6 +27,13 @@ projects:
     description: "Quart platform umbrella"
     tags: [quart, platform]
 
+  content-cleaning-adapter:
+    root: quart-platform/content-cleaning-adapter
+    parent: quart-platform
+    type: python-library
+    description: "Content cleaning adapter library (profiles, Layer A, quality bridge)"
+    tags: [content, cleaning, adapter]
+
   quart-core:
     root: quart-platform/quart-core
     parent: quart-platform
