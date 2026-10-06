@@ -66,6 +66,10 @@ Open backlog count after cleanup: **32**
    `candidate-quart-core-fix-ci-greenlet-test-job-20261001`, whose Git alternates
    and origin depended on it. The operator restored the dependent clone's
    objects/remote and reported successful `git fsck` with dirty work preserved.
+   A subsequent exact-base prepare at `main@2bbb8dd` still returned
+   `CANDIDATE_LINEAGE_SCAN_FAILED`, now naming that repaired dependent clone
+   (request `9726cf27-73c4-4f6d-b92a-784d327bc0ac`). Git integrity alone
+   therefore does not establish valid registration/lineage metadata.
    Cleanup must inspect inbound Git alternates, origin and worktree dependencies
    before directory removal. Preserve the source or first make dependants
    self-contained against a trusted source, retaining local-only objects/refs;
