@@ -2261,6 +2261,7 @@ class TestOpenCodeProductionAdmission:
             "OPENCODE_UPGRADE_INTERVAL_SECONDS="
             "${OPENCODE_UPGRADE_INTERVAL_SECONDS:-86400}"
         ) in env
+        assert "OPENCODE_MINIMUM_VERSION=${OPENCODE_MINIMUM_VERSION:-1.18.34}" in env
         assert (
             "OPENCODE_MANAGED_BIN="
             "${OPENCODE_MANAGED_BIN:-/var/lib/mcp-agent/opencode/bin/opencode}"

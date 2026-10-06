@@ -1924,6 +1924,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
@@ -1936,6 +1937,7 @@ managed = Path(sys.argv[2])
 state_path = Path(sys.argv[3])
 interval = int(sys.argv[4])
 timeout = int(sys.argv[5])
+minimum_version = sys.argv[6].strip()
 # Only the explicit serialized command may update the shared executable.
 os.environ["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
 rollback_path = None
@@ -2024,6 +2026,20 @@ def command(argv, command_timeout):
     return result
 
 
+_STABLE_VERSION_TOKEN = re.compile(
+    r"(?<![0-9A-Za-z])v?(\\d+)\\.(\\d+)\\.(\\d+)(?![0-9A-Za-z.-])"
+)
+
+
+def parse_stable_version(value):
+    if not isinstance(value, str):
+        return None
+    matches = _STABLE_VERSION_TOKEN.findall(value.strip())
+    if len(matches) != 1:
+        return None
+    return tuple(int(part) for part in matches[0])
+
+
 def binary_version(path):
     result = command([str(path), "--version"], min(timeout, 30))
     if result.returncode != 0:
@@ -2031,6 +2047,8 @@ def binary_version(path):
     version = " ".join(result.stdout.split())[:200]
     if not version:
         fail("version_probe_failed", "empty version output")
+    if parse_stable_version(version) is None:
+        fail("version_format_invalid", version)
     return version
 
 
@@ -2067,6 +2085,11 @@ def atomic_json(path, payload):
 
 if interval <= 0 or timeout <= 0:
     fail("invalid_config", "interval and timeout must be positive")
+if re.fullmatch(r"\\d+\\.\\d+\\.\\d+", minimum_version) is None:
+    fail("invalid_config", "minimum_version must be stable x.y.z")
+minimum_version_parts = parse_stable_version(minimum_version)
+if minimum_version_parts is None:
+    fail("invalid_config", "minimum_version must be stable x.y.z")
 managed.parent.mkdir(parents=True, exist_ok=True)
 state_path.parent.mkdir(parents=True, exist_ok=True)
 lock_path = state_path.with_name(state_path.name + ".lock")
@@ -2112,15 +2135,19 @@ with os.fdopen(lock_fd, "a+") as lock_handle:
     if isinstance(receipt, dict):
         checked_at = receipt.get("checked_at_epoch")
         age = now - checked_at if isinstance(checked_at, int) else -1
+        receipt_version = parse_stable_version(receipt.get("binary_version"))
         if (
             receipt.get("version") == 1
             and 0 <= age < interval
             and receipt.get("binary_sha256") == current_digest
+            and receipt_version is not None
+            and receipt_version >= minimum_version_parts
             and receipt.get("permission_flag")
             in {"--dangerously-skip-permissions", "--auto"}
         ):
             response = dict(receipt)
             response["gate_status"] = "fresh"
+            response["minimum_version"] = minimum_version
             print(json.dumps(response, sort_keys=True, separators=(",", ":")))
             raise SystemExit(0)
 
@@ -2221,6 +2248,12 @@ with os.fdopen(lock_fd, "a+") as lock_handle:
 
         regular_file(managed, "managed_binary")
         version_after = binary_version(managed)
+        version_after_parts = parse_stable_version(version_after)
+        if version_after_parts is None or version_after_parts < minimum_version_parts:
+            fail(
+                "minimum_version_not_met",
+                f"managed OpenCode {version_after!r} is below required {minimum_version}",
+            )
         normalized_output = " ".join(upgraded.stdout.lower().split())
         if (
             version_after == version_before
@@ -2239,6 +2272,7 @@ with os.fdopen(lock_fd, "a+") as lock_handle:
         "binary_sha256": digest_file(managed),
         "binary_version_before": version_before,
         "binary_version": version_after,
+        "minimum_version": minimum_version,
         "permission_flag": selected_permission_flag,
         "upgrade_command": ["opencode", "upgrade", "--method", "curl"],
         "upgrade_exit_code": upgraded.returncode,
@@ -2262,6 +2296,7 @@ def _opencode_upgrade_gate_script_lines(
     state_path: str,
     interval_seconds: int,
     timeout_seconds: int,
+    minimum_version: str,
 ) -> list[str]:
     """Gate worker launch on a serialized, durable scheduled OpenCode upgrade."""
     permission_reader = (
@@ -2271,6 +2306,7 @@ def _opencode_upgrade_gate_script_lines(
         f"OPENCODE_UPGRADE_GATE_ENABLED={'1' if enabled else '0'}",
         f"OPENCODE_UPGRADE_INTERVAL_SECONDS={interval_seconds}",
         f"OPENCODE_UPGRADE_TIMEOUT_SECONDS={timeout_seconds}",
+        f"OPENCODE_MINIMUM_VERSION={_shell_escape(minimum_version)}",
         f"OPENCODE_MANAGED_BIN={_shell_escape(managed_bin)}",
         f"OPENCODE_UPGRADE_STATE={_shell_escape(state_path)}",
         "OPENCODE_UPGRADE_BLOCKED=0",
@@ -2279,11 +2315,12 @@ def _opencode_upgrade_gate_script_lines(
         'runner_artifact_remove "$td/opencode-upgrade.json"',
         'if [ "$OPENCODE_UPGRADE_GATE_ENABLED" = "1" ]; then',
         '  runner_artifact_write_line "$td/agent-status.md" "Status: upgrading-opencode"',
-        '  if OPENCODE_UPGRADE_RESULT=$(python3 - "$OPCODE_SEED_BIN" "$OPENCODE_MANAGED_BIN" "$OPENCODE_UPGRADE_STATE" "$OPENCODE_UPGRADE_INTERVAL_SECONDS" "$OPENCODE_UPGRADE_TIMEOUT_SECONDS" 2>&1 <<\'OPENCODE_UPGRADE_EOF\'',
+        '  if OPENCODE_UPGRADE_RESULT=$(python3 - "$OPCODE_SEED_BIN" "$OPENCODE_MANAGED_BIN" "$OPENCODE_UPGRADE_STATE" "$OPENCODE_UPGRADE_INTERVAL_SECONDS" "$OPENCODE_UPGRADE_TIMEOUT_SECONDS" "$OPENCODE_MINIMUM_VERSION" 2>&1 <<\'OPENCODE_UPGRADE_EOF\'',
         _OPENCODE_UPGRADE_GATE_PY.rstrip("\n"),
         "OPENCODE_UPGRADE_EOF",
         "  ); then",
         '    OPCODE_BIN="$OPENCODE_MANAGED_BIN"',
+        '    export PATH="$(dirname "$OPENCODE_MANAGED_BIN"):$PATH"',
         '    runner_artifact_write_line "$td/opencode-upgrade.json" "$OPENCODE_UPGRADE_RESULT"',
         f'    OPENCODE_PERMISSION_FLAG=$(printf "%s" "$OPENCODE_UPGRADE_RESULT" | python3 -c {_shell_escape(permission_reader)}) || OPENCODE_PERMISSION_FLAG=',
         '    runner_artifact_write_line "$td/agent-status.md" "Status: running"',
@@ -2452,6 +2489,9 @@ def _build_opencode_script(
     upgrade_timeout_seconds = int(
         os.environ.get("OPENCODE_UPGRADE_TIMEOUT_SECONDS", "600")
     )
+    upgrade_minimum_version = os.environ.get(
+        "OPENCODE_MINIMUM_VERSION", "1.18.34"
+    ).strip()
     upgrade_managed_bin = os.environ.get(
         "OPENCODE_MANAGED_BIN",
         "/var/lib/mcp-agent/opencode/bin/opencode",
@@ -2473,6 +2513,10 @@ def _build_opencode_script(
         or upgrade_timeout_seconds <= 0
     ):
         raise ValueError("OpenCode admission timing/reserve values are invalid")
+    if upgrade_gate_enabled and re.fullmatch(
+        r"\d+\.\d+\.\d+", upgrade_minimum_version
+    ) is None:
+        raise ValueError("OPENCODE_MINIMUM_VERSION must be stable x.y.z")
     if upgrade_gate_enabled and (
         not os.path.isabs(upgrade_managed_bin)
         or not os.path.isabs(upgrade_state_path)
@@ -2693,6 +2737,7 @@ def _build_opencode_script(
             state_path=upgrade_state_path,
             interval_seconds=upgrade_interval_seconds,
             timeout_seconds=upgrade_timeout_seconds,
+            minimum_version=upgrade_minimum_version,
         )
     )
     parts.extend(
