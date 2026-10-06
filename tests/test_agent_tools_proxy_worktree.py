@@ -2580,6 +2580,7 @@ class TestScheduledOpenCodeUpgradeGate:
         monkeypatch.setenv("OPENCODE_UPGRADE_GATE_ENABLED", "true")
         monkeypatch.setenv("OPENCODE_UPGRADE_INTERVAL_SECONDS", "86400")
         monkeypatch.setenv("OPENCODE_UPGRADE_TIMEOUT_SECONDS", "10")
+        monkeypatch.setenv("OPENCODE_MINIMUM_VERSION", "1.18.16")
         monkeypatch.setenv("OPENCODE_MANAGED_BIN", str(managed_bin))
         monkeypatch.setenv("OPENCODE_UPGRADE_STATE_PATH", str(state_path))
         monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
@@ -2709,6 +2710,7 @@ class TestScheduledOpenCodeUpgradeGate:
                 str(state_path),
                 "86400",
                 "10",
+                "1.18.16",
             ],
             text=True,
             capture_output=True,
@@ -2770,6 +2772,7 @@ class TestScheduledOpenCodeUpgradeGate:
                 str(state_path),
                 "86400",
                 "10",
+                "1.18.16",
             ],
             text=True,
             capture_output=True,
@@ -2826,6 +2829,7 @@ class TestScheduledOpenCodeUpgradeGate:
                 str(state_path),
                 "86400",
                 "10",
+                "1.18.16",
             ],
             text=True,
             capture_output=True,
@@ -2878,6 +2882,7 @@ class TestScheduledOpenCodeUpgradeGate:
             str(state_path),
             "86400",
             "10",
+            "1.18.16",
         ]
 
         processes = [
@@ -2898,6 +2903,232 @@ class TestScheduledOpenCodeUpgradeGate:
         statuses = sorted(payload["gate_status"] for payload in payloads)
         assert statuses == ["checked", "fresh"]
         assert {payload["permission_flag"] for payload in payloads} == {"--auto"}
+
+    def test_fresh_receipt_below_minimum_forces_upgrade(self, tmp_path, monkeypatch):
+        runtime_root = tmp_path / "minimum-refresh-runtime"
+        managed_bin = runtime_root / "managed" / "opencode"
+        managed_bin.parent.mkdir(parents=True)
+        calls = tmp_path / "minimum-refresh-calls.txt"
+        managed_bin.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            '  --version) echo "1.18.16"; exit 0 ;;\n'
+            "  upgrade)\n"
+            '    echo upgrade >> "$UPGRADE_CALLS"\n'
+            '    target="$HOME/.opencode/bin/opencode"\n'
+            '    mkdir -p "$(dirname "$target")"\n'
+            '    cat > "$target" <<\'UPGRADED\'\n'
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            '  --version) echo "1.18.34"; exit 0 ;;\n'
+            "  run)\n"
+            '    if [ "${2:-}" = "--help" ]; then echo "  --auto"; exit 0; fi\n'
+            "    exit 0 ;;\n"
+            "  *) exit 2 ;;\n"
+            "esac\n"
+            "UPGRADED\n"
+            '    chmod 755 "$target"\n'
+            '    echo "installed 1.18.34"\n'
+            "    exit 0 ;;\n"
+            "  run)\n"
+            '    if [ "${2:-}" = "--help" ]; then echo "  --auto"; exit 0; fi\n'
+            "    exit 0 ;;\n"
+            "  *) exit 2 ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        managed_bin.chmod(0o755)
+        state_path = runtime_root / "state" / "opencode-upgrade.json"
+        state_path.parent.mkdir(parents=True)
+        state_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "checked_at_epoch": int(time.time()),
+                    "binary_sha256": hashlib.sha256(managed_bin.read_bytes()).hexdigest(),
+                    "binary_version": "1.18.16",
+                    "permission_flag": "--auto",
+                }
+            ),
+            encoding="utf-8",
+        )
+        env = os.environ.copy()
+        env["UPGRADE_CALLS"] = str(calls)
+
+        result = subprocess.run(
+            [
+                "python3",
+                "-c",
+                _OPENCODE_UPGRADE_GATE_PY,
+                str(managed_bin),
+                str(managed_bin),
+                str(state_path),
+                "86400",
+                "10",
+                "1.18.34",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=env,
+        )
+
+        assert result.returncode == 0, result.stderr or result.stdout
+        assert calls.read_text(encoding="utf-8").splitlines() == ["upgrade"]
+        receipt = json.loads(result.stdout)
+        assert receipt["gate_status"] == "checked"
+        assert receipt["binary_version"] == "1.18.34"
+        assert receipt["minimum_version"] == "1.18.34"
+        assert subprocess.run(
+            [str(managed_bin), "--version"],
+            text=True,
+            capture_output=True,
+            check=False,
+        ).stdout.strip() == "1.18.34"
+
+    def test_upgrade_below_minimum_rolls_back_and_blocks(self, tmp_path):
+        runtime_root = tmp_path / "minimum-block-runtime"
+        managed_bin = runtime_root / "managed" / "opencode"
+        managed_bin.parent.mkdir(parents=True)
+        managed_bin.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            '  --version) echo "1.18.16"; exit 0 ;;\n'
+            '  upgrade) echo "opencode upgrade skipped: 1.18.16 is already installed"; exit 0 ;;\n'
+            "  run)\n"
+            '    if [ "${2:-}" = "--help" ]; then echo "  --auto"; exit 0; fi\n'
+            "    exit 0 ;;\n"
+            "  *) exit 2 ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        managed_bin.chmod(0o755)
+        state_path = runtime_root / "state" / "opencode-upgrade.json"
+
+        result = subprocess.run(
+            [
+                "python3",
+                "-c",
+                _OPENCODE_UPGRADE_GATE_PY,
+                str(managed_bin),
+                str(managed_bin),
+                str(state_path),
+                "86400",
+                "10",
+                "1.18.34",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert result.returncode == 1
+        failure = json.loads(result.stdout)
+        assert failure["reason"] == "minimum_version_not_met"
+        assert failure["rollback_status"] == "restored"
+        assert subprocess.run(
+            [str(managed_bin), "--version"],
+            text=True,
+            capture_output=True,
+            check=False,
+        ).stdout.strip() == "1.18.16"
+
+    def test_successful_gate_puts_managed_opencode_first_on_worker_path(
+        self, tmp_path, monkeypatch
+    ):
+        source = tmp_path / "path-coherence-source"
+        source.mkdir()
+        _init_git_repo(source)
+        artifacts = tmp_path / "path-coherence-artifacts"
+        artifacts.mkdir()
+        (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+
+        stale_bin = tmp_path / "stale-bin"
+        stale_bin.mkdir()
+        stale = stale_bin / "opencode"
+        stale.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            '  --version) echo "1.18.16"; exit 0 ;;\n'
+            "  *) exit 2 ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        stale.chmod(0o755)
+
+        managed_bin = tmp_path / "managed-path" / "opencode"
+        managed_bin.parent.mkdir(parents=True)
+        capture = tmp_path / "bare-opencode-capture.txt"
+        managed_bin.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            '  --version) echo "1.18.34"; exit 0 ;;\n'
+            "  run)\n"
+            '    if [ "${2:-}" = "--help" ]; then echo "  --auto"; exit 0; fi\n'
+            '    command -v opencode > "$BARE_OPENCODE_CAPTURE"\n'
+            '    opencode --version >> "$BARE_OPENCODE_CAPTURE"\n'
+            '    echo "→ Read current-plan.md"\n'
+            "    exit 0 ;;\n"
+            "  *) exit 2 ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        managed_bin.chmod(0o755)
+        state_path = tmp_path / "path-state" / "opencode-upgrade.json"
+        state_path.parent.mkdir(parents=True)
+        state_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "checked_at_epoch": int(time.time()),
+                    "binary_sha256": hashlib.sha256(managed_bin.read_bytes()).hexdigest(),
+                    "binary_version": "1.18.34",
+                    "permission_flag": "--auto",
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("PATH", f"{stale_bin}:{os.environ.get('PATH', '')}")
+        monkeypatch.setenv("BARE_OPENCODE_CAPTURE", str(capture))
+        self._configure_gate(
+            monkeypatch,
+            managed_bin=managed_bin,
+            state_path=state_path,
+        )
+        monkeypatch.setenv("OPENCODE_MINIMUM_VERSION", "1.18.34")
+
+        script = _build_opencode_script(
+            str(artifacts), TASK_ID, None, project_root=str(source)
+        )
+        result = subprocess.run(
+            ["sh", "-c", script],
+            cwd=source,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+        )
+
+        assert result.returncode == 0, result.stderr or result.stdout
+        assert capture.read_text(encoding="utf-8").splitlines() == [
+            str(managed_bin),
+            "1.18.34",
+        ]
+        task_receipt = json.loads(
+            (artifacts / "opencode-upgrade.json").read_text(encoding="utf-8")
+        )
+        assert task_receipt["gate_status"] == "fresh"
+        assert task_receipt["minimum_version"] == "1.18.34"
+
+    def test_invalid_minimum_version_is_rejected_before_script_build(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("OPENCODE_UPGRADE_GATE_ENABLED", "true")
+        monkeypatch.setenv("OPENCODE_MINIMUM_VERSION", "latest")
+        with pytest.raises(
+            ValueError, match="OPENCODE_MINIMUM_VERSION must be stable x.y.z"
+        ):
+            _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
 
     def test_failed_upgrade_blocks_agent_before_proxy_or_run(self, tmp_path, monkeypatch):
         source = tmp_path / "upgrade-failure-source"
