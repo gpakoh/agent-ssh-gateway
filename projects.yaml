@@ -367,6 +367,13 @@ projects:
     description: "Engineering Supervisor service"
     tags: ["quart", "supervisor", "python-service"]
 
+  work-session-service:
+    root: "quart-platform/work-session-service"
+    parent: quart-platform
+    type: "python-service"
+    description: "Durable long-running work session runtime between Engineering Supervisor and OpenCode"
+    tags: ["quart", "forge", "work-session", "agent-runtime"]
+
   infra-quart-supervisor-auth-20260903:
     root: "quart-platform/.infra-quart-wt"
     parent: quart-platform

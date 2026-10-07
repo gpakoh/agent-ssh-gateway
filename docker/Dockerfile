@@ -10,9 +10,17 @@ ENV BUILD_TIME=${BUILD_TIME}
 
 # Security: Install only necessary packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
     openssh-client \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
+
+# git (used by the workspace git tools in app/workspace/git.py) inspects
+# host-bound project trees that are mostly root-owned while the gateway runs
+# as uid 1000: git's ownership check would refuse them ("dubious ownership").
+# The adapter scrubs the subprocess env (no HOME, no GIT_CONFIG_*), so the
+# exception lives in system config, which git reads regardless of env.
+RUN git config --system --add safe.directory '*'
 
 # Security: Create non-root user with restricted shell
 RUN groupadd -r -g 1000 appuser && \
