@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from examples.mcp_client_remote.fleet.gitea_client import GiteaClient
@@ -137,6 +138,13 @@ async def test_adapter_minimizes_created_pr(monkeypatch):
         async def __aexit__(self, *args):
             return None
 
+        async def get_repo(self, owner, repo):
+            return {"default_branch": "master"}
+
+        async def get_branch(self, owner, repo, branch):
+            assert branch in {"master", "ai/fleet-hardening"}
+            return {"name": branch}
+
         async def create_pull_request(self, owner, repo, **kwargs):
             calls.append({"owner": owner, "repo": repo, **kwargs})
             return {
@@ -207,6 +215,65 @@ async def test_adapter_minimizes_created_pr(monkeypatch):
         },
     }
     assert "secret@example" not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_adapter_missing_base_reports_default_branch_without_post(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    create_calls = 0
+
+    class FakeClient:
+        def __init__(self, token: str):
+            assert token == "token"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get_repo(self, owner, repo):
+            assert (owner, repo) == ("gpakoh", "work-session-service")
+            return {"default_branch": "main"}
+
+        async def get_branch(self, owner, repo, branch):
+            assert (owner, repo) == ("gpakoh", "work-session-service")
+            if branch == "master":
+                request = httpx.Request(
+                    "GET",
+                    "https://git.example/api/v1/repos/gpakoh/work-session-service/branches/master",
+                )
+                response = httpx.Response(404, request=request)
+                raise httpx.HTTPStatusError(
+                    "not found", request=request, response=response
+                )
+            return {"name": branch}
+
+        async def create_pull_request(self, owner, repo, **kwargs):
+            nonlocal create_calls
+            create_calls += 1
+            raise AssertionError("PR POST must not run when the base branch is missing")
+
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: FakeClient)
+    result = await remote.gitea_create_pull_request(
+        "gpakoh",
+        "work-session-service",
+        "feat: durable kernel",
+        "feat/durable-kernel-20261007",
+        "master",
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "BASE_BRANCH_NOT_FOUND"
+    assert result["error"]["retryable"] is False
+    assert result["error"]["details"] == {
+        "branch_role": "base",
+        "branch": "master",
+        "default_branch": "main",
+        "mutation_occurred": False,
+    }
+    assert "main" in result["error"]["hint"]
+    assert create_calls == 0
 
 
 @pytest.mark.asyncio
