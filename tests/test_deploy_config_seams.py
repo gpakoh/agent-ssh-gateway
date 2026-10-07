@@ -1743,6 +1743,30 @@ class TestDeployProvisionsComposeRegistryAuth:
         assert syntax.returncode == 0, syntax.stderr
 
 
+class TestSetupPythonCacheTeardown:
+    """Keep uv-driven CI jobs free of setup-python cache post-actions."""
+
+    def test_uv_jobs_do_not_enable_setup_python_pip_cache(self):
+        workflow = _load_workflow(CI_WORKFLOW_PATH)
+
+        for job_name in ("test", "e2e"):
+            steps = workflow["jobs"][job_name]["steps"]
+            setup_steps = [
+                step
+                for step in steps
+                if str(step.get("uses", "")).startswith("actions/setup-python@")
+            ]
+            assert len(setup_steps) == 1, job_name
+            assert "cache" not in setup_steps[0].get("with", {}), job_name
+
+            install_step = next(
+                step
+                for step in steps
+                if step.get("name") == "Install package (frozen lockfile)"
+            )
+            assert "uv sync --frozen --extra dev" in str(install_step.get("run", "")), job_name
+
+
 class TestInstallPackageNetworkResilience:
     """CI dependency installation must tolerate the same runner egress
     failures that later affected pip-audit; otherwise the audit step never
