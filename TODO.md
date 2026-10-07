@@ -1,15 +1,15 @@
 # Agent SSH Gateway — TODO
 
-Last cleaned: 2026-10-04.
+Last cleaned: 2026-10-07.
 
 This file is the active backlog only. Completed audit notes, fixed CI blockers,
 merged PR evidence, and superseded diagnostics should live in PR history,
 changelogs, or dedicated audit archives — not in TODO.
 
-Open backlog count after cleanup: **32**
+Open backlog count after cleanup: **31**
 
 - **P1 / critical:** 10
-- **P2 / important:** 15
+- **P2 / important:** 14
 - **P3 / capability / wishlist:** 7
 
 ## P1 / Critical blockers
@@ -217,11 +217,6 @@ Open backlog count after cleanup: **32**
     that exact commit, and return `requested_ref` plus `resolved_commit_sha`.
     Cache keys must include exact resolved commit and path, not only repo/path or
     symbolic branch.
-
-22. ⬜ **Permit safe framework dynamic-route filenames in workspace paths.**
-    Path validation should allow literal `[` and `]` in components such as
-    `[slug].astro` or `[id].tsx` while retaining absolute-path, traversal and
-    root-escape protections across read and write helpers.
 
 23. ⬜ **Make candidate verifier containers concurrency-safe.**
     Parallel verified-push/delivery operations must not collide on a fixed Docker

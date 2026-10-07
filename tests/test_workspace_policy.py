@@ -236,6 +236,10 @@ class TestScopes:
         path = write_only_policy.validate_write("project-a", "new_file.py")
         assert "new_file.py" in str(path)
 
+    def test_write_accepts_bracketed_dynamic_route_path(self, write_only_policy):
+        path = write_only_policy.validate_write("project-a", "src/pages/[slug].astro")
+        assert path.parts[-3:] == ("src", "pages", "[slug].astro")
+
     def test_write_cannot_execute(self, write_only_policy):
         with pytest.raises(ScopeDeniedError, match="project:execute"):
             write_only_policy.validate_execute("project-a")
