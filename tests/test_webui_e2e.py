@@ -48,7 +48,13 @@ E2E_PAGE_LOAD_TIMEOUT_SECONDS = 600.0
 E2E_SCRIPT_TIMEOUT_SECONDS = 120.0
 E2E_REMOTE_SESSION_ATTEMPTS = 3
 E2E_REMOTE_SESSION_RETRY_DELAY_SECONDS = 2.0
-E2E_REMOTE_FIXTURE_READY_TIMEOUT_SECONDS = 20.0
+# A Grid can report ready before a freshly-created Chromium renderer can reach
+# the loopback fixture under shared-runner pressure. Run #14495 exhausted three
+# 20s sessions even though the same tree passed E2E immediately beforehand.
+# Give each renderer enough time to make progress instead of repeatedly
+# discarding it; three bounded attempts still fit comfortably inside the
+# dedicated 15-minute E2E job budget.
+E2E_REMOTE_FIXTURE_READY_TIMEOUT_SECONDS = 60.0
 
 if not webdriver or (not _REMOTE_URL and not (_DRIVER and _CHROMIUM)):
     pytest.skip(
@@ -212,14 +218,29 @@ def _new_remote_driver(opts, base):
             )
             return drv
         except (SessionNotCreatedException, TimeoutException) as exc:
-            last_error = exc
+            diagnostic = ""
+            if drv is not None:
+                try:
+                    current_url = drv.current_url
+                    ready_state = drv.execute_script("return document.readyState")
+                    page_source_bytes = len(drv.page_source.encode("utf-8", "replace"))
+                    diagnostic = (
+                        f" current_url={current_url!r} ready_state={ready_state!r} "
+                        f"page_source_bytes={page_source_bytes}"
+                    )
+                except Exception as diagnostic_exc:  # noqa: BLE001 - best-effort CI context
+                    diagnostic = f" diagnostic_error={type(diagnostic_exc).__name__}"
+            last_error = AssertionError(
+                f"remote fixture readiness attempt {attempt}/{E2E_REMOTE_SESSION_ATTEMPTS} "
+                f"failed with {type(exc).__name__}:{diagnostic}"
+            )
             if drv is not None:
                 try:
                     drv.quit()
                 except Exception:
                     pass
             if attempt >= E2E_REMOTE_SESSION_ATTEMPTS:
-                raise
+                raise last_error from exc
             time.sleep(E2E_REMOTE_SESSION_RETRY_DELAY_SECONDS)
     raise AssertionError(f"remote Selenium session retry exhausted: {last_error}")
 

@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "ci-docker-build-retry.sh"
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+WEBUI_E2E = ROOT / "tests" / "test_webui_e2e.py"
 E2E_COLLECTION_TIMEOUT_SECONDS = 60
 
 
@@ -249,6 +250,16 @@ def test_ci_e2e_uses_digest_pinned_selenium_sidecar_and_requires_execution_proof
     assert "uv run pytest tests/test_webui_e2e.py -m e2e -q --junitxml=e2e-results.xml" in workflow
     assert "uv run pytest -m e2e -q --junitxml=e2e-results.xml" not in workflow
     assert "if tests <= 0 or skipped != 0:" in workflow
+
+
+def test_webui_e2e_remote_fixture_readiness_has_shared_runner_headroom_and_diagnostics() -> None:
+    source = WEBUI_E2E.read_text(encoding="utf-8")
+
+    assert "E2E_REMOTE_FIXTURE_READY_TIMEOUT_SECONDS = 60.0" in source
+    assert "E2E_REMOTE_SESSION_ATTEMPTS = 3" in source
+    assert "current_url=" in source
+    assert "ready_state=" in source
+    assert "page_source_bytes=" in source
 
 
 def test_webui_e2e_remote_mode_collects_all_browser_tests_without_local_toolchain() -> None:

@@ -982,7 +982,7 @@ class TestE2eFailsClosedWithoutBrowserToolchain:
         text = E2E_WEBUI_PATH.read_text(encoding="utf-8")
         assert "E2E_REMOTE_SESSION_ATTEMPTS = 3" in text
         assert "E2E_REMOTE_SESSION_RETRY_DELAY_SECONDS = 2.0" in text
-        assert "E2E_REMOTE_FIXTURE_READY_TIMEOUT_SECONDS = 20.0" in text
+        assert "E2E_REMOTE_FIXTURE_READY_TIMEOUT_SECONDS = 60.0" in text
         assert "except (SessionNotCreatedException, TimeoutException)" in text
         assert "for attempt in range(1, E2E_REMOTE_SESSION_ATTEMPTS + 1)" in text
         assert "if attempt >= E2E_REMOTE_SESSION_ATTEMPTS" in text
@@ -2169,7 +2169,7 @@ class TestStatefulServiceMemoryLimits:
         assert services["mcp-postgres"]["deploy"]["resources"]["limits"]["memory"] == "1G"
 
     def test_redis_eviction_budget_remains_separate_from_container_ceiling(self):
-        command = _load_compose()["services"]["redis"]["command"]
+        command = " ".join(_load_compose()["services"]["redis"]["command"])
         assert "--maxmemory 256mb" in command
 
 
@@ -2207,7 +2207,7 @@ class TestRedisTrustBoundary:
         assert env.get("REDIS_PASSWORD") == "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"
 
     def test_redis_command_sources_requirepass_from_container_env(self):
-        command = _load_compose()["services"]["redis"]["command"]
+        command = " ".join(_load_compose()["services"]["redis"]["command"])
         requirepass_value = command.split("--requirepass", 1)[1].split()[0].strip('"')
         assert requirepass_value == "$$REDIS_PASSWORD", (
             "redis must start with --requirepass from the (Compose-escaped) "
@@ -2215,7 +2215,7 @@ class TestRedisTrustBoundary:
         )
 
     def test_redis_command_has_no_literal_secret(self):
-        command = _load_compose()["services"]["redis"]["command"]
+        command = " ".join(_load_compose()["services"]["redis"]["command"])
         requirepass_value = command.split("--requirepass", 1)[1].split()[0].strip('"')
         assert requirepass_value.startswith("$$")
 
