@@ -2159,6 +2159,20 @@ class TestAgentExecutorDataRoot:
         assert "chown -R mcpuser:mcpuser /var/lib/mcp-agent" in text
 
 
+class TestStatefulServiceMemoryLimits:
+    """Stateful services keep enough cgroup headroom without changing app budgets."""
+
+    def test_postgres_and_redis_have_one_gib_container_limits(self):
+        services = _load_compose()["services"]
+        assert services["mcp-postgres"]["mem_limit"] == "1g"
+        assert services["redis"]["mem_limit"] == "1g"
+        assert services["mcp-postgres"]["deploy"]["resources"]["limits"]["memory"] == "1G"
+
+    def test_redis_eviction_budget_remains_separate_from_container_ceiling(self):
+        command = _load_compose()["services"]["redis"]["command"]
+        assert "--maxmemory 256mb" in command
+
+
 class TestRedisTrustBoundary:
     """P1 Redis trust boundary: Redis must move off the shared external
     internal_net onto a project-private internal network, require a password,
