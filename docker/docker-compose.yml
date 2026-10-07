@@ -152,7 +152,16 @@ services:
     restart: unless-stopped
     # $$ escapes Compose interpolation so the container shell expands
     # $REDIS_PASSWORD from the env var above -- never a hardcoded secret.
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass "$$REDIS_PASSWORD"
+    # A bare string `command` would be argv-split by compose, NOT evaluated
+    # by a shell (the server gets the literal "$REDIS_PASSWORD" and the
+    # CMD-SHELL healthcheck fails WRONGPASS), and a plain `sh -c` would skip
+    # docker-entrypoint.sh's redis-user privilege drop ($1 must be
+    # "redis-server" for it). So sh expands the password, then re-enters the
+    # original entrypoint to keep the uid drop.
+    command:
+      - sh
+      - -c
+      - exec docker-entrypoint.sh redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass "$$REDIS_PASSWORD"
     healthcheck:
       # Auth via the REDISCLI_AUTH env var so the password never lands in the
       # healthcheck's argv (never `redis-cli -a <password>`).
