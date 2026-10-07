@@ -6,11 +6,11 @@ This file is the active backlog only. Completed audit notes, fixed CI blockers,
 merged PR evidence, and superseded diagnostics should live in PR history,
 changelogs, or dedicated audit archives — not in TODO.
 
-Open backlog count after cleanup: **31**
+Open backlog count after cleanup: **35**
 
 - **P1 / critical:** 10
-- **P2 / important:** 14
-- **P3 / capability / wishlist:** 7
+- **P2 / important:** 16
+- **P3 / capability / wishlist:** 9
 
 ## P1 / Critical blockers
 
@@ -84,13 +84,6 @@ Open backlog count after cleanup: **31**
    separates live workers, reclaimable never-attempted leases and ambiguous rows;
    require explicit evidence/acknowledgement before deleting ambiguous leases;
    tombstone every reclaimed lease exactly once.
-
-5. ⬜ **Expose OpenCode startup, proxy and useful-work state structurally.**
-   Startup/proxy rotation, provider/server errors and semantic agent progress are
-   still too dependent on raw log archaeology. Surface phase, elapsed time,
-   proxy attempt/max, last startup message, final proxy outcome, upstream error
-   class/ref, and `useful_agent_activity_seen`. Heartbeats must not reset
-   semantic staleness.
 
 6. ⬜ **Keep ChatGPT-visible tool schemas in parity with server manifests.**
    Tools can appear available in `tools_manifest` while missing or having a
@@ -181,6 +174,20 @@ Open backlog count after cleanup: **31**
     jobs, and ordinary red CI. Exact-head acceptable evidence must be explicit in
     repository policy and never silently weakened.
 
+42. ⬜ **Make Docker inventory scope explicit and machine-readable.**
+   `docker_ps(all=true)` still returns only the containers visible through the
+   Gateway's configured Docker endpoint, but the response does not identify that
+   endpoint/context or state whether the inventory is host-complete. Historical
+   operator evidence showed a 39-vs-151 mismatch; a fresh 2026-10-07 call still
+   returned only 38 rows with no endpoint/scope/completeness metadata. Absence
+   from this view must not be treated as proof of system-wide absence.
+
+   Acceptance: Docker inventory responses expose a safe endpoint/context identity
+   and an explicit scope/completeness field; documentation defines what `count`
+   means; configured multiple endpoints are selectable or explicitly reported as
+   unavailable; regression coverage prevents a scoped daemon view from being
+   presented as system-wide inventory.
+
 ## P2 / Important bugs and reliability gaps
 
 13. ⬜ **Wire the production `astro-sites` named root into `mcp-oauth` after the host path is provisioned.**
@@ -244,6 +251,13 @@ Open backlog count after cleanup: **31**
     release downstream jobs, or fail/reconcile explicitly rather than leaving the
     workflow indefinitely `in_progress`.
 
+    **2026-10-07 update:** PR #468 removed `setup-python`'s unused pip-cache
+    post-action from uv-driven test/E2E jobs, eliminating the concrete teardown
+    path that broke run #14371. Exact rerun #14371 attempt 2 and post-merge run
+    #14458 both completed successfully. Keep this item open for the broader
+    controller-level guarantee: an unrelated future teardown timeout must still
+    terminalize or reconcile explicitly rather than strand the workflow.
+
 30. ⬜ **Add Gitea Actions artifact listing and bounded download.**
     Operators can inspect runs/jobs/logs, but need first-class artifact metadata
     and safe archive/file retrieval with run/head provenance, size limits,
@@ -265,6 +279,24 @@ Open backlog count after cleanup: **31**
     Non-Git registered script/config/data workspaces need immutable snapshot
     source contracts for read-only analysis tasks, with explicit delivery/mutation
     disabled unless a separate trusted write contract exists.
+
+43. ⬜ **Expose command-plane degradation state separately from connector/auth failure.**
+    Long-lived agent sessions can temporarily lose callable tools during gateway
+    restart, image boot, host overload or session expiry. Today these distinct
+    states can all look like "connector gone" and provoke unnecessary re-auth or
+    duplicate retries. Expose a cheap bounded plane status such as
+    `ready|starting|overloaded|session_expired` with optional `retry_after_s`,
+    build identity and start time; document expected transient gaps across deploys.
+
+44. ⬜ **Prevent candidate worktree drift after verified delivery.**
+    A verified candidate must remain byte-for-byte consistent with its Git HEAD
+    unless an explicit write operation mutates it. In a JS Chat Engine delivery,
+    remote exact head `ac66a850673cc0383163298e337fe2e3f0b96ec1` retained
+    `_MIGRATION_LOCK_WAIT_SECONDS = 5.0`, while the registered candidate later
+    showed that tracked line deleted without a session write call, producing false
+    local test failures until restored. Add post-delivery worktree==HEAD proof,
+    identify/remove the mutation path, and fail closed with attributed evidence if
+    drift is detected.
 
 ## P3 / Capability and ergonomics wishlist
 
@@ -343,3 +375,19 @@ Open backlog count after cleanup: **31**
     Provide typed local branch switch/sync, safe scratch cleanup, project-level
     Docker/build diagnostics and policy-denial guidance so operators do not need
     raw shell fallbacks for common recovery actions.
+
+45. ⬜ **Add session-scoped tool-schema caching with explicit invalidation.**
+    Long-lived clients currently rediscover callable tool schemas repeatedly, and
+    a partial catalog during gateway boot can look like a permanent capability
+    loss. Define an etag/build-id based cache contract so schemas may be reused
+    while the plane is stable and are invalidated on build or plane-state change;
+    do not weaken authentication or server-side authorization checks.
+
+46. ⬜ **Make `info(project)` verification commands executable verbatim.**
+    Verification guidance must include any project-specific mypy targets/options,
+    not just a generic `uv run --extra dev mypy`. A JS Chat Engine delivery
+    observed the advertised bare mypy command fail with `Missing target module,
+    package, files, or command`, while `uv run --extra dev mypy app scripts tests`
+    was the actual project contract. Add a round-trip contract test that every
+    command advertised by `info(project).verification.commands` can be executed
+    verbatim from the registered project root.
