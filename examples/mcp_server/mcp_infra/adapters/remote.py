@@ -959,7 +959,13 @@ async def gitea_create_pull_request(
     base: str,
     body: str = "",
 ) -> dict[str, Any]:
-    """Create a same-repository Gitea pull request. Does not merge it."""
+    """Create a same-repository Gitea pull request. Does not merge it.
+
+    Use the repository's reported ``default_branch`` as the base unless the
+    intended target is explicitly different. The adapter verifies both refs
+    before POST so a stale ``master``/``main`` assumption fails without a
+    mutation and reports the actual default branch when available.
+    """
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
@@ -970,6 +976,40 @@ async def gitea_create_pull_request(
         )
     try:
         async with _server_gitea_client()(token) as client:
+            metadata = await client.get_repo(owner, repo)
+            default_branch = str(metadata.get("default_branch") or "").strip() or None
+            for branch_role, branch_name in (("base", base), ("head", head)):
+                try:
+                    await client.get_branch(owner, repo, branch_name)
+                except httpx.HTTPStatusError as exc:
+                    response = exc.response
+                    if response is None or response.status_code != 404:
+                        raise
+                    code = (
+                        "BASE_BRANCH_NOT_FOUND"
+                        if branch_role == "base"
+                        else "HEAD_BRANCH_NOT_FOUND"
+                    )
+                    hint = (
+                        f"Repository default branch is {default_branch!r}. "
+                        "Re-read repository metadata and retry with the intended base branch."
+                        if branch_role == "base" and default_branch
+                        else "Re-read repository branches and retry with an existing branch."
+                    )
+                    return tool_error(
+                        tool="gitea_create_pull_request",
+                        code=code,
+                        message=f"{branch_role} branch {branch_name!r} does not exist in repository",
+                        retryable=False,
+                        hint=hint,
+                        details={
+                            "branch_role": branch_role,
+                            "branch": branch_name,
+                            "default_branch": default_branch,
+                            "mutation_occurred": False,
+                        },
+                        source="gitea",
+                    )
             raw = await client.create_pull_request(
                 owner,
                 repo,
