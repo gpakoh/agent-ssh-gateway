@@ -492,6 +492,10 @@ class TestCiSmokeGatewayUsesHttpCheckNotHealthStatus:
         assert "State.Health.Status" not in window
         assert "docker exec" in window and "urlopen" in window
 
+    def test_gateway_standalone_smoke_fails_redis_fast_without_a_peer(self):
+        text = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
+        assert "-e REDIS_URL=redis://127.0.0.1:1/0" in text
+
     def test_mcp_server_check_uses_direct_http_readiness(self):
         """Probe app readiness directly instead of Docker's 30s health cadence."""
         text = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
@@ -1857,6 +1861,11 @@ class TestLocalPythonQualification:
             )
             run = str(install_step.get("run", ""))
             assert requested_line in run, job_name
+            assert "python -m pip --version" in run, job_name
+            assert "python -m ensurepip --upgrade" in run, job_name
+            assert run.index("python -m ensurepip --upgrade") < run.index(
+                "python -m pip install --upgrade pip"
+            ), job_name
             assert 'uv python find "$requested_python"' in run, job_name
             assert 'uv python install "$requested_python"' in run, job_name
             assert 'actual_python="$("$python_path" -c' in run, job_name

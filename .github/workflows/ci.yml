@@ -191,6 +191,10 @@ jobs:
 
       - name: Install package (frozen lockfile)
         run: |
+          if ! python -m pip --version >/dev/null 2>&1; then
+            echo "::notice::runner Python has no executable pip module; restoring bundled pip via ensurepip"
+            python -m ensurepip --upgrade
+          fi
           python -m pip install --upgrade pip
           uv_ready=false
           for attempt in 1 2 3 4 5; do
@@ -491,6 +495,10 @@ jobs:
 
       - name: Install package (frozen lockfile)
         run: |
+          if ! python -m pip --version >/dev/null 2>&1; then
+            echo "::notice::runner Python has no executable pip module; restoring bundled pip via ensurepip"
+            python -m ensurepip --upgrade
+          fi
           python -m pip install --upgrade pip
           uv_ready=false
           for attempt in 1 2 3 4 5; do
@@ -885,6 +893,7 @@ jobs:
             -e API_KEY=ci-smoke-only-not-a-real-secret \
             -e AGENT_TOKEN=ci-smoke-only-not-a-real-secret \
             -e JWT_SECRET=ci-smoke-only-not-a-real-secret \
+            -e REDIS_URL=redis://127.0.0.1:1/0 \
             "$CI_SMOKE_GW_IMAGE_ID"
 
           docker run -d --name "$MCP_NAME" \
