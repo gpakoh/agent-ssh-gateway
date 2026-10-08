@@ -2188,6 +2188,11 @@ class TestStatefulServiceMemoryLimits:
         assert services["redis"]["mem_limit"] == "1g"
         assert services["mcp-postgres"]["deploy"]["resources"]["limits"]["memory"] == "1G"
 
+    def test_runtime_control_plane_services_have_one_gib_limits(self):
+        services = _load_compose()["services"]
+        for service_name in ("mcp-server", "mcp-oauth", "web-ssh-gateway"):
+            assert services[service_name]["deploy"]["resources"]["limits"]["memory"] == "1G"
+
     def test_redis_eviction_budget_remains_separate_from_container_ceiling(self):
         command = " ".join(_load_compose()["services"]["redis"]["command"])
         assert "--maxmemory 256mb" in command
