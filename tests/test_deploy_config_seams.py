@@ -2182,11 +2182,11 @@ class TestAgentExecutorDataRoot:
 class TestStatefulServiceMemoryLimits:
     """Stateful services keep enough cgroup headroom without changing app budgets."""
 
-    def test_postgres_and_redis_have_one_gib_container_limits(self):
+    def test_stateful_container_limits_match_operator_targets(self):
         services = _load_compose()["services"]
-        assert services["mcp-postgres"]["mem_limit"] == "1g"
+        assert services["mcp-postgres"]["mem_limit"] == "768m"
         assert services["redis"]["mem_limit"] == "1g"
-        assert services["mcp-postgres"]["deploy"]["resources"]["limits"]["memory"] == "1G"
+        assert services["mcp-postgres"]["deploy"]["resources"]["limits"]["memory"] == "768M"
 
     def test_runtime_control_plane_services_have_one_gib_limits(self):
         services = _load_compose()["services"]

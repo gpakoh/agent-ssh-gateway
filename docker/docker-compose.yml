@@ -2,7 +2,7 @@ name: web-ssh-gateway
 
 services:
   mcp-postgres:
-    mem_limit: 1g
+    mem_limit: 768m
     image: pgvector/pgvector:pg16
     container_name: mcp-postgres
     hostname: mcp-postgres
@@ -20,7 +20,7 @@ services:
       resources:
         limits:
           cpus: '1.0'
-          memory: 1G
+          memory: 768M
         reservations:
           cpus: '0.25'
           memory: 256M
