@@ -394,6 +394,39 @@ class TestGatewayHealthcheckReadsBodyStatusNotJustHttpStatus:
         assert "== 'ok'" in joined or '== "ok"' in joined
 
 
+class TestDeployHealthFailureDiagnostics:
+    """A failed production health gate must leave enough bounded evidence to
+    identify the degraded dependency before rollback destroys that generation.
+    The gateway's public /health contract already exposes only sanitized
+    component status/failure classes, so it is safe to emit in CI logs.
+    """
+
+    def test_gateway_timeout_dumps_public_component_health_before_returning(self):
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        helper = text.split("dump_health_failure_diagnostics() {", 1)[1].split("\n}\n", 1)[0]
+        wait_fn = text.split("wait_docker_health() {", 1)[1].split("\n}\n", 1)[0]
+
+        assert 'if [ "$container" = "web-ssh-gateway" ]' in helper
+        assert "http://127.0.0.1:8085/health" in helper
+        assert "json.dumps" in helper
+        assert "printenv" not in helper
+        assert "docker logs" not in helper
+        assert 'dump_health_failure_diagnostics "$name" "$container"' in wait_fn
+        timeout_block = wait_fn.split('echo "FAIL (status=$status after ${timeout}s)"', 1)[1]
+        assert timeout_block.index(
+            'dump_health_failure_diagnostics "$name" "$container"'
+        ) < timeout_block.index("return 1")
+
+    def test_deploy_script_remains_valid_bash(self):
+        syntax = subprocess.run(
+            ["bash", "-n", str(DEPLOY_SCRIPT)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert syntax.returncode == 0, syntax.stderr
+
+
 class TestDeployRunsAlembicMigrations:
     """M15: app/main.py's startup create_all() is a fresh-DB/resilience
     fallback, not a substitute for tracking migration history -- nothing
