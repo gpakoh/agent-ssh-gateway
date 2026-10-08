@@ -191,14 +191,22 @@ jobs:
 
       - name: Install package (frozen lockfile)
         run: |
-          if ! python -m pip --version >/dev/null 2>&1; then
-            echo "::notice::runner Python has no executable pip module; restoring bundled pip via ensurepip"
-            python -m ensurepip --upgrade
+          pip_install=(python -m pip)
+          if ! "${pip_install[@]}" --version >/dev/null 2>&1; then
+            if command -v pip3 >/dev/null 2>&1 && pip3 --version >/dev/null 2>&1; then
+              pip_install=(pip3)
+            elif command -v pip >/dev/null 2>&1 && pip --version >/dev/null 2>&1; then
+              pip_install=(pip)
+            else
+              rm -rf .ci-bootstrap-venv
+              python -m venv .ci-bootstrap-venv
+              pip_install=(.ci-bootstrap-venv/bin/python -m pip)
+            fi
           fi
-          python -m pip install --upgrade pip
+          "${pip_install[@]}" --version
           uv_ready=false
           for attempt in 1 2 3 4 5; do
-            if python -m pip install uv; then
+            if "${pip_install[@]}" install uv; then
               uv_ready=true
               break
             fi
@@ -210,7 +218,7 @@ jobs:
           done
           if [ "$uv_ready" != "true" ]; then
             echo "::warning::pip install uv retries exhausted; trying one direct fallback without proxy env"
-            if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy python -m pip install uv; then
+            if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy "${pip_install[@]}" install uv; then
               uv_ready=true
             fi
           fi
@@ -495,14 +503,22 @@ jobs:
 
       - name: Install package (frozen lockfile)
         run: |
-          if ! python -m pip --version >/dev/null 2>&1; then
-            echo "::notice::runner Python has no executable pip module; restoring bundled pip via ensurepip"
-            python -m ensurepip --upgrade
+          pip_install=(python -m pip)
+          if ! "${pip_install[@]}" --version >/dev/null 2>&1; then
+            if command -v pip3 >/dev/null 2>&1 && pip3 --version >/dev/null 2>&1; then
+              pip_install=(pip3)
+            elif command -v pip >/dev/null 2>&1 && pip --version >/dev/null 2>&1; then
+              pip_install=(pip)
+            else
+              rm -rf .ci-bootstrap-venv
+              python -m venv .ci-bootstrap-venv
+              pip_install=(.ci-bootstrap-venv/bin/python -m pip)
+            fi
           fi
-          python -m pip install --upgrade pip
+          "${pip_install[@]}" --version
           uv_ready=false
           for attempt in 1 2 3 4 5; do
-            if python -m pip install uv; then
+            if "${pip_install[@]}" install uv; then
               uv_ready=true
               break
             fi
@@ -514,7 +530,7 @@ jobs:
           done
           if [ "$uv_ready" != "true" ]; then
             echo "::warning::pip install uv retries exhausted; trying one direct fallback without proxy env"
-            if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy python -m pip install uv; then
+            if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy "${pip_install[@]}" install uv; then
               uv_ready=true
             fi
           fi

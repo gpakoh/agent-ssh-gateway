@@ -1861,11 +1861,11 @@ class TestLocalPythonQualification:
             )
             run = str(install_step.get("run", ""))
             assert requested_line in run, job_name
-            assert "python -m pip --version" in run, job_name
-            assert "python -m ensurepip --upgrade" in run, job_name
-            assert run.index("python -m ensurepip --upgrade") < run.index(
-                "python -m pip install --upgrade pip"
-            ), job_name
+            assert "pip_install=(python -m pip)" in run, job_name
+            assert "command -v pip3" in run, job_name
+            assert "command -v pip" in run, job_name
+            assert "python -m venv .ci-bootstrap-venv" in run, job_name
+            assert '"${pip_install[@]}" install uv' in run, job_name
             assert 'uv python find "$requested_python"' in run, job_name
             assert 'uv python install "$requested_python"' in run, job_name
             assert 'actual_python="$("$python_path" -c' in run, job_name
@@ -1888,7 +1888,7 @@ class TestInstallPackageNetworkResilience:
             run = next(s for s in steps if s.get("name") == "Install package (frozen lockfile)")["run"]
 
             assert "for attempt in 1 2 3 4 5" in run
-            assert "python -m pip install uv" in run
+            assert '"${pip_install[@]}" install uv' in run
             assert "UV_HTTP_TIMEOUT=60 uv sync --frozen --extra dev" in run
             assert "uv sync attempt ${attempt}/5 failed" in run
             assert 'sleep "$delay"' in run
