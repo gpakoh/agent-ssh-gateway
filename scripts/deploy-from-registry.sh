@@ -66,6 +66,28 @@ repo_digest() {
   docker inspect --format '{{index .RepoDigests 0}}' "$1" 2>/dev/null || echo ""
 }
 
+dump_health_failure_diagnostics() {
+  local name="$1" container="$2"
+
+  # /health is intentionally public and bounded to non-sensitive component
+  # state/failure classes. Capture it before rollback destroys the failed
+  # generation so a deploy failure says *which* dependency degraded instead
+  # of only "status=unhealthy". Keep this narrow to the gateway because the
+  # other services expose synthetic/authenticated health surfaces whose
+  # bodies are not suitable for unconditional CI logging.
+  if [ "$container" = "web-ssh-gateway" ]; then
+    local health_json
+    health_json=$(docker exec "$container" python3 -c \
+      "import json, urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8085/health', timeout=4)); print(json.dumps(d, sort_keys=True, separators=(',', ':')))" \
+      2>/dev/null || true)
+    if [ -n "$health_json" ]; then
+      echo "  $name health detail: $health_json"
+    else
+      echo "  $name health detail: unavailable"
+    fi
+  fi
+}
+
 wait_docker_health() {
   local name="$1" container="$2" timeout="$3"
   echo -n "  $name: "
@@ -88,6 +110,7 @@ wait_docker_health() {
     fi
     if (( $(date +%s) - start >= timeout )); then
       echo "FAIL (status=$status after ${timeout}s)"
+      dump_health_failure_diagnostics "$name" "$container"
       return 1
     fi
     sleep 2
