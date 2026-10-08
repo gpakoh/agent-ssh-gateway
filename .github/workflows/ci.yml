@@ -47,7 +47,7 @@ jobs:
 
   test:
     needs: [scope]
-    if: needs.scope.outputs.full_ci == 'true'
+    if: github.event_name == 'pull_request' && needs.scope.outputs.full_ci == 'true'
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     # No job in this workflow had a timeout at all -- a genuinely hung
@@ -548,8 +548,8 @@ jobs:
     # github.server_url (https://github.com vs Gitea's ROOT_URL), and give
     # deploy's container an explicit image (nod-ci-docker-e2e, the same
     # job image the Gitea runner's label already uses).
-    needs: [test, e2e]
-    if: github.server_url != 'https://github.com' && (github.event_name == 'pull_request' || (github.ref_name == 'master' && github.event_name == 'push'))
+    needs: [scope]
+    if: needs.scope.outputs.full_ci == 'true' && github.server_url != 'https://github.com' && (github.event_name == 'pull_request' || (github.ref_name == 'master' && github.event_name == 'push'))
     runs-on: docker-e2e-ci
     timeout-minutes: 20
     env:

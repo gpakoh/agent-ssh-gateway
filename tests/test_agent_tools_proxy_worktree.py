@@ -504,7 +504,7 @@ def _run_managed_bundle_case(
         text=True,
         capture_output=True,
         check=False,
-        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+        timeout=PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS,
     )
     return result, artifacts, workspace, marker
 

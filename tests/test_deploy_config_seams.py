@@ -920,14 +920,16 @@ class TestDocsOnlyPushDoesNotDeployRuntime:
     def test_heavy_jobs_and_deploy_cannot_bypass_docs_gate(self):
         jobs = _load_workflow(CI_WORKFLOW_PATH)["jobs"]
         assert jobs["test"]["needs"] == ["scope"]
-        assert jobs["test"]["if"] == "needs.scope.outputs.full_ci == 'true'"
-        for job, dependencies in {
-            "e2e": ["test"],
-            "build-and-push": ["test", "e2e"],
-            "deploy": ["build-and-push"],
-            "host-smoke": ["deploy"],
-        }.items():
-            assert jobs[job]["needs"] == dependencies
+        assert jobs["test"]["if"] == (
+            "github.event_name == 'pull_request' && "
+            "needs.scope.outputs.full_ci == 'true'"
+        )
+        assert jobs["e2e"]["needs"] == ["test"]
+        assert jobs["build-and-push"]["needs"] == ["scope"]
+        assert "needs.scope.outputs.full_ci == 'true'" in jobs["build-and-push"]["if"]
+        assert jobs["deploy"]["needs"] == ["build-and-push"]
+        assert jobs["host-smoke"]["needs"] == ["deploy"]
+        for job in ("test", "e2e", "build-and-push", "deploy", "host-smoke"):
             assert "always()" not in jobs[job].get("if", "")
 
 
@@ -1198,11 +1200,9 @@ class TestE2eFailsClosedWithoutBrowserToolchain:
         assert "|| true" not in run
         assert "continue-on-error" not in e2e_step
 
-    def test_build_and_push_depends_on_e2e(self):
+    def test_build_and_push_can_run_in_parallel_with_pr_qualification(self):
         wf = _load_workflow(CI_WORKFLOW_PATH)
-        needs = wf["jobs"]["build-and-push"].get("needs", [])
-        assert "e2e" in needs
-        assert "test" in needs
+        assert wf["jobs"]["build-and-push"].get("needs") == ["scope"]
 
     def test_e2e_waits_for_python_matrix_before_starting(self):
         wf = _load_workflow(CI_WORKFLOW_PATH)
@@ -2215,11 +2215,16 @@ class TestAgentExecutorDataRoot:
 class TestStatefulServiceMemoryLimits:
     """Stateful services keep enough cgroup headroom without changing app budgets."""
 
-    def test_postgres_and_redis_have_one_gib_container_limits(self):
+    def test_stateful_container_limits_match_operator_targets(self):
         services = _load_compose()["services"]
-        assert services["mcp-postgres"]["mem_limit"] == "1g"
+        assert services["mcp-postgres"]["mem_limit"] == "768m"
         assert services["redis"]["mem_limit"] == "1g"
-        assert services["mcp-postgres"]["deploy"]["resources"]["limits"]["memory"] == "1G"
+        assert services["mcp-postgres"]["deploy"]["resources"]["limits"]["memory"] == "768M"
+
+    def test_runtime_control_plane_services_have_one_gib_limits(self):
+        services = _load_compose()["services"]
+        for service_name in ("mcp-server", "mcp-oauth", "web-ssh-gateway"):
+            assert services[service_name]["deploy"]["resources"]["limits"]["memory"] == "1G"
 
     def test_redis_eviction_budget_remains_separate_from_container_ceiling(self):
         command = " ".join(_load_compose()["services"]["redis"]["command"])

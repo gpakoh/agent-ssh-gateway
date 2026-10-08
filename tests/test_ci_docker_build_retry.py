@@ -59,6 +59,22 @@ case "$FAKE_DOCKER_MODE" in
     fi
     exit 0
     ;;
+  apt_proxy_connect_timeout_then_success)
+    if [ "$count" -eq 1 ]; then
+      echo 'Connection timed out [IP: 192.0.2.10 3128]' >&2
+      echo 'Could not connect to 192.0.2.10:3128 (192.0.2.10), connection timed out' >&2
+      echo 'Unable to connect to 192.0.2.10:3128' >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  buildkit_proxy_no_route_then_success)
+    if [ "$count" -eq 1 ]; then
+      echo 'failed to fetch anonymous token: proxyconnect tcp: dial tcp 192.0.2.10:3128: connect: no route to host' >&2
+      exit 1
+    fi
+    exit 0
+    ;;
   proxy_502_until_direct)
     if [ -z "${HTTP_PROXY:-}" ] && [ -z "${HTTPS_PROXY:-}" ] && \
        [ -z "${http_proxy:-}" ] && [ -z "${https_proxy:-}" ] && \
@@ -176,6 +192,22 @@ def test_apt_proxy_502_is_classified_as_transient_even_with_secondary_dependency
     tmp_path: Path,
 ) -> None:
     result, counter = _run_wrapper(tmp_path, "apt_proxy_502_then_success")
+
+    assert result.returncode == 0
+    assert counter.read_text(encoding="utf-8").strip() == "2"
+    assert "transient network/registry error; retrying" in result.stderr
+
+
+def test_apt_proxy_connect_timeout_is_classified_as_transient(tmp_path: Path) -> None:
+    result, counter = _run_wrapper(tmp_path, "apt_proxy_connect_timeout_then_success")
+
+    assert result.returncode == 0
+    assert counter.read_text(encoding="utf-8").strip() == "2"
+    assert "transient network/registry error; retrying" in result.stderr
+
+
+def test_buildkit_proxy_no_route_is_classified_as_transient(tmp_path: Path) -> None:
+    result, counter = _run_wrapper(tmp_path, "buildkit_proxy_no_route_then_success")
 
     assert result.returncode == 0
     assert counter.read_text(encoding="utf-8").strip() == "2"
