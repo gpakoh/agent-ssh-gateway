@@ -724,6 +724,26 @@ class TestMcpOauthServiceCoherence:
         assert "/var/lib/mcp-supervisor" in mkdir_line
         assert "/var/lib/mcp-supervisor" in chown_line
 
+    def test_destructive_audit_uses_dedicated_preowned_volume(self):
+        compose = _load_compose()
+        oauth = compose["services"]["mcp-oauth"]
+        env = _env_dict(oauth["environment"])
+
+        assert env["MCP_AUDIT_LOG_PATH"] == "/var/lib/mcp-audit/mcp_audit.jsonl"
+        assert "mcp_oauth_audit:/var/lib/mcp-audit" in oauth["volumes"]
+        assert "mcp_oauth_audit" in compose["volumes"]
+        assert "mcp_oauth_audit:/var/lib/mcp-audit" not in compose["services"]["mcp-server"]["volumes"]
+
+        text = MCP_SERVER_DOCKERFILE.read_text(encoding="utf-8")
+        mkdir_line = next(
+            line for line in text.splitlines() if line.startswith("RUN mkdir -p /app/data")
+        )
+        chown_line = next(
+            line for line in text.splitlines() if "chown -R appuser:appuser" in line
+        )
+        assert "/var/lib/mcp-audit" in mkdir_line
+        assert "/var/lib/mcp-audit" in chown_line
+
     def test_has_its_own_dedicated_volume_not_shared_with_mcp_server(self):
         """Sharing mcp_server_tokens would couple the OAuth client/token
         store to the unrelated bearer-only service's -- must be its own

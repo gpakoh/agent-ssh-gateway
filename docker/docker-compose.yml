@@ -348,10 +348,11 @@ services:
       - MCP_TOKEN_STORE_FILE=/app/data/mcp_tokens.json
       - MCP_CLIENT_STORE_FILE=/app/data/mcp_clients.json
       # Strict destructive-intent audit events must survive container
-      # recreation, not live on the ephemeral read_only rootfs (/app is
-      # baked into the image). mcp_oauth_data is already mounted at
-      # /app/data below -- no new volume needed.
-      - MCP_AUDIT_LOG_PATH=/app/data/mcp_audit.jsonl
+      # recreation and must not depend on the historical ownership of the
+      # OAuth token/client data volume. A dedicated fresh volume is mounted
+      # on an image path pre-owned by appuser so required fsync-backed audit
+      # writes stay available across upgrades from older deployments.
+      - MCP_AUDIT_LOG_PATH=/var/lib/mcp-audit/mcp_audit.jsonl
       - GITEA_TOKEN=${GITEA_TOKEN:-}
       - GITEA_API_BASE=${GITEA_API_BASE:-}
       - GITEA_FORWARDED_HOST=${GITEA_FORWARDED_HOST:-}
@@ -399,6 +400,7 @@ services:
       # mcp_server_tokens -- keeps the OAuth client/token store
       # independent of the bearer-only service's.
       - mcp_oauth_data:/app/data
+      - mcp_oauth_audit:/var/lib/mcp-audit
       - mcp_supervisor_journal:/var/lib/mcp-supervisor
       - mcp_candidate_store:/var/lib/mcp-candidates
       - agent_runtime:/var/lib/mcp-agent
@@ -622,6 +624,8 @@ volumes:
   mcp_server_tokens:
     driver: local
   mcp_oauth_data:
+    driver: local
+  mcp_oauth_audit:
     driver: local
   mcp_supervisor_journal:
     driver: local
