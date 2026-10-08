@@ -32,13 +32,59 @@ jobs:
     outputs:
       full_ci: ${{ steps.classify.outputs.full_ci }}
     steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
+      - name: Checkout exact event commit from Gitea
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+        run: |
+          set -euo pipefail
+          set +x
+          expected_sha="${{ github.event.pull_request.head.sha || github.sha }}"
+          printf '%s\n' "$expected_sha" | grep -qxE '[0-9a-f]{40}' || {
+            echo "::error::event head is not a lowercase 40-hex SHA" >&2
+            exit 1
+          }
+          : "${GITEA_TOKEN:?GITEA_TOKEN is required for the private repository checkout}"
+          repo_url="${{ github.server_url }}/${{ github.repository }}.git"
+          gitea_token="$GITEA_TOKEN"
+          unset GITEA_TOKEN
+          auth_header="Authorization: Basic $(printf '%s' "x-access-token:${gitea_token}" | base64 | tr -d '\r\n')"
+          gitea_token=""
+          unset gitea_token
+
+          if [ -z "${GITHUB_WORKSPACE:-}" ] || [ ! -d "$GITHUB_WORKSPACE" ] || [ -L "$GITHUB_WORKSPACE" ]; then
+            echo "::error::GITHUB_WORKSPACE must be an existing non-symlink directory" >&2
+            exit 1
+          fi
+          case "$GITHUB_WORKSPACE" in
+            /*) ;;
+            *) echo "::error::GITHUB_WORKSPACE must be absolute" >&2; exit 1 ;;
+          esac
+          case "$GITHUB_WORKSPACE" in
+            *[!/]*) ;;
+            *) echo "::error::GITHUB_WORKSPACE must not be the filesystem root" >&2; exit 1 ;;
+          esac
+          case "/$GITHUB_WORKSPACE/" in
+            *"/../"*) echo "::error::GITHUB_WORKSPACE must not contain .. segments" >&2; exit 1 ;;
+          esac
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+          git init -q "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git remote add origin "$repo_url"
+          (
+            export GIT_TERMINAL_PROMPT=0
+            export GIT_CONFIG_COUNT=2
+            export GIT_CONFIG_KEY_0="http.${repo_url}.extraHeader"
+            export GIT_CONFIG_VALUE_0="$auth_header"
+            export GIT_CONFIG_KEY_1="http.${repo_url}.followRedirects"
+            export GIT_CONFIG_VALUE_1="false"
+            git fetch -q --no-tags origin "$expected_sha" '+refs/heads/*:refs/remotes/origin/*'
+          )
+          auth_header=""
+          unset auth_header
+          git checkout -q -f --detach "$expected_sha"
+          git clean -fdx
+          test "$(git rev-parse HEAD)" = "$expected_sha"
+          test -z "$(git status --porcelain)"
       - name: Check scope regression cases without application dependencies
         run: python3 -m unittest tests.test_ci_change_scope
       - name: Classify exact diff and check documentation whitespace

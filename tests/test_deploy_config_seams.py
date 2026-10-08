@@ -909,8 +909,32 @@ class TestDocsOnlyPushDoesNotDeployRuntime:
         scope = wf["jobs"]["scope"]
         assert scope["outputs"]["full_ci"] == "${{ steps.classify.outputs.full_ci }}"
         checkout = scope["steps"][0]
-        assert checkout["with"]["fetch-depth"] == 0
-        assert checkout["with"]["ref"] == "${{ github.event.pull_request.head.sha || github.sha }}"
+        assert checkout["name"] == "Checkout exact event commit from Gitea"
+        assert checkout["env"] == {"GITEA_TOKEN": "${{ secrets.GITEA_TOKEN }}"}
+        checkout_run = checkout["run"]
+        assert "actions/checkout" not in json.dumps(scope)
+        assert "actions/setup-python" not in json.dumps(scope)
+        assert 'expected_sha="${{ github.event.pull_request.head.sha || github.sha }}"' in checkout_run
+        assert "git fetch -q --no-tags origin \"$expected_sha\" '+refs/heads/*:refs/remotes/origin/*'" in checkout_run
+        assert 'test "$(git rev-parse HEAD)" = "$expected_sha"' in checkout_run
+        assert "GIT_CONFIG_VALUE_0=\"$auth_header\"" in checkout_run
+        assert 'GIT_CONFIG_VALUE_1="false"' in checkout_run
+        assert "filesystem root" in checkout_run
+        syntax_source = (
+            checkout_run.replace(
+                "${{ github.event.pull_request.head.sha || github.sha }}", "0" * 40
+            )
+            .replace("${{ github.server_url }}", "https://gitea.example.invalid")
+            .replace("${{ github.repository }}", "owner/repo")
+        )
+        syntax = subprocess.run(
+            ["bash", "-n"],
+            input=syntax_source,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert syntax.returncode == 0, syntax.stderr
         commands = "\n".join(step.get("run", "") for step in scope["steps"])
         assert "python3 scripts/ci_change_scope.py" in commands
         assert "python3 -m unittest tests.test_ci_change_scope" in commands
