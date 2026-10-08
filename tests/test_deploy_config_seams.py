@@ -1820,28 +1820,50 @@ class TestDeployProvisionsComposeRegistryAuth:
         assert syntax.returncode == 0, syntax.stderr
 
 
-class TestSetupPythonCacheTeardown:
-    """Keep uv-driven CI jobs free of setup-python cache post-actions."""
+class TestLocalPythonQualification:
+    """PR qualification must not depend on resolving GitHub-hosted actions."""
 
-    def test_uv_jobs_do_not_enable_setup_python_pip_cache(self):
+    def test_python_jobs_checkout_exact_event_sha_without_third_party_actions(self):
         workflow = _load_workflow(CI_WORKFLOW_PATH)
 
         for job_name in ("test", "e2e"):
-            steps = workflow["jobs"][job_name]["steps"]
-            setup_steps = [
-                step
-                for step in steps
-                if str(step.get("uses", "")).startswith("actions/setup-python@")
-            ]
-            assert len(setup_steps) == 1, job_name
-            assert "cache" not in setup_steps[0].get("with", {}), job_name
+            job = workflow["jobs"][job_name]
+            serialized = json.dumps(job)
+            assert "actions/checkout" not in serialized, job_name
+            assert "actions/setup-python" not in serialized, job_name
 
+            checkout = job["steps"][0]
+            assert checkout["name"] == "Checkout exact event commit from Gitea", job_name
+            assert checkout["env"] == {"GITEA_TOKEN": "${{ secrets.GITEA_TOKEN }}"}, job_name
+            run = checkout["run"]
+            assert 'expected_sha="${{ github.event.pull_request.head.sha || github.sha }}"' in run
+            assert "git fetch -q --no-tags origin \"$expected_sha\" '+refs/heads/*:refs/remotes/origin/*'" in run
+            assert 'test "$(git rev-parse HEAD)" = "$expected_sha"' in run
+            assert 'test -z "$(git status --porcelain)"' in run
+
+    def test_uv_jobs_provision_and_verify_requested_python_before_sync(self):
+        workflow = _load_workflow(CI_WORKFLOW_PATH)
+        requested_by_job = {
+            "test": 'requested_python="${{ matrix.python-version }}"',
+            "e2e": 'requested_python="3.12"',
+        }
+
+        for job_name, requested_line in requested_by_job.items():
+            steps = workflow["jobs"][job_name]["steps"]
             install_step = next(
                 step
                 for step in steps
                 if step.get("name") == "Install package (frozen lockfile)"
             )
-            assert "uv sync --frozen --extra dev" in str(install_step.get("run", "")), job_name
+            run = str(install_step.get("run", ""))
+            assert requested_line in run, job_name
+            assert 'uv python find "$requested_python"' in run, job_name
+            assert 'uv python install "$requested_python"' in run, job_name
+            assert 'actual_python="$("$python_path" -c' in run, job_name
+            assert 'if [ "$actual_python" != "$requested_python" ]; then' in run, job_name
+            assert 'export UV_PYTHON="$python_path"' in run, job_name
+            assert 'echo "UV_PYTHON=$python_path" >> "$GITHUB_ENV"' in run, job_name
+            assert run.index("actual_python=") < run.index("uv sync --frozen --extra dev"), job_name
 
 
 class TestInstallPackageNetworkResilience:

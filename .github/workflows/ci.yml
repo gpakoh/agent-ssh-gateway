@@ -114,7 +114,59 @@ jobs:
         python-version: ["3.11", "3.12"]
 
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout exact event commit from Gitea
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+        run: |
+          set -euo pipefail
+          set +x
+          expected_sha="${{ github.event.pull_request.head.sha || github.sha }}"
+          printf '%s\n' "$expected_sha" | grep -qxE '[0-9a-f]{40}' || {
+            echo "::error::event head is not a lowercase 40-hex SHA" >&2
+            exit 1
+          }
+          : "${GITEA_TOKEN:?GITEA_TOKEN is required for the private repository checkout}"
+          repo_url="${{ github.server_url }}/${{ github.repository }}.git"
+          gitea_token="$GITEA_TOKEN"
+          unset GITEA_TOKEN
+          auth_header="Authorization: Basic $(printf '%s' "x-access-token:${gitea_token}" | base64 | tr -d '\r\n')"
+          gitea_token=""
+          unset gitea_token
+
+          if [ -z "${GITHUB_WORKSPACE:-}" ] || [ ! -d "$GITHUB_WORKSPACE" ] || [ -L "$GITHUB_WORKSPACE" ]; then
+            echo "::error::GITHUB_WORKSPACE must be an existing non-symlink directory" >&2
+            exit 1
+          fi
+          case "$GITHUB_WORKSPACE" in
+            /*) ;;
+            *) echo "::error::GITHUB_WORKSPACE must be absolute" >&2; exit 1 ;;
+          esac
+          case "$GITHUB_WORKSPACE" in
+            *[!/]*) ;;
+            *) echo "::error::GITHUB_WORKSPACE must not be the filesystem root" >&2; exit 1 ;;
+          esac
+          case "/$GITHUB_WORKSPACE/" in
+            *"/../"*) echo "::error::GITHUB_WORKSPACE must not contain .. segments" >&2; exit 1 ;;
+          esac
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+          git init -q "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git remote add origin "$repo_url"
+          (
+            export GIT_TERMINAL_PROMPT=0
+            export GIT_CONFIG_COUNT=2
+            export GIT_CONFIG_KEY_0="http.${repo_url}.extraHeader"
+            export GIT_CONFIG_VALUE_0="$auth_header"
+            export GIT_CONFIG_KEY_1="http.${repo_url}.followRedirects"
+            export GIT_CONFIG_VALUE_1="false"
+            git fetch -q --no-tags origin "$expected_sha" '+refs/heads/*:refs/remotes/origin/*'
+          )
+          auth_header=""
+          unset auth_header
+          git checkout -q -f --detach "$expected_sha"
+          git clean -fdx
+          test "$(git rev-parse HEAD)" = "$expected_sha"
+          test -z "$(git status --porcelain)"
 
       - name: Configure package proxy
         run: |
@@ -136,11 +188,6 @@ jobs:
             echo "no_proxy=$package_no_proxy" >> "$GITHUB_ENV"
             echo "::notice::CI package proxy enabled for dependency install and audit steps"
           fi
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v7
-        with:
-          python-version: ${{ matrix.python-version }}
 
       - name: Install package (frozen lockfile)
         run: |
@@ -166,6 +213,45 @@ jobs:
           if [ "$uv_ready" != "true" ]; then
             exit 1
           fi
+
+          requested_python="${{ matrix.python-version }}"
+          if python_path="$(uv python find "$requested_python" 2>/dev/null)"; then
+            :
+          else
+            python_path=""
+          fi
+          if [ -z "$python_path" ]; then
+            python_ready=false
+            for attempt in 1 2 3 4 5; do
+              if UV_HTTP_TIMEOUT=60 uv python install "$requested_python"; then
+                python_ready=true
+                break
+              fi
+              if [ "$attempt" -lt 5 ]; then
+                delay=$((attempt * 10))
+                echo "::warning::uv python install $requested_python attempt ${attempt}/5 failed, retrying in ${delay}s..."
+                sleep "$delay"
+              fi
+            done
+            if [ "$python_ready" != "true" ]; then
+              echo "::warning::uv python install retries exhausted; trying one direct fallback without proxy env"
+              if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy UV_HTTP_TIMEOUT=60 uv python install "$requested_python"; then
+                python_ready=true
+              fi
+            fi
+            if [ "$python_ready" != "true" ]; then
+              exit 1
+            fi
+            python_path="$(uv python find "$requested_python")"
+          fi
+          actual_python="$("$python_path" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+          if [ "$actual_python" != "$requested_python" ]; then
+            echo "::error::resolved Python $actual_python at $python_path, expected $requested_python" >&2
+            exit 1
+          fi
+          export UV_PYTHON="$python_path"
+          echo "UV_PYTHON=$python_path" >> "$GITHUB_ENV"
+          echo "Using Python $actual_python from $python_path"
 
           for attempt in 1 2 3 4 5; do
             if UV_HTTP_TIMEOUT=60 uv sync --frozen --extra dev; then
@@ -328,7 +414,59 @@ jobs:
       CI_PACKAGE_HTTPS_PROXY: ${{ secrets.CI_PACKAGE_HTTPS_PROXY }}
       CI_PACKAGE_NO_PROXY: ${{ secrets.CI_PACKAGE_NO_PROXY }}
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout exact event commit from Gitea
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+        run: |
+          set -euo pipefail
+          set +x
+          expected_sha="${{ github.event.pull_request.head.sha || github.sha }}"
+          printf '%s\n' "$expected_sha" | grep -qxE '[0-9a-f]{40}' || {
+            echo "::error::event head is not a lowercase 40-hex SHA" >&2
+            exit 1
+          }
+          : "${GITEA_TOKEN:?GITEA_TOKEN is required for the private repository checkout}"
+          repo_url="${{ github.server_url }}/${{ github.repository }}.git"
+          gitea_token="$GITEA_TOKEN"
+          unset GITEA_TOKEN
+          auth_header="Authorization: Basic $(printf '%s' "x-access-token:${gitea_token}" | base64 | tr -d '\r\n')"
+          gitea_token=""
+          unset gitea_token
+
+          if [ -z "${GITHUB_WORKSPACE:-}" ] || [ ! -d "$GITHUB_WORKSPACE" ] || [ -L "$GITHUB_WORKSPACE" ]; then
+            echo "::error::GITHUB_WORKSPACE must be an existing non-symlink directory" >&2
+            exit 1
+          fi
+          case "$GITHUB_WORKSPACE" in
+            /*) ;;
+            *) echo "::error::GITHUB_WORKSPACE must be absolute" >&2; exit 1 ;;
+          esac
+          case "$GITHUB_WORKSPACE" in
+            *[!/]*) ;;
+            *) echo "::error::GITHUB_WORKSPACE must not be the filesystem root" >&2; exit 1 ;;
+          esac
+          case "/$GITHUB_WORKSPACE/" in
+            *"/../"*) echo "::error::GITHUB_WORKSPACE must not contain .. segments" >&2; exit 1 ;;
+          esac
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+          git init -q "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git remote add origin "$repo_url"
+          (
+            export GIT_TERMINAL_PROMPT=0
+            export GIT_CONFIG_COUNT=2
+            export GIT_CONFIG_KEY_0="http.${repo_url}.extraHeader"
+            export GIT_CONFIG_VALUE_0="$auth_header"
+            export GIT_CONFIG_KEY_1="http.${repo_url}.followRedirects"
+            export GIT_CONFIG_VALUE_1="false"
+            git fetch -q --no-tags origin "$expected_sha" '+refs/heads/*:refs/remotes/origin/*'
+          )
+          auth_header=""
+          unset auth_header
+          git checkout -q -f --detach "$expected_sha"
+          git clean -fdx
+          test "$(git rev-parse HEAD)" = "$expected_sha"
+          test -z "$(git status --porcelain)"
 
       - name: Configure package proxy
         run: |
@@ -350,11 +488,6 @@ jobs:
             echo "no_proxy=$package_no_proxy" >> "$GITHUB_ENV"
             echo "::notice::CI package proxy enabled for dependency install and audit steps"
           fi
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
 
       - name: Install package (frozen lockfile)
         run: |
@@ -380,6 +513,45 @@ jobs:
           if [ "$uv_ready" != "true" ]; then
             exit 1
           fi
+
+          requested_python="3.12"
+          if python_path="$(uv python find "$requested_python" 2>/dev/null)"; then
+            :
+          else
+            python_path=""
+          fi
+          if [ -z "$python_path" ]; then
+            python_ready=false
+            for attempt in 1 2 3 4 5; do
+              if UV_HTTP_TIMEOUT=60 uv python install "$requested_python"; then
+                python_ready=true
+                break
+              fi
+              if [ "$attempt" -lt 5 ]; then
+                delay=$((attempt * 10))
+                echo "::warning::uv python install $requested_python attempt ${attempt}/5 failed, retrying in ${delay}s..."
+                sleep "$delay"
+              fi
+            done
+            if [ "$python_ready" != "true" ]; then
+              echo "::warning::uv python install retries exhausted; trying one direct fallback without proxy env"
+              if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy UV_HTTP_TIMEOUT=60 uv python install "$requested_python"; then
+                python_ready=true
+              fi
+            fi
+            if [ "$python_ready" != "true" ]; then
+              exit 1
+            fi
+            python_path="$(uv python find "$requested_python")"
+          fi
+          actual_python="$("$python_path" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+          if [ "$actual_python" != "$requested_python" ]; then
+            echo "::error::resolved Python $actual_python at $python_path, expected $requested_python" >&2
+            exit 1
+          fi
+          export UV_PYTHON="$python_path"
+          echo "UV_PYTHON=$python_path" >> "$GITHUB_ENV"
+          echo "Using Python $actual_python from $python_path"
 
           for attempt in 1 2 3 4 5; do
             if UV_HTTP_TIMEOUT=60 uv sync --frozen --extra dev; then
