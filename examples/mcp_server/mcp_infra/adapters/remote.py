@@ -427,6 +427,8 @@ _MERGE_RECONCILE_ATTEMPTS = 3
 _MERGE_RECONCILE_DELAY_SECONDS = 0.05
 _ACTION_RERUN_RECONCILE_ATTEMPTS = 3
 _ACTION_RERUN_RECONCILE_DELAY_SECONDS = 0.05
+_GITEA_GOVERNANCE_RECONCILE_ATTEMPTS = 3
+_GITEA_GOVERNANCE_RECONCILE_DELAY_SECONDS = 0.05
 _GITEA_CI_PAGE_LIMIT = 50
 _GITEA_CI_MAX_RUNS = 1000
 _GITEA_CI_MAX_PAGES = 20
@@ -2144,6 +2146,679 @@ async def gitea_delete_branch(
     )
 
 
+def _gitea_branch_head_sha(branch: Any) -> str | None:
+    if not isinstance(branch, dict):
+        return None
+    commit = branch.get("commit")
+    if not isinstance(commit, dict):
+        return None
+    return _valid_commit_sha(commit.get("id") or commit.get("sha"))
+
+
+async def _gitea_branch_or_none(
+    client: Any,
+    owner: str,
+    repo: str,
+    branch: str,
+) -> dict[str, Any] | None:
+    try:
+        return await client.get_branch(owner, repo, branch)
+    except httpx.HTTPStatusError as exc:
+        response = exc.response
+        if response is not None and response.status_code == 404:
+            return None
+        raise
+
+
+def _gitea_governance_exception_is_ambiguous(exc: BaseException) -> bool:
+    if isinstance(
+        exc,
+        (
+            GiteaMutationOutcomeUnknown,
+            asyncio.CancelledError,
+            httpx.TransportError,
+            TimeoutError,
+        ),
+    ):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        response = exc.response
+        return response is not None and (
+            response.status_code == 409 or response.status_code >= 500
+        )
+    return False
+
+
+async def _reconcile_gitea_branch_creation(
+    client: Any,
+    owner: str,
+    repo: str,
+    branch: str,
+    *,
+    expected_head_sha: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    attempts = 0
+    last_observed_sha: str | None = None
+    last_read_error_class: str | None = None
+    for attempt in range(_GITEA_GOVERNANCE_RECONCILE_ATTEMPTS):
+        attempts = attempt + 1
+        try:
+            observed = await _gitea_branch_or_none(client, owner, repo, branch)
+        except Exception as exc:
+            last_read_error_class = type(exc).__name__
+        else:
+            last_observed_sha = _gitea_branch_head_sha(observed)
+            if observed is not None and last_observed_sha == expected_head_sha:
+                return observed, {
+                    "reconciliation_attempts": attempts,
+                    "observed_head_sha": last_observed_sha,
+                }
+            if observed is not None and last_observed_sha is not None:
+                break
+        if attempt + 1 < _GITEA_GOVERNANCE_RECONCILE_ATTEMPTS:
+            await asyncio.sleep(_GITEA_GOVERNANCE_RECONCILE_DELAY_SECONDS)
+    details: dict[str, Any] = {
+        "reconciliation_attempts": attempts,
+        "observed_head_sha": last_observed_sha,
+    }
+    if last_read_error_class:
+        details["last_read_error_class"] = last_read_error_class
+    return None, details
+
+
+async def _reconcile_gitea_default_branch(
+    client: Any,
+    owner: str,
+    repo: str,
+    branch: str,
+    *,
+    expected_head_sha: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    attempts = 0
+    last_default: str | None = None
+    last_head_sha: str | None = None
+    last_read_error_class: str | None = None
+    for attempt in range(_GITEA_GOVERNANCE_RECONCILE_ATTEMPTS):
+        attempts = attempt + 1
+        try:
+            metadata = await client.get_repo(owner, repo)
+            observed_branch = await client.get_branch(owner, repo, branch)
+        except Exception as exc:
+            last_read_error_class = type(exc).__name__
+        else:
+            last_default = str(metadata.get("default_branch") or "").strip() or None
+            last_head_sha = _gitea_branch_head_sha(observed_branch)
+            if last_default == branch and last_head_sha == expected_head_sha:
+                return metadata, {
+                    "reconciliation_attempts": attempts,
+                    "observed_default_branch": last_default,
+                    "observed_head_sha": last_head_sha,
+                }
+        if attempt + 1 < _GITEA_GOVERNANCE_RECONCILE_ATTEMPTS:
+            await asyncio.sleep(_GITEA_GOVERNANCE_RECONCILE_DELAY_SECONDS)
+    details: dict[str, Any] = {
+        "reconciliation_attempts": attempts,
+        "observed_default_branch": last_default,
+        "observed_head_sha": last_head_sha,
+    }
+    if last_read_error_class:
+        details["last_read_error_class"] = last_read_error_class
+    return None, details
+
+
+async def gitea_create_branch_at_sha(
+    owner: str,
+    repo: str,
+    branch: str,
+    expected_head_sha: str,
+) -> dict[str, Any]:
+    """Create one repository branch at an exact existing commit SHA."""
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return tool_error(
+            tool="gitea_create_branch_at_sha",
+            code="DEPENDENCY_MISSING",
+            message="GITEA_TOKEN not configured",
+            source="gitea",
+        )
+    branch = str(branch or "").strip()
+    try:
+        expected_head_sha = validate_expected_sha(expected_head_sha)
+    except ValueError as exc:
+        return _remote_api_error("gitea_create_branch_at_sha", "gitea", exc)
+    if not branch:
+        return tool_error(
+            tool="gitea_create_branch_at_sha",
+            code="INVALID_INPUT",
+            message="branch is required",
+            source="gitea",
+        )
+
+    audit_metadata: dict[str, Any] | None = None
+    mutation_error: BaseException | None = None
+    try:
+        async with _server_gitea_client()(token) as client:
+            metadata = await client.get_repo(owner, repo)
+            if metadata.get("archived") is True:
+                return tool_error(
+                    tool="gitea_create_branch_at_sha",
+                    code="POLICY_DENIED",
+                    message="creating branches in an archived repository is not allowed",
+                    source="gitea",
+                )
+            permissions = metadata.get("permissions") or {}
+            if not permissions.get("push") or not permissions.get("admin"):
+                return tool_error(
+                    tool="gitea_create_branch_at_sha",
+                    code="AUTH_ERROR",
+                    message=(
+                        "Configured Gitea identity requires both push and admin "
+                        "repository access"
+                    ),
+                    source="gitea",
+                )
+
+            existing = await _gitea_branch_or_none(client, owner, repo, branch)
+            if existing is not None:
+                existing_sha = _gitea_branch_head_sha(existing)
+                if existing_sha == expected_head_sha:
+                    return tool_success(
+                        "gitea_create_branch_at_sha",
+                        result={
+                            "owner": owner,
+                            "repo": repo,
+                            "branch": branch,
+                            "head_sha": expected_head_sha,
+                            "created": False,
+                            "already_exists": True,
+                            "verified": True,
+                        },
+                        source="gitea",
+                    )
+                return tool_error(
+                    tool="gitea_create_branch_at_sha",
+                    code="BRANCH_EXISTS_DIFFERENT_HEAD",
+                    message=(
+                        "branch already exists at a different or unprovable head; "
+                        "refusing overwrite"
+                    ),
+                    details={
+                        "branch": branch,
+                        "expected_head_sha": expected_head_sha,
+                        "observed_head_sha": existing_sha,
+                        "mutation_occurred": False,
+                    },
+                    source="gitea",
+                )
+
+            commits = await client.list_commits(
+                owner,
+                repo,
+                sha=expected_head_sha,
+                limit=1,
+            )
+            source_sha = None
+            if isinstance(commits, list) and commits:
+                first = commits[0]
+                if isinstance(first, dict):
+                    source_sha = _valid_commit_sha(first.get("sha") or first.get("id"))
+            if source_sha != expected_head_sha:
+                return tool_error(
+                    tool="gitea_create_branch_at_sha",
+                    code="SOURCE_SHA_UNPROVEN",
+                    message=(
+                        "expected_head_sha could not be proven as an existing "
+                        "repository commit"
+                    ),
+                    details={
+                        "expected_head_sha": expected_head_sha,
+                        "observed_source_sha": source_sha,
+                        "mutation_occurred": False,
+                    },
+                    source="gitea",
+                )
+
+            identity = await _require_gitea_identity(client)
+            if identity is None:
+                return tool_error(
+                    tool="gitea_create_branch_at_sha",
+                    code="AUTH_ERROR",
+                    message=(
+                        "Authenticated Gitea identity and caller fingerprint are required"
+                    ),
+                    source="gitea",
+                )
+            username, fingerprint = identity
+
+            if await _gitea_branch_or_none(client, owner, repo, branch) is not None:
+                return tool_error(
+                    tool="gitea_create_branch_at_sha",
+                    code="BRANCH_APPEARED",
+                    message="branch appeared during preflight; re-read it before retrying",
+                    retryable=True,
+                    details={"branch": branch, "mutation_occurred": False},
+                    source="gitea",
+                )
+            fresh_commits = await client.list_commits(
+                owner,
+                repo,
+                sha=expected_head_sha,
+                limit=1,
+            )
+            fresh_sha = None
+            if isinstance(fresh_commits, list) and fresh_commits:
+                first = fresh_commits[0]
+                if isinstance(first, dict):
+                    fresh_sha = _valid_commit_sha(first.get("sha") or first.get("id"))
+            if fresh_sha != expected_head_sha:
+                return tool_error(
+                    tool="gitea_create_branch_at_sha",
+                    code="SOURCE_SHA_UNPROVEN",
+                    message="source commit changed or became unprovable during preflight",
+                    retryable=True,
+                    details={
+                        "expected_head_sha": expected_head_sha,
+                        "mutation_occurred": False,
+                    },
+                    source="gitea",
+                )
+
+            correlation_id = uuid.uuid4().hex
+            audit_metadata = {
+                "owner": owner,
+                "repo": repo,
+                "branch": branch,
+                "expected_head_sha": expected_head_sha,
+                "gitea_username": username,
+                "caller_fingerprint": fingerprint,
+                "correlation_id": correlation_id,
+            }
+            audit_logger = _get_gitea_audit_logger()
+            try:
+                audit_logger.append_required(
+                    McpAuditEvent(
+                        event_type="mcp.gitea_admin_intent",
+                        tool="gitea_create_branch_at_sha",
+                        action="create_branch_at_sha",
+                        decision="allow",
+                        reason="create repository branch at exact commit SHA",
+                        metadata=audit_metadata,
+                    )
+                )
+            except AuditWriteError:
+                return tool_error(
+                    tool="gitea_create_branch_at_sha",
+                    code="AUDIT_UNAVAILABLE",
+                    message="Audit log unavailable; admin operation refused",
+                    source="gitea",
+                )
+
+            try:
+                await client.create_branch_at_ref(
+                    owner,
+                    repo,
+                    branch=branch,
+                    source_sha=expected_head_sha,
+                )
+            except asyncio.CancelledError as exc:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    current_task.uncancel()
+                mutation_error = exc
+            except Exception as exc:
+                if not _gitea_governance_exception_is_ambiguous(exc):
+                    raise
+                mutation_error = exc
+
+            created_branch, reconciliation = await _reconcile_gitea_branch_creation(
+                client,
+                owner,
+                repo,
+                branch,
+                expected_head_sha=expected_head_sha,
+            )
+            if created_branch is None:
+                details: dict[str, Any] = {
+                    "branch": branch,
+                    "expected_head_sha": expected_head_sha,
+                    "mutation_started": True,
+                    **reconciliation,
+                }
+                if mutation_error is not None:
+                    details["mutation_error_class"] = type(mutation_error).__name__
+                    if isinstance(mutation_error, httpx.HTTPStatusError):
+                        details["mutation_http_status"] = mutation_error.response.status_code
+                return tool_error(
+                    tool="gitea_create_branch_at_sha",
+                    code="MUTATION_OUTCOME_UNKNOWN",
+                    message=(
+                        "branch creation was attempted but the exact server-side head "
+                        "could not be proven"
+                    ),
+                    retryable=False,
+                    hint=(
+                        "Do not replay blindly. Re-read the branch and reconcile its "
+                        "exact head first."
+                    ),
+                    details=details,
+                    source="gitea",
+                )
+
+            if audit_metadata is not None:
+                try:
+                    _get_gitea_audit_logger().append(
+                        McpAuditEvent(
+                            event_type="mcp.gitea_admin_success",
+                            tool="gitea_create_branch_at_sha",
+                            action="create_branch_at_sha",
+                            decision="allow",
+                            reason="create repository branch at exact commit SHA",
+                            metadata=audit_metadata,
+                        )
+                    )
+                except Exception:
+                    pass
+            data = {
+                "owner": owner,
+                "repo": repo,
+                "branch": branch,
+                "head_sha": expected_head_sha,
+                "created": True,
+                "already_exists": False,
+                "verified": True,
+                "outcome": (
+                    "created_after_ambiguous_response"
+                    if mutation_error is not None
+                    else "created"
+                ),
+                "reconciliation_attempts": reconciliation["reconciliation_attempts"],
+            }
+    except Exception as exc:
+        return _remote_api_error("gitea_create_branch_at_sha", "gitea", exc)
+    return tool_success("gitea_create_branch_at_sha", result=data, source="gitea")
+
+
+async def gitea_set_default_branch(
+    owner: str,
+    repo: str,
+    branch: str,
+    expected_head_sha: str,
+    expected_current_default_branch: str,
+    expected_current_default_sha: str,
+) -> dict[str, Any]:
+    """Switch repository default branch with target and current-default leases."""
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return tool_error(
+            tool="gitea_set_default_branch",
+            code="DEPENDENCY_MISSING",
+            message="GITEA_TOKEN not configured",
+            source="gitea",
+        )
+    branch = str(branch or "").strip()
+    expected_current_default_branch = str(
+        expected_current_default_branch or ""
+    ).strip()
+    if not branch or not expected_current_default_branch:
+        return tool_error(
+            tool="gitea_set_default_branch",
+            code="INVALID_INPUT",
+            message="branch and expected_current_default_branch are required",
+            source="gitea",
+        )
+    try:
+        expected_head_sha = validate_expected_sha(expected_head_sha)
+        expected_current_default_sha = validate_expected_sha(
+            expected_current_default_sha
+        )
+    except ValueError as exc:
+        return _remote_api_error("gitea_set_default_branch", "gitea", exc)
+
+    audit_metadata: dict[str, Any] | None = None
+    mutation_error: BaseException | None = None
+    try:
+        async with _server_gitea_client()(token) as client:
+            metadata = await client.get_repo(owner, repo)
+            if metadata.get("archived") is True:
+                return tool_error(
+                    tool="gitea_set_default_branch",
+                    code="POLICY_DENIED",
+                    message=(
+                        "changing the default branch of an archived repository is not allowed"
+                    ),
+                    source="gitea",
+                )
+            permissions = metadata.get("permissions") or {}
+            if not permissions.get("push") or not permissions.get("admin"):
+                return tool_error(
+                    tool="gitea_set_default_branch",
+                    code="AUTH_ERROR",
+                    message=(
+                        "Configured Gitea identity requires both push and admin "
+                        "repository access"
+                    ),
+                    source="gitea",
+                )
+
+            target = await client.get_branch(owner, repo, branch)
+            target_sha = _gitea_branch_head_sha(target)
+            if target_sha != expected_head_sha:
+                return tool_error(
+                    tool="gitea_set_default_branch",
+                    code="TARGET_HEAD_MISMATCH",
+                    message="target branch head differs from expected_head_sha",
+                    details={
+                        "branch": branch,
+                        "expected_head_sha": expected_head_sha,
+                        "observed_head_sha": target_sha,
+                        "mutation_occurred": False,
+                    },
+                    source="gitea",
+                )
+
+            current_default = str(metadata.get("default_branch") or "").strip()
+            if current_default == branch:
+                return tool_success(
+                    "gitea_set_default_branch",
+                    result={
+                        "owner": owner,
+                        "repo": repo,
+                        "default_branch": branch,
+                        "head_sha": expected_head_sha,
+                        "changed": False,
+                        "already_default": True,
+                        "verified": True,
+                    },
+                    source="gitea",
+                )
+            if current_default != expected_current_default_branch:
+                return tool_error(
+                    tool="gitea_set_default_branch",
+                    code="DEFAULT_BRANCH_MISMATCH",
+                    message=(
+                        "repository default branch changed; re-read repository metadata "
+                        "before retrying"
+                    ),
+                    details={
+                        "expected_current_default_branch": (
+                            expected_current_default_branch
+                        ),
+                        "observed_current_default_branch": current_default or None,
+                        "mutation_occurred": False,
+                    },
+                    source="gitea",
+                )
+            current_branch = await client.get_branch(owner, repo, current_default)
+            current_sha = _gitea_branch_head_sha(current_branch)
+            if current_sha != expected_current_default_sha:
+                return tool_error(
+                    tool="gitea_set_default_branch",
+                    code="CURRENT_DEFAULT_HEAD_MISMATCH",
+                    message=(
+                        "current default branch head changed; refusing administrative switch"
+                    ),
+                    details={
+                        "expected_current_default_sha": expected_current_default_sha,
+                        "observed_current_default_sha": current_sha,
+                        "mutation_occurred": False,
+                    },
+                    source="gitea",
+                )
+
+            identity = await _require_gitea_identity(client)
+            if identity is None:
+                return tool_error(
+                    tool="gitea_set_default_branch",
+                    code="AUTH_ERROR",
+                    message=(
+                        "Authenticated Gitea identity and caller fingerprint are required"
+                    ),
+                    source="gitea",
+                )
+            username, fingerprint = identity
+
+            fresh_metadata = await client.get_repo(owner, repo)
+            fresh_current_default = str(
+                fresh_metadata.get("default_branch") or ""
+            ).strip()
+            fresh_target = await client.get_branch(owner, repo, branch)
+            fresh_current = await client.get_branch(
+                owner,
+                repo,
+                expected_current_default_branch,
+            )
+            if (
+                fresh_current_default != expected_current_default_branch
+                or _gitea_branch_head_sha(fresh_target) != expected_head_sha
+                or _gitea_branch_head_sha(fresh_current)
+                != expected_current_default_sha
+            ):
+                return tool_error(
+                    tool="gitea_set_default_branch",
+                    code="ADMIN_LEASE_CHANGED",
+                    message="repository branch-governance state changed during preflight",
+                    retryable=True,
+                    details={"mutation_occurred": False},
+                    source="gitea",
+                )
+
+            correlation_id = uuid.uuid4().hex
+            audit_metadata = {
+                "owner": owner,
+                "repo": repo,
+                "new_default_branch": branch,
+                "expected_head_sha": expected_head_sha,
+                "previous_default_branch": expected_current_default_branch,
+                "expected_previous_default_sha": expected_current_default_sha,
+                "gitea_username": username,
+                "caller_fingerprint": fingerprint,
+                "correlation_id": correlation_id,
+            }
+            audit_logger = _get_gitea_audit_logger()
+            try:
+                audit_logger.append_required(
+                    McpAuditEvent(
+                        event_type="mcp.gitea_admin_intent",
+                        tool="gitea_set_default_branch",
+                        action="set_default_branch",
+                        decision="allow",
+                        reason="switch repository default branch with exact-SHA leases",
+                        metadata=audit_metadata,
+                    )
+                )
+            except AuditWriteError:
+                return tool_error(
+                    tool="gitea_set_default_branch",
+                    code="AUDIT_UNAVAILABLE",
+                    message="Audit log unavailable; admin operation refused",
+                    source="gitea",
+                )
+
+            try:
+                await client.set_default_branch(owner, repo, branch=branch)
+            except asyncio.CancelledError as exc:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    current_task.uncancel()
+                mutation_error = exc
+            except Exception as exc:
+                if not _gitea_governance_exception_is_ambiguous(exc):
+                    raise
+                mutation_error = exc
+
+            confirmed, reconciliation = await _reconcile_gitea_default_branch(
+                client,
+                owner,
+                repo,
+                branch,
+                expected_head_sha=expected_head_sha,
+            )
+            if confirmed is None:
+                details: dict[str, Any] = {
+                    "expected_default_branch": branch,
+                    "expected_head_sha": expected_head_sha,
+                    "previous_default_branch": expected_current_default_branch,
+                    "mutation_started": True,
+                    **reconciliation,
+                }
+                if mutation_error is not None:
+                    details["mutation_error_class"] = type(mutation_error).__name__
+                    if isinstance(mutation_error, httpx.HTTPStatusError):
+                        details["mutation_http_status"] = mutation_error.response.status_code
+                return tool_error(
+                    tool="gitea_set_default_branch",
+                    code="MUTATION_OUTCOME_UNKNOWN",
+                    message=(
+                        "default-branch mutation was attempted but the server-side state "
+                        "could not be proven"
+                    ),
+                    retryable=False,
+                    hint=(
+                        "Do not replay blindly. Re-read repository metadata and target "
+                        "branch first."
+                    ),
+                    details=details,
+                    source="gitea",
+                )
+
+            if audit_metadata is not None:
+                try:
+                    _get_gitea_audit_logger().append(
+                        McpAuditEvent(
+                            event_type="mcp.gitea_admin_success",
+                            tool="gitea_set_default_branch",
+                            action="set_default_branch",
+                            decision="allow",
+                            reason=(
+                                "switch repository default branch with exact-SHA leases"
+                            ),
+                            metadata=audit_metadata,
+                        )
+                    )
+                except Exception:
+                    pass
+            data = {
+                "owner": owner,
+                "repo": repo,
+                "default_branch": branch,
+                "head_sha": expected_head_sha,
+                "previous_default_branch": expected_current_default_branch,
+                "previous_default_sha": expected_current_default_sha,
+                "changed": True,
+                "already_default": False,
+                "verified": True,
+                "outcome": (
+                    "changed_after_ambiguous_response"
+                    if mutation_error is not None
+                    else "changed"
+                ),
+                "reconciliation_attempts": reconciliation["reconciliation_attempts"],
+            }
+    except Exception as exc:
+        return _remote_api_error("gitea_set_default_branch", "gitea", exc)
+    return tool_success("gitea_set_default_branch", result=data, source="gitea")
+
+
 async def gitea_list_action_runs(
     owner: str, repo: str, status: str | None = None, limit: int = 10
 ) -> dict[str, Any]:
@@ -3246,6 +3921,8 @@ def register_all() -> None:
     register_tool("gitea_merge_pull_request")(gitea_merge_pull_request)
     register_tool("gitea_close_pull_request")(gitea_close_pull_request)
     register_tool("gitea_delete_branch")(gitea_delete_branch)
+    register_tool("gitea_create_branch_at_sha")(gitea_create_branch_at_sha)
+    register_tool("gitea_set_default_branch")(gitea_set_default_branch)
     register_tool("gitea_materialize_task_candidate")(gitea_materialize_task_candidate)
     register_tool("gitea_push_local_ref")(gitea_push_local_ref)
     register_tool("gitea_push_verified_commit")(gitea_push_verified_commit)

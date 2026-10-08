@@ -93,6 +93,19 @@ ALLOWED_ACTION_WRITE_ENDPOINTS = frozenset(
         "/repos/{owner}/{repo}/actions/runs/{run_id}/rerun",
     }
 )
+# Repository-governance writes stay separate from PR/Actions writes. Branch
+# creation is the only allowed POST and repository PATCH is reserved solely
+# for changing ``default_branch``.
+ALLOWED_BRANCH_WRITE_ENDPOINTS = frozenset(
+    {
+        "/repos/{owner}/{repo}/branches",
+    }
+)
+ALLOWED_REPO_ADMIN_ENDPOINTS = frozenset(
+    {
+        "/repos/{owner}/{repo}",
+    }
+)
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 _SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
 MAX_PR_TITLE = 200
@@ -465,6 +478,76 @@ class GiteaClient:
                 "gitea actions mutation returned an undecodable success response"
             ) from exc
 
+    async def _post_branch(
+        self,
+        endpoint: str,
+        payload: dict[str, Any],
+        **path_params: Any,
+    ) -> Any:
+        """POST one narrowly allowlisted branch-creation operation."""
+        if endpoint not in ALLOWED_BRANCH_WRITE_ENDPOINTS:
+            raise ValueError(f"Branch write endpoint not allowed: {endpoint}")
+        if "owner" in path_params:
+            validate_repo_owner_or_name(path_params["owner"], label="owner")
+        if "repo" in path_params:
+            validate_repo_owner_or_name(path_params["repo"], label="repo")
+        path = endpoint.format(**path_params)
+        resp = await self._client.post(path, json=payload)
+        if resp.status_code in (401, 403):
+            detail = resp.json().get("message", "unauthorized")
+            raise PermissionError(f"gitea api {path}: {detail}")
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise httpx.HTTPStatusError(
+                f"gitea api {path}: {resp.status_code} {resp.reason_phrase}",
+                request=exc.request,
+                response=exc.response,
+            ) from None
+        if not resp.content:
+            return {}
+        try:
+            return resp.json()
+        except ValueError as exc:
+            raise GiteaMutationOutcomeUnknown(
+                "gitea branch mutation returned an undecodable success response"
+            ) from exc
+
+    async def _patch_repo_admin(
+        self,
+        endpoint: str,
+        payload: dict[str, Any],
+        **path_params: Any,
+    ) -> Any:
+        """PATCH the narrowly allowlisted repository-properties endpoint."""
+        if endpoint not in ALLOWED_REPO_ADMIN_ENDPOINTS:
+            raise ValueError(f"Repository admin endpoint not allowed: {endpoint}")
+        if "owner" in path_params:
+            validate_repo_owner_or_name(path_params["owner"], label="owner")
+        if "repo" in path_params:
+            validate_repo_owner_or_name(path_params["repo"], label="repo")
+        path = endpoint.format(**path_params)
+        resp = await self._client.patch(path, json=payload)
+        if resp.status_code in (401, 403):
+            detail = resp.json().get("message", "unauthorized")
+            raise PermissionError(f"gitea api {path}: {detail}")
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise httpx.HTTPStatusError(
+                f"gitea api {path}: {resp.status_code} {resp.reason_phrase}",
+                request=exc.request,
+                response=exc.response,
+            ) from None
+        if not resp.content:
+            return {}
+        try:
+            return resp.json()
+        except ValueError as exc:
+            raise GiteaMutationOutcomeUnknown(
+                "gitea repository admin mutation returned an undecodable success response"
+            ) from exc
+
     async def _patch(
         self,
         endpoint: str,
@@ -520,6 +603,52 @@ class GiteaClient:
             repo=repo,
             branch=branch,
         )
+
+    async def create_branch_at_ref(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        branch: str,
+        source_sha: str,
+    ) -> dict[str, Any]:
+        """Create exactly one branch from an exact commit SHA/ref."""
+        branch = _validate_branch_name(branch, "new")
+        source_sha = source_sha.strip()
+        if not _SHA1_RE.fullmatch(source_sha):
+            raise ValueError("source_sha must be a lowercase 40-character SHA-1")
+        data = await self._post_branch(
+            "/repos/{owner}/{repo}/branches",
+            {"new_branch_name": branch, "old_ref_name": source_sha},
+            owner=owner,
+            repo=repo,
+        )
+        if not isinstance(data, dict):
+            raise GiteaMutationOutcomeUnknown(
+                "gitea branch mutation returned a non-object response"
+            )
+        return data
+
+    async def set_default_branch(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        branch: str,
+    ) -> dict[str, Any]:
+        """Set only the repository ``default_branch`` property."""
+        branch = _validate_branch_name(branch, "default")
+        data = await self._patch_repo_admin(
+            "/repos/{owner}/{repo}",
+            {"default_branch": branch},
+            owner=owner,
+            repo=repo,
+        )
+        if not isinstance(data, dict):
+            raise GiteaMutationOutcomeUnknown(
+                "gitea repository admin mutation returned a non-object response"
+            )
+        return data
 
     async def list_commits(
         self,
