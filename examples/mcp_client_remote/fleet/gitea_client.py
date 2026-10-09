@@ -65,6 +65,7 @@ ALLOWED_ENDPOINTS = frozenset(
         "/repos/{owner}/{repo}/actions/runs/{run_id}",
         "/repos/{owner}/{repo}/actions/runs/{run_id}/jobs",
         "/repos/{owner}/{repo}/actions/jobs",
+        "/repos/{owner}/{repo}/actions/jobs/{job_id}",
         "/repos/{owner}/{repo}/actions/jobs/{job_id}/logs",
         "/repos/{owner}/{repo}/actions/workflows",
     }
@@ -91,6 +92,7 @@ ALLOWED_CLOSE_ENDPOINTS = frozenset(
 ALLOWED_ACTION_WRITE_ENDPOINTS = frozenset(
     {
         "/repos/{owner}/{repo}/actions/runs/{run_id}/rerun",
+        "/repos/{owner}/{repo}/actions/runs/{run_id}/jobs/{job_id}/rerun",
     }
 )
 # Repository-governance writes stay separate from PR/Actions writes. Branch
@@ -453,9 +455,12 @@ class GiteaClient:
             validate_repo_owner_or_name(path_params["owner"], label="owner")
         if "repo" in path_params:
             validate_repo_owner_or_name(path_params["repo"], label="repo")
-        if "run_id" in path_params:
+        if "run_id" in path_params or "job_id" in path_params:
             path_params = dict(path_params)
+        if "run_id" in path_params:
             path_params["run_id"] = _validate_positive_int(path_params["run_id"], "run_id")
+        if "job_id" in path_params:
+            path_params["job_id"] = _validate_positive_int(path_params["job_id"], "job_id")
         path = endpoint.format(**path_params)
         resp = await self._client.post(path)
         if resp.status_code in (401, 403):
@@ -928,6 +933,21 @@ class GiteaClient:
         )
         return minimize_action_run_payload(run)
 
+    async def get_action_job(
+        self,
+        owner: str,
+        repo: str,
+        job_id: int,
+    ) -> dict[str, Any]:
+        job_id = _validate_positive_int(job_id, "job_id")
+        job = await self._get(
+            "/repos/{owner}/{repo}/actions/jobs/{job_id}",
+            owner=owner,
+            repo=repo,
+            job_id=job_id,
+        )
+        return minimize_action_job_payload(job)
+
     async def rerun_action_run(
         self,
         owner: str,
@@ -944,18 +964,38 @@ class GiteaClient:
         )
         return minimize_action_run_payload(run)
 
+    async def rerun_action_job(
+        self,
+        owner: str,
+        repo: str,
+        run_id: int,
+        job_id: int,
+    ) -> dict[str, Any]:
+        """Rerun one existing workflow job via Gitea's dedicated endpoint."""
+        run_id = _validate_positive_int(run_id, "run_id")
+        job_id = _validate_positive_int(job_id, "job_id")
+        job = await self._post_action(
+            "/repos/{owner}/{repo}/actions/runs/{run_id}/jobs/{job_id}/rerun",
+            owner=owner,
+            repo=repo,
+            run_id=run_id,
+            job_id=job_id,
+        )
+        return minimize_action_job_payload(job)
+
     async def list_action_run_jobs(
         self,
         owner: str,
         repo: str,
         run_id: int,
     ) -> dict[str, Any]:
-        return await self._get(
+        data = await self._get(
             "/repos/{owner}/{repo}/actions/runs/{run_id}/jobs",
             owner=owner,
             repo=repo,
             run_id=run_id,
         )
+        return normalize_action_jobs_response(data)
 
     async def list_action_jobs(
         self,
