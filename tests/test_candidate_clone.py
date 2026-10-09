@@ -508,6 +508,109 @@ def test_prepare_candidate_clone_resolves_symbolic_base_ref(registry_fixture) ->
     assert _git(clone_root, "rev-parse", "HEAD") == base
 
 
+def test_prepare_candidate_clone_refuses_stale_symbolic_local_fallback_when_remote_unknown(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as candidate_clone_module
+
+    workspace, source, config_dir, journal_root, base = registry_fixture
+    _git(source, "branch", "main", base)
+    _git(source, "remote", "add", "gitea", "ssh://git@example.invalid/source-project.git")
+    monkeypatch.setattr(
+        candidate_clone_module,
+        "_probe_remote_ref",
+        lambda _source, _ref: candidate_clone_module.RemoteRefProbe(
+            candidate_clone_module.RemoteRefStatus.UNKNOWN
+        ),
+    )
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_clone_module.prepare_candidate_clone(
+            "source-project",
+            "candidate/remote-unknown-symbolic",
+            "main",
+            config_dir=config_dir,
+            journal_root=journal_root,
+        )
+
+    assert exc_info.value.code == "SOURCE_REMOTE_STATE_UNKNOWN"
+    assert exc_info.value.retryable is True
+    assert exc_info.value.details == {
+        "base_ref": "main",
+        "remote_status": "unknown",
+        "recovery_action": "refresh_or_restore_trusted_remote_access",
+    }
+    candidate_root = workspace / ".mcp-candidate-clones"
+    assert not candidate_root.exists() or not any(candidate_root.iterdir())
+
+
+def test_prepare_candidate_clone_exact_local_base_survives_unknown_remote_state(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as candidate_clone_module
+
+    workspace, source, config_dir, journal_root, base = registry_fixture
+    _git(source, "remote", "add", "gitea", "ssh://git@example.invalid/source-project.git")
+    monkeypatch.setattr(
+        candidate_clone_module,
+        "_probe_remote_ref",
+        lambda _source, _ref: candidate_clone_module.RemoteRefProbe(
+            candidate_clone_module.RemoteRefStatus.UNKNOWN
+        ),
+    )
+
+    receipt = candidate_clone_module.prepare_candidate_clone(
+        "source-project",
+        "candidate/remote-unknown-exact-local",
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    assert receipt.base_sha == base
+    assert _git(clone_root, "rev-parse", "HEAD") == base
+
+
+def test_prepare_candidate_clone_exact_missing_base_reports_unknown_remote_state(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as candidate_clone_module
+
+    workspace, source, config_dir, journal_root, _base = registry_fixture
+    requested_sha = "f" * 40
+    _git(source, "remote", "add", "gitea", "ssh://git@example.invalid/source-project.git")
+    monkeypatch.setattr(
+        candidate_clone_module,
+        "_probe_remote_ref",
+        lambda _source, _ref: candidate_clone_module.RemoteRefProbe(
+            candidate_clone_module.RemoteRefStatus.UNKNOWN
+        ),
+    )
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_clone_module.prepare_candidate_clone(
+            "source-project",
+            "candidate/remote-unknown-exact",
+            requested_sha,
+            config_dir=config_dir,
+            journal_root=journal_root,
+        )
+
+    assert exc_info.value.code == "SOURCE_REMOTE_STATE_UNKNOWN"
+    assert exc_info.value.retryable is True
+    assert exc_info.value.details == {
+        "base_ref": requested_sha,
+        "remote_status": "unknown",
+        "recovery_action": "refresh_or_restore_trusted_remote_access",
+    }
+    candidate_root = workspace / ".mcp-candidate-clones"
+    assert not candidate_root.exists() or not any(candidate_root.iterdir())
+
+
 def test_prepare_candidate_clone_uses_trusted_remote_base_when_local_checkout_is_stale(
     registry_fixture,
     tmp_path: Path,
@@ -535,8 +638,15 @@ def test_prepare_candidate_clone_uses_trusted_remote_base_when_local_checkout_is
     _git(remote_source, "bundle", "create", str(bundle), "HEAD")
     monkeypatch.setattr(
         candidate_clone_module,
-        "_remote_ref_sha",
-        lambda _source, ref: remote_sha if ref == "master" else None,
+        "_probe_remote_ref",
+        lambda _source, ref: candidate_clone_module.RemoteRefProbe(
+            candidate_clone_module.RemoteRefStatus.FOUND,
+            remote_sha,
+        )
+        if ref == "master"
+        else candidate_clone_module.RemoteRefProbe(
+            candidate_clone_module.RemoteRefStatus.ABSENT
+        ),
     )
     monkeypatch.setattr(
         candidate_clone_module,
@@ -601,8 +711,15 @@ def test_prepare_candidate_clone_exact_base_timeout_uses_trusted_bundle(
     monkeypatch.setattr(candidate_clone_module, "_run_git", timeout_exact_local_resolve)
     monkeypatch.setattr(
         candidate_clone_module,
-        "_remote_ref_sha",
-        lambda _source, ref: remote_sha if ref == remote_sha else None,
+        "_probe_remote_ref",
+        lambda _source, ref: candidate_clone_module.RemoteRefProbe(
+            candidate_clone_module.RemoteRefStatus.FOUND,
+            remote_sha,
+        )
+        if ref == remote_sha
+        else candidate_clone_module.RemoteRefProbe(
+            candidate_clone_module.RemoteRefStatus.ABSENT
+        ),
     )
     monkeypatch.setattr(
         candidate_clone_module,
@@ -633,7 +750,13 @@ def test_prepare_candidate_clone_missing_base_returns_typed_source_ref_error(
     from examples.mcp_server import candidate_clone as candidate_clone_module
 
     _workspace, _source, config_dir, journal_root, _base = registry_fixture
-    monkeypatch.setattr(candidate_clone_module, "_remote_ref_sha", lambda _source, _ref: None)
+    monkeypatch.setattr(
+        candidate_clone_module,
+        "_probe_remote_ref",
+        lambda _source, _ref: candidate_clone_module.RemoteRefProbe(
+            candidate_clone_module.RemoteRefStatus.ABSENT
+        ),
+    )
 
     with pytest.raises(CandidateCloneError) as exc_info:
         candidate_clone_module.prepare_candidate_clone(
@@ -656,7 +779,14 @@ def test_prepare_candidate_clone_remote_base_without_managed_source_returns_stal
 
     _workspace, _source, config_dir, journal_root, _base = registry_fixture
     remote_sha = "a" * 40
-    monkeypatch.setattr(candidate_clone_module, "_remote_ref_sha", lambda _source, _ref: remote_sha)
+    monkeypatch.setattr(
+        candidate_clone_module,
+        "_probe_remote_ref",
+        lambda _source, _ref: candidate_clone_module.RemoteRefProbe(
+            candidate_clone_module.RemoteRefStatus.FOUND,
+            remote_sha,
+        ),
+    )
     monkeypatch.setattr(candidate_clone_module, "ensure_managed_source_bundle", lambda _project, _sha: None)
 
     with pytest.raises(CandidateCloneError) as exc_info:
