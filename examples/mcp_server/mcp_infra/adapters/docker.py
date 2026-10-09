@@ -50,6 +50,37 @@ def _get_audit_logger():
     return server_attr("get_audit_logger")()
 
 
+def _resolve_compose_project_dir(project_dir: str | None, client: Any) -> str | None:
+    """Resolve a registered project id without exposing its host path.
+
+    Existing callers may still pass an allowed filesystem path. A value that
+    names a workspace-registry project is resolved internally to its root and
+    revalidated by DockerClient's existing allowed-root policy. Failures for a
+    registered project deliberately report only the logical id.
+    """
+    if project_dir is None:
+        return None
+
+    from app.workspace.policy import WorkspacePolicyError
+
+    registry = server_attr("_get_workspace_registry")()
+    try:
+        project = registry.project_info(project_dir)
+    except WorkspacePolicyError:
+        return project_dir
+
+    resolved = str(project.get("root") or "")
+    if not resolved:
+        raise ValueError(f"Registered project {project_dir!r} has no workspace root")
+    try:
+        client._validate_project_dir(resolved)
+    except ValueError:
+        raise ValueError(
+            f"Registered project {project_dir!r} is unavailable to Docker Compose"
+        ) from None
+    return resolved
+
+
 _DEPLOY_STABILITY_SECONDS = 90
 _DEPLOY_HELPER_CONTAINER = "mcp-oauth"
 _DEPLOY_CONTRACTS: dict[str, dict[str, str]] = {
@@ -390,7 +421,8 @@ async def docker_compose_ps(
     client = _docker_client()
     try:
         validate_pagination(limit, "limit")
-        rows = await client.compose_ps(project_dir=project_dir, limit=limit)
+        resolved_project_dir = _resolve_compose_project_dir(project_dir, client)
+        rows = await client.compose_ps(project_dir=resolved_project_dir, limit=limit)
     except ValueError as exc:
         return tool_error(tool="docker_compose_ps", code="INVALID_INPUT", message=str(exc), source="docker")
     except RuntimeError as exc:
@@ -409,8 +441,10 @@ async def docker_compose_services(
     project_dir: str | None = None,
 ) -> dict[str, Any]:
     """List service names defined in a Docker Compose project."""
+    client = _docker_client()
     try:
-        result = await _docker_client().compose_services(project_dir=project_dir)
+        resolved_project_dir = _resolve_compose_project_dir(project_dir, client)
+        result = await client.compose_services(project_dir=resolved_project_dir)
     except ValueError as exc:
         return tool_error(
             tool="docker_compose_services", code="INVALID_INPUT", message=str(exc), source="docker"
@@ -429,9 +463,11 @@ async def docker_compose_logs(
     timestamps: bool = False,
 ) -> dict[str, Any]:
     """Fetch logs from services in a Docker Compose project. tail: 1-1000 lines."""
+    client = _docker_client()
     try:
-        result = await _docker_client().compose_logs(
-            project_dir=project_dir,
+        resolved_project_dir = _resolve_compose_project_dir(project_dir, client)
+        result = await client.compose_logs(
+            project_dir=resolved_project_dir,
             services=services,
             tail=tail,
             follow=follow,
@@ -536,8 +572,10 @@ async def _docker_compose_down_impl(
     timeout: int = 30,
     volumes: bool = False,
 ) -> RunResult:
-    return await _docker_client().compose_down(
-        project_dir=project_dir,
+    client = _docker_client()
+    resolved_project_dir = _resolve_compose_project_dir(project_dir, client)
+    return await client.compose_down(
+        project_dir=resolved_project_dir,
         remove_orphans=remove_orphans,
         timeout=timeout,
         volumes=volumes,
@@ -566,8 +604,10 @@ async def _docker_compose_up_impl(
     build: bool = False,
     timeout: int = 120,
 ) -> str:
-    return await _docker_client().compose_up(
-        project_dir=project_dir,
+    client = _docker_client()
+    resolved_project_dir = _resolve_compose_project_dir(project_dir, client)
+    return await client.compose_up(
+        project_dir=resolved_project_dir,
         services=services,
         detach=detach,
         build=build,
@@ -579,8 +619,10 @@ async def _docker_compose_restart_impl(
     services: list[str] | None = None,
     timeout: int = 30,
 ) -> str:
-    return await _docker_client().compose_restart(
-        project_dir=project_dir,
+    client = _docker_client()
+    resolved_project_dir = _resolve_compose_project_dir(project_dir, client)
+    return await client.compose_restart(
+        project_dir=resolved_project_dir,
         services=services,
         timeout=timeout,
     )
@@ -591,8 +633,10 @@ async def _docker_compose_build_impl(
     no_cache: bool = False,
     timeout: int = 300,
 ) -> str:
-    return await _docker_client().compose_build(
-        project_dir=project_dir,
+    client = _docker_client()
+    resolved_project_dir = _resolve_compose_project_dir(project_dir, client)
+    return await client.compose_build(
+        project_dir=resolved_project_dir,
         services=services,
         no_cache=no_cache,
         timeout=timeout,
@@ -971,7 +1015,7 @@ async def docker_compose_down(
                 source="docker",
             )
     dc = _docker_client()
-    dc._validate_project_dir(project_dir)
+    _resolve_compose_project_dir(project_dir, dc)
     parts = []
     if project_dir:
         parts.append(f"project={project_dir}")
