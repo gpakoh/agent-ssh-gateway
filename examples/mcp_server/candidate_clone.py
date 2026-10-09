@@ -461,9 +461,20 @@ def _probe_remote_ref(source_root: Path, ref: str) -> RemoteRefProbe:
     return RemoteRefProbe(RemoteRefStatus.UNKNOWN)
 
 
-def _remote_ref_sha(source_root: Path, base_ref: str) -> str | None:
-    probe = _probe_remote_ref(source_root, base_ref)
-    return probe.sha if probe.status is RemoteRefStatus.FOUND else None
+def _source_has_configured_remote(source_root: Path) -> bool:
+    """Return whether the registered source advertises any Git remote.
+
+    A configured remote means an explicit symbolic ``base_ref`` is expected to
+    be reconciled against remote state. If the trusted-remote probe is UNKNOWN,
+    silently falling back to a local branch can materialize a stale candidate.
+    Local-only repositories remain supported for development/test workflows.
+    """
+    remotes = _run_git(
+        source_root,
+        ["remote"],
+        operation="list source remotes",
+    )
+    return any(line.strip() for line in remotes.splitlines())
 
 
 def _status_state(repo: Path) -> tuple[bool, str, int]:
@@ -1567,7 +1578,34 @@ def prepare_candidate_clone(
 
     requested_ref = base_ref or "HEAD"
     local_sha = _local_commit_or_none(source_root, requested_ref)
-    remote_sha = _remote_ref_sha(source_root, requested_ref) if base_ref else None
+    remote_probe = _probe_remote_ref(source_root, requested_ref) if base_ref else None
+    remote_sha = (
+        remote_probe.sha
+        if remote_probe is not None and remote_probe.status is RemoteRefStatus.FOUND
+        else None
+    )
+    exact_local_ref = bool(
+        base_ref
+        and re.fullmatch(r"[0-9a-fA-F]{40}", requested_ref)
+        and local_sha == requested_ref.lower()
+    )
+    if (
+        base_ref
+        and remote_probe is not None
+        and remote_probe.status is RemoteRefStatus.UNKNOWN
+        and not exact_local_ref
+        and _source_has_configured_remote(source_root)
+    ):
+        raise _fail(
+            "SOURCE_REMOTE_STATE_UNKNOWN",
+            "trusted remote state is unknown; refusing local base-ref fallback",
+            retryable=True,
+            details={
+                "base_ref": requested_ref,
+                "remote_status": remote_probe.status.value,
+                "recovery_action": "refresh_or_restore_trusted_remote_access",
+            },
+        )
     if base_ref and remote_sha is None and local_sha is None:
         raise _fail(
             "SOURCE_REF_NOT_AVAILABLE",

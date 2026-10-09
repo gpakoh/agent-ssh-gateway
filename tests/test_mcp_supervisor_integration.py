@@ -274,6 +274,45 @@ def test_recovery_unknown_project_fails_closed(monkeypatch, immediate_run_tool):
     assert result["error"]["code"] == "PROJECT_NOT_FOUND"
 
 
+def test_prepare_candidate_clone_preserves_typed_remote_state_error(
+    tmp_path, immediate_run_tool, monkeypatch
+):
+    config_dir = tmp_path / "registry"
+    config_dir.mkdir()
+    journal_root = tmp_path / "journals"
+    monkeypatch.setattr(supervisor, "_resolve_registry_config_dir", lambda: config_dir)
+    monkeypatch.setattr(
+        supervisor,
+        "_journal_root_for_project",
+        lambda _project, _root: journal_root,
+    )
+
+    def _raise(*_args, **_kwargs):
+        raise supervisor.CandidateCloneError(
+            "SOURCE_REMOTE_STATE_UNKNOWN",
+            "trusted remote state is unknown; refusing local base-ref fallback",
+            retryable=True,
+            details={
+                "base_ref": "main",
+                "remote_status": "unknown",
+                "recovery_action": "refresh_or_restore_trusted_remote_access",
+            },
+        )
+
+    monkeypatch.setattr(supervisor, "_prepare_candidate_clone", _raise)
+
+    result = supervisor.prepare_candidate_clone("demo", "candidate/demo", "main")
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "SOURCE_REMOTE_STATE_UNKNOWN"
+    assert result["error"]["retryable"] is True
+    assert result["error"]["details"] == {
+        "base_ref": "main",
+        "remote_status": "unknown",
+        "recovery_action": "refresh_or_restore_trusted_remote_access",
+    }
+
+
 def test_register_all_registers_exactly_three_tools(monkeypatch):
     registered: list[str] = []
 
