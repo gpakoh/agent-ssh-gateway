@@ -52,6 +52,42 @@ class SmokeError(RuntimeError):
     pass
 
 
+def _required_schema() -> tuple[str, tuple[str, ...]]:
+    tool_name = os.environ.get("MCP_SMOKE_REQUIRED_TOOL", "").strip()
+    raw_inputs = os.environ.get("MCP_SMOKE_REQUIRED_INPUTS", "")
+    inputs = tuple(dict.fromkeys(item.strip() for item in raw_inputs.split(",") if item.strip()))
+    if inputs and not tool_name:
+        raise SmokeError("MCP_SMOKE_REQUIRED_INPUTS requires MCP_SMOKE_REQUIRED_TOOL")
+    return tool_name, inputs
+
+
+def _validate_required_tool_schema(tools: Any) -> None:
+    tool_name, required_inputs = _required_schema()
+    if not tool_name:
+        return
+    if not isinstance(tools, list):
+        raise SmokeError("tools/list returned no tools array")
+
+    matches = [tool for tool in tools if isinstance(tool, dict) and tool.get("name") == tool_name]
+    if len(matches) != 1:
+        raise SmokeError(f"required tool {tool_name!r} missing or ambiguous")
+    schema = matches[0].get("inputSchema")
+    if not isinstance(schema, dict):
+        raise SmokeError(f"required tool {tool_name!r} has no inputSchema object")
+    properties = schema.get("properties")
+    required = schema.get("required")
+    if not isinstance(properties, dict) or not isinstance(required, list):
+        raise SmokeError(f"required tool {tool_name!r} has incomplete inputSchema")
+
+    missing_properties = [name for name in required_inputs if name not in properties]
+    missing_required = [name for name in required_inputs if name not in required]
+    if missing_properties or missing_required:
+        raise SmokeError(
+            f"required tool {tool_name!r} schema mismatch: "
+            f"missing properties={missing_properties}, missing required={missing_required}"
+        )
+
+
 def _req(method: str, path: str, body: dict[str, Any] | None = None, form: bool = False,
          sid: str | None = None, token: str | None = None) -> tuple[int, dict[str, Any], str, str]:
     headers = {"Accept": "application/json, text/event-stream"}
@@ -171,9 +207,16 @@ def _mcp_call(token: str, method: str, params: dict[str, Any], sid: str | None =
     }, sid=sid, token=token)
     if status != 200:
         raise SmokeError(f"mcp {method}: http {status}")
+    if not payload:
+        raise SmokeError(f"mcp {method}: empty or malformed response")
+    if payload.get("jsonrpc") != "2.0" or payload.get("id") != 1:
+        raise SmokeError(f"mcp {method}: response id/jsonrpc mismatch")
     if "error" in payload:
         raise SmokeError(f"mcp {method}: {payload['error']}")
-    return payload.get("result", {}), ret_sid
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        raise SmokeError(f"mcp {method}: missing result object")
+    return result, ret_sid
 
 
 def _terminate_session(token: str, sid: str) -> None:
@@ -195,6 +238,7 @@ def main() -> int:
     exit_code: Any = None
     rc = 1
     try:
+        required_tool, _ = _required_schema()
         client_id = _register_client()
         token = _oauth_flow(client_id, password)
 
@@ -205,6 +249,10 @@ def main() -> int:
         })
         if not sid:
             raise SmokeError("initialize returned no session id")
+
+        if required_tool:
+            tools_result, _ = _mcp_call(token, "tools/list", {}, sid=sid)
+            _validate_required_tool_schema(tools_result.get("tools"))
 
         result, _ = _mcp_call(token, "tools/call", {
             "name": "git_status",

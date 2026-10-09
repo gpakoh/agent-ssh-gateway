@@ -262,6 +262,13 @@ CI:
 pytest -m host_smoke -v
 ```
 
+The registry deploy path also performs authenticated MCP black-box checks after
+container recreation. The deployed bearer and public OAuth surfaces must expose
+the critical `gitea_rerun_action_job` input schema, including its exact
+run/job/head fencing arguments. Transient reconnects are retried only for the
+read-only bearer `initialize` + `tools/list` handshake; the OAuth/DCR flow is
+fail-closed and is not blindly replayed after a timeout or unknown outcome.
+
 ## Documentation
 
 - [Security policy and threat model](SECURITY.md)

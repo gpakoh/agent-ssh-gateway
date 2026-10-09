@@ -59,6 +59,8 @@ def test_mcp_oauth_black_box_smoke_full_flow():
     env = dict(os.environ)
     env["MCP_AUTHORIZE_PASSWORD"] = password
     env.setdefault("MCP_SMOKE_TIMEOUT", "90")
+    env["MCP_SMOKE_REQUIRED_TOOL"] = "gitea_rerun_action_job"
+    env["MCP_SMOKE_REQUIRED_INPUTS"] = "owner,repo,run_id,job_id,expected_head_sha"
     result = subprocess.run(
         [sys.executable, str(SCRIPT)],
         capture_output=True,
