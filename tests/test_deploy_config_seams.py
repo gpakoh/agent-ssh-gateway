@@ -1758,6 +1758,28 @@ class TestPrBuildsAndSmokeTestsDockerArtifact:
             assert exact_tag not in smoke
         assert "manifest unknown" in smoke
 
+    def test_pre_push_smoke_matches_application_memory_ceiling(self):
+        """Standalone gateway/MCP smoke containers must stay within the
+        production-class 1 GiB application ceiling instead of running
+        unconstrained on the shared Docker runner."""
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        steps = wf["jobs"]["build-and-push"]["steps"]
+        by_name = {step.get("name"): step for step in steps}
+        smoke = by_name[
+            "Smoke-test built images (before pushing, on a push; standalone, on a PR)"
+        ]["run"]
+
+        ceiling = "--memory=1g --memory-swap=1g"
+        assert smoke.count(ceiling) == 2
+        gateway_run = smoke.split('docker run -d --name "$GW_NAME"', 1)[1].split(
+            '"$CI_SMOKE_GW_IMAGE_ID"', 1
+        )[0]
+        mcp_run = smoke.split('docker run -d --name "$MCP_NAME"', 1)[1].split(
+            '"$CI_SMOKE_MCP_IMAGE_ID"', 1
+        )[0]
+        assert ceiling in gateway_run
+        assert ceiling in mcp_run
+
 
 class TestDeployProvisionsComposeRegistryAuth:
     """The post-merge deploy lane owns private-registry auth provisioning.
