@@ -108,6 +108,23 @@ Open backlog count after cleanup: **42**
    closes the silent-stale-fallback subcase. Item #2 remains open for the broader
    canonical write-plane and lineage recovery contract described above.
 
+   **2026-10-10 deployed inbound-dependency fence acceptance:** PR #501 merged as
+   `71b1204b82d5...`; post-merge run #15307 completed build-and-push, deploy and
+   host-smoke successfully, and live `health` reported both Gateway and MCP on
+   exact SHA `71b1204b82d5...`. A disposable `/tmp` fixture executed inside that
+   deployed `mcp-server` image created a candidate plus a sibling `git clone
+   --shared`, then invoked the real `candidate_cleanup` core. Cleanup failed
+   closed with non-retryable `WORKSPACE_CONTENDED`, identified the dependant as
+   `candidate-live-shared-dependent` with dependency types `alternates` and
+   `local_origin`, and returned
+   `recovery_action=make_dependants_self_contained_then_retry_cleanup`. The target
+   candidate directory and registry entry remained intact, the dependant HEAD
+   remained readable, and `git fsck --full` returned 0. This closes the unsafe
+   inbound-dependency deletion subcase through the deployed core. The live MCP
+   manifest still exposes `prepare_candidate_clone` but no `candidate_cleanup`
+   operator tool, so item #2 remains open for caller-visible inspect/reconcile/
+   cleanup and dependant-self-containment recovery rather than for this fence.
+
 4. ⬜ **Reconcile stale unbound fleet leases without duplicate work.**
    Historical `attempted` / `legacy_unknown` lease rows can consume all fleet
    capacity even when no lease has a recent heartbeat. Add fleet status that
