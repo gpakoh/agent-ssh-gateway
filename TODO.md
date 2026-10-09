@@ -147,6 +147,19 @@ Open backlog count after cleanup: **42**
    layer retains the old schema. Keep mutation behavior independent of this
    diagnostic signal.
 
+   **2026-10-09 divergent closed-unmerged cleanup reproducer:** `infra-quart`
+   still has superseded closed-unmerged branches whose exact heads are proven but
+   whose trees diverge from current default. The live server manifest documents
+   optional `closed_unmerged_cleanup_reason` on `gitea_delete_branch`, while this
+   ChatGPT-facing callable schema still exposes only owner/repo/branch/
+   `expected_head_sha`. An exact-SHA delete therefore fails closed with
+   `POLICY_DENIED` and `mutation_occurred=false`, and the caller cannot supply the
+   audited explicit cleanup reason without a raw-API workaround. Keep this as
+   concrete caller-impact evidence under #6, not as a separate cleanup feature:
+   once external schema parity is restored, re-run one superseded infra-quart
+   branch cleanup and verify exact-SHA deletion plus absent ref while all existing
+   open-PR/protected/default/audit guards remain fail-closed.
+
    **2026-10-09 terminal reconnect evidence:** PR #491 added fresh-session bearer
    and public OAuth schema acceptance; its first post-merge deploy #15036 exposed
    an EOF-SSE parser defect and correctly rolled back. PR #492 fixed that parser,
