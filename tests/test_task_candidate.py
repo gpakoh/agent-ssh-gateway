@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from examples.mcp_server import task_candidate as task_candidate_module
 from examples.mcp_server.agent_paths import task_dir
 from examples.mcp_server.mcp_infra.adapters import remote
 from examples.mcp_server.task_candidate import (
@@ -217,30 +218,20 @@ def test_make_verifier_readable_tolerates_disappearing_git_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path / "staging"
-    lock = root / "repo" / ".git" / "objects" / "maintenance.lock"
-    lock.parent.mkdir(parents=True)
-    lock.write_text("ephemeral\n", encoding="utf-8")
-    payload = root / "repo" / "tracked.txt"
+    root.mkdir()
+    payload = root / "tracked.txt"
     payload.write_text("content\n", encoding="utf-8")
+    vanished = root / "maintenance.lock"
 
-    original_stat = Path.stat
-    vanished = False
+    def fake_walk(_root: Path):
+        yield str(root), [], [payload.name, vanished.name]
 
-    def racing_stat(path: Path, *args: Any, **kwargs: Any):
-        nonlocal vanished
-        if path == lock and not vanished:
-            vanished = True
-            lock.unlink()
-            raise FileNotFoundError(lock)
-        return original_stat(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "stat", racing_stat)
+    monkeypatch.setattr(task_candidate_module.os, "walk", fake_walk)
 
     _make_verifier_readable(root)
 
-    assert vanished is True
-    assert not lock.exists()
     assert payload.stat().st_mode & 0o044 == 0o044
+    assert not vanished.exists()
 
 
 # ── materialization stores evidence + digest ──────────────────────
