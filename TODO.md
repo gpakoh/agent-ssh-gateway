@@ -257,6 +257,32 @@ Open backlog count after cleanup: **42**
     postcondition verification, clean-runner private-image pull, and fail-closed
     behavior for missing/ambiguous credentials.
 
+    **2026-10-09 agent-memory production evidence:** `agent-memory-service`
+    promotion is integrated and its current-main image `aefd07d016ba...` was
+    published at registry digest `sha256:9c906bdae1d1...`, but no live
+    `agent-memory-service` container exists. The reviewed promotion contract
+    requires operator-owned `AGENT_MEMORY_DATABASE_URL`,
+    `AGENT_MEMORY_INTERNAL_API_KEY`, `AGENT_MEMORY_INFRA_COMPOSE_DIR` and a
+    digest-pinned `AGENT_MEMORY_PSQL_IMAGE`; the active deployment execution
+    plane cannot read the root-owned infra environment and no guarded primitive
+    can consume those values without exposing them. Keep this under the shared
+    secret-propagation finding rather than opening a service-specific blocker.
+    Evidence: agent-memory-service PR #7 merge `e09040ec...`, PR #8 merge
+    `aefd07d01...`, post-merge run #15197 SUCCESS; live inventory still shows no
+    agent-memory-service container.
+
+    **2026-10-09 Actions/private-registry evidence:** `work-session-service`
+    proved that the built-in `GITEA_TOKEN` is non-empty but is not accepted for
+    Docker package-registry authentication: exact-head run #15200 reached
+    `docker login` and failed unauthorized. The branch was corrected back to a
+    fail-closed explicit `REGISTRY_TOKEN` contract at `565cd8a0...`; no callable
+    Actions secret-management primitive can bind an operator-owned read-only PAT
+    to that repository. Closure for this item must therefore cover both guarded
+    deploy-time secret consumption and audited Actions-secret provisioning, with
+    no plaintext returned or logged. Evidence: run #15200 quality/postgres green,
+    agent-memory-e2e failed only at registry login; corrected head
+    `565cd8a0eb77...` retains explicit `REGISTRY_TOKEN`.
+
 ## P2 / Important bugs and reliability gaps
 
 13. ⬜ **Wire the production `astro-sites` named root into `mcp-oauth` after the host path is provisioned.**
