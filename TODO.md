@@ -95,6 +95,19 @@ Open backlog count after cleanup: **42**
    authoritative remote commit or return an explicit refresh/recovery action,
    never silently create a candidate from stale local state.
 
+   **2026-10-09 deployed stale-source acceptance:** PR #498 merged as
+   `eaeb7d48ad81...`; post-merge run #15202 completed build-and-push, deploy and
+   host-smoke successfully, and live `health` reported Gateway/MCP build SHA
+   `eaeb7d48ad81...`. At acceptance time authoritative `gpakoh/infra-quart/main`
+   was `e8bbef68af3f...`, while the registered source checkout remained at
+   `HEAD=a38021c7890c...` with stale local `gitea/main=981df946b884...`.
+   Calling the deployed `prepare_candidate_clone(project=infra-quart,
+   base_ref=main)` returned typed retryable `SOURCE_REMOTE_STATE_UNKNOWN` with
+   `recovery_action=refresh_or_restore_trusted_remote_access`; it did not create
+   a candidate directory and did not materialize either stale local SHA. This
+   closes the silent-stale-fallback subcase. Item #2 remains open for the broader
+   canonical write-plane and lineage recovery contract described above.
+
 4. ⬜ **Reconcile stale unbound fleet leases without duplicate work.**
    Historical `attempted` / `legacy_unknown` lease rows can consume all fleet
    capacity even when no lease has a recent heartbeat. Add fleet status that
