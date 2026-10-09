@@ -122,6 +122,20 @@ Open backlog count after cleanup: **42**
    layer retains the old schema. Keep mutation behavior independent of this
    diagnostic signal.
 
+   **2026-10-09 terminal reconnect evidence:** PR #491 added fresh-session bearer
+   and public OAuth schema acceptance; its first post-merge deploy #15036 exposed
+   an EOF-SSE parser defect and correctly rolled back. PR #492 fixed that parser,
+   and post-merge #15062 completed successfully. The later workflow change #494
+   then redeployed exact `master@9c4bc3ff677c...`; run #15114 completed
+   build-and-push, deploy and host-smoke successfully, with host-smoke proving
+   `web-ssh-gateway`, `mcp-server` and `mcp-oauth` all running that exact SHA and
+   a fresh public OAuth black-box flow passing. After that full restart/reconnect,
+   authoritative `tools_manifest` still exposes `gitea_rerun_action_job`, while
+   this attached ChatGPT `api_tool.list_resources(..., query="gitea_rerun_action_job")`
+   still does not expose the callable tool. This isolates the remaining defect to
+   the external ChatGPT resource-catalog refresh/filter/cache layer rather than
+   Gateway deployment, FastMCP registration or public MCP/OAuth reconnect behavior.
+
 7. ⬜ **Reconcile Gitea Actions lifecycle, stranded jobs and cancellable runs.**
    CI runs/jobs can remain `waiting` / `in_progress` after all useful work is
    done, after cleanup timeouts, or after old workflow jobs later become runnable.
@@ -336,6 +350,14 @@ Open backlog count after cleanup: **42**
     under item 45), then prove a real external caller can invoke one failed job
     without rerunning the whole workflow.
 
+    **2026-10-09 reconnect acceptance:** PRs #491/#492 plus successful post-merge
+    run #15114 now prove fresh bearer/public-OAuth MCP reconnects after a full
+    redeploy accept the current schema surface. `tools_manifest` still reports
+    `gitea_rerun_action_job` enabled/available, but the attached ChatGPT resource
+    catalog still cannot call it. Therefore no additional Gateway rerun code is
+    required here; the only remaining closure step is external catalog exposure
+    followed by one real failed-job rerun acceptance from that external caller.
+
 33. ⬜ **Align outer `run_agent` success envelopes with non-submission results.**
     Pre-submit validation failures, blocked terminal replays and other
     non-submitted outcomes must not return outer `ok=true` with submission
@@ -503,6 +525,16 @@ Open backlog count after cleanup: **42**
     additions), or return an explicit stale-catalog state with a bounded refresh
     action. A successful server deploy must not leave the old callable catalog
     indefinitely authoritative in that session.
+
+    **2026-10-09 isolation evidence:** post-merge #15114 redeployed
+    `master@9c4bc3ff677c...` successfully. Fresh public OAuth host-smoke passed and
+    all three live application containers reported that exact BUILD_SHA, proving
+    the Gateway/public MCP reconnect path is current after restart. Yet the same
+    attached ChatGPT catalog still omits `gitea_rerun_action_job` while live
+    `tools_manifest` exposes it. The remaining invalidation responsibility is
+    therefore outside the Gateway process/session implementation: close this item
+    only when the external resource catalog either refreshes on server build/toolset
+    change or surfaces an explicit stale state plus bounded refresh action.
 
 46. ⬜ **Make `info(project)` verification commands executable verbatim.**
     Verification guidance must include any project-specific mypy targets/options,
