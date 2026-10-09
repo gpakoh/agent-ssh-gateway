@@ -26,6 +26,7 @@ from examples.mcp_server.task_candidate import (
     CandidateError,
     _candidate_record_dir,
     _canonical_verifier_receipt_sha256,
+    _make_verifier_readable,
     bind_task_attempt_job,
     materialize_task_candidate,
     record_task_delivery_contract,
@@ -210,6 +211,36 @@ def _validate(root: Path, expected_sha: str) -> tuple[dict[str, Any], Path]:
         destination_branch=BRANCH,
         expected_sha=expected_sha,
     )
+
+
+def test_make_verifier_readable_tolerates_disappearing_git_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "staging"
+    lock = root / "repo" / ".git" / "objects" / "maintenance.lock"
+    lock.parent.mkdir(parents=True)
+    lock.write_text("ephemeral\n", encoding="utf-8")
+    payload = root / "repo" / "tracked.txt"
+    payload.write_text("content\n", encoding="utf-8")
+
+    original_stat = Path.stat
+    vanished = False
+
+    def racing_stat(path: Path, *args: Any, **kwargs: Any):
+        nonlocal vanished
+        if path == lock and not vanished:
+            vanished = True
+            lock.unlink()
+            raise FileNotFoundError(lock)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", racing_stat)
+
+    _make_verifier_readable(root)
+
+    assert vanished is True
+    assert not lock.exists()
+    assert payload.stat().st_mode & 0o044 == 0o044
 
 
 # ── materialization stores evidence + digest ──────────────────────

@@ -1133,8 +1133,18 @@ def _make_verifier_readable(root: Path) -> None:
                     path.chmod(path.stat().st_mode | 0o055)
             for filename in filenames:
                 path = current_path / filename
-                if not path.is_symlink():
+                if path.is_symlink():
+                    continue
+                try:
                     path.chmod(path.stat().st_mode | 0o044)
+                except FileNotFoundError:
+                    # Git can create and remove ephemeral lock files (for
+                    # example objects/maintenance.lock) between os.walk()
+                    # listing the directory and this chmod pass. A vanished
+                    # file cannot be exposed to the verifier, so skipping that
+                    # specific race is safe; all other filesystem errors remain
+                    # fail-closed via the outer OSError handler.
+                    continue
     except OSError as exc:
         raise CandidateError("candidate staging cannot be exposed read-only to verifier") from exc
 
