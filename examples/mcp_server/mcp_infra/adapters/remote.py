@@ -2870,6 +2870,34 @@ def _action_run_attempt(value: Any) -> int | None:
     return value
 
 
+def _action_job_id(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return value
+
+
+def _action_job_attempt(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return value
+
+
+def _action_job_name(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _action_jobs(payload: Any) -> list[dict[str, Any]] | None:
+    if not isinstance(payload, dict):
+        return None
+    jobs = payload.get("jobs")
+    if not isinstance(jobs, list) or any(not isinstance(job, dict) for job in jobs):
+        return None
+    return jobs
+
+
 def _action_rerun_exception_is_ambiguous(exc: BaseException) -> bool:
     if isinstance(
         exc,
@@ -2918,6 +2946,79 @@ async def _reconcile_action_rerun_postcondition(
                 and observed_attempt > previous_attempt
             ):
                 return run, {
+                    "reconciliation_attempts": attempts,
+                    "observed": last_observed,
+                }
+        if attempt + 1 < _ACTION_RERUN_RECONCILE_ATTEMPTS:
+            await asyncio.sleep(_ACTION_RERUN_RECONCILE_DELAY_SECONDS)
+    details: dict[str, Any] = {
+        "reconciliation_attempts": attempts,
+        "observed": last_observed,
+    }
+    if last_read_error_class:
+        details["last_read_error_class"] = last_read_error_class
+    return None, details
+
+
+async def _reconcile_action_job_rerun_postcondition(
+    client: Any,
+    owner: str,
+    repo: str,
+    run_id: int,
+    *,
+    expected_head_sha: str,
+    job_name: str,
+    previous_attempt: int,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Prove that the selected logical job exists in a newer run attempt.
+
+    Gitea 1.27 creates a new ActionRunJob row for a job rerun, so the database
+    job id is not a stable postcondition identity.  We fence the mutation on a
+    unique job name in the current attempt, then reconcile by exact run/head,
+    higher run_attempt and that same unique logical job name.
+    """
+    last_observed: dict[str, Any] = {}
+    last_read_error_class: str | None = None
+    attempts = 0
+    for attempt in range(_ACTION_RERUN_RECONCILE_ATTEMPTS):
+        attempts = attempt + 1
+        try:
+            run = await client.get_action_run(owner, repo, run_id)
+            jobs_payload = await client.list_action_run_jobs(owner, repo, run_id)
+        except Exception as exc:
+            last_read_error_class = type(exc).__name__
+        else:
+            observed_run_id = _action_run_id(run.get("id"))
+            observed_head_sha = _valid_commit_sha(run.get("head_sha"))
+            observed_attempt = _action_run_attempt(run.get("run_attempt"))
+            jobs = _action_jobs(jobs_payload)
+            matches: list[dict[str, Any]] = []
+            if jobs is not None and observed_attempt is not None:
+                for job in jobs:
+                    if (
+                        _action_job_id(job.get("run_id")) == run_id
+                        and _valid_commit_sha(job.get("head_sha")) == expected_head_sha
+                        and _action_job_name(job.get("name")) == job_name
+                        and _action_job_attempt(job.get("run_attempt")) == observed_attempt
+                        and observed_attempt > previous_attempt
+                    ):
+                        matches.append(job)
+            last_observed = {
+                "run_id": observed_run_id,
+                "head_sha": observed_head_sha,
+                "run_attempt": observed_attempt,
+                "matching_job_ids": [
+                    _action_job_id(job.get("id")) for job in matches
+                ],
+            }
+            if (
+                observed_run_id == run_id
+                and observed_head_sha == expected_head_sha
+                and observed_attempt is not None
+                and observed_attempt > previous_attempt
+                and len(matches) == 1
+            ):
+                return matches[0], {
                     "reconciliation_attempts": attempts,
                     "observed": last_observed,
                 }
@@ -3091,6 +3192,350 @@ async def gitea_rerun_action_run(
     except Exception as exc:
         return _remote_api_error("gitea_rerun_action_run", "gitea", exc)
     return tool_success("gitea_rerun_action_run", result=data, source="gitea")
+
+
+async def gitea_rerun_action_job(
+    owner: str,
+    repo: str,
+    run_id: int,
+    job_id: int,
+    expected_head_sha: str,
+) -> dict[str, Any]:
+    """Rerun one failed/cancelled job from the current attempt of an exact run.
+
+    The preflight binds the selected job to the exact run/head/current attempt
+    and requires its logical name to be unique in that attempt.  Gitea may
+    allocate a new database job id for the rerun, so postcondition proof uses
+    the exact run/head, a higher run_attempt and that unique logical job name.
+    Ambiguous mutation responses are reconciled by bounded reads and are never
+    blindly replayed.
+    """
+    tool = "gitea_rerun_action_job"
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return tool_error(
+            tool=tool,
+            code="DEPENDENCY_MISSING",
+            message="GITEA_TOKEN not configured",
+            source="gitea",
+        )
+    if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id < 1:
+        return tool_error(
+            tool=tool,
+            code="INVALID_INPUT",
+            message="run_id must be a positive integer",
+            source="gitea",
+        )
+    if isinstance(job_id, bool) or not isinstance(job_id, int) or job_id < 1:
+        return tool_error(
+            tool=tool,
+            code="INVALID_INPUT",
+            message="job_id must be a positive integer",
+            source="gitea",
+        )
+    normalized_expected_head = _valid_commit_sha(expected_head_sha)
+    if normalized_expected_head is None:
+        return tool_error(
+            tool=tool,
+            code="INVALID_INPUT",
+            message="expected_head_sha must be a 40-character SHA-1",
+            source="gitea",
+        )
+    expected_head_sha = normalized_expected_head
+
+    try:
+        async with _server_gitea_client()(token) as client:
+            before_run = await client.get_action_run(owner, repo, run_id)
+            actual_run_id = _action_run_id(before_run.get("id"))
+            actual_head_sha = _valid_commit_sha(before_run.get("head_sha"))
+            previous_attempt = _action_run_attempt(before_run.get("run_attempt"))
+            if actual_run_id != run_id:
+                return tool_error(
+                    tool=tool,
+                    code="RUN_ID_MISMATCH",
+                    message="Gitea returned a different workflow run id; refusing job rerun",
+                    source="gitea",
+                )
+            if actual_head_sha != expected_head_sha:
+                return tool_error(
+                    tool=tool,
+                    code="HEAD_MISMATCH",
+                    message="workflow run head changed or differs from expected_head_sha",
+                    details={
+                        "run_id": run_id,
+                        "job_id": job_id,
+                        "expected_head_sha": expected_head_sha,
+                        "observed_head_sha": actual_head_sha,
+                        "mutation_occurred": False,
+                    },
+                    source="gitea",
+                )
+            if previous_attempt is None:
+                return tool_error(
+                    tool=tool,
+                    code="RUN_STATE_UNPROVEN",
+                    message="workflow run_attempt is unavailable or malformed; refusing job rerun",
+                    source="gitea",
+                )
+            if before_run.get("status") != "completed":
+                return tool_error(
+                    tool=tool,
+                    code="RUN_NOT_COMPLETED",
+                    message="workflow run is not completed; refusing duplicate job execution",
+                    retryable=True,
+                    details={"run_id": run_id, "status": before_run.get("status")},
+                    source="gitea",
+                )
+            run_conclusion = before_run.get("conclusion")
+            if run_conclusion == "success":
+                return tool_error(
+                    tool=tool,
+                    code="RUN_ALREADY_SUCCESSFUL",
+                    message="workflow run already succeeded; refusing unnecessary job rerun",
+                    source="gitea",
+                )
+            if run_conclusion not in {"failure", "cancelled"}:
+                return tool_error(
+                    tool=tool,
+                    code="RUN_NOT_RERUNNABLE",
+                    message="workflow run conclusion is not a proven rerunnable failure/cancellation",
+                    details={"run_id": run_id, "conclusion": run_conclusion},
+                    source="gitea",
+                )
+
+            before_job = await client.get_action_job(owner, repo, job_id)
+            actual_job_id = _action_job_id(before_job.get("id"))
+            job_run_id = _action_job_id(before_job.get("run_id"))
+            job_attempt = _action_job_attempt(before_job.get("run_attempt"))
+            job_head_sha = _valid_commit_sha(before_job.get("head_sha"))
+            job_name = _action_job_name(before_job.get("name"))
+            if actual_job_id != job_id:
+                return tool_error(
+                    tool=tool,
+                    code="JOB_ID_MISMATCH",
+                    message="Gitea returned a different workflow job id; refusing rerun",
+                    source="gitea",
+                )
+            if job_run_id != run_id:
+                return tool_error(
+                    tool=tool,
+                    code="JOB_RUN_MISMATCH",
+                    message="workflow job does not belong to the requested run",
+                    details={
+                        "job_id": job_id,
+                        "expected_run_id": run_id,
+                        "observed_run_id": job_run_id,
+                        "mutation_occurred": False,
+                    },
+                    source="gitea",
+                )
+            if job_head_sha != expected_head_sha:
+                return tool_error(
+                    tool=tool,
+                    code="JOB_HEAD_MISMATCH",
+                    message="workflow job head differs from expected_head_sha",
+                    details={
+                        "job_id": job_id,
+                        "expected_head_sha": expected_head_sha,
+                        "observed_head_sha": job_head_sha,
+                        "mutation_occurred": False,
+                    },
+                    source="gitea",
+                )
+            if job_attempt != previous_attempt or job_name is None:
+                return tool_error(
+                    tool=tool,
+                    code="JOB_STATE_UNPROVEN",
+                    message="workflow job is not proven to belong to the current run attempt",
+                    details={
+                        "job_id": job_id,
+                        "run_attempt": previous_attempt,
+                        "job_run_attempt": job_attempt,
+                        "job_name": job_name,
+                        "mutation_occurred": False,
+                    },
+                    source="gitea",
+                )
+            if before_job.get("status") != "completed":
+                return tool_error(
+                    tool=tool,
+                    code="JOB_NOT_COMPLETED",
+                    message="workflow job is not completed; refusing duplicate execution",
+                    retryable=True,
+                    details={"job_id": job_id, "status": before_job.get("status")},
+                    source="gitea",
+                )
+            job_conclusion = before_job.get("conclusion")
+            if job_conclusion == "success":
+                return tool_error(
+                    tool=tool,
+                    code="JOB_ALREADY_SUCCESSFUL",
+                    message="workflow job already succeeded; refusing unnecessary rerun",
+                    source="gitea",
+                )
+            if job_conclusion not in {"failure", "cancelled"}:
+                return tool_error(
+                    tool=tool,
+                    code="JOB_NOT_RERUNNABLE",
+                    message="workflow job conclusion is not a proven rerunnable failure/cancellation",
+                    details={"job_id": job_id, "conclusion": job_conclusion},
+                    source="gitea",
+                )
+
+            current_payload = await client.list_action_run_jobs(owner, repo, run_id)
+            current_jobs = _action_jobs(current_payload)
+            if current_jobs is None:
+                return tool_error(
+                    tool=tool,
+                    code="JOB_STATE_UNPROVEN",
+                    message="current workflow job list is unavailable or malformed",
+                    source="gitea",
+                )
+            logical_matches = [
+                job
+                for job in current_jobs
+                if _action_job_id(job.get("run_id")) == run_id
+                and _valid_commit_sha(job.get("head_sha")) == expected_head_sha
+                and _action_job_attempt(job.get("run_attempt")) == previous_attempt
+                and _action_job_name(job.get("name")) == job_name
+            ]
+            if len(logical_matches) != 1:
+                return tool_error(
+                    tool=tool,
+                    code="JOB_IDENTITY_AMBIGUOUS",
+                    message="logical workflow job name is not unique in the current run attempt",
+                    details={
+                        "job_id": job_id,
+                        "job_name": job_name,
+                        "matching_job_ids": [
+                            _action_job_id(job.get("id")) for job in logical_matches
+                        ],
+                        "mutation_occurred": False,
+                    },
+                    source="gitea",
+                )
+            if _action_job_id(logical_matches[0].get("id")) != job_id:
+                return tool_error(
+                    tool=tool,
+                    code="JOB_NOT_CURRENT",
+                    message="job_id is not the current-attempt job for this logical job name",
+                    details={
+                        "job_id": job_id,
+                        "current_job_id": _action_job_id(logical_matches[0].get("id")),
+                        "mutation_occurred": False,
+                    },
+                    source="gitea",
+                )
+
+            mutation_error: BaseException | None = None
+            mutation_response: dict[str, Any] | None = None
+            try:
+                mutation_response = await client.rerun_action_job(
+                    owner,
+                    repo,
+                    run_id,
+                    job_id,
+                )
+            except asyncio.CancelledError as exc:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    current_task.uncancel()
+                mutation_error = exc
+            except Exception as exc:
+                if not _action_rerun_exception_is_ambiguous(exc):
+                    raise
+                mutation_error = exc
+
+            rerun: dict[str, Any] | None = None
+            reconciliation: dict[str, Any]
+            if mutation_response is not None:
+                response_job_id = _action_job_id(mutation_response.get("id"))
+                response_run_id = _action_job_id(mutation_response.get("run_id"))
+                response_attempt = _action_job_attempt(mutation_response.get("run_attempt"))
+                response_head_sha = _valid_commit_sha(mutation_response.get("head_sha"))
+                response_name = _action_job_name(mutation_response.get("name"))
+                if (
+                    response_job_id is not None
+                    and response_run_id == run_id
+                    and response_attempt is not None
+                    and response_attempt > previous_attempt
+                    and response_head_sha == expected_head_sha
+                    and response_name == job_name
+                ):
+                    rerun = mutation_response
+                    reconciliation = {
+                        "reconciliation_attempts": 0,
+                        "observed": {
+                            "run_id": response_run_id,
+                            "head_sha": response_head_sha,
+                            "run_attempt": response_attempt,
+                            "matching_job_ids": [response_job_id],
+                        },
+                    }
+                else:
+                    rerun, reconciliation = await _reconcile_action_job_rerun_postcondition(
+                        client,
+                        owner,
+                        repo,
+                        run_id,
+                        expected_head_sha=expected_head_sha,
+                        job_name=job_name,
+                        previous_attempt=previous_attempt,
+                    )
+            else:
+                rerun, reconciliation = await _reconcile_action_job_rerun_postcondition(
+                    client,
+                    owner,
+                    repo,
+                    run_id,
+                    expected_head_sha=expected_head_sha,
+                    job_name=job_name,
+                    previous_attempt=previous_attempt,
+                )
+
+            if rerun is None:
+                details: dict[str, Any] = {
+                    "run_id": run_id,
+                    "job_id": job_id,
+                    "job_name": job_name,
+                    "expected_head_sha": expected_head_sha,
+                    "previous_attempt": previous_attempt,
+                    "mutation_started": True,
+                    **reconciliation,
+                }
+                if mutation_error is not None:
+                    details["mutation_error_class"] = type(mutation_error).__name__
+                    if isinstance(mutation_error, httpx.HTTPStatusError):
+                        details["mutation_http_status"] = mutation_error.response.status_code
+                return tool_error(
+                    tool=tool,
+                    code="MUTATION_OUTCOME_UNKNOWN",
+                    message="workflow job rerun was attempted but the selected logical job in a higher run_attempt could not be proven",
+                    retryable=False,
+                    hint="Do not replay the rerun mutation. Re-read the run and current-attempt jobs until the selected job outcome is authoritative.",
+                    details=details,
+                    source="gitea",
+                )
+
+            data = {
+                "run_id": run_id,
+                "selected_job_id": job_id,
+                "rerun_job_id": _action_job_id(rerun.get("id")),
+                "job_name": job_name,
+                "head_sha": expected_head_sha,
+                "previous_attempt": previous_attempt,
+                "run_attempt": _action_job_attempt(rerun.get("run_attempt")),
+                "status": rerun.get("status"),
+                "conclusion": rerun.get("conclusion"),
+                "outcome": "started_after_ambiguous_response"
+                if mutation_error is not None
+                else "started",
+                "verified": True,
+                "reconciliation_attempts": reconciliation["reconciliation_attempts"],
+            }
+    except Exception as exc:
+        return _remote_api_error(tool, "gitea", exc)
+    return tool_success(tool, result=data, source="gitea")
 
 
 async def gitea_list_action_run_jobs(owner: str, repo: str, run_id: int) -> dict[str, Any]:
@@ -3929,6 +4374,7 @@ def register_all() -> None:
     register_tool("gitea_list_action_runs")(gitea_list_action_runs)
     register_tool("gitea_get_action_run")(gitea_get_action_run)
     register_tool("gitea_rerun_action_run")(gitea_rerun_action_run)
+    register_tool("gitea_rerun_action_job")(gitea_rerun_action_job)
     register_tool("gitea_list_action_run_jobs")(gitea_list_action_run_jobs)
     register_tool("gitea_list_action_jobs")(gitea_list_action_jobs)
     register_tool("gitea_get_action_job_logs")(gitea_get_action_job_logs)
