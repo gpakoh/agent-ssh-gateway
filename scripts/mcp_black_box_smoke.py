@@ -102,23 +102,29 @@ def _mcp_request(body: dict[str, Any], token: str, sid: str | None = None) -> tu
 
         ret_sid = resp.getheader("mcp-session-id", "")
         resp.close()
-        if b"\n\n" not in buf:
-            raise TransientSmokeError("truncated MCP response before complete SSE frame")
 
         raw = buf.decode("utf-8", errors="replace")
         payload: dict[str, Any] | None = None
-        for line in raw.split("\n"):
+        frame_terminated = b"\n\n" in buf or b"\r\n\r\n" in buf
+        for line in raw.splitlines():
             if not line.startswith("data:"):
                 continue
             try:
                 parsed = json.loads(line[5:])
             except (TypeError, ValueError) as exc:
+                if not frame_terminated:
+                    raise TransientSmokeError(
+                        f"truncated MCP SSE JSON before frame completion: {exc}"
+                    ) from exc
                 raise SmokeError(f"malformed SSE JSON: {exc}") from exc
             if not isinstance(parsed, dict):
                 raise SmokeError("MCP response data must be a JSON object")
             payload = parsed
             break
+
         if payload is None:
+            if not raw.strip():
+                raise TransientSmokeError("MCP response ended before a payload")
             raise SmokeError("MCP response contained no data frame")
         if payload.get("jsonrpc") != "2.0" or payload.get("id") != body.get("id"):
             raise SmokeError("MCP response id/jsonrpc mismatch")
