@@ -187,7 +187,10 @@ smoke() {
       ok=false
     fi
     echo -n "  mcp-server (authenticated MCP):  "
-    if docker exec mcp-server python3 scripts/mcp_black_box_smoke.py; then
+    if docker exec \
+      -e MCP_SMOKE_REQUIRED_TOOL=gitea_rerun_action_job \
+      -e MCP_SMOKE_REQUIRED_INPUTS=owner,repo,run_id,job_id,expected_head_sha \
+      mcp-server python3 scripts/mcp_black_box_smoke.py; then
       echo "OK"
     else
       echo "FAIL"

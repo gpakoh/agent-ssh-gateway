@@ -19,6 +19,8 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 
 
@@ -76,6 +78,26 @@ GIT_STATUS_TEXT = json.dumps({
     "result": {"outcome": "passed", "exit_code": 0,
                "stdout": " M docker/docker-compose.yml\n"},
 })
+
+
+def _required_job_tool(*, include_expected_head: bool = True) -> dict:
+    names = ["owner", "repo", "run_id", "job_id"]
+    if include_expected_head:
+        names.append("expected_head_sha")
+    return {
+        "name": "gitea_rerun_action_job",
+        "inputSchema": {
+            "type": "object",
+            "properties": {name: {"type": "string"} for name in names},
+            "required": names,
+        },
+    }
+
+
+@pytest.fixture(autouse=True)
+def _clear_schema_requirement(monkeypatch):
+    monkeypatch.delenv("MCP_SMOKE_REQUIRED_TOOL", raising=False)
+    monkeypatch.delenv("MCP_SMOKE_REQUIRED_INPUTS", raising=False)
 
 
 class TestMcpOauthBlackBoxSmoke:
@@ -257,3 +279,130 @@ class TestMcpOauthBlackBoxSmoke:
             smoke.http.client, "HTTPConnection", side_effect=OSError("connection refused")
         ):
             assert smoke.main() == 1
+
+    def test_required_job_schema_succeeds_without_admin_tool_call(self, monkeypatch):
+        monkeypatch.setenv("MCP_AUTHORIZE_PASSWORD", "secret")
+        monkeypatch.setenv("MCP_SMOKE_REQUIRED_TOOL", "gitea_rerun_action_job")
+        monkeypatch.setenv(
+            "MCP_SMOKE_REQUIRED_INPUTS",
+            "owner,repo,run_id,job_id,expected_head_sha",
+        )
+        responses = [
+            _json(201, {"client_id": "cid", "client_secret": ""}),
+            _FakeResponse(302, b"", location="http://localhost" + CONSENT_URL),
+            _FakeResponse(303, b"", location=CALLBACK_URL),
+            _json(200, {"access_token": "at-1", "scope": "mcp:read mcp:project"}),
+            _sse({"jsonrpc": "2.0", "id": 1, "result": {}}, sid="sid-1"),
+            _sse(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {"tools": [_required_job_tool()]},
+                }
+            ),
+            _sse(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "isError": False,
+                        "content": [{"type": "text", "text": GIT_STATUS_TEXT}],
+                    },
+                }
+            ),
+            _FakeResponse(204, b""),
+        ]
+        fake_conn = MagicMock()
+        fake_conn.getresponse.side_effect = responses
+        with patch.object(smoke.http.client, "HTTPConnection", return_value=fake_conn):
+            assert smoke.main() == 0
+
+        mcp_bodies = [
+            json.loads(call.args[2])
+            for call in fake_conn.request.call_args_list
+            if call.args[1] == "/mcp" and call.args[0] == "POST"
+        ]
+        assert [body["method"] for body in mcp_bodies] == [
+            "initialize",
+            "tools/list",
+            "tools/call",
+        ]
+        assert mcp_bodies[-1]["params"]["name"] == "git_status"
+
+    def test_partial_required_schema_fails_before_tool_call(self, monkeypatch):
+        monkeypatch.setenv("MCP_AUTHORIZE_PASSWORD", "secret")
+        monkeypatch.setenv("MCP_SMOKE_REQUIRED_TOOL", "gitea_rerun_action_job")
+        monkeypatch.setenv(
+            "MCP_SMOKE_REQUIRED_INPUTS",
+            "owner,repo,run_id,job_id,expected_head_sha",
+        )
+        responses = [
+            _json(201, {"client_id": "cid"}),
+            _FakeResponse(302, b"", location="http://localhost" + CONSENT_URL),
+            _FakeResponse(303, b"", location=CALLBACK_URL),
+            _json(200, {"access_token": "at-1"}),
+            _sse({"jsonrpc": "2.0", "id": 1, "result": {}}, sid="sid-1"),
+            _sse(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "tools": [_required_job_tool(include_expected_head=False)]
+                    },
+                }
+            ),
+            _FakeResponse(204, b""),
+        ]
+        fake_conn = MagicMock()
+        fake_conn.getresponse.side_effect = responses
+        with patch.object(smoke.http.client, "HTTPConnection", return_value=fake_conn):
+            assert smoke.main() == 1
+
+        mcp_bodies = [
+            json.loads(call.args[2])
+            for call in fake_conn.request.call_args_list
+            if call.args[1] == "/mcp" and call.args[0] == "POST"
+        ]
+        assert [body["method"] for body in mcp_bodies] == ["initialize", "tools/list"]
+
+    def test_truncated_tools_list_fails_without_replaying_oauth(self, monkeypatch):
+        monkeypatch.setenv("MCP_AUTHORIZE_PASSWORD", "secret")
+        monkeypatch.setenv("MCP_SMOKE_REQUIRED_TOOL", "gitea_rerun_action_job")
+        responses = [
+            _json(201, {"client_id": "cid"}),
+            _FakeResponse(302, b"", location="http://localhost" + CONSENT_URL),
+            _FakeResponse(303, b"", location=CALLBACK_URL),
+            _json(200, {"access_token": "at-1"}),
+            _sse({"jsonrpc": "2.0", "id": 1, "result": {}}, sid="sid-1"),
+            _FakeResponse(200, b'data: {"jsonrpc":"2.0","id":1'),
+            _FakeResponse(204, b""),
+        ]
+        fake_conn = MagicMock()
+        fake_conn.getresponse.side_effect = responses
+        with patch.object(smoke.http.client, "HTTPConnection", return_value=fake_conn):
+            assert smoke.main() == 1
+
+        register_calls = [
+            call for call in fake_conn.request.call_args_list if call.args[1] == "/register"
+        ]
+        assert len(register_calls) == 1
+
+    def test_timeout_after_initialize_does_not_replay_oauth_flow(self, monkeypatch):
+        monkeypatch.setenv("MCP_AUTHORIZE_PASSWORD", "secret")
+        monkeypatch.setenv("MCP_SMOKE_REQUIRED_TOOL", "gitea_rerun_action_job")
+        with (
+            patch.object(smoke, "_register_client", return_value="cid") as register_client,
+            patch.object(smoke, "_oauth_flow", return_value="at-1") as oauth_flow,
+            patch.object(
+                smoke,
+                "_mcp_call",
+                side_effect=[({}, "sid-1"), TimeoutError("tools/list timeout")],
+            ) as mcp_call,
+            patch.object(smoke, "_terminate_session") as terminate_session,
+        ):
+            assert smoke.main() == 1
+
+        register_client.assert_called_once_with()
+        oauth_flow.assert_called_once_with("cid", "secret")
+        assert mcp_call.call_count == 2
+        terminate_session.assert_called_once_with("at-1", "sid-1")

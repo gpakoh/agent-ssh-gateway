@@ -540,7 +540,11 @@ class TestProductionSmokeIsAuthenticatedBlackBox:
 
     def test_smoke_runs_mcp_black_box_check_via_docker_exec(self):
         text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
-        assert "docker exec mcp-server python3 scripts/mcp_black_box_smoke.py" in text
+        assert "MCP_SMOKE_REQUIRED_TOOL=gitea_rerun_action_job" in text
+        assert (
+            "MCP_SMOKE_REQUIRED_INPUTS=owner,repo,run_id,job_id,expected_head_sha" in text
+        )
+        assert "mcp-server python3 scripts/mcp_black_box_smoke.py" in text
 
     def test_black_box_checks_only_run_after_containers_are_healthy(self):
         """No point authenticating against a service that's still

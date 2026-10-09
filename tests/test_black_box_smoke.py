@@ -136,6 +136,31 @@ def _sse_frame(payload: dict) -> bytes:
     return f"data: {json.dumps(payload)}\n\n".encode()
 
 
+def _required_job_tool(*, include_expected_head: bool = True) -> dict:
+    names = ["owner", "repo", "run_id", "job_id"]
+    if include_expected_head:
+        names.append("expected_head_sha")
+    return {
+        "name": "gitea_rerun_action_job",
+        "inputSchema": {
+            "type": "object",
+            "properties": {name: {"type": "string"} for name in names},
+            "required": names,
+        },
+    }
+
+
+@pytest.fixture(autouse=True)
+def _clear_mcp_smoke_schema_env(monkeypatch):
+    for name in (
+        "MCP_SMOKE_REQUIRED_TOOL",
+        "MCP_SMOKE_REQUIRED_INPUTS",
+        "MCP_SMOKE_ATTEMPTS",
+        "MCP_SMOKE_RETRY_DELAY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 class TestMcpBlackBoxSmoke:
     def test_missing_token_fails(self, monkeypatch):
         monkeypatch.delenv("MCP_STREAMABLE_HTTP_BEARER_TOKEN", raising=False)
@@ -186,9 +211,172 @@ class TestMcpBlackBoxSmoke:
         with patch.object(mcp_smoke.http.client, "HTTPConnection", return_value=fake_conn):
             assert mcp_smoke.main() == 1
 
-    def test_transport_error_fails(self, monkeypatch):
+    def test_transport_error_fails_after_bounded_retries(self, monkeypatch):
         monkeypatch.setenv("MCP_STREAMABLE_HTTP_BEARER_TOKEN", "test-token")
+        monkeypatch.setenv("MCP_SMOKE_ATTEMPTS", "2")
+        monkeypatch.setenv("MCP_SMOKE_RETRY_DELAY", "0")
         with patch.object(
             mcp_smoke.http.client, "HTTPConnection", side_effect=OSError("connection refused")
-        ):
+        ) as http_connection:
             assert mcp_smoke.main() == 1
+        assert http_connection.call_count == 2
+
+    def test_required_job_schema_succeeds(self, monkeypatch):
+        monkeypatch.setenv("MCP_STREAMABLE_HTTP_BEARER_TOKEN", "test-token")
+        monkeypatch.setenv("MCP_SMOKE_REQUIRED_TOOL", "gitea_rerun_action_job")
+        monkeypatch.setenv(
+            "MCP_SMOKE_REQUIRED_INPUTS",
+            "owner,repo,run_id,job_id,expected_head_sha",
+        )
+        responses = [
+            _FakeMcpResponse(
+                _sse_frame({"jsonrpc": "2.0", "id": 1, "result": {}}),
+                session_id="sid-1",
+            ),
+            _FakeMcpResponse(
+                _sse_frame(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "result": {"tools": [_required_job_tool()]},
+                    }
+                )
+            ),
+        ]
+        fake_conn = MagicMock()
+        fake_conn.getresponse.side_effect = responses
+        with patch.object(mcp_smoke.http.client, "HTTPConnection", return_value=fake_conn):
+            assert mcp_smoke.main() == 0
+
+    def test_required_job_schema_missing_tool_fails_without_retry(self, monkeypatch):
+        monkeypatch.setenv("MCP_STREAMABLE_HTTP_BEARER_TOKEN", "test-token")
+        monkeypatch.setenv("MCP_SMOKE_REQUIRED_TOOL", "gitea_rerun_action_job")
+        monkeypatch.setenv("MCP_SMOKE_ATTEMPTS", "3")
+        responses = [
+            _FakeMcpResponse(
+                _sse_frame({"jsonrpc": "2.0", "id": 1, "result": {}}),
+                session_id="sid-1",
+            ),
+            _FakeMcpResponse(
+                _sse_frame(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "result": {"tools": [{"name": "health"}]},
+                    }
+                )
+            ),
+        ]
+        fake_conn = MagicMock()
+        fake_conn.getresponse.side_effect = responses
+        with patch.object(mcp_smoke.http.client, "HTTPConnection", return_value=fake_conn):
+            assert mcp_smoke.main() == 1
+        assert fake_conn.getresponse.call_count == 2
+
+    def test_partial_required_schema_fails_without_retry(self, monkeypatch):
+        monkeypatch.setenv("MCP_STREAMABLE_HTTP_BEARER_TOKEN", "test-token")
+        monkeypatch.setenv("MCP_SMOKE_REQUIRED_TOOL", "gitea_rerun_action_job")
+        monkeypatch.setenv(
+            "MCP_SMOKE_REQUIRED_INPUTS",
+            "owner,repo,run_id,job_id,expected_head_sha",
+        )
+        monkeypatch.setenv("MCP_SMOKE_ATTEMPTS", "3")
+        responses = [
+            _FakeMcpResponse(
+                _sse_frame({"jsonrpc": "2.0", "id": 1, "result": {}}),
+                session_id="sid-1",
+            ),
+            _FakeMcpResponse(
+                _sse_frame(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "result": {
+                            "tools": [_required_job_tool(include_expected_head=False)]
+                        },
+                    }
+                )
+            ),
+        ]
+        fake_conn = MagicMock()
+        fake_conn.getresponse.side_effect = responses
+        with patch.object(mcp_smoke.http.client, "HTTPConnection", return_value=fake_conn):
+            assert mcp_smoke.main() == 1
+        assert fake_conn.getresponse.call_count == 2
+
+    def test_truncated_initialize_retries_with_fresh_session(self, monkeypatch):
+        monkeypatch.setenv("MCP_STREAMABLE_HTTP_BEARER_TOKEN", "test-token")
+        monkeypatch.setenv("MCP_SMOKE_ATTEMPTS", "2")
+        monkeypatch.setenv("MCP_SMOKE_RETRY_DELAY", "0")
+        responses = [
+            _FakeMcpResponse(b'data: {"jsonrpc":"2.0","id":1'),
+            _FakeMcpResponse(
+                _sse_frame({"jsonrpc": "2.0", "id": 1, "result": {}}),
+                session_id="sid-2",
+            ),
+            _FakeMcpResponse(
+                _sse_frame(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "result": {"tools": [{"name": "health"}]},
+                    }
+                )
+            ),
+        ]
+        fake_conn = MagicMock()
+        fake_conn.getresponse.side_effect = responses
+        with patch.object(mcp_smoke.http.client, "HTTPConnection", return_value=fake_conn):
+            assert mcp_smoke.main() == 0
+        assert fake_conn.request.call_count == 3
+        first_headers = fake_conn.request.call_args_list[0].args[3]
+        retry_headers = fake_conn.request.call_args_list[1].args[3]
+        list_headers = fake_conn.request.call_args_list[2].args[3]
+        assert "Mcp-Session-Id" not in first_headers
+        assert "Mcp-Session-Id" not in retry_headers
+        assert list_headers["Mcp-Session-Id"] == "sid-2"
+
+    def test_timeout_retries_read_only_handshake_once(self, monkeypatch):
+        monkeypatch.setenv("MCP_STREAMABLE_HTTP_BEARER_TOKEN", "test-token")
+        monkeypatch.setenv("MCP_SMOKE_ATTEMPTS", "2")
+        monkeypatch.setenv("MCP_SMOKE_RETRY_DELAY", "0")
+        fake_conn = MagicMock()
+        fake_conn.getresponse.side_effect = [
+            _FakeMcpResponse(
+                _sse_frame({"jsonrpc": "2.0", "id": 1, "result": {}}),
+                session_id="sid-2",
+            ),
+            _FakeMcpResponse(
+                _sse_frame(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "result": {"tools": [{"name": "health"}]},
+                    }
+                )
+            ),
+        ]
+        with patch.object(
+            mcp_smoke.http.client,
+            "HTTPConnection",
+            side_effect=[TimeoutError("timed out"), fake_conn, fake_conn],
+        ) as http_connection:
+            assert mcp_smoke.main() == 0
+        assert http_connection.call_count == 3
+
+    def test_complete_partial_tools_result_is_not_retried(self, monkeypatch):
+        monkeypatch.setenv("MCP_STREAMABLE_HTTP_BEARER_TOKEN", "test-token")
+        monkeypatch.setenv("MCP_SMOKE_ATTEMPTS", "3")
+        monkeypatch.setenv("MCP_SMOKE_RETRY_DELAY", "0")
+        responses = [
+            _FakeMcpResponse(
+                _sse_frame({"jsonrpc": "2.0", "id": 1, "result": {}}),
+                session_id="sid-1",
+            ),
+            _FakeMcpResponse(_sse_frame({"jsonrpc": "2.0", "id": 2, "result": {}})),
+        ]
+        fake_conn = MagicMock()
+        fake_conn.getresponse.side_effect = responses
+        with patch.object(mcp_smoke.http.client, "HTTPConnection", return_value=fake_conn):
+            assert mcp_smoke.main() == 1
+        assert fake_conn.getresponse.call_count == 2
