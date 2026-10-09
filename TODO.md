@@ -83,6 +83,18 @@ Open backlog count after cleanup: **42**
    recovery must preserve every dependent HEAD, ref and dirty file and leave
    `git fsck` clean. Report metadata recovery and directory GC separately.
 
+   **Exact-remote-base drift evidence, 2026-10-09:** authoritative Gitea
+   `gpakoh/infra-quart/main` advanced to `c396301a3a82912d4da87d8902fa2abe3ee028c9`
+   after merged PR #334, while `prepare_candidate_clone(base_ref=main)` still
+   materialized stale `dcec7ad7e5a069024e62fcad42d099a2565f9998`; requesting the exact
+   current SHA returned `SOURCE_REF_NOT_AVAILABLE` repeatedly. The caller failed
+   closed, did not open a stale-base PR, and exact-SHA deleted its temporary
+   remote candidate ref after read-after-write proved a prior ambiguous push had
+   actually succeeded. Acceptance for this item must also cover remote-main-ahead-
+   of-local-source: symbolic `main` and exact current SHA must resolve to the
+   authoritative remote commit or return an explicit refresh/recovery action,
+   never silently create a candidate from stale local state.
+
 4. ⬜ **Reconcile stale unbound fleet leases without duplicate work.**
    Historical `attempted` / `legacy_unknown` lease rows can consume all fleet
    capacity even when no lease has a recent heartbeat. Add fleet status that
