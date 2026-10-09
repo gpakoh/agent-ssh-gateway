@@ -95,6 +95,19 @@ Open backlog count after cleanup: **42**
    authoritative remote commit or return an explicit refresh/recovery action,
    never silently create a candidate from stale local state.
 
+   **2026-10-09 deployed stale-source acceptance:** PR #498 merged as
+   `eaeb7d48ad81...`; post-merge run #15202 completed build-and-push, deploy and
+   host-smoke successfully, and live `health` reported Gateway/MCP build SHA
+   `eaeb7d48ad81...`. At acceptance time authoritative `gpakoh/infra-quart/main`
+   was `e8bbef68af3f...`, while the registered source checkout remained at
+   `HEAD=a38021c7890c...` with stale local `gitea/main=981df946b884...`.
+   Calling the deployed `prepare_candidate_clone(project=infra-quart,
+   base_ref=main)` returned typed retryable `SOURCE_REMOTE_STATE_UNKNOWN` with
+   `recovery_action=refresh_or_restore_trusted_remote_access`; it did not create
+   a candidate directory and did not materialize either stale local SHA. This
+   closes the silent-stale-fallback subcase. Item #2 remains open for the broader
+   canonical write-plane and lineage recovery contract described above.
+
 4. ⬜ **Reconcile stale unbound fleet leases without duplicate work.**
    Historical `attempted` / `legacy_unknown` lease rows can consume all fleet
    capacity even when no lease has a recent heartbeat. Add fleet status that
@@ -256,6 +269,32 @@ Open backlog count after cleanup: **42**
     Acceptance must prove source/target identity, no plaintext exposure, exact
     postcondition verification, clean-runner private-image pull, and fail-closed
     behavior for missing/ambiguous credentials.
+
+    **2026-10-09 agent-memory production evidence:** `agent-memory-service`
+    promotion is integrated and its current-main image `aefd07d016ba...` was
+    published at registry digest `sha256:9c906bdae1d1...`, but no live
+    `agent-memory-service` container exists. The reviewed promotion contract
+    requires operator-owned `AGENT_MEMORY_DATABASE_URL`,
+    `AGENT_MEMORY_INTERNAL_API_KEY`, `AGENT_MEMORY_INFRA_COMPOSE_DIR` and a
+    digest-pinned `AGENT_MEMORY_PSQL_IMAGE`; the active deployment execution
+    plane cannot read the root-owned infra environment and no guarded primitive
+    can consume those values without exposing them. Keep this under the shared
+    secret-propagation finding rather than opening a service-specific blocker.
+    Evidence: agent-memory-service PR #7 merge `e09040ec...`, PR #8 merge
+    `aefd07d01...`, post-merge run #15197 SUCCESS; live inventory still shows no
+    agent-memory-service container.
+
+    **2026-10-09 Actions/private-registry evidence:** `work-session-service`
+    proved that the built-in `GITEA_TOKEN` is non-empty but is not accepted for
+    Docker package-registry authentication: exact-head run #15200 reached
+    `docker login` and failed unauthorized. The branch was corrected back to a
+    fail-closed explicit `REGISTRY_TOKEN` contract at `565cd8a0...`; no callable
+    Actions secret-management primitive can bind an operator-owned read-only PAT
+    to that repository. Closure for this item must therefore cover both guarded
+    deploy-time secret consumption and audited Actions-secret provisioning, with
+    no plaintext returned or logged. Evidence: run #15200 quality/postgres green,
+    agent-memory-e2e failed only at registry login; corrected head
+    `565cd8a0eb77...` retains explicit `REGISTRY_TOKEN`.
 
 ## P2 / Important bugs and reliability gaps
 
