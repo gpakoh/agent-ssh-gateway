@@ -906,6 +906,7 @@ jobs:
           # completes in ~1s with bind-address-in-use instead of the
           # expected 60s polling loop.
           docker run -d --name "$GW_NAME" \
+            --memory=1g --memory-swap=1g \
             -e API_KEY=ci-smoke-only-not-a-real-secret \
             -e AGENT_TOKEN=ci-smoke-only-not-a-real-secret \
             -e JWT_SECRET=ci-smoke-only-not-a-real-secret \
@@ -913,6 +914,7 @@ jobs:
             "$CI_SMOKE_GW_IMAGE_ID"
 
           docker run -d --name "$MCP_NAME" \
+            --memory=1g --memory-swap=1g \
             -e MCP_CLIENT_SAFE_MODE=true \
             -e MCP_GATEWAY_TOOL_MODE=mcp_client \
             -e MCP_STREAMABLE_HTTP_HOST=0.0.0.0 \
