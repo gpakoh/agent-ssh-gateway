@@ -1,16 +1,21 @@
 # Agent SSH Gateway — TODO
 
-Last cleaned: 2026-10-07.
+Last cleaned: 2026-10-09.
 
 This file is the active backlog only. Completed audit notes, fixed CI blockers,
 merged PR evidence, and superseded diagnostics should live in PR history,
 changelogs, or dedicated audit archives — not in TODO.
 
-Open backlog count after cleanup: **35**
+On 2026-10-09 the cleaned `master` backlog and the long-lived dirty canonical
+`TODO.md` were reconciled into this single view. Historical duplicates and
+superseded diagnostics were not reintroduced; unique still-open findings and
+useful current evidence were folded into the corresponding active items.
 
-- **P1 / critical:** 10
-- **P2 / important:** 16
-- **P3 / capability / wishlist:** 9
+Open backlog count after cleanup: **42**
+
+- **P1 / critical:** 11
+- **P2 / important:** 20
+- **P3 / capability / wishlist:** 11
 
 ## P1 / Critical blockers
 
@@ -109,9 +114,13 @@ Open backlog count after cleanup: **35**
    missing job-rerun guard correctly remained `unknown`, not falsely absent.
 
    This narrows the remaining investigation to external catalog refresh/filtering
-   rather than FastMCP registration. Obtain a **complete** external catalog report
-   after refresh/reconnect and identify which client cache/allowlist layer retains
-   the old schema. Keep mutation behavior independent of this diagnostic signal.
+   rather than FastMCP registration. The same dirty-backlog evidence also covered
+   server-visible/client-hidden `closed_unmerged_cleanup_reason`, `git_fetch_ref`
+   and `docker_deploy_contract`; keep them under this single parity finding rather
+   than opening one ticket per missing schema. Obtain a **complete** external
+   catalog report after refresh/reconnect and identify which client cache/allowlist
+   layer retains the old schema. Keep mutation behavior independent of this
+   diagnostic signal.
 
 7. ⬜ **Reconcile Gitea Actions lifecycle, stranded jobs and cancellable runs.**
    CI runs/jobs can remain `waiting` / `in_progress` after all useful work is
@@ -188,8 +197,11 @@ Open backlog count after cleanup: **35**
 12. ⬜ **Make CI merge gating distinguish missing, incompatible and stale evidence.**
     Merge tools should distinguish no workflow, no exact-head run, stale run,
     trigger-incompatible workflow (for example push-only), intentionally skipped
-    jobs, and ordinary red CI. Exact-head acceptable evidence must be explicit in
-    repository policy and never silently weakened.
+    jobs, ordinary red CI, and repositories whose branch policy explicitly has no
+    required status checks. When checks are disabled, either allow the exact-head
+    merge or return a typed product-policy requirement that Actions are mandatory;
+    do not collapse that state into `NO_REQUIRED_RUN_FOUND`. Exact-head acceptable
+    evidence must be explicit in repository policy and never silently weakened.
 
 42. ⬜ **Make Docker inventory scope explicit and machine-readable.**
    `docker_ps(all=true)` still returns only the containers visible through the
@@ -204,6 +216,20 @@ Open backlog count after cleanup: **35**
    means; configured multiple endpoints are selectable or explicitly reported as
    unavailable; regression coverage prevents a scoped daemon view from being
    presented as system-wide inventory.
+
+47. ⬜ **Provide redacted secret propagation/provisioning across approved deployment and CI scopes.**
+    Production deploys and cross-repository CI can require an existing root-only
+    credential without any safe way to copy/provision it to the approved target.
+    Browser Service was blocked on `PROXY_REGISTRY_API_KEY`; work-session-service
+    could not pull the private `agent-memory-service` image because its repository
+    `REGISTRY_TOKEN` was absent. Add an audited primitive that accepts only
+    allowlisted source/target identities and variable names, never returns or logs
+    the value, preserves target ownership/mode, and reports presence/equality or
+    opaque hash evidence only. It may either synchronize an approved env/secret
+    target or inject the value only inside one guarded deploy/Actions boundary.
+    Acceptance must prove source/target identity, no plaintext exposure, exact
+    postcondition verification, clean-runner private-image pull, and fail-closed
+    behavior for missing/ambiguous credentials.
 
 ## P2 / Important bugs and reliability gaps
 
@@ -220,15 +246,22 @@ Open backlog count after cleanup: **35**
 14. ⬜ **Make verification helpers honor project environments and CI-equivalent toolchains.**
     `run_pytest`, `run_ruff`, `run_mypy` and verifier containers should not fail
     falsely on unreadable `.venv`, missing `uv.lock`, unwritable caches, monorepo
-    collection collisions, or verifier/CI tool-version drift. They should select
-    the repository-declared verification profile or return a typed environment
-    diagnostic with toolchain provenance.
+    collection collisions, or verifier/CI tool-version drift. A 2026-10-08 Kojo
+    verified-push attempt additionally proved the trusted verifier image could use
+    `/usr/bin/python` without `pytest`, while the repository verifier could execute
+    the targeted tests. Expose candidate-verifier versus Actions-plane capability
+    provenance explicitly; advertised checks must either run in the selected plane
+    or return a typed environment/bootstrap diagnostic instead of code failure.
 
 15. ⬜ **Make agent cancellation and submission atomic/reconcilable.**
     Cancellation can mark a local job ambiguous while the remote runner keeps
     heartbeating, and rate-limited submission can return failure after a runner
-    has already started unbound. Preserve a cancellable/fenceable remote handle
-    or prove no runner/proxy acquisition occurred before returning failure.
+    has already started unbound. The 2026-10-08 infra-quart pilot reproduced the
+    cancellation side again: the Gateway job became ambiguous while the same
+    remote runner PID continued fresh heartbeats with no terminal artifacts.
+    Preserve a cancellable/fenceable remote handle or prove no runner/proxy
+    acquisition occurred before returning failure; replacement work must remain
+    blocked until the old writer is terminal or fenced.
 
 16. ⬜ **Reconcile agent jobs durably across Gateway restarts/deploys.**
     Restart/deploy can make returned job ids disappear while artifacts still show
@@ -331,6 +364,41 @@ Open backlog count after cleanup: **35**
     local test failures until restored. Add post-delivery worktree==HEAD proof,
     identify/remove the mutation path, and fail closed with attributed evidence if
     drift is detected.
+
+48. ⬜ **Fail project-scoped Compose mutations before confirmation when allowed roots are not configured.**
+    A registered `docker_compose_up` can return `confirmation_required`, but the
+    subsequent `confirm_operation` then fails before Docker execution when
+    `MCP_ALLOWED_PROJECT_ROOTS` is unset. Availability/preflight must reject this
+    configuration before creating a one-time pending action, or safely resolve
+    the registered project root without requiring callers to know host paths.
+    Acceptance covers unset-root fail-fast behavior, successful registered-root
+    execution, and proves confirmations are not consumed by impossible actions.
+
+49. ⬜ **Expose bounded destructive-audit health and recovery evidence.**
+    Guarded Gitea close/delete correctly fail closed with `AUDIT_UNAVAILABLE`
+    before mutation, but callers cannot distinguish transient audit transport or
+    storage outage from malformed cleanup input. Add a safe read-only audit
+    subsystem status/recovery signal with retryability and correlation metadata;
+    keep destructive mutations impossible unless intent persistence succeeds.
+    Acceptance covers zero mutation during outage and exactly-once audited success
+    after recovery for both PR close and exact-SHA branch deletion.
+
+50. ⬜ **Allow guarded workspace parent-directory creation.**
+    `workspace_file_write` cannot bootstrap a new package/workflow tree when a
+    parent directory does not already exist, forcing placeholder commits or
+    manual scaffolding. Add either explicit `create_parents=true` or a bounded
+    `workspace_mkdir`/scaffold primitive with project-relative paths, depth/name
+    limits, symlink/root-escape protection and receipts. Default behavior must
+    remain fail-closed with a typed `PARENT_MISSING` diagnostic.
+
+51. ⬜ **Reconcile `gitea_push_verified_commit` after ambiguous client/transport timeout.**
+    A caller timeout can occur after the remote feature branch has already moved
+    to the exact expected head, creating a false-negative delivery result and
+    making a blind retry unsafe. After timeout/5xx, perform bounded fresh remote
+    reads: return reconciled success when the exact head/postcondition is proven;
+    return definite no-mutation only when the old tip is proven; otherwise return
+    `MUTATION_OUTCOME_UNKNOWN` with no blind-retry guidance. Regression coverage
+    must include response-lost-after-success and timeout-before-write cases.
 
 ## P3 / Capability and ergonomics wishlist
 
@@ -444,3 +512,19 @@ Open backlog count after cleanup: **35**
     was the actual project contract. Add a round-trip contract test that every
     command advertised by `info(project).verification.commands` can be executed
     verbatim from the registered project root.
+
+52. ⬜ **Expose guarded Gitea issue-state mutation.**
+    The external surface can list/read Gitea issues but cannot reconcile an issue
+    to closed after its fix is independently proven. Add a same-repository
+    issue-state mutation with fresh expected-state/version fencing, narrow field
+    allowlisting, audit evidence and post-write verification. Acceptance covers
+    close success, already-closed idempotence, concurrent-state mismatch, missing
+    issue and remote failure with zero unintended mutation.
+
+53. ⬜ **Add guarded bulk tree / multi-file candidate bootstrap.**
+    Greenfield packages currently require many sequential single-file workspace
+    writes and pre-created directories. Add a bounded `workspace_apply_tree` or
+    equivalent patchset/materialization primitive with file-count/byte limits,
+    project-relative path validation, parent creation under policy, aggregate and
+    per-file hashes, dry-run support and atomic/fail-closed semantics. Acceptance
+    includes a ≥10-file bootstrap plus traversal/oversize/partial-failure tests.
