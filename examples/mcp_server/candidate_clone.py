@@ -1662,6 +1662,206 @@ def prepare_candidate_clone(
         )
 
 
+def _resolve_git_dependency_path(raw: str, *, relative_to: Path) -> Path | None:
+    value = raw.strip()
+    if not value:
+        return None
+    path = Path(value)
+    if not path.is_absolute():
+        path = relative_to / path
+    try:
+        return path.resolve(strict=False)
+    except OSError as exc:
+        raise _fail(
+            "WORKSPACE_CONTENDED",
+            "candidate dependency path cannot be resolved safely",
+            retryable=True,
+        ) from exc
+
+
+def _inbound_candidate_dependencies(
+    candidates_root: Path,
+    candidate_root: Path,
+) -> list[dict[str, Any]]:
+    """Return sibling candidate clones that still depend on ``candidate_root``.
+
+    Historical candidates may have been cloned with ``--shared`` or directly
+    from another candidate. Deleting that source can make the dependant lose
+    objects even when the source itself is clean and remotely preserved. Scan
+    the concrete Git dependency seams we have observed: linked-worktree gitdir,
+    object alternates, and a local sibling origin.
+    """
+    try:
+        target_root = candidate_root.resolve(strict=True)
+        target_objects = (target_root / ".git" / "objects").resolve(strict=True)
+    except OSError as exc:
+        raise _fail(
+            "WORKSPACE_CONTENDED",
+            "candidate dependency target cannot be inspected safely",
+            retryable=True,
+        ) from exc
+
+    found: list[dict[str, Any]] = []
+    try:
+        entries = list(os.scandir(candidates_root))
+    except OSError as exc:
+        raise _fail(
+            "WORKSPACE_CONTENDED",
+            "candidate dependency directory cannot be scanned",
+            retryable=True,
+        ) from exc
+
+    for entry in entries:
+        if entry.name in {_LINEAGE_LOCKS_DIRNAME, candidate_root.name}:
+            continue
+        if not entry.name.startswith("candidate-"):
+            continue
+        try:
+            if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                raise _fail(
+                    "WORKSPACE_CONTENDED",
+                    "candidate dependency entry is unsafe",
+                    retryable=True,
+                    details={"dependent_project_id": entry.name},
+                )
+        except OSError as exc:
+            raise _fail(
+                "WORKSPACE_CONTENDED",
+                "candidate dependency entry cannot be inspected",
+                retryable=True,
+                details={"dependent_project_id": entry.name},
+            ) from exc
+
+        dependant = Path(entry.path)
+        git_path = dependant / ".git"
+        try:
+            git_stat = git_path.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise _fail(
+                "WORKSPACE_CONTENDED",
+                "candidate dependency git metadata cannot be inspected",
+                retryable=True,
+                details={"dependent_project_id": entry.name},
+            ) from exc
+
+        dependency_types: set[str] = set()
+        if stat.S_ISREG(git_stat.st_mode):
+            try:
+                raw_gitdir = git_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise _fail(
+                    "WORKSPACE_CONTENDED",
+                    "candidate dependency git metadata cannot be read",
+                    retryable=True,
+                    details={"dependent_project_id": entry.name},
+                ) from exc
+            if len(raw_gitdir) > 4096:
+                raise _fail(
+                    "WORKSPACE_CONTENDED",
+                    "candidate dependency git metadata is unexpectedly large",
+                    retryable=True,
+                    details={"dependent_project_id": entry.name},
+                )
+            prefix = "gitdir:"
+            if not raw_gitdir.lower().startswith(prefix):
+                raise _fail(
+                    "WORKSPACE_CONTENDED",
+                    "candidate dependency gitfile is malformed",
+                    retryable=True,
+                    details={"dependent_project_id": entry.name},
+                )
+            linked = _resolve_git_dependency_path(
+                raw_gitdir[len(prefix) :],
+                relative_to=dependant,
+            )
+            if linked is not None and (linked == target_root or target_root in linked.parents):
+                dependency_types.add("worktree_gitdir")
+        elif stat.S_ISDIR(git_stat.st_mode) and not stat.S_ISLNK(git_stat.st_mode):
+            alternates = git_path / "objects" / "info" / "alternates"
+            try:
+                alternate_stat = alternates.lstat()
+            except FileNotFoundError:
+                alternate_stat = None
+            except OSError as exc:
+                raise _fail(
+                    "WORKSPACE_CONTENDED",
+                    "candidate dependency alternates cannot be inspected",
+                    retryable=True,
+                    details={"dependent_project_id": entry.name},
+                ) from exc
+            if alternate_stat is not None:
+                if stat.S_ISLNK(alternate_stat.st_mode) or not stat.S_ISREG(alternate_stat.st_mode):
+                    raise _fail(
+                        "WORKSPACE_CONTENDED",
+                        "candidate dependency alternates metadata is unsafe",
+                        retryable=True,
+                        details={"dependent_project_id": entry.name},
+                    )
+                try:
+                    alternate_lines = alternates.read_text(encoding="utf-8").splitlines()
+                except (OSError, UnicodeError) as exc:
+                    raise _fail(
+                        "WORKSPACE_CONTENDED",
+                        "candidate dependency alternates cannot be read",
+                        retryable=True,
+                        details={"dependent_project_id": entry.name},
+                    ) from exc
+                for line in alternate_lines:
+                    alternate = _resolve_git_dependency_path(
+                        line,
+                        relative_to=git_path / "objects",
+                    )
+                    if alternate is not None and (
+                        alternate == target_objects or target_objects in alternate.parents
+                    ):
+                        dependency_types.add("alternates")
+                        break
+
+            local_origin = _legacy_local_origin(dependant)
+            if local_origin is not None:
+                try:
+                    if local_origin.resolve(strict=True) == target_root:
+                        dependency_types.add("local_origin")
+                except OSError:
+                    pass
+        else:
+            raise _fail(
+                "WORKSPACE_CONTENDED",
+                "candidate dependency git metadata is unsafe",
+                retryable=True,
+                details={"dependent_project_id": entry.name},
+            )
+
+        if dependency_types:
+            found.append(
+                {
+                    "dependent_project_id": entry.name,
+                    "dependency_types": sorted(dependency_types),
+                }
+            )
+
+    return sorted(found, key=lambda item: str(item["dependent_project_id"]))
+
+
+def _require_no_inbound_candidate_dependencies(
+    candidates_root: Path,
+    candidate_root: Path,
+) -> None:
+    dependencies = _inbound_candidate_dependencies(candidates_root, candidate_root)
+    if dependencies:
+        raise _fail(
+            "WORKSPACE_CONTENDED",
+            "candidate cleanup is blocked by inbound Git dependencies",
+            retryable=False,
+            details={
+                "dependent_candidates": dependencies,
+                "recovery_action": "make_dependants_self_contained_then_retry_cleanup",
+            },
+        )
+
+
 def candidate_cleanup(
     project_id: str,
     expected_head_sha: str,
@@ -1846,6 +2046,7 @@ def _cleanup_candidate_locked(
         head_sha=expected_head_sha,
         expected_registry_root=expected_registry_root,
     )
+    _require_no_inbound_candidate_dependencies(candidates_root, candidate_root)
 
     _enforce_reference_guard(reference_guard)
     if tombstone is None:
@@ -1892,6 +2093,7 @@ def _cleanup_candidate_locked(
             expected_registry_root=expected_registry_root,
         )
         _enforce_reference_guard(reference_guard)
+        _require_no_inbound_candidate_dependencies(candidates_root, candidate_root)
         try:
             shutil.rmtree(candidate_root)
         except OSError as exc:
