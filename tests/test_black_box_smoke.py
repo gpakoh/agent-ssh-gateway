@@ -136,6 +136,11 @@ def _sse_frame(payload: dict) -> bytes:
     return f"data: {json.dumps(payload)}\n\n".encode()
 
 
+def _sse_eof(payload: dict) -> bytes:
+    """Single valid SSE data line terminated by HTTP EOF, without a blank frame separator."""
+    return f"data: {json.dumps(payload)}\n".encode()
+
+
 def _required_job_tool(*, include_expected_head: bool = True) -> dict:
     names = ["owner", "repo", "run_id", "job_id"]
     if include_expected_head:
@@ -180,6 +185,32 @@ class TestMcpBlackBoxSmoke:
         fake_conn.getresponse.side_effect = responses
         with patch.object(mcp_smoke.http.client, "HTTPConnection", return_value=fake_conn):
             assert mcp_smoke.main() == 0
+
+    def test_eof_terminated_sse_payload_is_accepted(self, monkeypatch):
+        """Regression for deploy #15036: valid SSE data can end at HTTP EOF without a blank line."""
+        monkeypatch.setenv("MCP_STREAMABLE_HTTP_BEARER_TOKEN", "test-token")
+        monkeypatch.setenv("MCP_SMOKE_ATTEMPTS", "2")
+        monkeypatch.setenv("MCP_SMOKE_RETRY_DELAY", "0")
+        responses = [
+            _FakeMcpResponse(
+                _sse_eof({"jsonrpc": "2.0", "id": 1, "result": {}}),
+                session_id="sid-1",
+            ),
+            _FakeMcpResponse(
+                _sse_eof(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "result": {"tools": [{"name": "health"}]},
+                    }
+                )
+            ),
+        ]
+        fake_conn = MagicMock()
+        fake_conn.getresponse.side_effect = responses
+        with patch.object(mcp_smoke.http.client, "HTTPConnection", return_value=fake_conn):
+            assert mcp_smoke.main() == 0
+        assert fake_conn.getresponse.call_count == 2
 
     def test_no_session_id_fails(self, monkeypatch):
         monkeypatch.setenv("MCP_STREAMABLE_HTTP_BEARER_TOKEN", "test-token")
