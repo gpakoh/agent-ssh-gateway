@@ -492,6 +492,10 @@ class TestCiSmokeGatewayUsesHttpCheckNotHealthStatus:
         assert "State.Health.Status" not in window
         assert "docker exec" in window and "urlopen" in window
 
+    def test_gateway_standalone_smoke_fails_redis_fast_without_a_peer(self):
+        text = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
+        assert "-e REDIS_URL=redis://127.0.0.1:1/0" in text
+
     def test_mcp_server_check_uses_direct_http_readiness(self):
         """Probe app readiness directly instead of Docker's 30s health cadence."""
         text = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
@@ -909,8 +913,32 @@ class TestDocsOnlyPushDoesNotDeployRuntime:
         scope = wf["jobs"]["scope"]
         assert scope["outputs"]["full_ci"] == "${{ steps.classify.outputs.full_ci }}"
         checkout = scope["steps"][0]
-        assert checkout["with"]["fetch-depth"] == 0
-        assert checkout["with"]["ref"] == "${{ github.event.pull_request.head.sha || github.sha }}"
+        assert checkout["name"] == "Checkout exact event commit from Gitea"
+        assert checkout["env"] == {"GITEA_TOKEN": "${{ secrets.GITEA_TOKEN }}"}
+        checkout_run = checkout["run"]
+        assert "actions/checkout" not in json.dumps(scope)
+        assert "actions/setup-python" not in json.dumps(scope)
+        assert 'expected_sha="${{ github.event.pull_request.head.sha || github.sha }}"' in checkout_run
+        assert "git fetch -q --no-tags origin \"$expected_sha\" '+refs/heads/*:refs/remotes/origin/*'" in checkout_run
+        assert 'test "$(git rev-parse HEAD)" = "$expected_sha"' in checkout_run
+        assert "GIT_CONFIG_VALUE_0=\"$auth_header\"" in checkout_run
+        assert 'GIT_CONFIG_VALUE_1="false"' in checkout_run
+        assert "filesystem root" in checkout_run
+        syntax_source = (
+            checkout_run.replace(
+                "${{ github.event.pull_request.head.sha || github.sha }}", "0" * 40
+            )
+            .replace("${{ github.server_url }}", "https://gitea.example.invalid")
+            .replace("${{ github.repository }}", "owner/repo")
+        )
+        syntax = subprocess.run(
+            ["bash", "-n"],
+            input=syntax_source,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert syntax.returncode == 0, syntax.stderr
         commands = "\n".join(step.get("run", "") for step in scope["steps"])
         assert "python3 scripts/ci_change_scope.py" in commands
         assert "python3 -m unittest tests.test_ci_change_scope" in commands
@@ -1796,28 +1824,55 @@ class TestDeployProvisionsComposeRegistryAuth:
         assert syntax.returncode == 0, syntax.stderr
 
 
-class TestSetupPythonCacheTeardown:
-    """Keep uv-driven CI jobs free of setup-python cache post-actions."""
+class TestLocalPythonQualification:
+    """PR qualification must not depend on resolving GitHub-hosted actions."""
 
-    def test_uv_jobs_do_not_enable_setup_python_pip_cache(self):
+    def test_python_jobs_checkout_exact_event_sha_without_third_party_actions(self):
         workflow = _load_workflow(CI_WORKFLOW_PATH)
 
         for job_name in ("test", "e2e"):
-            steps = workflow["jobs"][job_name]["steps"]
-            setup_steps = [
-                step
-                for step in steps
-                if str(step.get("uses", "")).startswith("actions/setup-python@")
-            ]
-            assert len(setup_steps) == 1, job_name
-            assert "cache" not in setup_steps[0].get("with", {}), job_name
+            job = workflow["jobs"][job_name]
+            serialized = json.dumps(job)
+            assert "actions/checkout" not in serialized, job_name
+            assert "actions/setup-python" not in serialized, job_name
 
+            checkout = job["steps"][0]
+            assert checkout["name"] == "Checkout exact event commit from Gitea", job_name
+            assert checkout["env"] == {"GITEA_TOKEN": "${{ secrets.GITEA_TOKEN }}"}, job_name
+            run = checkout["run"]
+            assert 'expected_sha="${{ github.event.pull_request.head.sha || github.sha }}"' in run
+            assert "git fetch -q --no-tags origin \"$expected_sha\" '+refs/heads/*:refs/remotes/origin/*'" in run
+            assert 'test "$(git rev-parse HEAD)" = "$expected_sha"' in run
+            assert 'test -z "$(git status --porcelain)"' in run
+
+    def test_uv_jobs_provision_and_verify_requested_python_before_sync(self):
+        workflow = _load_workflow(CI_WORKFLOW_PATH)
+        requested_by_job = {
+            "test": 'requested_python="${{ matrix.python-version }}"',
+            "e2e": 'requested_python="3.12"',
+        }
+
+        for job_name, requested_line in requested_by_job.items():
+            steps = workflow["jobs"][job_name]["steps"]
             install_step = next(
                 step
                 for step in steps
                 if step.get("name") == "Install package (frozen lockfile)"
             )
-            assert "uv sync --frozen --extra dev" in str(install_step.get("run", "")), job_name
+            run = str(install_step.get("run", ""))
+            assert requested_line in run, job_name
+            assert "pip_install=(python -m pip)" in run, job_name
+            assert "command -v pip3" in run, job_name
+            assert "command -v pip" in run, job_name
+            assert "python -m venv .ci-bootstrap-venv" in run, job_name
+            assert '"${pip_install[@]}" install uv' in run, job_name
+            assert 'uv python find "$requested_python"' in run, job_name
+            assert 'uv python install "$requested_python"' in run, job_name
+            assert 'actual_python="$("$python_path" -c' in run, job_name
+            assert 'if [ "$actual_python" != "$requested_python" ]; then' in run, job_name
+            assert 'export UV_PYTHON="$python_path"' in run, job_name
+            assert 'echo "UV_PYTHON=$python_path" >> "$GITHUB_ENV"' in run, job_name
+            assert run.index("actual_python=") < run.index("uv sync --frozen --extra dev"), job_name
 
 
 class TestInstallPackageNetworkResilience:
@@ -1833,7 +1888,7 @@ class TestInstallPackageNetworkResilience:
             run = next(s for s in steps if s.get("name") == "Install package (frozen lockfile)")["run"]
 
             assert "for attempt in 1 2 3 4 5" in run
-            assert "python -m pip install uv" in run
+            assert '"${pip_install[@]}" install uv' in run
             assert "UV_HTTP_TIMEOUT=60 uv sync --frozen --extra dev" in run
             assert "uv sync attempt ${attempt}/5 failed" in run
             assert 'sleep "$delay"' in run
