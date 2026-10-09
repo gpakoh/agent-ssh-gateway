@@ -96,6 +96,23 @@ Open backlog count after cleanup: **35**
    complete report and identifies the filtering/caching/allowlist mechanism; do
    not add a curated catalog workaround before that evidence exists.
 
+   **2026-10-09 external-session evidence:** after PR #489 was merged and
+   post-merge run #14985 completed build-and-push, deploy and host-smoke on
+   `master@0e357599a6aa...`, the authoritative live manifest reported
+   `gitea_rerun_action_job` enabled/available and included it in the server
+   toolset hash. The same already-attached ChatGPT `api_tool` catalog still
+   omitted the tool and still exposed older schemas that omit newer optional
+   arguments such as `closed_unmerged_cleanup_reason` and the client-observation
+   parameters on `tools_manifest`. Supplying those hidden manifest parameters
+   through the transport still succeeded and produced a lifecycle/auth/hash-bound
+   incomplete attestation; because the report was intentionally incomplete, the
+   missing job-rerun guard correctly remained `unknown`, not falsely absent.
+
+   This narrows the remaining investigation to external catalog refresh/filtering
+   rather than FastMCP registration. Obtain a **complete** external catalog report
+   after refresh/reconnect and identify which client cache/allowlist layer retains
+   the old schema. Keep mutation behavior independent of this diagnostic signal.
+
 7. ⬜ **Reconcile Gitea Actions lifecycle, stranded jobs and cancellable runs.**
    CI runs/jobs can remain `waiting` / `in_progress` after all useful work is
    done, after cleanup timeouts, or after old workflow jobs later become runnable.
@@ -269,6 +286,23 @@ Open backlog count after cleanup: **35**
     reconcile ambiguous mutation responses, and return previous/new attempt plus
     selected jobs.
 
+    **2026-10-09 implementation/deploy evidence:** full-run rerun was already
+    live; PR #489 added `gitea_rerun_action_job` with exact run/job/head/current-
+    attempt fencing, failed/cancelled-only policy, logical-job uniqueness and
+    bounded ambiguous-response reconciliation. Exact head `6d932cc09f5b...`
+    passed PR run #14967; merge `0e357599a6aa...` passed post-merge run #14985,
+    including build-and-push, deploy and host-smoke. The live authoritative
+    `tools_manifest` now reports both rerun tools enabled/available with
+    `mcp:repo` + `mcp:admin`, and a session-bound incomplete client attestation
+    correctly leaves `gitea_rerun_action_job` guard coverage `unknown`.
+
+    Keep this item open only for caller-visible acceptance: the current external
+    ChatGPT resource catalog still omits the new job-rerun tool even though the
+    deployed server surface contains it. Do not add another rerun primitive or
+    bypass the catalog; finish exposure/parity under item 6 (and cache invalidation
+    under item 45), then prove a real external caller can invoke one failed job
+    without rerunning the whole workflow.
+
 33. ⬜ **Align outer `run_agent` success envelopes with non-submission results.**
     Pre-submit validation failures, blocked terminal replays and other
     non-submitted outcomes must not return outer `ok=true` with submission
@@ -382,6 +416,25 @@ Open backlog count after cleanup: **35**
     loss. Define an etag/build-id based cache contract so schemas may be reused
     while the plane is stable and are invalidated on build or plane-state change;
     do not weaken authentication or server-side authorization checks.
+
+    **2026-10-09 reproducer:** after master `0e357599a6aa...` completed
+    build-and-push, deploy and host-smoke in run #14985, the live server
+    `tools_manifest` advertised `gitea_rerun_action_job` as enabled/available
+    and emitted toolset hash `sha256:c88900df0e1e...`, while this same long-lived
+    ChatGPT session's external `api_tool` resource catalog still exposed the
+    pre-deploy surface and omitted that tool. The server can accept bounded,
+    lifecycle/auth/toolset-hash-bound `client_visible_tool_names` attestations,
+    but the external catalog also hides those optional `tools_manifest`
+    parameters from its callable schema. This proves a real cache/filtering
+    invalidation gap outside the authoritative FastMCP tool manager, not a
+    missing server registration.
+
+    Acceptance should include a long-lived client attached before a deploy:
+    once the server toolset hash/build identity changes, its next schema lookup
+    must refresh to the new `mcp.tools/list` surface (including optional argument
+    additions), or return an explicit stale-catalog state with a bounded refresh
+    action. A successful server deploy must not leave the old callable catalog
+    indefinitely authoritative in that session.
 
 46. ⬜ **Make `info(project)` verification commands executable verbatim.**
     Verification guidance must include any project-specific mypy targets/options,
