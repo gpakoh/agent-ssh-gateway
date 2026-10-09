@@ -1267,6 +1267,245 @@ def test_candidate_cleanup_removes_preserved_candidate_and_is_idempotent(
     assert repeated.directory_removed is False
 
 
+def test_candidate_cleanup_ignores_independent_sibling_candidate(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    target_branch = "candidate/cleanup-independent-target"
+    sibling_branch = "candidate/cleanup-independent-sibling"
+    preserved_ref = "archive/candidate-cleanup-independent-target"
+    target = prepare_candidate_clone(
+        "source-project",
+        target_branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    sibling = prepare_candidate_clone(
+        "source-project",
+        sibling_branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    target_root = workspace / ".mcp-candidate-clones" / target.project_id
+    sibling_root = workspace / ".mcp-candidate-clones" / sibling.project_id
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=target_branch,
+        delivery="absent",
+    )
+
+    cleaned = candidate_cleanup(
+        target.project_id,
+        base,
+        target_branch,
+        "source-project",
+        preserved_ref,
+        config_dir=config_dir,
+        journal_root=journal_root,
+        reference_guard=_idle_guard,
+    )
+
+    assert cleaned.directory_removed is True
+    assert not target_root.exists()
+    assert sibling_root.is_dir()
+    assert _git(sibling_root, "rev-parse", "HEAD") == base
+
+
+def test_candidate_cleanup_blocks_shared_clone_dependency_without_mutation(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-shared-dependent"
+    preserved_ref = "archive/candidate-cleanup-shared-dependent"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    dependent_root = workspace / ".mcp-candidate-clones" / "candidate-legacy-shared-dependent"
+    _git(workspace, "clone", "--quiet", "--shared", str(clone_root), str(dependent_root))
+    assert _git(dependent_root, "rev-parse", "HEAD") == base
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+
+    err = exc_info.value
+    assert err.code == "WORKSPACE_CONTENDED"
+    assert err.retryable is False
+    assert err.details == {
+        "dependent_candidates": [
+            {
+                "dependent_project_id": "candidate-legacy-shared-dependent",
+                "dependency_types": ["alternates", "local_origin"],
+            }
+        ],
+        "recovery_action": "make_dependants_self_contained_then_retry_cleanup",
+    }
+    assert clone_root.is_dir()
+    assert receipt.project_id in (config_dir / "projects.yaml").read_text(encoding="utf-8")
+    assert _git(dependent_root, "rev-parse", "HEAD") == base
+    _git(dependent_root, "fsck", "--full")
+
+
+def test_candidate_cleanup_blocks_linked_worktree_dependency_without_mutation(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-worktree-dependent"
+    preserved_ref = "archive/candidate-cleanup-worktree-dependent"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    dependent_root = workspace / ".mcp-candidate-clones" / "candidate-linked-worktree-dependent"
+    _git(clone_root, "worktree", "add", "--quiet", "--detach", str(dependent_root), base)
+    assert _git(dependent_root, "rev-parse", "HEAD") == base
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+
+    err = exc_info.value
+    assert err.code == "WORKSPACE_CONTENDED"
+    assert err.details == {
+        "dependent_candidates": [
+            {
+                "dependent_project_id": "candidate-linked-worktree-dependent",
+                "dependency_types": ["worktree_gitdir"],
+            }
+        ],
+        "recovery_action": "make_dependants_self_contained_then_retry_cleanup",
+    }
+    assert clone_root.is_dir()
+    assert dependent_root.is_dir()
+    assert receipt.project_id in (config_dir / "projects.yaml").read_text(encoding="utf-8")
+    assert _git(dependent_root, "rev-parse", "HEAD") == base
+
+
+def test_candidate_cleanup_rechecks_dependencies_after_registry_removal_and_recovers(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-late-dependent"
+    preserved_ref = "archive/candidate-cleanup-late-dependent"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    dependent_root = workspace / ".mcp-candidate-clones" / "candidate-late-shared-dependent"
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+    guard_calls = 0
+
+    def create_dependency_after_preflight() -> None:
+        nonlocal guard_calls
+        guard_calls += 1
+        if guard_calls == 1:
+            _git(workspace, "clone", "--quiet", "--shared", str(clone_root), str(dependent_root))
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=create_dependency_after_preflight,
+        )
+
+    assert exc_info.value.code == "WORKSPACE_CONTENDED"
+    assert clone_root.is_dir()
+    assert dependent_root.is_dir()
+    assert receipt.project_id not in (config_dir / "projects.yaml").read_text(encoding="utf-8")
+    assert _git(dependent_root, "rev-parse", "HEAD") == base
+    _git(dependent_root, "fsck", "--full")
+
+    shutil.rmtree(dependent_root)
+    recovered = candidate_cleanup(
+        receipt.project_id,
+        base,
+        branch,
+        "source-project",
+        preserved_ref,
+        config_dir=config_dir,
+        journal_root=journal_root,
+        reference_guard=_idle_guard,
+    )
+    assert recovered.registry_removed is False
+    assert recovered.directory_removed is True
+    assert recovered.already_cleaned is False
+    assert not clone_root.exists()
+
+
 def test_candidate_cleanup_requires_reference_guard(
     registry_fixture,
     monkeypatch: pytest.MonkeyPatch,

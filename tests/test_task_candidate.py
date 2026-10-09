@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from examples.mcp_server import task_candidate as task_candidate_module
 from examples.mcp_server.agent_paths import task_dir
 from examples.mcp_server.mcp_infra.adapters import remote
 from examples.mcp_server.task_candidate import (
@@ -26,6 +27,7 @@ from examples.mcp_server.task_candidate import (
     CandidateError,
     _candidate_record_dir,
     _canonical_verifier_receipt_sha256,
+    _make_verifier_readable,
     bind_task_attempt_job,
     materialize_task_candidate,
     record_task_delivery_contract,
@@ -210,6 +212,26 @@ def _validate(root: Path, expected_sha: str) -> tuple[dict[str, Any], Path]:
         destination_branch=BRANCH,
         expected_sha=expected_sha,
     )
+
+
+def test_make_verifier_readable_tolerates_disappearing_git_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "staging"
+    root.mkdir()
+    payload = root / "tracked.txt"
+    payload.write_text("content\n", encoding="utf-8")
+    vanished = root / "maintenance.lock"
+
+    def fake_walk(_root: Path):
+        yield str(root), [], [payload.name, vanished.name]
+
+    monkeypatch.setattr(task_candidate_module.os, "walk", fake_walk)
+
+    _make_verifier_readable(root)
+
+    assert payload.stat().st_mode & 0o044 == 0o044
+    assert not vanished.exists()
 
 
 # ── materialization stores evidence + digest ──────────────────────
