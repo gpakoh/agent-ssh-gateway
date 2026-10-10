@@ -16,8 +16,10 @@ MAX_CLIENT_VISIBLE_TOOL_NAMES = 256
 MAX_CLIENT_VISIBLE_TOOL_NAME_BYTES = 128
 MAX_CLIENT_VISIBLE_TOOL_NAMES_BYTES = 16 * 1024
 MAX_REQUIRED_GUARD_TOOL_NAMES = 32
+MAX_CLIENT_TOOLSET_HASH_BYTES = 128
 
 _TOOL_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+_TOOLSET_HASH_RE = re.compile(r"sha256:[0-9a-f]{64}")
 
 
 @dataclass(frozen=True)
@@ -73,6 +75,76 @@ def normalize_required_guard_tool_names(names: list[str]) -> tuple[str, ...]:
     """Validate bounded call-context guard requirements."""
 
     return _normalize_tool_names(names, max_names=MAX_REQUIRED_GUARD_TOOL_NAMES)
+
+
+def normalize_client_toolset_hash(value: str | None) -> str | None:
+    """Bound and validate a client-reported toolset hash.
+
+    ``None`` means the client did not know (or did not supply) the toolset hash
+    its external catalog was built from, which is rendered as ``unproven`` -- an
+    honest "cannot tell" rather than a false ``current`` or ``stale``.  Anything
+    else must be a ``sha256:<64 lowercase hex>`` string; malformed or oversized
+    input raises before any state write, mirroring the tool-name rules.
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("client catalog toolset hash must be a string")
+    if len(value.encode("utf-8")) > MAX_CLIENT_TOOLSET_HASH_BYTES:
+        raise ValueError("client catalog toolset hash exceeds size limit")
+    if _TOOLSET_HASH_RE.fullmatch(value) is None:
+        raise ValueError(
+            "client catalog toolset hash must match sha256:<64 lowercase hex>"
+        )
+    return value
+
+
+def build_catalog_refresh_contract(
+    *,
+    server_toolset_hash: str | None,
+    client_catalog_toolset_hash: str | None,
+) -> dict[str, Any]:
+    """Type a client catalog against the live server surface.
+
+    Returns a ``current`` / ``stale`` / ``unproven`` state and, when stale, a
+    safe refresh action.  This is diagnostic only: it never gates a server-side
+    mutation, never filters ``tools/list``, and never re-registers anything.
+    A long-lived client whose catalog was built from an older build/toolset hash
+    can therefore detect staleness explicitly instead of inferring it from an
+    empty diff, and refresh by re-running ``tools/list`` (the server registers
+    its full surface at startup, so no server-side reconnect is required).
+    """
+
+    if server_toolset_hash is None or client_catalog_toolset_hash is None:
+        state = "unproven"
+        stale = False
+    elif client_catalog_toolset_hash == server_toolset_hash:
+        state = "current"
+        stale = False
+    else:
+        state = "stale"
+        stale = True
+
+    return {
+        "catalog_state": state,
+        "server_toolset_hash": server_toolset_hash,
+        "client_catalog_toolset_hash": client_catalog_toolset_hash,
+        "refresh_required": stale,
+        "refresh_action": {
+            "method": "mcp",
+            "tool": "tools/list",
+            "transport": "streamable-http",
+            "server_side_reconnect_required": False,
+        },
+        "note": (
+            "A stale catalog means the client-supplied toolset hash differs from "
+            "the current server toolset hash. Re-run mcp tools/list to obtain the "
+            "current callable surface; the server registers its full surface at "
+            "startup, so no server-side reconnect is required. Diagnostic only: "
+            "this never gates a server mutation."
+        ),
+    }
 
 
 def record_session_attestation(

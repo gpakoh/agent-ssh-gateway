@@ -16,7 +16,12 @@ from tool_modes import (
 from tool_results import validate_pagination
 from tool_scopes import ACCESS_PROFILES, get_required_scopes
 
-from examples.mcp_server.surface_parity import ClientSurfaceAttestation, evaluate_required_guards
+from examples.mcp_server.surface_parity import (
+    ClientSurfaceAttestation,
+    build_catalog_refresh_contract,
+    evaluate_required_guards,
+    normalize_client_toolset_hash,
+)
 
 
 def _agent_guidance() -> dict[str, Any]:
@@ -44,6 +49,7 @@ def _operator_surface_contract(
     client_attestation: ClientSurfaceAttestation | None,
     client_observation_status: str,
     required_guard_tools: tuple[str, ...],
+    client_catalog_toolset_hash: str | None = None,
 ) -> dict[str, Any]:
     """Render authoritative server state beside an unverified client report."""
 
@@ -95,6 +101,10 @@ def _operator_surface_contract(
         },
         "missing_from_client": missing_from_client,
         "unexpected_in_client": unexpected_in_client,
+        "catalog_refresh": build_catalog_refresh_contract(
+            server_toolset_hash=server_toolset_hash,
+            client_catalog_toolset_hash=client_catalog_toolset_hash,
+        ),
         "guard_coverage": evaluate_required_guards(client_attestation, required_guard_tools),
         "operator_guidance": "Server state is authoritative only for the local MCP tool manager. Client-visible names are client-reported and never independently verified; use missing/unexpected diagnostics to investigate the external resource catalog without treating the report as mutation authority. An externally missing tool is not proof that the MCP server failed to register it.",
     }
@@ -116,6 +126,7 @@ def build_manifest(
     client_attestation: ClientSurfaceAttestation | None = None,
     client_observation_status: str | None = None,
     required_guard_tools: tuple[str, ...] = (),
+    client_catalog_toolset_hash: str | None = None,
 ) -> dict[str, Any]:
     """Build the tools manifest from registries.
 
@@ -256,6 +267,8 @@ def build_manifest(
         )
     if client_observation_status not in {"not_supplied", "supplied_bound", "supplied_unbound"}:
         raise ValueError("invalid client_observation_status")
+    if client_catalog_toolset_hash is not None:
+        client_catalog_toolset_hash = normalize_client_toolset_hash(client_catalog_toolset_hash)
 
     # Build access profiles (scope lists only — no token values)
     profiles_dict: dict[str, list[str]] = {
@@ -282,6 +295,7 @@ def build_manifest(
             client_attestation=client_attestation,
             client_observation_status=client_observation_status,
             required_guard_tools=required_guard_tools,
+            client_catalog_toolset_hash=client_catalog_toolset_hash,
         ),
         "catalog_consistency": catalog_consistency,
     }

@@ -67,6 +67,7 @@ from examples.mcp_server.surface_parity import (
     ClientSurfaceAttestation,
     clear_session_attestation,
     load_session_attestation,
+    normalize_client_toolset_hash,
     normalize_client_visible_tool_names,
     normalize_required_guard_tool_names,
     record_session_attestation,
@@ -432,6 +433,7 @@ def gateway_tools_manifest(
     client_visible_tool_names: list[str] | None = None,
     client_visible_tool_names_complete: bool = False,
     required_guard_tool_names: list[str] | None = None,
+    client_catalog_toolset_hash: str | None = None,
 ) -> dict[str, Any]:
     """Return the server tool manifest plus optional client-reported diagnostics.
 
@@ -439,6 +441,12 @@ def gateway_tools_manifest(
     independently verified and never become implicit mutation preconditions.
     Reports are retained only when bound to the current server-created MCP
     lifecycle, authenticated identity, and live toolset hash.
+
+    ``client_catalog_toolset_hash`` (default None) is the toolset hash the
+    caller's external catalog was built from, if known.  It is rendered as a
+    typed ``catalog_state`` (current/stale/unproven) with a safe refresh action
+    so a long-lived client can detect a stale catalog instead of inferring it.
+    Diagnostic only; it never alters tool registration or mutation gating.
     """
 
     def _manifest() -> dict[str, Any]:
@@ -446,7 +454,10 @@ def gateway_tools_manifest(
         lifecycle_owner = _current_mcp_lifecycle_owner()
         auth_identity = _current_auth_reuse_key()
 
-        # Validate every caller-controlled name before any state write.
+        # Validate every caller-controlled value before any state write.
+        validated_client_catalog_hash = normalize_client_toolset_hash(
+            client_catalog_toolset_hash
+        )
         required_guard_tools = normalize_required_guard_tool_names(
             required_guard_tool_names or []
         )
@@ -495,6 +506,7 @@ def gateway_tools_manifest(
             client_attestation=attestation,
             client_observation_status=observation_status,
             required_guard_tools=required_guard_tools,
+            client_catalog_toolset_hash=validated_client_catalog_hash,
         )
 
     return _run_gateway(tool="tools_manifest", fn=_manifest)
