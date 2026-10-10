@@ -70,6 +70,8 @@ from examples.mcp_server.surface_parity import (
     normalize_client_visible_tool_names,
     normalize_required_guard_tool_names,
     record_session_attestation,
+    record_tool_list_refresh_notification,
+    tool_list_refresh_notification_sent,
 )
 
 _auth_settings, _auth_provider, _agent_router = auth_setup.setup()
@@ -421,7 +423,6 @@ def _unavailable_tool_reasons() -> dict[str, str]:
     return reasons
 
 
-@register_tool("tools_manifest")
 def gateway_tools_manifest(
     scope: str | None = None,
     mode: str | None = None,
@@ -498,6 +499,91 @@ def gateway_tools_manifest(
         )
 
     return _run_gateway(tool="tools_manifest", fn=_manifest)
+
+
+async def _signal_tool_list_refresh(response: dict[str, Any]) -> None:
+    """Best-effort protocol cue for clients whose external tool catalog may be stale.
+
+    ``tools_manifest`` is deliberately kept callable through old catalogs.  On
+    its first protocol call for one server lifecycle/toolset pair, tell the MCP
+    client to refetch ``tools/list``.  A failed notification never changes the
+    read-only manifest result and is not recorded as delivered, so a later call
+    may retry.  Direct Python calls to ``gateway_tools_manifest`` stay purely
+    synchronous and do not emit protocol traffic.
+    """
+
+    if response.get("ok") is not True:
+        return
+    result = response.get("result")
+    if not isinstance(result, dict):
+        return
+    contract = result.get("operator_surface_contract")
+    if not isinstance(contract, dict):
+        return
+    server_surface = contract.get("server_surface")
+    toolset_hash = (
+        server_surface.get("toolset_hash") if isinstance(server_surface, dict) else None
+    )
+    lifecycle_owner = _current_mcp_lifecycle_owner()
+    session = _current_mcp_session()
+
+    signal: dict[str, Any] = {
+        "method": "notifications/tools/list_changed",
+        "toolset_hash": toolset_hash,
+        "status": "unavailable",
+    }
+    contract["catalog_refresh_signal"] = signal
+
+    if lifecycle_owner is None or session is None or not isinstance(toolset_hash, str):
+        signal["reason"] = "no_bound_mcp_lifecycle"
+        return
+    if tool_list_refresh_notification_sent(lifecycle_owner, toolset_hash):
+        signal["status"] = "already_sent"
+        return
+
+    sender = getattr(session, "send_tool_list_changed", None)
+    if not callable(sender):
+        signal["reason"] = "session_notification_unsupported"
+        return
+    try:
+        await sender()
+    except Exception as exc:
+        signal["status"] = "send_failed"
+        signal["retryable"] = True
+        signal["error_class"] = type(exc).__name__
+        return
+
+    record_tool_list_refresh_notification(lifecycle_owner, toolset_hash)
+    signal["status"] = "sent"
+
+
+@register_tool("tools_manifest")
+async def _gateway_tools_manifest_protocol(
+    scope: str | None = None,
+    mode: str | None = None,
+    name_prefix: str | None = None,
+    include_descriptions: bool = True,
+    offset: int = 0,
+    limit: int | None = None,
+    client_visible_tool_names: list[str] | None = None,
+    client_visible_tool_names_complete: bool = False,
+    required_guard_tool_names: list[str] | None = None,
+) -> dict[str, Any]:
+    """Return the server manifest and cue stale MCP clients to relist tools."""
+
+    response = gateway_tools_manifest(
+        scope=scope,
+        mode=mode,
+        name_prefix=name_prefix,
+        include_descriptions=include_descriptions,
+        offset=offset,
+        limit=limit,
+        client_visible_tool_names=client_visible_tool_names,
+        client_visible_tool_names_complete=client_visible_tool_names_complete,
+        required_guard_tool_names=required_guard_tool_names,
+    )
+    await _signal_tool_list_refresh(response)
+    return response
 
 
 # ── Main ─────────────────────────────────────────────────────────
