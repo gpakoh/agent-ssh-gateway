@@ -1015,6 +1015,8 @@ def test_agent_adapter_registers_run_agents_tool(monkeypatch):
     assert registered["run_agents"] is adapter.gateway_run_agents
     assert registered["agent_status"] is adapter.gateway_agent_status
     assert registered["read_agent_artifact"] is adapter.gateway_read_agent_artifact
+    assert registered["fleet_status"] is adapter.gateway_fleet_status
+    assert registered["fleet_reconcile_unbound"] is adapter.gateway_fleet_reconcile_unbound
 
 
 def test_gateway_agent_status_wraps_lightweight_status(monkeypatch):
@@ -1419,6 +1421,7 @@ class TestGatewayRunAgents:
             "task-b",
         ]
         fleet.reconcile.assert_awaited_once()
+        assert fleet.reconcile.await_args.kwargs["recovery_boundary"] is None
         assert fleet.submit.await_count == 2
         assert all(
             call.kwargs["sweep_before_submit"] is False
@@ -1537,6 +1540,7 @@ class TestGatewayRunAgents:
         assert kwargs["terminal_observer"] is observer
         assert kwargs["observe_submitted_job"] is True
         assert kwargs["retry_attempted_unbound"] is True
+        assert kwargs["recovery_boundary"] is None
         assert callable(kwargs["job_result_fn"])
 
     @pytest.mark.asyncio
@@ -1570,6 +1574,7 @@ class TestGatewayRunAgents:
         assert kwargs["terminal_observer"] is observer
         assert kwargs["observe_submitted_job"] is False
         assert kwargs["retry_attempted_unbound"] is True
+        assert kwargs["recovery_boundary"] is None
         assert callable(kwargs["job_result_fn"])
         assert callable(kwargs["submit_sync"])
 

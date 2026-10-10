@@ -133,6 +133,8 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "supervisor_register_project": ["mcp:admin"],
     "prepare_candidate_clone": ["mcp:repo", "mcp:admin"],
     "candidate_cleanup": ["mcp:repo", "mcp:admin"],
+    "fleet_status": ["mcp:agent-run", "mcp:admin"],
+    "fleet_reconcile_unbound": ["mcp:agent-run", "mcp:admin"],
     # agent-run — mcp:agent-run
     "run_opencode": ["mcp:agent-run"],
     "run_agent": ["mcp:agent-run"],

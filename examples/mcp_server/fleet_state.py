@@ -22,6 +22,7 @@ Core invariants
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from dataclasses import dataclass
@@ -87,6 +88,18 @@ CREATE TABLE IF NOT EXISTS fleet_task_outcome (
     result_json JSONB,
     reported_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS fleet_lease_tombstone (
+    lease_token UUID PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    pool TEXT NOT NULL,
+    submit_state TEXT,
+    reason TEXT NOT NULL,
+    reclaimed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_fleet_lease_tombstone_task
+    ON fleet_lease_tombstone(task_id);
 
 -- ---------------------------------------------------------------
 -- Durable migration to an explicit submission state.
@@ -181,6 +194,19 @@ _RELEASE_NEVER_DISPATCHED_SQL: Final = """
 DELETE FROM fleet_worker_lease
 WHERE task_id = $1 AND lease_token = $2::uuid
   AND job_id IS NULL AND submit_state = 'never_attempted'
+"""
+
+_GET_LEASE_TOMBSTONE_SQL: Final = """
+SELECT lease_token::text AS lease_token, task_id, pool, submit_state, reason, reclaimed_at
+FROM fleet_lease_tombstone
+WHERE lease_token = $1::uuid
+"""
+
+_INSERT_LEASE_TOMBSTONE_SQL: Final = """
+INSERT INTO fleet_lease_tombstone(lease_token, task_id, pool, submit_state, reason)
+VALUES($1::uuid, $2, $3, $4, $5)
+ON CONFLICT (lease_token) DO NOTHING
+RETURNING lease_token::text AS lease_token, task_id, pool, submit_state, reason, reclaimed_at
 """
 
 _GET_UNBOUND_LEASES_SQL: Final = (
@@ -644,20 +670,53 @@ class FleetState:
     async def release_never_dispatched(
         self, *, task_id: str, lease_token: str
     ) -> bool:
-        """Reclaim an unbound lease only if it was never dispatched.
+        """Reclaim a proven never-dispatched lease with a durable tombstone.
 
-        Only a fresh ``never_attempted`` lease is deleted; ``legacy_unknown``
-        and ``attempted`` unbound leases are untouched so an in-flight gateway
-        job is never assumed dead.
+        Only a fresh ``never_attempted`` unbound lease is reclaimable;
+        ``legacy_unknown`` and ``attempted`` rows remain untouched. The exact
+        lease token is tombstoned atomically before deletion, so a response-lost
+        retry can prove the same lease was already reclaimed without making the
+        task itself terminal or blocking a later safe re-admission.
         """
         task_id = _require_name(task_id, "task_id")
         lease_token = _require_name(lease_token, "lease_token")
         pg_pool = await self._ensure_pool()
-        async with pg_pool.acquire() as conn:
-            result = await conn.execute(_RELEASE_NEVER_DISPATCHED_SQL, task_id, lease_token)
-        if isinstance(result, str):
-            return result.startswith("DELETE 1")
-        return bool(result)
+        async with pg_pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(_GET_LEASE_FOR_UPDATE_SQL, task_id)
+            if row is None:
+                tombstone = await conn.fetchrow(_GET_LEASE_TOMBSTONE_SQL, lease_token)
+                return bool(
+                    tombstone is not None
+                    and tombstone["task_id"] == task_id
+                    and tombstone["submit_state"] == NEVER_ATTEMPTED
+                    and tombstone["reason"] == "never_dispatched_reclaimed"
+                )
+
+            lease = _lease_from_row(row)
+            if (
+                lease.lease_token != lease_token
+                or lease.job_id is not None
+                or lease.submit_state != NEVER_ATTEMPTED
+            ):
+                return False
+
+            existing_tombstone = await conn.fetchrow(_GET_LEASE_TOMBSTONE_SQL, lease_token)
+            if existing_tombstone is not None:
+                raise LeaseConflictError("active lease token is already tombstoned")
+            inserted = await conn.fetchrow(
+                _INSERT_LEASE_TOMBSTONE_SQL,
+                lease_token,
+                task_id,
+                lease.pool,
+                lease.submit_state,
+                "never_dispatched_reclaimed",
+            )
+            if inserted is None:
+                raise LeaseConflictError("lease tombstone changed during reclaim")
+            deleted = await conn.execute(_RELEASE_NEVER_DISPATCHED_SQL, task_id, lease_token)
+            if deleted != "DELETE 1":
+                raise LeaseConflictError("lease changed before never-dispatched reclaim")
+            return True
 
     async def reconcile_unbound_after_execution_plane_replacement(
         self,
@@ -767,6 +826,7 @@ class FleetState:
                 "liveness_reconciled": True,
                 "reason": "execution_plane_replaced_and_submission_unresolved",
                 "previous_submit_state": lease.submit_state,
+                "lease_token_sha256": hashlib.sha256(lease_token.encode()).hexdigest(),
                 "lease_claimed_at": lease.claimed_at.isoformat() if lease.claimed_at else None,
                 "lease_heartbeat_at": lease.heartbeat_at.isoformat() if lease.heartbeat_at else None,
                 "submit_attempted_at": (
@@ -781,6 +841,19 @@ class FleetState:
                 "executor_generation": executor_generation,
                 "mcp_generation": mcp_generation,
             }
+            existing_tombstone = await conn.fetchrow(_GET_LEASE_TOMBSTONE_SQL, lease_token)
+            if existing_tombstone is not None:
+                raise LeaseConflictError("active lease token is already tombstoned")
+            tombstone = await conn.fetchrow(
+                _INSERT_LEASE_TOMBSTONE_SQL,
+                lease_token,
+                task_id,
+                lease.pool,
+                lease.submit_state,
+                "execution_plane_replaced_and_submission_unresolved",
+            )
+            if tombstone is None:
+                raise LeaseConflictError("lease tombstone changed during generation reconciliation")
             await conn.execute(
                 _UPSERT_OUTCOME_SQL,
                 task_id,

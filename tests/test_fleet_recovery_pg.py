@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -62,6 +63,7 @@ async def schema_ready():
         async with state._pool.acquire() as conn:
             await conn.execute("DELETE FROM fleet_worker_lease")
             await conn.execute("DELETE FROM fleet_task_outcome")
+            await conn.execute("DELETE FROM fleet_lease_tombstone")
             await conn.execute("DELETE FROM fleet_worker_pool")
     await state.close()
 
@@ -158,6 +160,38 @@ class TestMigrationSemantics:
                 lease_token=lease.lease_token,
             )
             assert gone is True
+            # A response-lost retry proves the exact same reclaim from the
+            # durable lease tombstone without inserting another tombstone.
+            assert await schema_ready.release_never_dispatched(
+                task_id=lease.task_id,
+                lease_token=lease.lease_token,
+            ) is True
+            async with schema_ready._pool.acquire() as conn:
+                tombstones = await conn.fetch(
+                    "SELECT task_id, submit_state, reason FROM fleet_lease_tombstone "
+                    "WHERE lease_token = $1::uuid",
+                    lease.lease_token,
+                )
+            assert len(tombstones) == 1
+            assert tombstones[0]["task_id"] == lease.task_id
+            assert tombstones[0]["submit_state"] == "never_attempted"
+            assert tombstones[0]["reason"] == "never_dispatched_reclaimed"
+
+            # A lease tombstone is not a terminal task outcome: the same task
+            # may be safely admitted later with a fresh fence.
+            replacement = await schema_ready.acquire_slot(
+                pool_name=pool_name,
+                task_id=lease.task_id,
+                coordinator_id="r2-retry",
+                capacity=2,
+            )
+            assert replacement.acquired is True
+            assert replacement.lease is not None
+            assert replacement.lease.lease_token != lease.lease_token
+            assert await schema_ready.release_never_dispatched(
+                task_id=replacement.lease.task_id,
+                lease_token=replacement.lease.lease_token,
+            ) is True
         after = await schema_ready.list_unbound_leases(pool_name=pool_name)
         assert task_id in {lease.task_id for lease in after}, (
             "legacy_unknown in-flight row must survive reconcile"
@@ -314,6 +348,78 @@ class TestRollingUpgradeCompatibility:
             await conn.execute(
                 "DELETE FROM fleet_worker_lease WHERE task_id = $1", task_id
             )
+
+
+class TestLeaseTombstoneSemantics:
+    async def test_generation_reconcile_tombstones_exact_lease_once(self, schema_ready):
+        pool_name = f"test/r2/generation/{uuid.uuid4().hex[:8]}"
+        task_id = f"generation-{uuid.uuid4().hex[:8]}"
+        admission = await schema_ready.acquire_slot(
+            pool_name=pool_name,
+            task_id=task_id,
+            coordinator_id="old-coordinator",
+            capacity=2,
+        )
+        assert admission.acquired and admission.lease is not None
+        token = admission.lease.lease_token
+        await schema_ready.mark_submit_attempted(task_id=task_id, lease_token=token)
+
+        observed_at = datetime.now(UTC)
+        old_activity = observed_at - timedelta(minutes=10)
+        replacement_start = observed_at - timedelta(minutes=5)
+        async with schema_ready._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE fleet_worker_lease SET claimed_at=$2, heartbeat_at=$2, "
+                "submit_attempted_at=$2 WHERE task_id=$1",
+                task_id,
+                old_activity,
+            )
+
+        outcome = await schema_ready.reconcile_unbound_after_execution_plane_replacement(
+            task_id=task_id,
+            lease_token=token,
+            expected_submit_state="attempted",
+            gateway_started_at=replacement_start,
+            executor_started_at=replacement_start,
+            mcp_started_at=replacement_start,
+            observed_at=observed_at,
+            gateway_generation="gateway-new",
+            executor_generation="executor-new",
+            mcp_generation="mcp-new",
+        )
+
+        assert outcome is not None and outcome.status == "ambiguous"
+        assert await schema_ready.get_lease(task_id) is None
+        async with schema_ready._pool.acquire() as conn:
+            tombstones = await conn.fetch(
+                "SELECT task_id, submit_state, reason FROM fleet_lease_tombstone "
+                "WHERE lease_token=$1::uuid",
+                token,
+            )
+        assert len(tombstones) == 1
+        assert tombstones[0]["task_id"] == task_id
+        assert tombstones[0]["submit_state"] == "attempted"
+        assert tombstones[0]["reason"] == "execution_plane_replaced_and_submission_unresolved"
+
+        # Direct replay cannot create a second tombstone after the lease is gone.
+        replay = await schema_ready.reconcile_unbound_after_execution_plane_replacement(
+            task_id=task_id,
+            lease_token=token,
+            expected_submit_state="attempted",
+            gateway_started_at=replacement_start,
+            executor_started_at=replacement_start,
+            mcp_started_at=replacement_start,
+            observed_at=observed_at,
+            gateway_generation="gateway-new",
+            executor_generation="executor-new",
+            mcp_generation="mcp-new",
+        )
+        assert replay is None
+        async with schema_ready._pool.acquire() as conn:
+            assert await conn.fetchval(
+                "SELECT count(*) FROM fleet_lease_tombstone WHERE lease_token=$1::uuid",
+                token,
+            ) == 1
 
 
 class TestRaceFailClosed:

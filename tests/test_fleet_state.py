@@ -413,6 +413,46 @@ async def test_heartbeat_wrong_token_never_creates_or_releases_slot():
 
 
 @pytest.mark.asyncio
+async def test_never_dispatched_reclaim_tombstones_once_and_retry_is_idempotent():
+    lease = _lease_row()
+    lease["submit_state"] = "never_attempted"
+    lease["submit_attempted_at"] = None
+    tombstone = {
+        "lease_token": lease["lease_token"],
+        "task_id": lease["task_id"],
+        "pool": lease["pool"],
+        "submit_state": "never_attempted",
+        "reason": "never_dispatched_reclaimed",
+        "reclaimed_at": NOW,
+    }
+    conn = _FakeConn(
+        fetchrows=[lease, None, tombstone, None, tombstone],
+        execute_results=["DELETE 1"],
+    )
+    state = _state(conn)
+
+    assert await state.release_never_dispatched(
+        task_id=lease["task_id"], lease_token=lease["lease_token"]
+    ) is True
+    assert await state.release_never_dispatched(
+        task_id=lease["task_id"], lease_token=lease["lease_token"]
+    ) is True
+
+    inserts = [
+        call
+        for call in conn.calls
+        if call[0] == "fetchrow" and call[1] == fleet_state_module._INSERT_LEASE_TOMBSTONE_SQL
+    ]
+    deletes = [
+        call
+        for call in conn.calls
+        if call[0] == "execute" and call[1] == fleet_state_module._RELEASE_NEVER_DISPATCHED_SQL
+    ]
+    assert len(inserts) == 1
+    assert len(deletes) == 1
+
+
+@pytest.mark.asyncio
 async def test_generation_reconciliation_persists_ambiguous_outcome_before_release():
     lease = _lease_row()
     lease["submit_state"] = "attempted"
@@ -433,8 +473,16 @@ async def test_generation_reconciliation_persists_ambiguous_outcome_before_relea
         },
         "reported_at": observed,
     }
+    tombstone = {
+        "lease_token": lease["lease_token"],
+        "task_id": "task-1",
+        "pool": "ssh-gateway/sshd",
+        "submit_state": "attempted",
+        "reason": "execution_plane_replaced_and_submission_unresolved",
+        "reclaimed_at": observed,
+    }
     conn = _FakeConn(
-        fetchrows=[lease, None, outcome],
+        fetchrows=[lease, None, None, tombstone, outcome],
         execute_results=["INSERT 0 1", "DELETE 1"],
     )
 
@@ -452,11 +500,22 @@ async def test_generation_reconciliation_persists_ambiguous_outcome_before_relea
     )
 
     assert result is not None and result.status == "ambiguous"
-    writes = [(sql, args) for kind, sql, args in conn.calls if kind == "execute"]
-    assert [sql for sql, _ in writes] == [
-        fleet_state_module._UPSERT_OUTCOME_SQL,
-        fleet_state_module._DELETE_LEASE_SQL,
+    mutations = [
+        (kind, sql)
+        for kind, sql, _ in conn.calls
+        if sql
+        in {
+            fleet_state_module._INSERT_LEASE_TOMBSTONE_SQL,
+            fleet_state_module._UPSERT_OUTCOME_SQL,
+            fleet_state_module._DELETE_LEASE_SQL,
+        }
     ]
+    assert mutations == [
+        ("fetchrow", fleet_state_module._INSERT_LEASE_TOMBSTONE_SQL),
+        ("execute", fleet_state_module._UPSERT_OUTCOME_SQL),
+        ("execute", fleet_state_module._DELETE_LEASE_SQL),
+    ]
+    writes = [(sql, args) for kind, sql, args in conn.calls if kind == "execute"]
     assert writes[0][1][3] == "ambiguous"
     assert writes[1][1] == ("task-1", lease["lease_token"])
 

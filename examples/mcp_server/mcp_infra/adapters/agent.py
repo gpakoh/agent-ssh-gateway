@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -65,7 +66,7 @@ from agent_tasks import (
 )
 from agent_tools import project_run_agent as _project_run_agent
 from gateway_client import GatewayClientError
-from mcp_audit import redact_secrets
+from mcp_audit import AuditWriteError, McpAuditEvent, redact_secrets
 from mcp_client_tools import run_project_command
 from opencode_tools import project_run_opencode as _project_run_opencode
 from tool_results import tool_error
@@ -78,6 +79,12 @@ from examples.mcp_server.agent_sources import (
 from examples.mcp_server.fleet_runtime import (
     ExecutionPlaneRecoveryBoundary,
     get_fleet_runtime,
+)
+from examples.mcp_server.fleet_state import (
+    ATTEMPTED,
+    LEGACY_UNKNOWN,
+    LeaseConflictError,
+    LeaseNotFoundError,
 )
 from examples.mcp_server.mcp_infra._server_ref import server_attr
 from examples.mcp_server.mcp_infra.adapters.gateway import _split_csv_or_lines, _split_lines
@@ -743,6 +750,229 @@ def gateway_archive_agent_task(project: str, task_id: str) -> dict[str, Any]:
     )
 
 
+async def gateway_fleet_status() -> dict[str, Any]:
+    """Inspect fleet capacity and classify lease safety without mutation."""
+
+    async def _fn() -> dict[str, Any]:
+        fleet = await get_fleet_runtime()
+        if fleet is None:
+            return {"enabled": False, "reason": "fleet_disabled"}
+        snapshot = await fleet.fleet_status(
+            job_status_fn=lambda job_id: _server_client().job_status(job_id)
+        )
+        return {"enabled": True, **snapshot}
+
+    return await run_tool_async(
+        tool="fleet_status",
+        title="Fleet status",
+        fn=_fn,
+        success_text="Read fleet status.",
+    )
+
+
+async def gateway_fleet_reconcile_unbound(
+    task_id: str,
+    lease_fence: str,
+    expected_submit_state: str,
+    acknowledge: bool = False,
+    reason: str = "",
+) -> dict[str, Any]:
+    """Explicitly reconcile one exact historical unbound fleet lease."""
+
+    async def _fn() -> dict[str, Any]:
+        if acknowledge is not True:
+            return tool_error(
+                tool="fleet_reconcile_unbound",
+                code="POLICY_DENIED",
+                message="Explicit acknowledge=true is required for ambiguous fleet reconciliation.",
+                retryable=False,
+            )
+        normalized_reason = reason.strip() if isinstance(reason, str) else ""
+        if not normalized_reason or len(normalized_reason) > 500 or "\x00" in normalized_reason:
+            return tool_error(
+                tool="fleet_reconcile_unbound",
+                code="INVALID_INPUT",
+                message="reason must be 1..500 non-NUL characters.",
+                retryable=False,
+            )
+        if expected_submit_state not in {ATTEMPTED, LEGACY_UNKNOWN}:
+            return tool_error(
+                tool="fleet_reconcile_unbound",
+                code="INVALID_INPUT",
+                message="expected_submit_state must be attempted or legacy_unknown.",
+                retryable=False,
+            )
+        if not isinstance(lease_fence, str):
+            return tool_error(
+                tool="fleet_reconcile_unbound",
+                code="INVALID_INPUT",
+                message="lease_fence must be a UUID string.",
+                retryable=False,
+            )
+        try:
+            lease_token = str(uuid.UUID(lease_fence.strip()))
+        except (ValueError, AttributeError):
+            return tool_error(
+                tool="fleet_reconcile_unbound",
+                code="INVALID_INPUT",
+                message="lease_fence must be a valid UUID.",
+                retryable=False,
+            )
+
+        fleet = await get_fleet_runtime()
+        if fleet is None:
+            return tool_error(
+                tool="fleet_reconcile_unbound",
+                code="CHECK_FAILED",
+                message="Fleet admission is disabled; there is no active fleet runtime to reconcile.",
+                retryable=False,
+            )
+
+        lease = await fleet.state.get_lease(task_id)
+        if lease is None:
+            try:
+                return await fleet.reconcile_unbound_lease(
+                    task_id=task_id,
+                    lease_token=lease_token,
+                    expected_submit_state=expected_submit_state,
+                    resolved_job_id=None,
+                    recovery_boundary=None,
+                )
+            except LeaseNotFoundError:
+                return tool_error(
+                    tool="fleet_reconcile_unbound",
+                    code="FILE_NOT_FOUND",
+                    message="No matching active or previously reconciled fleet lease exists.",
+                    retryable=False,
+                )
+        if lease.pool != fleet.pool_name:
+            return tool_error(
+                tool="fleet_reconcile_unbound",
+                code="WORKSPACE_CONTENDED",
+                message="Fleet lease belongs to a different pool.",
+                retryable=True,
+            )
+        if lease.lease_token != lease_token or lease.submit_state != expected_submit_state:
+            return tool_error(
+                tool="fleet_reconcile_unbound",
+                code="WORKSPACE_CONTENDED",
+                message="Fleet lease token or submission state changed.",
+                retryable=True,
+            )
+
+        resolver = _trusted_fleet_job_resolver()
+        try:
+            resolved_job_id = await asyncio.to_thread(resolver, task_id)
+        except Exception as exc:
+            return tool_error(
+                tool="fleet_reconcile_unbound",
+                code="CHECK_FAILED",
+                message="Trusted Gateway submission identity could not be resolved.",
+                retryable=True,
+                details={"error_class": type(exc).__name__},
+            )
+
+        normalized_resolved_job_id = (
+            resolved_job_id.strip()
+            if isinstance(resolved_job_id, str) and resolved_job_id.strip()
+            else None
+        )
+        if lease.job_id is not None:
+            if normalized_resolved_job_id == lease.job_id:
+                return {
+                    "action": "already_bound_existing_job",
+                    "task_id": task_id,
+                    "job_id": lease.job_id,
+                    "released": False,
+                }
+            return tool_error(
+                tool="fleet_reconcile_unbound",
+                code="WORKSPACE_CONTENDED",
+                message="Bound fleet lease does not match trusted submission identity.",
+                retryable=True,
+            )
+
+        recovery_boundary = None
+        if normalized_resolved_job_id is None:
+            recovery_boundary = await _execution_plane_recovery_boundary()
+            if recovery_boundary is None:
+                return tool_error(
+                    tool="fleet_reconcile_unbound",
+                    code="CHECK_FAILED",
+                    message="Replacement-generation evidence is unavailable; ambiguous lease retained.",
+                    retryable=True,
+                )
+
+        correlation_id = uuid.uuid4().hex
+        audit_metadata = {
+            "task_id": task_id,
+            "lease_fence_sha256": hashlib.sha256(lease_token.encode()).hexdigest(),
+            "expected_submit_state": expected_submit_state,
+            "reason": normalized_reason,
+            "acknowledged": True,
+        }
+        try:
+            server_attr("get_audit_logger")().append_required(
+                McpAuditEvent(
+                    event_type="mcp.fleet_reconcile_intent",
+                    tool="fleet_reconcile_unbound",
+                    action="reconcile_unbound_lease",
+                    decision="allow",
+                    reason=normalized_reason,
+                    request_id=correlation_id,
+                    metadata=audit_metadata,
+                )
+            )
+        except AuditWriteError:
+            return tool_error(
+                tool="fleet_reconcile_unbound",
+                code="AUDIT_UNAVAILABLE",
+                message="Audit log unavailable; fleet reconciliation refused.",
+                retryable=True,
+            )
+
+        try:
+            result = await fleet.reconcile_unbound_lease(
+                task_id=task_id,
+                lease_token=lease_token,
+                expected_submit_state=expected_submit_state,
+                resolved_job_id=resolved_job_id,
+                recovery_boundary=recovery_boundary,
+            )
+        except (LeaseConflictError, LeaseNotFoundError) as exc:
+            return tool_error(
+                tool="fleet_reconcile_unbound",
+                code="WORKSPACE_CONTENDED",
+                message="Fleet lease changed during reconciliation.",
+                retryable=True,
+                details={"error_class": type(exc).__name__},
+            )
+
+        try:
+            server_attr("get_audit_logger")().append(
+                McpAuditEvent(
+                    event_type="mcp.fleet_reconcile_result",
+                    tool="fleet_reconcile_unbound",
+                    action="reconcile_unbound_lease",
+                    decision="allow" if result.get("action") != "retained" else "block",
+                    reason=str(result.get("reason") or result.get("action") or "reconciled"),
+                    request_id=correlation_id,
+                    metadata={**audit_metadata, "result_action": result.get("action")},
+                )
+            )
+        except Exception:
+            pass
+        result["correlation_id"] = correlation_id
+        return result
+
+    return await run_tool_async(
+        tool="fleet_reconcile_unbound",
+        title="Fleet reconcile unbound lease",
+        fn=_fn,
+        success_text="Reconciled fleet lease.",
+    )
+
+
 _OPENCODE_FLEET_ADMISSION_ENV = "MCP_OPENCODE_FLEET_ADMISSION_ENABLED"
 
 
@@ -907,7 +1137,6 @@ async def _submit_agent_with_fleet(
     if fleet is None:
         return await asyncio.to_thread(submit_sync, None)
     trusted_job_resolver = _trusted_fleet_job_resolver()
-    recovery_boundary = await _execution_plane_recovery_boundary()
     job_result_fn = (
         (lambda jid: _server_client().job_result(jid))
         if terminal_observer is not None
@@ -924,7 +1153,7 @@ async def _submit_agent_with_fleet(
         observe_submitted_job=observe_submitted_job,
         retry_attempted_unbound=True,
         trusted_job_resolver=trusted_job_resolver,
-        recovery_boundary=recovery_boundary,
+        recovery_boundary=None,
         sweep_before_submit=sweep_before_submit,
     )
 
@@ -986,9 +1215,6 @@ async def gateway_run_agents(project: str, task_ids: str) -> dict[str, Any]:
         fleet = await get_fleet_runtime()
         terminal_observer = _agent_router_terminal_observer()
         trusted_job_resolver = _trusted_fleet_job_resolver() if fleet is not None else None
-        recovery_boundary = (
-            await _execution_plane_recovery_boundary() if fleet is not None else None
-        )
 
         def status_fn(job_id: str) -> dict[str, Any]:
             return _server_client().job_status(job_id)
@@ -1004,7 +1230,7 @@ async def gateway_run_agents(project: str, task_ids: str) -> dict[str, Any]:
                     job_result_fn=detailed_result_fn,
                     terminal_observer=terminal_observer,
                     trusted_job_resolver=trusted_job_resolver,
-                    recovery_boundary=recovery_boundary,
+                    recovery_boundary=None,
                 )
             except Exception:
                 pass
@@ -1031,7 +1257,7 @@ async def gateway_run_agents(project: str, task_ids: str) -> dict[str, Any]:
                         observe_submitted_job=True,
                         retry_attempted_unbound=True,
                         trusted_job_resolver=trusted_job_resolver,
-                        recovery_boundary=recovery_boundary,
+                        recovery_boundary=None,
                         sweep_before_submit=False,
                     )
                 return result
@@ -1066,6 +1292,8 @@ def register_all() -> None:
     register_tool("cancel_agent_task")(gateway_cancel_agent_task)
     register_tool("retry_agent_task")(gateway_retry_agent_task)
     register_tool("archive_agent_task")(gateway_archive_agent_task)
+    register_tool("fleet_status")(gateway_fleet_status)
+    register_tool("fleet_reconcile_unbound")(gateway_fleet_reconcile_unbound)
     register_tool("run_opencode")(gateway_run_opencode)
     register_tool("run_agent")(gateway_run_agent)
     register_tool("run_agents")(gateway_run_agents)

@@ -994,6 +994,60 @@ class TestDeploymentConcurrencySerialization:
         assert concurrency.get("cancel-in-progress") is False
 
 
+class TestFleetPostgresCiGate:
+    """Fleet recovery transactions must execute against disposable real Postgres."""
+
+    def test_fleet_postgres_job_is_pr_only_and_docs_gated(self):
+        job = _load_workflow(CI_WORKFLOW_PATH)["jobs"]["fleet-postgres"]
+        assert job["needs"] == ["scope"]
+        condition = job["if"]
+        assert "github.event_name == 'pull_request'" in condition
+        assert "needs.scope.outputs.full_ci == 'true'" in condition
+        assert "github.server_url != 'https://github.com'" in condition
+        assert "always()" not in condition
+
+    def test_fleet_postgres_bootstrap_does_not_assume_python_module_pip(self):
+        job = _load_workflow(CI_WORKFLOW_PATH)["jobs"]["fleet-postgres"]
+        install = next(
+            item
+            for item in job["steps"]
+            if item.get("name") == "Install Python 3.12 test environment"
+        )
+        run = install["run"]
+        assert "pip_install=(python -m pip)" in run
+        assert "command -v pip3" in run
+        assert "command -v pip" in run
+        assert "python -m venv .ci-bootstrap-venv" in run
+        assert '"${pip_install[@]}" --version' in run
+        assert '"${pip_install[@]}" install uv' in run
+        assert "pip_install=(python3 -m pip)" not in run
+
+    def test_fleet_postgres_job_uses_isolated_service_and_forbids_skips(self):
+        job = _load_workflow(CI_WORKFLOW_PATH)["jobs"]["fleet-postgres"]
+        service = job["services"]["postgres"]
+        assert service["image"] == "pgvector/pgvector:pg16"
+        assert service["env"]["POSTGRES_DB"] == "fleet_test"
+        assert service["env"]["POSTGRES_PASSWORD"] == "fleet-ci-only"
+        assert "pg_isready -U postgres -d fleet_test" in service["options"]
+        assert job["env"]["FLEET_TEST_PG_DSN"] == (
+            "postgresql://postgres:fleet-ci-only@postgres:5432/fleet_test"
+        )
+        step = next(
+            item
+            for item in job["steps"]
+            if item.get("name") == "Fleet recovery real-Postgres regressions"
+        )
+        run = step["run"]
+        assert "pytest tests/test_fleet_recovery_pg.py" in run
+        assert "--junitxml=fleet-pg-results.xml" in run
+        assert "skipped != 0" in run
+        assert "tests <= 0" in run
+        assert "failures != 0" in run and "errors != 0" in run
+        assert "raise SystemExit(1)" in run
+        assert "|| true" not in run
+        assert "continue-on-error" not in step
+
+
 class TestE2eFailsClosedWithoutBrowserToolchain:
     """CI-004: browser coverage is required evidence, never a soft skip."""
 
