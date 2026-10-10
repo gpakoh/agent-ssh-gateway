@@ -978,6 +978,171 @@ async def _verify_site_audit_live(
     return {"targets": target_snapshot, "protected": protected_snapshot}
 
 
+def _site_audit_pending_maps(
+    pending: dict[str, Any],
+    *,
+    source_revision: str,
+    target_images: dict[str, dict[str, str]],
+) -> tuple[
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, Any]],
+]:
+    if pending.get("schema_version") != 1 or pending.get("status") != "pending":
+        raise RuntimeError("Site Audit pending evidence schema/status is invalid")
+    if pending.get("source_revision") != source_revision:
+        raise RuntimeError("Site Audit pending evidence source revision mismatch")
+    generation = pending.get("deploy_generation")
+    if not isinstance(generation, str) or not re.fullmatch(
+        r"[0-9a-f]{12}-[0-9]{8}T[0-9]{6}Z", generation
+    ):
+        raise RuntimeError("Site Audit pending deploy generation is malformed")
+
+    previous = pending.get("previous")
+    target = pending.get("target")
+    protected = pending.get("protected_before")
+    if not isinstance(previous, list) or len(previous) != len(_SITE_AUDIT_TARGETS):
+        raise RuntimeError("Site Audit pending rollback evidence must contain exactly five targets")
+    if not isinstance(target, list) or len(target) != len(_SITE_AUDIT_TARGETS):
+        raise RuntimeError("Site Audit pending target evidence must contain exactly five targets")
+    if not isinstance(protected, list) or len(protected) != len(_SITE_AUDIT_PROTECTED_CONTAINERS):
+        raise RuntimeError("Site Audit pending protected-container evidence is incomplete")
+
+    previous_by_service: dict[str, dict[str, Any]] = {}
+    target_by_service: dict[str, dict[str, Any]] = {}
+    protected_by_name: dict[str, dict[str, Any]] = {}
+    for item in previous:
+        if not isinstance(item, dict):
+            raise RuntimeError("Site Audit pending rollback target evidence is malformed")
+        service = item.get("service")
+        if not isinstance(service, str) or service in previous_by_service:
+            raise RuntimeError("Site Audit pending rollback service set is malformed")
+        previous_by_service[service] = item
+    for item in target:
+        if not isinstance(item, dict):
+            raise RuntimeError("Site Audit pending target evidence is malformed")
+        service = item.get("service")
+        if not isinstance(service, str) or service in target_by_service:
+            raise RuntimeError("Site Audit pending target service set is malformed")
+        target_by_service[service] = item
+    for item in protected:
+        if not isinstance(item, dict):
+            raise RuntimeError("Site Audit pending protected evidence is malformed")
+        container = item.get("container")
+        if not isinstance(container, str) or container in protected_by_name:
+            raise RuntimeError("Site Audit pending protected-container set is malformed")
+        protected_by_name[container] = item
+
+    expected_services = {service for service, _container, _image in _SITE_AUDIT_TARGETS}
+    if set(previous_by_service) != expected_services or set(target_by_service) != expected_services:
+        raise RuntimeError("Site Audit pending service set differs from guarded contract")
+    if set(protected_by_name) != set(_SITE_AUDIT_PROTECTED_CONTAINERS):
+        raise RuntimeError("Site Audit pending protected-container set changed")
+
+    for service, container, _image_name in _SITE_AUDIT_TARGETS:
+        old = previous_by_service[service]
+        tgt = target_by_service[service]
+        if old.get("container") != container or tgt.get("container") != container:
+            raise RuntimeError("Site Audit pending container mapping changed")
+        if tgt.get("image") != target_images[service]["image"]:
+            raise RuntimeError("Site Audit pending target image set changed")
+        for item, fields, label in (
+            (old, ("image_id", "rollback_ref", "config_image", "container_id"), "rollback"),
+            (tgt, ("image_id",), "target"),
+        ):
+            for field in fields:
+                value = item.get(field)
+                if not isinstance(value, str) or not value or "\t" in value or "\n" in value:
+                    raise RuntimeError(f"Site Audit pending {label} {field} evidence is malformed")
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", old["image_id"]):
+            raise RuntimeError("Site Audit pending rollback image ID is malformed")
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", tgt["image_id"]):
+            raise RuntimeError("Site Audit pending target image ID is malformed")
+        restart_count = old.get("restart_count")
+        if not isinstance(restart_count, int) or isinstance(restart_count, bool) or restart_count < 0:
+            raise RuntimeError("Site Audit pending rollback restart evidence is malformed")
+
+    for container in _SITE_AUDIT_PROTECTED_CONTAINERS:
+        item = protected_by_name[container]
+        for field in ("container_id", "started_at"):
+            value = item.get(field)
+            if not isinstance(value, str) or not value or "\t" in value or "\n" in value:
+                raise RuntimeError(f"Site Audit pending protected {field} evidence is malformed")
+    return previous_by_service, target_by_service, protected_by_name
+
+
+async def _verify_site_audit_recovery(
+    client: Any,
+    *,
+    pending: dict[str, Any],
+    source_revision: str,
+    target_images: dict[str, dict[str, str]],
+) -> dict[str, Any]:
+    previous, _target, protected = _site_audit_pending_maps(
+        pending,
+        source_revision=source_revision,
+        target_images=target_images,
+    )
+    pre_mutation = True
+    rolled_back = True
+    live_targets: dict[str, dict[str, Any]] = {}
+    for service, container, _image_name in _SITE_AUDIT_TARGETS:
+        old = previous[service]
+        inspected = _single_inspect(await client.inspect(container, max_lines=10))
+        config = inspected.get("Config")
+        runtime = inspected.get("State")
+        if not isinstance(config, dict) or not isinstance(runtime, dict):
+            raise RuntimeError("Site Audit recovery target metadata is incomplete")
+        health = runtime.get("Health")
+        if not isinstance(health, dict) or health.get("Status") != "healthy":
+            raise RuntimeError("Site Audit recovery target is not Docker-healthy")
+        if inspected.get("Image") != old["image_id"]:
+            pre_mutation = False
+            rolled_back = False
+        if (
+            inspected.get("Id") != old["container_id"]
+            or config.get("Image") != old["config_image"]
+            or inspected.get("RestartCount") != old["restart_count"]
+        ):
+            pre_mutation = False
+        if config.get("Image") != old["rollback_ref"] or inspected.get("RestartCount") != 0:
+            rolled_back = False
+        live_targets[container] = {
+            "container_id": inspected.get("Id"),
+            "image_id": inspected.get("Image"),
+            "image": config.get("Image"),
+            "restart_count": inspected.get("RestartCount"),
+            "health": health.get("Status"),
+        }
+
+    live_protected: dict[str, dict[str, Any]] = {}
+    for container in _SITE_AUDIT_PROTECTED_CONTAINERS:
+        expected = protected[container]
+        inspected = _single_inspect(await client.inspect(container, max_lines=10))
+        runtime = inspected.get("State")
+        if not isinstance(runtime, dict):
+            raise RuntimeError("Site Audit recovery protected metadata is incomplete")
+        if inspected.get("Id") != expected["container_id"] or runtime.get("StartedAt") != expected["started_at"]:
+            raise RuntimeError("Site Audit protected dependency/CRM identity changed during recovery")
+        live_protected[container] = {
+            "container_id": inspected.get("Id"),
+            "started_at": runtime.get("StartedAt"),
+        }
+
+    if pre_mutation:
+        outcome = "pre_mutation_restored"
+    elif rolled_back:
+        outcome = "rolled_back_to_previous_images"
+    else:
+        raise RuntimeError("Site Audit recovery result is neither pre-mutation nor proven rollback")
+    return {
+        "outcome": outcome,
+        "targets": live_targets,
+        "protected": live_protected,
+        "deploy_generation": pending["deploy_generation"],
+    }
+
+
 def _site_audit_helper_payload(client: Any, run: RunResult) -> tuple[dict[str, Any] | None, str]:
     output_tail = _sanitize_deploy_tail(client, (run.stdout or "") + "\n" + (run.stderr or ""))
     try:
@@ -1128,8 +1293,47 @@ async def _docker_deploy_site_audit_impl(
     )
 
     if ambiguous:
-        recovery = await client.run_site_audit_deploy_contract_helper(
+        try:
+            recovery_plan = await _prepare_site_audit_deploy(
+                candidate_project=candidate_project,
+                expected_head_sha=expected_head_sha,
+                expected_script_blob_sha=expected_script_blob_sha,
+                expected_script_sha256=expected_script_sha256,
+                source_revision=source_revision,
+                image_namespace=image_namespace,
+            )
+            if recovery_plan["target_images"] != plan["target_images"]:
+                raise RuntimeError("Site Audit five-image set changed before recovery")
+        except (ValueError, RuntimeError) as exc:
+            return tool_error(
+                tool="docker_deploy_site_audit",
+                code="DEPLOY_CONTRACT_OUTCOME_AMBIGUOUS",
+                message=(
+                    "Site Audit deploy outcome is unknown and recovery preflight no longer "
+                    f"matches the confirmed candidate: {exc}"
+                ),
+                result={
+                    "source_revision": source_revision,
+                    "target_images": plan["target_images"],
+                    "output_tail": output_tail,
+                },
+                source="docker",
+                retryable=False,
+                hint="Do not retry deploy. Reconcile the durable pending/LKG state with the original candidate identity.",
+            )
+
+        recovery_kwargs = {
             **helper_kwargs,
+            "helper_image_id": recovery_plan["helper_image_id"],
+            "candidate_root": recovery_plan["candidate_root"],
+            "operator_root": recovery_plan["operator_root"],
+            "script_path": recovery_plan["script_path"],
+            "env_file": recovery_plan["env_file"],
+            "state_volume": recovery_plan["state_volume"],
+            "image_namespace": recovery_plan["image_namespace"],
+        }
+        recovery = await client.run_site_audit_deploy_contract_helper(
+            **recovery_kwargs,
             recover=True,
         )
         recovery_payload, recovery_tail = _site_audit_helper_payload(client, recovery)
@@ -1137,32 +1341,68 @@ async def _docker_deploy_site_audit_impl(
             recovery.exit_code == 0
             and isinstance(recovery_payload, dict)
             and recovery_payload.get("exit_code") == 0
+            and recovery_payload.get("mode") == "recover"
+            and recovery_payload.get("pending_exists") is False
         ):
-            try:
-                accepted = await _accept_site_audit_payload(
-                    client,
-                    payload=recovery_payload,
-                    source_revision=source_revision,
-                    target_images=plan["target_images"],
-                )
-            except RuntimeError:
-                accepted = None
-            if accepted is not None:
-                return tool_success(
-                    "docker_deploy_site_audit",
-                    result={
-                        "source_revision": source_revision,
-                        "script_blob_sha": expected_script_blob_sha,
-                        "script_sha256": expected_script_sha256,
-                        "target_images": plan["target_images"],
-                        "reconciled_after_unknown": True,
-                        "deployment": accepted,
-                        "output_tail": recovery_tail,
-                    },
-                    source="docker",
-                    dangerous=True,
-                    redacted=True,
-                )
+            state = recovery_payload.get("state")
+            if isinstance(state, dict) and state.get("source_revision") == source_revision:
+                try:
+                    accepted = await _accept_site_audit_payload(
+                        client,
+                        payload=recovery_payload,
+                        source_revision=source_revision,
+                        target_images=plan["target_images"],
+                    )
+                except RuntimeError:
+                    accepted = None
+                if accepted is not None:
+                    return tool_success(
+                        "docker_deploy_site_audit",
+                        result={
+                            "source_revision": source_revision,
+                            "script_blob_sha": expected_script_blob_sha,
+                            "script_sha256": expected_script_sha256,
+                            "target_images": plan["target_images"],
+                            "reconciled_after_unknown": True,
+                            "recovery_result": "target_accepted",
+                            "deployment": accepted,
+                            "output_tail": recovery_tail,
+                        },
+                        source="docker",
+                        dangerous=True,
+                        redacted=True,
+                    )
+
+            pending_before = recovery_payload.get("pending_before")
+            if isinstance(pending_before, dict):
+                try:
+                    recovered = await _verify_site_audit_recovery(
+                        client,
+                        pending=pending_before,
+                        source_revision=source_revision,
+                        target_images=plan["target_images"],
+                    )
+                except RuntimeError:
+                    recovered = None
+                if recovered is not None:
+                    return tool_error(
+                        tool="docker_deploy_site_audit",
+                        code="DEPLOY_CONTRACT_RECOVERED_NOT_DEPLOYED",
+                        message=(
+                            "Site Audit unknown outcome was safely reconciled without accepting "
+                            "the requested target generation"
+                        ),
+                        result={
+                            "source_revision": source_revision,
+                            "target_images": plan["target_images"],
+                            "reconciled_after_unknown": True,
+                            "recovery": recovered,
+                            "output_tail": recovery_tail,
+                        },
+                        source="docker",
+                        retryable=True,
+                        hint="Run a fresh preflight and create a new confirmation before any later deploy attempt.",
+                    )
         return tool_error(
             tool="docker_deploy_site_audit",
             code="DEPLOY_CONTRACT_OUTCOME_AMBIGUOUS",

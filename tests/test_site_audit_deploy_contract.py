@@ -151,13 +151,45 @@ class FakeSiteAuditClient:
         return [self.inspect_rows[name]]
 
 
-def _payload(state: dict | None = None, *, pending_exists: bool = False) -> str:
+def _pending() -> dict:
+    state = _state()
+    targets = _targets()
+    target = []
+    for item in state["deployed"]:
+        target.append(
+            {
+                "service": item["service"],
+                "container": item["container"],
+                "image": targets[item["service"]]["image"],
+                "image_id": item["image_id"],
+            }
+        )
+    return {
+        "schema_version": 1,
+        "status": "pending",
+        "source_revision": HEAD,
+        "deploy_generation": GENERATION,
+        "previous": state["previous"],
+        "target": target,
+        "protected_before": state["protected_containers_unchanged"],
+    }
+
+
+def _payload(
+    state: dict | None = None,
+    *,
+    pending_exists: bool = False,
+    mode: str = "deploy",
+    pending_before: dict | None = None,
+) -> str:
     return json.dumps(
         {
             "version": 1,
+            "mode": mode,
             "exit_code": 0,
             "output_tail": "site audit deploy ok",
-            "state": state or _state(),
+            "state": state if state is not None else _state(),
+            "pending_before": pending_before or {},
             "pending_exists": pending_exists,
         }
     )
@@ -503,7 +535,14 @@ async def test_site_audit_helper_timeout_stays_ambiguous_after_failed_recovery(m
 @pytest.mark.asyncio
 async def test_site_audit_unknown_outcome_can_reconcile_to_verified_success(monkeypatch):
     client = FakeSiteAuditClient(
-        [RunResult("", "outer timeout", -1), RunResult(_payload(), "", 0)]
+        [
+            RunResult("", "outer timeout", -1),
+            RunResult(
+                _payload(mode="recover", pending_before=_pending()),
+                "",
+                0,
+            ),
+        ]
     )
     monkeypatch.setattr(docker_adapter, "_prepare_site_audit_deploy", AsyncMock(return_value=_plan()))
     monkeypatch.setattr(docker_adapter, "_docker_client", lambda: client)
@@ -522,8 +561,128 @@ async def test_site_audit_unknown_outcome_can_reconcile_to_verified_success(monk
 
     assert result["ok"] is True
     assert result["result"]["reconciled_after_unknown"] is True
+    assert result["result"]["recovery_result"] == "target_accepted"
     assert [call["recover"] for call in client.helper_calls] == [False, True]
     sleep.assert_awaited_once_with(docker_adapter._SITE_AUDIT_VERIFY_STABILITY_SECONDS)
+
+
+@pytest.mark.asyncio
+async def test_site_audit_unknown_outcome_can_reconcile_pre_mutation_state(monkeypatch):
+    pending_before = _pending()
+    client = FakeSiteAuditClient(
+        [
+            RunResult("", "outer timeout", -1),
+            RunResult(
+                _payload(state={}, mode="recover", pending_before=pending_before),
+                "",
+                0,
+            ),
+        ]
+    )
+    for old in pending_before["previous"]:
+        client.inspect_rows[old["container"]] = {
+            "Id": old["container_id"],
+            "Image": old["image_id"],
+            "RestartCount": old["restart_count"],
+            "Config": {"Image": old["config_image"], "Labels": {}},
+            "State": {
+                "StartedAt": "2026-10-10T22:00:00Z",
+                "Health": {"Status": "healthy", "FailingStreak": 0},
+            },
+        }
+    monkeypatch.setattr(
+        docker_adapter,
+        "_prepare_site_audit_deploy",
+        AsyncMock(return_value=_plan()),
+    )
+    monkeypatch.setattr(docker_adapter, "_docker_client", lambda: client)
+
+    result = await docker_adapter._docker_deploy_site_audit_impl(
+        candidate_project=CANDIDATE,
+        expected_head_sha=HEAD,
+        expected_script_blob_sha=BLOB,
+        expected_script_sha256=SCRIPT_SHA,
+        source_revision=HEAD,
+        image_namespace=NAMESPACE,
+        target_images=_targets(),
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "DEPLOY_CONTRACT_RECOVERED_NOT_DEPLOYED"
+    assert result["error"]["retryable"] is True
+    assert result["result"]["recovery"]["outcome"] == "pre_mutation_restored"
+    assert [call["recover"] for call in client.helper_calls] == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_site_audit_unknown_outcome_can_reconcile_proven_rollback(monkeypatch):
+    pending_before = _pending()
+    client = FakeSiteAuditClient(
+        [
+            RunResult("", "outer timeout", -1),
+            RunResult(
+                _payload(state={}, mode="recover", pending_before=pending_before),
+                "",
+                0,
+            ),
+        ]
+    )
+    for index, old in enumerate(pending_before["previous"], start=1):
+        client.inspect_rows[old["container"]] = {
+            "Id": f"rollback-{index}",
+            "Image": old["image_id"],
+            "RestartCount": 0,
+            "Config": {"Image": old["rollback_ref"], "Labels": {}},
+            "State": {
+                "StartedAt": "2026-10-11T02:00:00Z",
+                "Health": {"Status": "healthy", "FailingStreak": 0},
+            },
+        }
+    monkeypatch.setattr(
+        docker_adapter,
+        "_prepare_site_audit_deploy",
+        AsyncMock(return_value=_plan()),
+    )
+    monkeypatch.setattr(docker_adapter, "_docker_client", lambda: client)
+
+    result = await docker_adapter._docker_deploy_site_audit_impl(
+        candidate_project=CANDIDATE,
+        expected_head_sha=HEAD,
+        expected_script_blob_sha=BLOB,
+        expected_script_sha256=SCRIPT_SHA,
+        source_revision=HEAD,
+        image_namespace=NAMESPACE,
+        target_images=_targets(),
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "DEPLOY_CONTRACT_RECOVERED_NOT_DEPLOYED"
+    assert result["result"]["recovery"]["outcome"] == "rolled_back_to_previous_images"
+    assert [call["recover"] for call in client.helper_calls] == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_site_audit_unknown_outcome_rechecks_candidate_before_recovery(monkeypatch):
+    client = FakeSiteAuditClient([RunResult("", "outer timeout", -1)])
+    prepare = AsyncMock(side_effect=[_plan(), ValueError("candidate HEAD changed")])
+    monkeypatch.setattr(docker_adapter, "_prepare_site_audit_deploy", prepare)
+    monkeypatch.setattr(docker_adapter, "_docker_client", lambda: client)
+
+    result = await docker_adapter._docker_deploy_site_audit_impl(
+        candidate_project=CANDIDATE,
+        expected_head_sha=HEAD,
+        expected_script_blob_sha=BLOB,
+        expected_script_sha256=SCRIPT_SHA,
+        source_revision=HEAD,
+        image_namespace=NAMESPACE,
+        target_images=_targets(),
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "DEPLOY_CONTRACT_OUTCOME_AMBIGUOUS"
+    assert "recovery preflight" in result["error"]["message"]
+    assert [call["recover"] for call in client.helper_calls] == [False]
+    assert prepare.await_count == 2
 
 
 @pytest.mark.asyncio

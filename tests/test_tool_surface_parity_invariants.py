@@ -108,6 +108,22 @@ class TestLiveServerToolSurface:
 
     TARGETS = {
         "gitea_create_branch_at_sha": ["owner", "repo", "branch", "expected_head_sha"],
+        "gitea_set_default_branch": [
+            "owner",
+            "repo",
+            "branch",
+            "expected_head_sha",
+            "expected_current_default_branch",
+            "expected_current_default_sha",
+        ],
+        "docker_deploy_site_audit": [
+            "candidate_project",
+            "expected_head_sha",
+            "expected_script_blob_sha",
+            "expected_script_sha256",
+            "source_revision",
+            "image_namespace",
+        ],
         "git_fetch_ref": ["project"],
         "git_refresh_branch_to_head": [
             "project",
@@ -158,7 +174,13 @@ class TestLiveServerToolSurface:
         assert listed == live_names
         for name in self.TARGETS:
             entry = next(t for t in result["tools"] if t["name"] == name)
-            assert entry["enabled"] is True and entry["available"] is True
+            assert entry["enabled"] is True
+            # Docker availability is a runtime property (binary/socket/config),
+            # not a schema-registration invariant.  Unit environments may
+            # correctly report it unavailable; live post-deploy acceptance
+            # proves availability separately.
+            if name != "docker_deploy_site_audit":
+                assert entry["available"] is True
         assert contract["catalog_refresh"]["catalog_state"] == "current"
 
     def test_stale_client_hash_returns_typed_refresh_action(

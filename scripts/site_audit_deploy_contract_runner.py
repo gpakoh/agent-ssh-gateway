@@ -28,6 +28,15 @@ _STATE_FIELDS = (
     "previous",
     "deployed",
 )
+_PENDING_FIELDS = (
+    "schema_version",
+    "status",
+    "source_revision",
+    "deploy_generation",
+    "previous",
+    "target",
+    "protected_before",
+)
 
 
 def _emit(
@@ -35,14 +44,18 @@ def _emit(
     exit_code: int,
     output: str,
     state: dict[str, Any] | None = None,
+    pending_before: dict[str, Any] | None = None,
     pending_exists: bool = False,
+    mode: str = "deploy",
     error: str | None = None,
 ) -> None:
     payload: dict[str, Any] = {
         "version": 1,
+        "mode": mode,
         "exit_code": int(exit_code),
         "output_tail": output[-_MAX_OUTPUT_CHARS:],
         "state": state or {},
+        "pending_before": pending_before or {},
         "pending_exists": bool(pending_exists),
     }
     if error:
@@ -58,16 +71,24 @@ def _safe_regular_file(path: Path) -> bool:
     return stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode)
 
 
-def _read_state(path: Path) -> dict[str, Any]:
+def _read_fields(path: Path, fields: tuple[str, ...], label: str) -> dict[str, Any]:
     if not _safe_regular_file(path):
-        raise RuntimeError("Site Audit deployment state file is unavailable or unsafe")
+        raise RuntimeError(f"{label} file is unavailable or unsafe")
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("Site Audit deployment state file is unreadable") from exc
+        raise RuntimeError(f"{label} file is unreadable") from exc
     if not isinstance(payload, dict):
-        raise RuntimeError("Site Audit deployment state payload is not an object")
-    return {key: payload.get(key) for key in _STATE_FIELDS if key in payload}
+        raise RuntimeError(f"{label} payload is not an object")
+    return {key: payload.get(key) for key in fields if key in payload}
+
+
+def _read_state(path: Path) -> dict[str, Any]:
+    return _read_fields(path, _STATE_FIELDS, "Site Audit deployment state")
+
+
+def _read_pending(path: Path) -> dict[str, Any]:
+    return _read_fields(path, _PENDING_FIELDS, "Site Audit pending deployment state")
 
 
 def main() -> int:
@@ -132,6 +153,21 @@ def main() -> int:
             "HOME": "/tmp",
         }
     )
+    mode = "recover" if args.recover else "deploy"
+    pending_before: dict[str, Any] = {}
+    if args.recover:
+        try:
+            pending_before = _read_pending(pending_file)
+        except RuntimeError as exc:
+            _emit(
+                exit_code=125,
+                output="",
+                pending_exists=pending_file.exists(),
+                mode=mode,
+                error=str(exc),
+            )
+            return 125
+
     argv = ["/bin/bash", str(script)]
     if args.recover:
         argv.append("--recover")
@@ -155,19 +191,31 @@ def main() -> int:
         _emit(
             exit_code=124,
             output=output,
+            pending_before=pending_before,
             pending_exists=pending_file.exists(),
+            mode=mode,
             error="Site Audit deploy contract timed out",
         )
         return 124
     except OSError:
-        _emit(exit_code=125, output="", error="Site Audit deploy contract could not start")
+        _emit(
+            exit_code=125,
+            output="",
+            pending_before=pending_before,
+            pending_exists=pending_file.exists(),
+            mode=mode,
+            error="Site Audit deploy contract could not start",
+        )
         return 125
 
     state: dict[str, Any] = {}
     error: str | None = None
     if completed.returncode == 0:
         try:
-            state = _read_state(state_file)
+            if state_file.exists():
+                state = _read_state(state_file)
+            elif not args.recover:
+                raise RuntimeError("Site Audit deployment state file is unavailable or unsafe")
         except RuntimeError as exc:
             error = str(exc)
             completed = subprocess.CompletedProcess(
@@ -181,7 +229,9 @@ def main() -> int:
         exit_code=int(completed.returncode),
         output=completed.stdout or "",
         state=state,
+        pending_before=pending_before,
         pending_exists=pending_file.exists(),
+        mode=mode,
         error=error,
     )
     return int(completed.returncode)
