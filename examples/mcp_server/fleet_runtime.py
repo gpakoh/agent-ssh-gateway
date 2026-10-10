@@ -23,6 +23,7 @@ Safety properties
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import socket
@@ -41,7 +42,10 @@ from examples.mcp_server.fleet_state import (
     MIN_GENERATION_RECONCILIATION_QUIESCENCE_SECONDS,
     NEVER_ATTEMPTED,
     FleetState,
+    LeaseConflictError,
+    LeaseNotFoundError,
     TaskAlreadyTerminalError,
+    TaskOutcome,
 )
 
 _T = TypeVar("_T")
@@ -88,6 +92,7 @@ _MAX_OBSERVED_TERMINAL_JOBS: Final = 4096
 _GATEWAY_TERMINAL: Final[frozenset[str]] = frozenset(
     {"completed", "failed", "cancelled", "ambiguous"}
 )
+_GATEWAY_ACTIVE: Final[frozenset[str]] = frozenset({"pending", "running", "cancelling"})
 _MISSING_JOB_ERROR_CODE: Final = "JOB_NOT_FOUND"
 _PRE_SUBMIT_TERMINAL: Final[frozenset[str]] = frozenset(
     {
@@ -718,6 +723,11 @@ class FleetRuntime:
         classification remains the responsibility of the normal authoritative
         gateway-status reconciliation path.
 
+        ``recovery_boundary`` is retained for source compatibility but is not
+        used to release an ambiguous row here. Historical ``attempted`` and
+        ``legacy_unknown`` leases require explicit operator acknowledgement
+        through the dedicated admin reconciliation surface.
+
         The resolver receives the durable fleet task id and must return one
         exact trusted gateway job id or ``None``.  Resolver failures are treated
         as unresolved state and never release capacity.
@@ -762,35 +772,212 @@ class FleetRuntime:
                     continue
                 continue
 
-            # A clean authoritative resolver miss is necessary but not enough:
-            # retained submission metadata can be evicted independently from a
-            # remote process. Generation reconciliation is allowed only when a
-            # separately attested replacement boundary proves that both the
-            # Gateway recovery plane and dedicated executor have been replaced.
-            # The resolver itself is authoritative across retained Redis state
-            # and current single-worker Gateway memory; optional quiescence is
-            # an additional operator barrier rather than the primary proof.
-            if recovery_boundary is None:
-                continue
-            try:
-                outcome = await self.state.reconcile_unbound_after_execution_plane_replacement(
-                    task_id=lease.task_id,
-                    lease_token=lease.lease_token,
-                    expected_submit_state=lease.submit_state,
-                    gateway_started_at=recovery_boundary.gateway_started_at,
-                    executor_started_at=recovery_boundary.executor_started_at,
-                    mcp_started_at=recovery_boundary.mcp_started_at,
-                    observed_at=recovery_boundary.observed_at,
-                    gateway_generation=recovery_boundary.gateway_generation,
-                    executor_generation=recovery_boundary.executor_generation,
-                    mcp_generation=recovery_boundary.mcp_generation,
-                    quiescence_seconds=recovery_boundary.quiescence_seconds,
-                )
-            except Exception:
-                continue
-            if outcome is not None:
-                released += 1
+            # A clean authoritative resolver miss remains ambiguous. Generation
+            # evidence is diagnostic here only; an explicit admin acknowledgement
+            # owns the separate token/state-fenced reconciliation mutation.
+            _ = recovery_boundary
         return released
+
+    async def fleet_status(
+        self,
+        *,
+        job_status_fn: Callable[[str], dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Return a machine-readable fleet snapshot without mutating leases."""
+        await self.ensure_ready()
+        bound = await self.state.list_bound_leases(pool_name=self.pool_name)
+        unbound = await self.state.list_unbound_leases(pool_name=self.pool_name)
+        items: list[dict[str, Any]] = []
+        counts = {
+            "live": 0,
+            "bound_terminal_pending_reconcile": 0,
+            "bound_status_unknown": 0,
+            "reclaimable_never_attempted": 0,
+            "ambiguous_unbound": 0,
+            "unknown_unbound": 0,
+        }
+
+        for lease in bound:
+            classification = "bound_status_unknown"
+            gateway_status: str | None = None
+            if job_status_fn is not None and lease.job_id:
+                try:
+                    result = await self._run_gateway_io(job_status_fn, lease.job_id)
+                except Exception as exc:
+                    missing = _gateway_missing_job_result(lease.job_id, exc)
+                    if missing is not None:
+                        classification = "bound_terminal_pending_reconcile"
+                        gateway_status = "ambiguous"
+                else:
+                    gateway_status = str(result.get("status") or "") or None
+                    if gateway_status in _GATEWAY_TERMINAL:
+                        classification = "bound_terminal_pending_reconcile"
+                    elif gateway_status in _GATEWAY_ACTIVE:
+                        classification = "live"
+            counts[classification] += 1
+            items.append(
+                {
+                    "task_id": lease.task_id,
+                    "lease_fence": lease.lease_token,
+                    "coordinator_id": lease.coordinator_id,
+                    "job_id": lease.job_id,
+                    "submit_state": lease.submit_state,
+                    "classification": classification,
+                    "gateway_status": gateway_status,
+                    "requires_acknowledgement": False,
+                    "recovery_action": (
+                        "automatic_bound_sweep"
+                        if classification == "bound_terminal_pending_reconcile"
+                        else "retry_fleet_status"
+                        if classification == "bound_status_unknown"
+                        else None
+                    ),
+                    "claimed_at": lease.claimed_at.isoformat() if lease.claimed_at else None,
+                    "heartbeat_at": lease.heartbeat_at.isoformat() if lease.heartbeat_at else None,
+                    "submit_attempted_at": (
+                        lease.submit_attempted_at.isoformat()
+                        if lease.submit_attempted_at
+                        else None
+                    ),
+                }
+            )
+
+        for lease in unbound:
+            if lease.submit_state == NEVER_ATTEMPTED:
+                classification = "reclaimable_never_attempted"
+            elif lease.submit_state in {ATTEMPTED, LEGACY_UNKNOWN}:
+                classification = "ambiguous_unbound"
+            else:
+                classification = "unknown_unbound"
+            counts[classification] += 1
+            items.append(
+                {
+                    "task_id": lease.task_id,
+                    "lease_fence": lease.lease_token,
+                    "coordinator_id": lease.coordinator_id,
+                    "job_id": None,
+                    "submit_state": lease.submit_state,
+                    "classification": classification,
+                    "gateway_status": None,
+                    "requires_acknowledgement": classification == "ambiguous_unbound",
+                    "recovery_action": (
+                        "automatic_sweep"
+                        if classification == "reclaimable_never_attempted"
+                        else "fleet_reconcile_unbound"
+                        if classification == "ambiguous_unbound"
+                        else "inspect_unknown_state"
+                    ),
+                    "claimed_at": lease.claimed_at.isoformat() if lease.claimed_at else None,
+                    "heartbeat_at": lease.heartbeat_at.isoformat() if lease.heartbeat_at else None,
+                    "submit_attempted_at": (
+                        lease.submit_attempted_at.isoformat()
+                        if lease.submit_attempted_at
+                        else None
+                    ),
+                }
+            )
+
+        return {
+            "pool": self.pool_name,
+            "capacity": self.capacity,
+            "active": len(items),
+            "available": max(self.capacity - len(items), 0),
+            "counts": counts,
+            "leases": items,
+        }
+
+    async def reconcile_unbound_lease(
+        self,
+        *,
+        task_id: str,
+        lease_token: str,
+        expected_submit_state: str,
+        resolved_job_id: str | None,
+        recovery_boundary: ExecutionPlaneRecoveryBoundary | None,
+    ) -> dict[str, Any]:
+        """Reconcile one exact historical unbound lease after operator ack."""
+        await self.ensure_ready()
+        if expected_submit_state not in {ATTEMPTED, LEGACY_UNKNOWN}:
+            raise ValueError("expected_submit_state must be attempted or legacy_unknown")
+        lease = await self.state.get_lease(task_id)
+        if lease is None:
+            outcome = await self.state.get_outcome(task_id)
+            if (
+                isinstance(outcome, TaskOutcome)
+                and outcome.status == "ambiguous"
+                and isinstance(outcome.result, dict)
+                and outcome.result.get("reason")
+                == "execution_plane_replaced_and_submission_unresolved"
+                and outcome.result.get("previous_submit_state") == expected_submit_state
+                and outcome.result.get("lease_token_sha256")
+                == hashlib.sha256(lease_token.encode()).hexdigest()
+            ):
+                return {
+                    "action": "already_reconciled",
+                    "task_id": task_id,
+                    "terminal_status": outcome.status,
+                    "released": True,
+                }
+            raise LeaseNotFoundError(f"no active lease for task {task_id!r}")
+        if lease.pool != self.pool_name:
+            raise LeaseConflictError("lease belongs to a different fleet pool")
+        if lease.lease_token != lease_token:
+            raise LeaseConflictError("lease token mismatch")
+        if lease.job_id is not None:
+            raise LeaseConflictError("explicit unbound reconciliation requires job_id=NULL")
+        if lease.submit_state != expected_submit_state:
+            raise LeaseConflictError(
+                f"submit state changed: expected {expected_submit_state!r}, "
+                f"lease has {lease.submit_state!r}"
+            )
+
+        if isinstance(resolved_job_id, str) and resolved_job_id.strip():
+            bound = await self.state.bind_job(
+                task_id=task_id,
+                lease_token=lease_token,
+                job_id=resolved_job_id.strip(),
+            )
+            return {
+                "action": "bound_existing_job",
+                "task_id": task_id,
+                "job_id": bound.job_id,
+                "released": False,
+            }
+
+        if recovery_boundary is None:
+            return {
+                "action": "retained",
+                "task_id": task_id,
+                "released": False,
+                "reason": "replacement_generation_evidence_unavailable",
+            }
+
+        outcome = await self.state.reconcile_unbound_after_execution_plane_replacement(
+            task_id=task_id,
+            lease_token=lease_token,
+            expected_submit_state=expected_submit_state,
+            gateway_started_at=recovery_boundary.gateway_started_at,
+            executor_started_at=recovery_boundary.executor_started_at,
+            mcp_started_at=recovery_boundary.mcp_started_at,
+            observed_at=recovery_boundary.observed_at,
+            gateway_generation=recovery_boundary.gateway_generation,
+            executor_generation=recovery_boundary.executor_generation,
+            mcp_generation=recovery_boundary.mcp_generation,
+            quiescence_seconds=recovery_boundary.quiescence_seconds,
+        )
+        if outcome is None:
+            return {
+                "action": "retained",
+                "task_id": task_id,
+                "released": False,
+                "reason": "replacement_generation_does_not_prove_inactivity",
+            }
+        return {
+            "action": "tombstoned_ambiguous",
+            "task_id": task_id,
+            "terminal_status": outcome.status,
+            "released": True,
+        }
 
     async def reconcile(
         self,

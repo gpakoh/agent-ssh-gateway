@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import threading
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
@@ -1756,7 +1757,7 @@ def _recovery_boundary() -> ExecutionPlaneRecoveryBoundary:
 
 
 @pytest.mark.asyncio
-async def test_sweep_unbound_resolver_miss_can_generation_reconcile():
+async def test_sweep_unbound_resolver_miss_retains_ambiguous_even_with_generation_boundary():
     attempted = _lease_state(submit_state="attempted")
     state = _mk_state()
     state.list_unbound_leases = AsyncMock(return_value=[attempted])
@@ -1768,7 +1769,11 @@ async def test_sweep_unbound_resolver_miss_can_generation_reconcile():
             job_id=None,
             status="ambiguous",
             exit_code=None,
-            result={"reason": "execution_plane_replaced_and_submission_unresolved"},
+            result={
+                "reason": "execution_plane_replaced_and_submission_unresolved",
+                "previous_submit_state": "attempted",
+                "lease_token_sha256": hashlib.sha256(attempted.lease_token.encode()).hexdigest(),
+            },
             reported_at=None,
         )
     )
@@ -1781,22 +1786,194 @@ async def test_sweep_unbound_resolver_miss_can_generation_reconcile():
         recovery_boundary=boundary,
     )
 
-    assert released == 1
+    assert released == 0
     resolver.assert_called_once_with(attempted.task_id)
     state.bind_job.assert_not_awaited()
-    state.reconcile_unbound_after_execution_plane_replacement.assert_awaited_once_with(
+    state.reconcile_unbound_after_execution_plane_replacement.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fleet_status_separates_live_reclaimable_and_ambiguous_rows():
+    state = _mk_state()
+    state.list_bound_leases = AsyncMock(
+        return_value=[
+            _lease_state(submit_state="attempted", job_id="job-running"),
+            _lease_state(submit_state="attempted", job_id="job-missing"),
+            _lease_state(submit_state="attempted", job_id="job-unknown"),
+        ]
+    )
+    state.list_unbound_leases = AsyncMock(
+        return_value=[
+            _lease_state(submit_state="never_attempted"),
+            _lease_state(submit_state="attempted"),
+            _lease_state(submit_state="legacy_unknown"),
+            _lease_state(submit_state="future_state"),
+        ]
+    )
+    runtime = _runtime(state)
+
+    def status_fn(job_id: str) -> dict:
+        if job_id == "job-running":
+            return {"job_id": job_id, "status": "running"}
+        if job_id == "job-missing":
+            raise RuntimeError("JOB_NOT_FOUND")
+        raise RuntimeError("gateway timeout")
+
+    snapshot = await runtime.fleet_status(job_status_fn=status_fn)
+
+    assert snapshot["active"] == 7
+    assert snapshot["available"] == 0
+    assert snapshot["counts"] == {
+        "live": 1,
+        "bound_terminal_pending_reconcile": 1,
+        "bound_status_unknown": 1,
+        "reclaimable_never_attempted": 1,
+        "ambiguous_unbound": 2,
+        "unknown_unbound": 1,
+    }
+    assert [row["classification"] for row in snapshot["leases"]] == [
+        "live",
+        "bound_terminal_pending_reconcile",
+        "bound_status_unknown",
+        "reclaimable_never_attempted",
+        "ambiguous_unbound",
+        "ambiguous_unbound",
+        "unknown_unbound",
+    ]
+    ambiguous = snapshot["leases"][4]
+    assert ambiguous["lease_fence"] == state.list_unbound_leases.return_value[1].lease_token
+    assert ambiguous["coordinator_id"] == "gpt-a"
+    assert ambiguous["requires_acknowledgement"] is True
+    assert ambiguous["recovery_action"] == "fleet_reconcile_unbound"
+    unknown_bound = snapshot["leases"][2]
+    assert unknown_bound["requires_acknowledgement"] is False
+    assert unknown_bound["recovery_action"] == "retry_fleet_status"
+
+
+@pytest.mark.asyncio
+async def test_fleet_status_unknown_gateway_state_is_not_reported_live():
+    state = _mk_state()
+    state.list_bound_leases = AsyncMock(
+        return_value=[_lease_state(submit_state="attempted", job_id="job-future")]
+    )
+    state.list_unbound_leases = AsyncMock(return_value=[])
+    runtime = _runtime(state)
+
+    snapshot = await runtime.fleet_status(
+        job_status_fn=lambda job_id: {"job_id": job_id, "status": "future-status"}
+    )
+
+    assert snapshot["counts"]["live"] == 0
+    assert snapshot["counts"]["bound_status_unknown"] == 1
+    assert snapshot["leases"][0]["classification"] == "bound_status_unknown"
+    assert snapshot["leases"][0]["recovery_action"] == "retry_fleet_status"
+
+
+@pytest.mark.asyncio
+async def test_explicit_unbound_reconcile_binds_recovered_job_without_release():
+    attempted = _lease_state(submit_state="attempted")
+    bound = _lease_state(submit_state="attempted", job_id="job-recovered")
+    state = _mk_state()
+    state.get_lease = AsyncMock(return_value=attempted)
+    state.bind_job = AsyncMock(return_value=bound)
+    state.reconcile_unbound_after_execution_plane_replacement = AsyncMock()
+    runtime = _runtime(state)
+
+    result = await runtime.reconcile_unbound_lease(
         task_id=attempted.task_id,
         lease_token=attempted.lease_token,
         expected_submit_state="attempted",
-        gateway_started_at=boundary.gateway_started_at,
-        executor_started_at=boundary.executor_started_at,
-        mcp_started_at=boundary.mcp_started_at,
-        observed_at=boundary.observed_at,
-        gateway_generation=boundary.gateway_generation,
-        executor_generation=boundary.executor_generation,
-        mcp_generation=boundary.mcp_generation,
-        quiescence_seconds=boundary.quiescence_seconds,
+        resolved_job_id="job-recovered",
+        recovery_boundary=None,
     )
+
+    assert result == {
+        "action": "bound_existing_job",
+        "task_id": attempted.task_id,
+        "job_id": "job-recovered",
+        "released": False,
+    }
+    state.bind_job.assert_awaited_once_with(
+        task_id=attempted.task_id,
+        lease_token=attempted.lease_token,
+        job_id="job-recovered",
+    )
+    state.reconcile_unbound_after_execution_plane_replacement.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_explicit_unbound_reconcile_requires_generation_proof_for_release():
+    attempted = _lease_state(submit_state="attempted")
+    state = _mk_state()
+    state.get_lease = AsyncMock(return_value=attempted)
+    state.reconcile_unbound_after_execution_plane_replacement = AsyncMock()
+    runtime = _runtime(state)
+
+    result = await runtime.reconcile_unbound_lease(
+        task_id=attempted.task_id,
+        lease_token=attempted.lease_token,
+        expected_submit_state="attempted",
+        resolved_job_id=None,
+        recovery_boundary=None,
+    )
+
+    assert result["action"] == "retained"
+    assert result["released"] is False
+    assert result["reason"] == "replacement_generation_evidence_unavailable"
+    state.reconcile_unbound_after_execution_plane_replacement.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_explicit_unbound_reconcile_tombstones_once_with_generation_proof():
+    attempted = _lease_state(submit_state="attempted")
+    outcome = TaskOutcome(
+        task_id=attempted.task_id,
+        pool=attempted.pool,
+        job_id=None,
+        status="ambiguous",
+        exit_code=None,
+        result={
+            "reason": "execution_plane_replaced_and_submission_unresolved",
+            "previous_submit_state": "attempted",
+            "lease_token_sha256": hashlib.sha256(attempted.lease_token.encode()).hexdigest(),
+        },
+        reported_at=None,
+    )
+    state = _mk_state()
+    state.get_lease = AsyncMock(side_effect=[attempted, None, None])
+    state.get_outcome = AsyncMock(return_value=outcome)
+    state.reconcile_unbound_after_execution_plane_replacement = AsyncMock(return_value=outcome)
+    runtime = _runtime(state)
+    boundary = _recovery_boundary()
+
+    first = await runtime.reconcile_unbound_lease(
+        task_id=attempted.task_id,
+        lease_token=attempted.lease_token,
+        expected_submit_state="attempted",
+        resolved_job_id=None,
+        recovery_boundary=boundary,
+    )
+    second = await runtime.reconcile_unbound_lease(
+        task_id=attempted.task_id,
+        lease_token=attempted.lease_token,
+        expected_submit_state="attempted",
+        resolved_job_id=None,
+        recovery_boundary=boundary,
+    )
+
+    assert first["action"] == "tombstoned_ambiguous"
+    assert first["released"] is True
+    assert second["action"] == "already_reconciled"
+    assert second["released"] is True
+    with pytest.raises(LeaseNotFoundError):
+        await runtime.reconcile_unbound_lease(
+            task_id=attempted.task_id,
+            lease_token="33333333-3333-3333-3333-333333333333",
+            expected_submit_state="attempted",
+            resolved_job_id=None,
+            recovery_boundary=boundary,
+        )
+    state.reconcile_unbound_after_execution_plane_replacement.assert_awaited_once()
 
 
 @pytest.mark.asyncio
