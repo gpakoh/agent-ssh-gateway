@@ -332,9 +332,46 @@ def _verify_deploy_evidence(
     }
 
 
+def _docker_inventory_scope(*, truncated: bool) -> dict[str, Any]:
+    """Describe the single Docker daemon view without exposing endpoint secrets/topology."""
+    docker_host = os.environ.get("DOCKER_HOST", "").strip()
+    docker_context = os.environ.get("DOCKER_CONTEXT", "").strip()
+    if docker_host:
+        endpoint_kind = docker_host.partition(":")[0].lower() or "configured"
+        endpoint_material = f"host:{docker_host}"
+        endpoint_source = "DOCKER_HOST"
+    elif docker_context:
+        endpoint_kind = "context"
+        endpoint_material = f"context:{docker_context}"
+        endpoint_source = "DOCKER_CONTEXT"
+    else:
+        endpoint_kind = "unix"
+        endpoint_material = "default:unix:///var/run/docker.sock"
+        endpoint_source = "docker_default"
+
+    return {
+        "scope": "configured_docker_daemon",
+        "endpoint": {
+            "kind": endpoint_kind,
+            "identity": f"sha256:{hashlib.sha256(endpoint_material.encode('utf-8')).hexdigest()}",
+            "source": endpoint_source,
+        },
+        "daemon_completeness": "truncated" if truncated else "complete_for_query",
+        "host_completeness": "unknown",
+        "count_semantics": "number_of_rows_returned_from_the_configured_daemon_after_limit",
+        "multi_endpoint_selection": {
+            "supported": False,
+            "reason": "docker_ps is bound to the process-configured Docker endpoint",
+        },
+    }
+
+
 async def docker_ps(all: bool = False, limit: int = 50) -> dict[str, Any]:
-    """List running containers as structured rows. Use all=True to include
-    stopped containers. limit: max rows (default 50)."""
+    """List containers from the configured Docker daemon only.
+
+    Use all=True to include stopped containers. ``count`` is the number of rows
+    returned after ``limit``; inventory metadata states daemon/host completeness.
+    """
     client = _docker_client()
     try:
         validate_pagination(limit, "limit")
@@ -345,7 +382,11 @@ async def docker_ps(all: bool = False, limit: int = 50) -> dict[str, Any]:
         return tool_error(tool="docker_ps", code="DOCKER_COMMAND_FAILED", message=str(exc), source="docker")
     return tool_success(
         "docker_ps",
-        result={"containers": rows, "count": len(rows)},
+        result={
+            "containers": rows,
+            "count": len(rows),
+            "inventory": _docker_inventory_scope(truncated=client.last_truncated),
+        },
         truncated=client.last_truncated,
         redacted=client.last_redacted,
         source="docker",

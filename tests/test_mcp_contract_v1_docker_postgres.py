@@ -38,13 +38,47 @@ class TestDockerToolsContractV1:
     async def test_docker_ps_returns_structured_result(self, monkeypatch):
         fake_client = MagicMock()
         fake_client.ps = AsyncMock(return_value=[{"Names": "web", "Status": "Up"}])
+        fake_client.last_truncated = False
+        fake_client.last_redacted = False
         monkeypatch.setattr(mcp_server_mod, "DockerClient", lambda: fake_client)
+        monkeypatch.delenv("DOCKER_HOST", raising=False)
+        monkeypatch.delenv("DOCKER_CONTEXT", raising=False)
 
         result = await mcp_server_mod.docker_ps()
         _assert_envelope(result)
         assert result["result"]["containers"] == [{"Names": "web", "Status": "Up"}]
         assert result["result"]["count"] == 1
+        inventory = result["result"]["inventory"]
+        assert inventory["scope"] == "configured_docker_daemon"
+        assert inventory["endpoint"]["kind"] == "unix"
+        assert inventory["endpoint"]["identity"].startswith("sha256:")
+        assert inventory["daemon_completeness"] == "complete_for_query"
+        assert inventory["host_completeness"] == "unknown"
+        assert inventory["multi_endpoint_selection"]["supported"] is False
         assert result["meta"]["source"] == "docker"
+
+    @pytest.mark.asyncio
+    async def test_docker_ps_reports_hashed_configured_endpoint_and_truncation(self, monkeypatch):
+        fake_client = MagicMock()
+        fake_client.ps = AsyncMock(return_value=[{"Names": "web"}])
+        fake_client.last_truncated = True
+        fake_client.last_redacted = False
+        monkeypatch.setattr(mcp_server_mod, "DockerClient", lambda: fake_client)
+        raw_endpoint = "tcp://docker.internal.example:2376"
+        monkeypatch.setenv("DOCKER_HOST", raw_endpoint)
+        monkeypatch.setenv("DOCKER_CONTEXT", "must-not-win")
+
+        result = await mcp_server_mod.docker_ps(limit=1)
+
+        inventory = result["result"]["inventory"]
+        assert inventory["endpoint"]["source"] == "DOCKER_HOST"
+        assert inventory["endpoint"]["kind"] == "tcp"
+        assert raw_endpoint not in repr(inventory)
+        assert len(inventory["endpoint"]["identity"]) == len("sha256:") + 64
+        assert inventory["daemon_completeness"] == "truncated"
+        assert inventory["host_completeness"] == "unknown"
+        assert result["result"]["count"] == 1
+        assert result["meta"]["truncated"] is True
 
     @pytest.mark.asyncio
     async def test_docker_ps_error_is_contract_v1(self, monkeypatch):
