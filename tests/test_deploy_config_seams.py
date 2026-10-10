@@ -1742,7 +1742,7 @@ class TestPrBuildsAndSmokeTestsDockerArtifact:
             run = step["run"]
             assert "ci-docker-login-retry.sh" in run
             assert "--password-stdin" not in run
-            assert "REGISTRY_TOKEN" in run
+            assert "/deploy/secrets/registry.token" in run
 
         script = REGISTRY_LOGIN_RETRY_SCRIPT.read_text(encoding="utf-8")
         assert 'IFS= read -r password' in script
@@ -1838,8 +1838,8 @@ class TestPrBuildsAndSmokeTestsDockerArtifact:
 class TestDeployProvisionsComposeRegistryAuth:
     """The post-merge deploy lane owns private-registry auth provisioning.
 
-    The registry token must stay in Gitea Actions secrets and reach Docker only
-    over stdin.  MCP receives only the non-secret operator volume name.
+    The registry token must stay in the shared infra-quart token file and reach
+    Docker only over stdin.  MCP receives only the non-secret operator volume name.
     """
 
     @staticmethod

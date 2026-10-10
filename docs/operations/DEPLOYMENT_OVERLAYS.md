@@ -119,8 +119,9 @@ For private registries, the production deploy job owns an operator Docker
 config volume named `mcp-compose-registry-auth`. After its normal registry
 login, CI resolves the exact just-published MCP image to a registry digest,
 uses that immutable image only as a Docker CLI helper, and rotates the volume
-with `docker login --password-stdin` from the Gitea Actions `REGISTRY_TOKEN`
-secret. The deploy job exports only
+with `docker login --password-stdin` from the shared
+`infra-quart/secrets/registry.token` file (mounted read-only into the deploy
+job). The deploy job exports only
 `MCP_COMPOSE_DOCKER_CONFIG_VOLUME=mcp-compose-registry-auth` to Compose, so the
 recreated `mcp-oauth` receives the non-secret selector while the registry token
 never becomes an MCP tool argument, Compose variable, tracked file, or
@@ -134,7 +135,8 @@ validated project directory is used.
 
 For a manual/non-CI deployment, provision or rotate the same operator-owned
 volume outside ChatGPT/MCP using an approved digest-pinned Docker CLI image and
-`docker login --password-stdin`, then set the selector in the private
+`docker login --password-stdin`, reading the token from the shared
+`infra-quart/secrets/registry.token` file, then set the selector in the private
 `docker/.env`, for example:
 
 ```bash

@@ -889,7 +889,7 @@ jobs:
     runs-on: docker-e2e-ci
     timeout-minutes: 20
     env:
-      REGISTRY: ${{ secrets.REGISTRY_HOST }}
+      REGISTRY: 192.168.1.103:3005
       # Self-hosted runner pool has no direct internet; outbound egress goes
       # through the local Squid proxy (value stored in the CI_DOCKER_*_PROXY
       # repo variables, rendered below). docker build
@@ -900,15 +900,18 @@ jobs:
       DOCKER_HTTP_PROXY: ${{ vars.CI_DOCKER_HTTP_PROXY }}
       DOCKER_HTTPS_PROXY: ${{ vars.CI_DOCKER_HTTPS_PROXY }}
       DOCKER_NO_PROXY: ${{ vars.CI_DOCKER_NO_PROXY }}
+    container:
+      volumes:
+        - /media/1TB/Python/quart-platform/infra-quart/secrets/registry.token:/deploy/secrets/registry.token:ro
     steps:
       - uses: actions/checkout@v7
       - name: Log in to the Gitea container registry
         # Only needed for the push steps below -- skipped entirely for a
         # PR run, which never pushes anything, so a PR run doesn't even
-        # need REGISTRY_TOKEN available to it.
+        # need the shared registry credential available to it.
         if: github.event_name == 'push'
         run: |
-          printf '%s\n' "${{ secrets.REGISTRY_TOKEN }}" | bash scripts/ci-docker-login-retry.sh "$REGISTRY" gpakoh
+          printf '%s\n' "$(cat /deploy/secrets/registry.token)" | bash scripts/ci-docker-login-retry.sh "$REGISTRY" gpakoh
       - name: Build web-ssh-gateway image
         run: |
           bash scripts/ci-docker-build-retry.sh -f docker/Dockerfile \
@@ -1150,8 +1153,9 @@ jobs:
         # from the host: the gitignored environment and persistent rollback state.
         - /media/1TB/Python/web_ssh/web-ssh-gateway/docker/.env:/deploy/web-ssh-gateway.env:ro
         - /media/1TB/Python/web_ssh/web-ssh-gateway/.state:/deploy/web-ssh-gateway-state
+        - /media/1TB/Python/quart-platform/infra-quart/secrets/registry.token:/deploy/secrets/registry.token:ro
     env:
-      REGISTRY: ${{ secrets.REGISTRY_HOST }}
+      REGISTRY: 192.168.1.103:3005
       # Non-secret selector consumed by mcp-oauth/Compose. The credential itself
       # never enters MCP args or tracked files; the deploy job provisions the
       # operator-owned volume below from the Actions secret store.
@@ -1178,7 +1182,7 @@ jobs:
       # login doesn't carry over, even on the same runner.
       - name: Log in to the Gitea container registry
         run: |
-          printf '%s\n' "${{ secrets.REGISTRY_TOKEN }}" | bash scripts/ci-docker-login-retry.sh "$REGISTRY" gpakoh
+          printf '%s\n' "$(cat /deploy/secrets/registry.token)" | bash scripts/ci-docker-login-retry.sh "$REGISTRY" gpakoh
       - name: Provision Compose registry auth volume
         shell: bash
         run: |
