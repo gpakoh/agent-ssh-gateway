@@ -8,12 +8,15 @@ import pytest
 
 from examples.mcp_server.mcp_infra._server_ref import server_module
 from examples.mcp_server.surface_parity import (
+    MAX_CLIENT_TOOLSET_HASH_BYTES,
     MAX_CLIENT_VISIBLE_TOOL_NAME_BYTES,
     MAX_CLIENT_VISIBLE_TOOL_NAMES_BYTES,
     ClientSurfaceAttestation,
+    build_catalog_refresh_contract,
     clear_session_attestation,
     evaluate_required_guards,
     load_session_attestation,
+    normalize_client_toolset_hash,
     normalize_client_visible_tool_names,
     normalize_required_guard_tool_names,
     record_session_attestation,
@@ -29,13 +32,16 @@ def _clear_attestations() -> None:
     parity = importlib.import_module("examples.mcp_server.surface_parity")
     globals().update(
         {
+            "MAX_CLIENT_TOOLSET_HASH_BYTES": parity.MAX_CLIENT_TOOLSET_HASH_BYTES,
             "MAX_CLIENT_VISIBLE_TOOL_NAME_BYTES": parity.MAX_CLIENT_VISIBLE_TOOL_NAME_BYTES,
             "MAX_CLIENT_VISIBLE_TOOL_NAMES_BYTES": parity.MAX_CLIENT_VISIBLE_TOOL_NAMES_BYTES,
             "ClientSurfaceAttestation": parity.ClientSurfaceAttestation,
+            "build_catalog_refresh_contract": parity.build_catalog_refresh_contract,
             "clear_all_attestations_for_tests": parity.clear_all_attestations_for_tests,
             "clear_session_attestation": parity.clear_session_attestation,
             "evaluate_required_guards": parity.evaluate_required_guards,
             "load_session_attestation": parity.load_session_attestation,
+            "normalize_client_toolset_hash": parity.normalize_client_toolset_hash,
             "normalize_client_visible_tool_names": parity.normalize_client_visible_tool_names,
             "normalize_required_guard_tool_names": parity.normalize_required_guard_tool_names,
             "record_session_attestation": parity.record_session_attestation,
@@ -338,6 +344,57 @@ def test_tools_manifest_same_auth_parallel_lifecycles_keep_distinct_reports(
     assert second_again["result"]["operator_surface_contract"]["client_observation"][
         "reported_names"
     ] == ["beta"]
+
+
+def test_client_toolset_hash_normalization_is_fail_closed() -> None:
+    valid = "sha256:" + "a" * 64
+    assert normalize_client_toolset_hash(valid) == valid
+    assert normalize_client_toolset_hash(None) is None
+
+    for bad in (
+        "sha256:" + "A" * 64,
+        "sha256:" + "ab",
+        "md5:" + "a" * 32,
+        "",
+    ):
+        with pytest.raises(ValueError, match="must match"):
+            normalize_client_toolset_hash(bad)
+
+    with pytest.raises(ValueError, match="must be a string"):
+        normalize_client_toolset_hash(123)  # type: ignore[arg-type]
+
+    oversized = "sha256:" + "a" * (MAX_CLIENT_TOOLSET_HASH_BYTES - 6)
+    with pytest.raises(ValueError, match="exceeds"):
+        normalize_client_toolset_hash(oversized)
+
+
+def test_catalog_refresh_contract_types_state_and_never_filters() -> None:
+    server_hash = "sha256:" + "b" * 64
+    other_hash = "sha256:" + "c" * 64
+
+    current = build_catalog_refresh_contract(
+        server_toolset_hash=server_hash,
+        client_catalog_toolset_hash=server_hash,
+    )
+    assert current["catalog_state"] == "current"
+    assert current["refresh_required"] is False
+    assert current["refresh_action"]["tool"] == "tools/list"
+
+    stale = build_catalog_refresh_contract(
+        server_toolset_hash=server_hash,
+        client_catalog_toolset_hash=other_hash,
+    )
+    assert stale["catalog_state"] == "stale"
+    assert stale["refresh_required"] is True
+    assert stale["client_catalog_toolset_hash"] == other_hash
+    assert stale["refresh_action"]["server_side_reconnect_required"] is False
+
+    unproven = build_catalog_refresh_contract(
+        server_toolset_hash=server_hash,
+        client_catalog_toolset_hash=None,
+    )
+    assert unproven["catalog_state"] == "unproven"
+    assert unproven["refresh_required"] is False
 
 
 def test_existing_git_mutations_are_not_parity_gated_and_no_static_dependency_map_exists() -> None:

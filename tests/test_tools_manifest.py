@@ -632,3 +632,76 @@ class TestManifestFilteringAndPagination:
     def test_negative_limit_rejected(self, sample_tools: list[FakeTool]) -> None:
         with pytest.raises(ValueError, match="limit"):
             build_manifest(sample_tools, mode_override="mcp_client", limit=-5)
+
+
+class TestCatalogRefreshContract:
+    """Typed stale/refresh state for a long-lived client catalog."""
+
+    _SERVER = "sha256:" + "b" * 64
+    _OTHER = "sha256:" + "c" * 64
+
+    def test_current_when_client_hash_matches(self, sample_tools: list[FakeTool]) -> None:
+        result = build_manifest(
+            sample_tools,
+            mode_override="mcp_client",
+            server_toolset_hash=self._SERVER,
+            client_catalog_toolset_hash=self._SERVER,
+        )
+        contract = result["operator_surface_contract"]["catalog_refresh"]
+        assert contract["catalog_state"] == "current"
+        assert contract["refresh_required"] is False
+        assert contract["client_catalog_toolset_hash"] == self._SERVER
+
+    def test_stale_yields_safe_refresh_action(self, sample_tools: list[FakeTool]) -> None:
+        result = build_manifest(
+            sample_tools,
+            mode_override="mcp_client",
+            server_toolset_hash=self._SERVER,
+            client_catalog_toolset_hash=self._OTHER,
+        )
+        contract = result["operator_surface_contract"]["catalog_refresh"]
+        assert contract["catalog_state"] == "stale"
+        assert contract["refresh_required"] is True
+        assert contract["refresh_action"] == {
+            "method": "mcp",
+            "tool": "tools/list",
+            "transport": "streamable-http",
+            "server_side_reconnect_required": False,
+        }
+
+    def test_unproven_when_client_hash_absent(self, sample_tools: list[FakeTool]) -> None:
+        result = build_manifest(
+            sample_tools,
+            mode_override="mcp_client",
+            server_toolset_hash=self._SERVER,
+        )
+        contract = result["operator_surface_contract"]["catalog_refresh"]
+        assert contract["catalog_state"] == "unproven"
+        assert contract["refresh_required"] is False
+        assert contract["client_catalog_toolset_hash"] is None
+
+    def test_invalid_client_hash_rejected(self, sample_tools: list[FakeTool]) -> None:
+        with pytest.raises(ValueError, match="sha256"):
+            build_manifest(
+                sample_tools,
+                mode_override="mcp_client",
+                server_toolset_hash=self._SERVER,
+                client_catalog_toolset_hash="not-a-hash",
+            )
+
+    def test_catalog_refresh_never_changes_tool_gating(
+        self, sample_tools: list[FakeTool]
+    ) -> None:
+        base = build_manifest(
+            sample_tools, mode_override="mcp_client", server_toolset_hash=self._SERVER
+        )
+        stale = build_manifest(
+            sample_tools,
+            mode_override="mcp_client",
+            server_toolset_hash=self._SERVER,
+            client_catalog_toolset_hash=self._OTHER,
+        )
+        assert base["tool_count"] == stale["tool_count"]
+        assert [
+            (t["name"], t["enabled"], t["available"]) for t in base["tools"]
+        ] == [(t["name"], t["enabled"], t["available"]) for t in stale["tools"]]
