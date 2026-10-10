@@ -90,3 +90,12 @@ def test_prepare_candidate_clone_requires_repo_and_admin_scope():
     assert not has_required_scope(["mcp:repo"], "prepare_candidate_clone")
     assert not has_required_scope(["mcp:admin"], "prepare_candidate_clone")
     assert has_required_scope(["mcp:repo", "mcp:admin"], "prepare_candidate_clone")
+
+
+def test_candidate_cleanup_requires_repo_and_admin_scope():
+    from examples.mcp_server.tool_scopes import get_required_scopes, has_required_scope
+
+    assert get_required_scopes("candidate_cleanup") == ["mcp:repo", "mcp:admin"]
+    assert not has_required_scope(["mcp:repo"], "candidate_cleanup")
+    assert not has_required_scope(["mcp:admin"], "candidate_cleanup")
+    assert has_required_scope(["mcp:repo", "mcp:admin"], "candidate_cleanup")

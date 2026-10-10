@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from examples.mcp_server.mcp_infra.adapters import supervisor
+from examples.mcp_server.mcp_infra.adapters import remote, supervisor
 from examples.mcp_server.supervisor_integration import RecoveryResult
 
 
@@ -35,6 +35,15 @@ def immediate_run_tool(monkeypatch):
         return fn()
 
     monkeypatch.setattr(supervisor, "run_tool", _run_tool)
+
+
+@pytest.fixture
+def immediate_run_tool_async(monkeypatch):
+    async def _run_tool_async(*, tool, title, fn, success_text):
+        del tool, title, success_text
+        return await fn()
+
+    monkeypatch.setattr(supervisor, "run_tool_async", _run_tool_async)
 
 
 @pytest.fixture
@@ -313,7 +322,358 @@ def test_prepare_candidate_clone_preserves_typed_remote_state_error(
     }
 
 
-def test_register_all_registers_exactly_three_tools(monkeypatch):
+class _CleanupReceipt:
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "project_id": "candidate-demo",
+            "removed": True,
+            "already_absent": False,
+        }
+
+
+class _AuditLogger:
+    def __init__(self, *, fail_required: bool = False) -> None:
+        self.fail_required = fail_required
+        self.required = []
+        self.success = []
+
+    def append_required(self, event) -> None:
+        if self.fail_required:
+            raise supervisor.AuditWriteError("audit unavailable")
+        self.required.append(event)
+
+    def append(self, event) -> None:
+        self.success.append(event)
+
+
+class _PullClient:
+    def __init__(self, pages=None, error: Exception | None = None) -> None:
+        self.pages = pages or {1: []}
+        self.error = error
+        self.calls: list[int] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return None
+
+    async def list_pull_requests(self, _owner, _repo, *, state, limit, page):
+        assert state == "open"
+        assert limit == 50
+        self.calls.append(page)
+        if self.error is not None:
+            raise self.error
+        return self.pages.get(page, [])
+
+
+def _same_repo_pr(number: int, *, ref: str, sha: str) -> dict[str, object]:
+    return {
+        "number": number,
+        "head": {
+            "ref": ref,
+            "sha": sha,
+            "repo": {"full_name": "gpakoh/agent-ssh-gateway"},
+        },
+    }
+
+
+def _foreign_pr(number: int, *, ref: str, sha: str) -> dict[str, object]:
+    return {
+        "number": number,
+        "head": {
+            "ref": ref,
+            "sha": sha,
+            "repo": {"full_name": "other/fork"},
+        },
+    }
+
+
+def _configure_cleanup_adapter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    client: _PullClient,
+    audit: _AuditLogger,
+    guard_calls: list[str],
+) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    config_dir = tmp_path / "registry"
+    config_dir.mkdir()
+    monkeypatch.setattr(
+        supervisor,
+        "_get_workspace_registry",
+        lambda: _Registry({"demo": source_root}),
+    )
+    monkeypatch.setattr(supervisor, "_resolve_registry_config_dir", lambda: config_dir)
+    monkeypatch.setattr(
+        supervisor,
+        "_journal_root_for_project",
+        lambda _project, _root: tmp_path / "journals",
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "_resolve_trusted_remote",
+        lambda _root: (
+            "gpakoh",
+            "https://git.xloud.ru/gpakoh/agent-ssh-gateway.git",
+            "managed-token",
+        ),
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "_parse_gitea_remote",
+        lambda _url: ("git.xloud.ru", "gpakoh", "agent-ssh-gateway"),
+    )
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: (lambda _token: client))
+    monkeypatch.setattr(
+        supervisor,
+        "server_attr",
+        lambda name: (lambda: audit)
+        if name == "get_audit_logger"
+        else (_ for _ in ()).throw(AssertionError(name)),
+    )
+    monkeypatch.setattr(supervisor, "_reset_project_registry_caches", lambda: True)
+
+    def _cleanup(
+        project_id,
+        expected_head_sha,
+        expected_branch,
+        expected_source_project,
+        preserved_ref,
+        *,
+        config_dir,
+        journal_root,
+        reference_guard,
+    ):
+        del project_id, expected_head_sha, expected_branch, expected_source_project
+        del preserved_ref, config_dir, journal_root
+        guard_calls.append("first")
+        reference_guard()
+        guard_calls.append("second")
+        reference_guard()
+        guard_calls.append("third")
+        reference_guard()
+        return _CleanupReceipt()
+
+    monkeypatch.setattr(supervisor, "_candidate_cleanup", _cleanup)
+
+
+async def test_candidate_cleanup_uses_fresh_guard_twice_and_required_audit_once(
+    tmp_path, immediate_run_tool_async, monkeypatch
+):
+    head = "a" * 40
+    client = _PullClient(
+        {1: [_foreign_pr(7, ref="candidate/demo", sha=head)]}
+    )
+    audit = _AuditLogger()
+    guard_calls: list[str] = []
+    _configure_cleanup_adapter(
+        tmp_path,
+        monkeypatch,
+        client=client,
+        audit=audit,
+        guard_calls=guard_calls,
+    )
+
+    result = await supervisor.candidate_cleanup(
+        "candidate-demo",
+        head,
+        "candidate/demo",
+        "demo",
+        "archive/candidate-demo",
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["removed"] is True
+    assert result["result"]["cache_reset"] is True
+    assert guard_calls == ["first", "second", "third"]
+    assert client.calls == [1, 1, 1]
+    assert len(audit.required) == 1
+    assert len(audit.success) == 1
+    assert (
+        audit.required[0].metadata["correlation_id"]
+        == audit.success[0].metadata["correlation_id"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("ref", "sha", "reference_type"),
+    [
+        ("candidate/demo", "b" * 40, "branch"),
+        ("different/ref", "a" * 40, "head_sha"),
+    ],
+)
+async def test_candidate_cleanup_blocks_open_same_repo_pr_reference(
+    tmp_path,
+    immediate_run_tool_async,
+    monkeypatch,
+    ref,
+    sha,
+    reference_type,
+):
+    head = "a" * 40
+    client = _PullClient({1: [_same_repo_pr(42, ref=ref, sha=sha)]})
+    audit = _AuditLogger()
+    guard_calls: list[str] = []
+    _configure_cleanup_adapter(
+        tmp_path,
+        monkeypatch,
+        client=client,
+        audit=audit,
+        guard_calls=guard_calls,
+    )
+
+    result = await supervisor.candidate_cleanup(
+        "candidate-demo",
+        head,
+        "candidate/demo",
+        "demo",
+        "archive/candidate-demo",
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "WORKSPACE_CONTENDED"
+    assert result["error"]["retryable"] is True
+    assert result["error"]["details"] == {
+        "reference_check": "gitea_open_pull_requests",
+        "pull_number": 42,
+        "reference_type": reference_type,
+    }
+    assert guard_calls == ["first"]
+    assert audit.required == []
+
+
+async def test_candidate_cleanup_scans_later_open_pr_pages_before_mutation(
+    tmp_path, immediate_run_tool_async, monkeypatch
+):
+    head = "a" * 40
+    first_page = [
+        _foreign_pr(index, ref=f"fork/{index}", sha=f"{index:040x}")
+        for index in range(1, 51)
+    ]
+    client = _PullClient(
+        {
+            1: first_page,
+            2: [_same_repo_pr(77, ref="candidate/demo", sha=head)],
+        }
+    )
+    audit = _AuditLogger()
+    guard_calls: list[str] = []
+    _configure_cleanup_adapter(
+        tmp_path,
+        monkeypatch,
+        client=client,
+        audit=audit,
+        guard_calls=guard_calls,
+    )
+
+    result = await supervisor.candidate_cleanup(
+        "candidate-demo",
+        head,
+        "candidate/demo",
+        "demo",
+        "archive/candidate-demo",
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "WORKSPACE_CONTENDED"
+    assert result["error"]["details"]["pull_number"] == 77
+    assert client.calls == [1, 2]
+    assert audit.required == []
+
+
+async def test_candidate_cleanup_fails_closed_on_matching_pr_with_unknown_repo(
+    tmp_path, immediate_run_tool_async, monkeypatch
+):
+    head = "a" * 40
+    client = _PullClient(
+        {1: [{"number": 9, "head": {"ref": "candidate/demo", "sha": head}}]}
+    )
+    audit = _AuditLogger()
+    guard_calls: list[str] = []
+    _configure_cleanup_adapter(
+        tmp_path,
+        monkeypatch,
+        client=client,
+        audit=audit,
+        guard_calls=guard_calls,
+    )
+
+    result = await supervisor.candidate_cleanup(
+        "candidate-demo",
+        head,
+        "candidate/demo",
+        "demo",
+        "archive/candidate-demo",
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "WORKSPACE_CONTENDED"
+    assert result["error"]["details"]["pull_number"] == 9
+    assert audit.required == []
+
+
+async def test_candidate_cleanup_remote_reference_failure_is_typed_and_non_mutating(
+    tmp_path, immediate_run_tool_async, monkeypatch
+):
+    client = _PullClient(error=TimeoutError("remote timeout"))
+    audit = _AuditLogger()
+    guard_calls: list[str] = []
+    _configure_cleanup_adapter(
+        tmp_path,
+        monkeypatch,
+        client=client,
+        audit=audit,
+        guard_calls=guard_calls,
+    )
+
+    result = await supervisor.candidate_cleanup(
+        "candidate-demo",
+        "a" * 40,
+        "candidate/demo",
+        "demo",
+        "archive/candidate-demo",
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CHECK_FAILED"
+    assert result["error"]["retryable"] is True
+    assert result["error"]["details"]["reference_check"] == "gitea_open_pull_requests"
+    assert audit.required == []
+
+
+async def test_candidate_cleanup_audit_failure_blocks_before_core_mutation(
+    tmp_path, immediate_run_tool_async, monkeypatch
+):
+    client = _PullClient()
+    audit = _AuditLogger(fail_required=True)
+    guard_calls: list[str] = []
+    _configure_cleanup_adapter(
+        tmp_path,
+        monkeypatch,
+        client=client,
+        audit=audit,
+        guard_calls=guard_calls,
+    )
+
+    result = await supervisor.candidate_cleanup(
+        "candidate-demo",
+        "a" * 40,
+        "candidate/demo",
+        "demo",
+        "archive/candidate-demo",
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "AUDIT_UNAVAILABLE"
+    assert result["error"]["retryable"] is True
+    assert guard_calls == ["first"]
+    assert audit.success == []
+
+
+def test_register_all_registers_exactly_five_tools(monkeypatch):
     registered: list[str] = []
 
     def _register(name):
@@ -333,6 +693,7 @@ def test_register_all_registers_exactly_three_tools(monkeypatch):
         "supervisor_recover_integrations",
         "supervisor_register_project",
         "prepare_candidate_clone",
+        "candidate_cleanup",
     ]
 
 
