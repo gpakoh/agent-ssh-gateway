@@ -8,26 +8,32 @@ under a server-controlled persistent directory.
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import hashlib
 import logging
 import os
+import uuid
 from pathlib import Path
 from typing import Any
 
 from tool_results import tool_error, tool_success
 
-from examples.mcp_server.candidate_clone import (
-    CandidateCloneError,
-)
+from examples.mcp_server.agent_sources import ManagedSourceBundleError, _resolve_trusted_remote
+from examples.mcp_server.candidate_clone import CandidateCloneError
+from examples.mcp_server.candidate_clone import candidate_cleanup as _candidate_cleanup
 from examples.mcp_server.candidate_clone import (
     prepare_candidate_clone as _prepare_candidate_clone,
 )
+from examples.mcp_server.control_plane_git import _parse_gitea_remote
+from examples.mcp_server.mcp_audit import AuditWriteError, McpAuditEvent
+from examples.mcp_server.mcp_infra._server_ref import server_attr
 from examples.mcp_server.mcp_infra.tool_registry import (
     _validate_project,
     instrumented,
     register_tool,
     run_tool,
+    run_tool_async,
 )
 from examples.mcp_server.project_registry_control import (
     ProjectRegistrationError,
@@ -367,6 +373,242 @@ def prepare_candidate_clone(
     )
 
 
+async def _assert_no_open_candidate_pr_reference(
+    *,
+    token: str,
+    owner: str,
+    repo: str,
+    expected_branch: str,
+    expected_head_sha: str,
+) -> None:
+    """Fail closed when an open same-repo PR still references the candidate."""
+    try:
+        from examples.mcp_server.mcp_infra.adapters.remote import (
+            _same_gitea_repo_from_pr_head,
+            _server_gitea_client,
+        )
+
+        async with _server_gitea_client()(token) as client:
+            for page in range(1, 21):
+                raw = await client.list_pull_requests(
+                    owner,
+                    repo,
+                    state="open",
+                    limit=50,
+                    page=page,
+                )
+                if not isinstance(raw, list) or any(
+                    not isinstance(pr, dict) for pr in raw
+                ):
+                    raise CandidateCloneError(
+                        "CHECK_FAILED",
+                        "open pull request reference state is malformed",
+                        retryable=True,
+                        details={"reference_check": "gitea_open_pull_requests"},
+                    )
+                for pr in raw:
+                    head = pr.get("head")
+                    if not isinstance(head, dict):
+                        continue
+                    head_ref = str(head.get("ref") or "").strip()
+                    head_sha = str(head.get("sha") or "").strip().lower()
+                    if head_ref != expected_branch and head_sha != expected_head_sha:
+                        continue
+                    same_repo = _same_gitea_repo_from_pr_head(
+                        head,
+                        owner=owner,
+                        repo=repo,
+                    )
+                    if same_repo is False:
+                        continue
+                    if same_repo is None:
+                        raise CandidateCloneError(
+                            "WORKSPACE_CONTENDED",
+                            "matching open pull request repository identity is unproven",
+                            retryable=True,
+                            details={
+                                "reference_check": "gitea_open_pull_requests",
+                                "pull_number": pr.get("number"),
+                            },
+                        )
+                    reference_type = "head_sha"
+                    if head_ref == expected_branch:
+                        reference_type = (
+                            "branch_and_head"
+                            if head_sha == expected_head_sha
+                            else "branch"
+                        )
+                    raise CandidateCloneError(
+                        "WORKSPACE_CONTENDED",
+                        "open pull request still references candidate cleanup target",
+                        retryable=True,
+                        details={
+                            "reference_check": "gitea_open_pull_requests",
+                            "pull_number": pr.get("number"),
+                            "reference_type": reference_type,
+                        },
+                    )
+                if len(raw) < 50:
+                    return
+            raise CandidateCloneError(
+                "CHECK_FAILED",
+                "open pull request reference scan exceeded safety bound",
+                retryable=True,
+                details={
+                    "reference_check": "gitea_open_pull_requests",
+                    "max_records": 1000,
+                },
+            )
+    except CandidateCloneError:
+        raise
+    except Exception as exc:
+        raise CandidateCloneError(
+            "CHECK_FAILED",
+            "open pull request reference state could not be verified",
+            retryable=True,
+            details={
+                "reference_check": "gitea_open_pull_requests",
+                "error_class": type(exc).__name__,
+            },
+        ) from exc
+
+
+async def candidate_cleanup(
+    project_id: str,
+    expected_head_sha: str,
+    expected_branch: str,
+    expected_source_project: str,
+    preserved_ref: str,
+) -> dict[str, Any]:
+    """Guarded cleanup of one preserved candidate clone."""
+
+    async def _run() -> dict[str, Any]:
+        try:
+            source_project, source_root = _resolve_project(expected_source_project)
+            config_dir = _resolve_registry_config_dir()
+            journal_root = _journal_root_for_project("workspace-registry", config_dir)
+        except _ProjectResolutionError:
+            return tool_error(
+                tool="candidate_cleanup",
+                code="PROJECT_NOT_FOUND",
+                message="Source project is not registered or its root is unavailable.",
+                retryable=False,
+            )
+        except ValueError:
+            return tool_error(
+                tool="candidate_cleanup",
+                code="INVALID_INPUT",
+                message="Workspace registry control plane is misconfigured.",
+                retryable=False,
+            )
+
+        audit_written = False
+        correlation_id = uuid.uuid4().hex
+        audit_metadata = {
+            "project_id": project_id,
+            "expected_head_sha": expected_head_sha,
+            "expected_branch": expected_branch,
+            "expected_source_project": source_project,
+            "preserved_ref": preserved_ref,
+            "correlation_id": correlation_id,
+        }
+
+        def _reference_guard() -> None:
+            nonlocal audit_written
+            try:
+                _username, clone_url, token = _resolve_trusted_remote(source_root)
+                _host, owner, repo = _parse_gitea_remote(clone_url)
+            except (ManagedSourceBundleError, RuntimeError, ValueError) as exc:
+                raise CandidateCloneError(
+                    "CHECK_FAILED",
+                    "trusted candidate source remote identity could not be verified",
+                    retryable=True,
+                    details={"reference_check": "trusted_gitea_remote"},
+                ) from exc
+
+            asyncio.run(
+                _assert_no_open_candidate_pr_reference(
+                    token=token,
+                    owner=owner,
+                    repo=repo,
+                    expected_branch=expected_branch,
+                    expected_head_sha=expected_head_sha,
+                )
+            )
+
+            if not audit_written:
+                try:
+                    server_attr("get_audit_logger")().append_required(
+                        McpAuditEvent(
+                            event_type="mcp.candidate_destructive_intent",
+                            tool="candidate_cleanup",
+                            action="candidate_cleanup",
+                            decision="allow",
+                            reason="guarded candidate cleanup",
+                            metadata=audit_metadata,
+                        )
+                    )
+                except AuditWriteError as exc:
+                    raise CandidateCloneError(
+                        "AUDIT_UNAVAILABLE",
+                        "audit log unavailable; candidate cleanup refused",
+                        retryable=True,
+                    ) from exc
+                audit_written = True
+
+        try:
+            receipt = await asyncio.to_thread(
+                _candidate_cleanup,
+                project_id,
+                expected_head_sha,
+                expected_branch,
+                source_project,
+                preserved_ref,
+                config_dir=config_dir,
+                journal_root=journal_root,
+                reference_guard=_reference_guard,
+            )
+        except CandidateCloneError as exc:
+            return tool_error(
+                tool="candidate_cleanup",
+                code=exc.code,
+                message=exc.message,
+                retryable=exc.retryable,
+                details=exc.details,
+            )
+
+        if audit_written:
+            try:
+                server_attr("get_audit_logger")().append(
+                    McpAuditEvent(
+                        event_type="mcp.candidate_destructive_success",
+                        tool="candidate_cleanup",
+                        action="candidate_cleanup",
+                        decision="allow",
+                        reason="guarded candidate cleanup completed",
+                        metadata=audit_metadata,
+                    )
+                )
+            except Exception:
+                pass
+
+        cache_reset = _reset_project_registry_caches()
+        result = receipt.as_dict()
+        result["cache_reset"] = cache_reset
+        return tool_success(
+            tool="candidate_cleanup",
+            result=result,
+            success_text="Cleaned candidate clone.",
+        )
+
+    return await run_tool_async(
+        tool="candidate_cleanup",
+        title="Candidate cleanup",
+        fn=_run,
+        success_text="Cleaned candidate clone.",
+    )
+
+
 def _integrate_impl(
     project: str,
     relative_path: str,
@@ -528,6 +770,9 @@ def register_all() -> None:
     register_tool("prepare_candidate_clone")(
         instrumented("prepare_candidate_clone")(prepare_candidate_clone)
     )
+    register_tool("candidate_cleanup")(
+        instrumented("candidate_cleanup")(candidate_cleanup)
+    )
 
 
 __all__ = [
@@ -536,4 +781,5 @@ __all__ = [
     "supervisor_recover_integrations",
     "supervisor_register_project",
     "prepare_candidate_clone",
+    "candidate_cleanup",
 ]
