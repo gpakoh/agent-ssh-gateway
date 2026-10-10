@@ -119,30 +119,52 @@ class TestRegisteredToolIsErrorViaRealFastMCP:
         as isError=True through the real FastMCP dispatch -- not the
         previous always-false behavior."""
         monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client")
+        saved_modules: dict[str, object] = {}
         for mod_name in list(sys.modules):
             if mod_name == "server" or mod_name.startswith("examples.mcp_server"):
+                saved_modules[mod_name] = sys.modules.pop(mod_name)
+
+        try:
+            server = importlib.import_module("examples.mcp_server.server")
+
+            def _deterministic_gateway_error(*args, **kwargs):
+                raise server.GatewayClientError(
+                    "project not found",
+                    status_code=404,
+                    body={"detail": "project not found"},
+                )
+
+            monkeypatch.setattr(
+                server.client,
+                "execute_project_command",
+                _deterministic_gateway_error,
+            )
+
+            async def _call():
+                return await server.mcp.call_tool(
+                    "git_status", {"project": "this-project-does-not-exist-xyz"}
+                )
+
+            result = asyncio.run(_call())
+            assert result.isError is True
+            assert result.structuredContent["ok"] is False
+        finally:
+            for mod_name in [
+                name
+                for name in list(sys.modules)
+                if (name == "server" or name.startswith("examples.mcp_server"))
+                and name not in saved_modules
+            ]:
                 del sys.modules[mod_name]
-
-        server = importlib.import_module("examples.mcp_server.server")
-
-        def _deterministic_gateway_error(*args, **kwargs):
-            raise server.GatewayClientError(
-                "project not found",
-                status_code=404,
-                body={"detail": "project not found"},
-            )
-
-        monkeypatch.setattr(
-            server.client,
-            "execute_project_command",
-            _deterministic_gateway_error,
-        )
-
-        async def _call():
-            return await server.mcp.call_tool(
-                "git_status", {"project": "this-project-does-not-exist-xyz"}
-            )
-
-        result = asyncio.run(_call())
-        assert result.isError is True
-        assert result.structuredContent["ok"] is False
+            sys.modules.update(saved_modules)
+            # Restoring sys.modules alone is insufficient: importing the fresh
+            # server also rebinds parent-package attributes to fresh module
+            # objects. Restore those attributes too so later tests and lazy
+            # imports observe the same module identities collected earlier.
+            for mod_name, module in saved_modules.items():
+                if "." not in mod_name:
+                    continue
+                parent_name, _, attr = mod_name.rpartition(".")
+                parent = sys.modules.get(parent_name)
+                if parent is not None and getattr(parent, attr, None) is not module:
+                    setattr(parent, attr, module)
