@@ -1046,6 +1046,92 @@ class DockerClient:
         ]
         return await self._run_with_result(argv, timeout=float(timeout))
 
+    async def run_site_audit_deploy_contract_helper(
+        self,
+        *,
+        helper_image_id: str,
+        candidate_root: str,
+        operator_root: str,
+        script_path: str,
+        env_file: str,
+        state_volume: str,
+        image_namespace: str,
+        source_revision: str,
+        timeout: int = 600,
+        recover: bool = False,
+    ) -> RunResult:
+        """Run the dedicated Site Audit repo-owned deploy transaction helper.
+
+        The adapter binds the candidate/source/script/image identities before
+        this method is reached.  No arbitrary command or Compose argv enters
+        this surface; rollout logic remains entirely in deploy-site-audit.sh.
+        """
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", helper_image_id):
+            raise ValueError("helper_image_id must be an immutable sha256 image ID")
+        candidate_root = self._validate_deploy_mount_path(candidate_root, "candidate_root")
+        operator_root = self._validate_deploy_mount_path(operator_root, "operator_root")
+        script_path = self._validate_deploy_mount_path(script_path, "script_path")
+        env_file = self._validate_deploy_mount_path(env_file, "env_file")
+        self._validate_volume_name(state_volume)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", image_namespace):
+            raise ValueError("image_namespace is invalid")
+        if not re.fullmatch(r"[0-9a-f]{40}", source_revision):
+            raise ValueError("source_revision must be an exact lowercase 40-hex SHA")
+        timeout = max(120, min(timeout, 900))
+
+        state_root = "/var/lib/site-audit-deploy-state"
+        state_file = f"{state_root}/deploy.json"
+        mount_socket = "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock"
+        mount_candidate = f"type=bind,src={candidate_root},dst={candidate_root},readonly"
+        mount_operator = f"type=bind,src={operator_root},dst={operator_root},readonly"
+        mount_state = f"type=volume,src={state_volume},dst={state_root}"
+        argv = [
+            DOCKER_BIN,
+            "run",
+            "--rm",
+            "--network",
+            "host",
+            "--user",
+            "0:0",
+            "--cap-drop",
+            "ALL",
+            "--cap-add",
+            "DAC_OVERRIDE",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--read-only",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,nodev,size=64m",
+            "--mount",
+            mount_socket,
+            "--mount",
+            mount_candidate,
+            "--mount",
+            mount_operator,
+            "--mount",
+            mount_state,
+            helper_image_id,
+            "python3",
+            "/app/scripts/site_audit_deploy_contract_runner.py",
+            "--script",
+            script_path,
+            "--source-root",
+            candidate_root,
+            "--env-file",
+            env_file,
+            "--state-file",
+            state_file,
+            "--image-namespace",
+            image_namespace,
+            "--source-revision",
+            source_revision,
+            "--timeout",
+            str(max(60, timeout - 30)),
+        ]
+        if recover:
+            argv.append("--recover")
+        return await self._run_with_result(argv, timeout=float(timeout))
+
     async def rm(self, container: str, force: bool = False) -> RunResult:
         self._validate_container_name(container)
         argv = [DOCKER_BIN, "rm"]
