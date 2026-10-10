@@ -524,3 +524,76 @@ projects:
     type: "python-service"
     description: "Kojo release hardening father rollup staging worktree"
     tags: ["kojo", "temporary", "release-hardening"]
+
+  nod_android:
+    root: NOD_android
+    type: unknown
+    description: "NOD Android client"
+    tags: []
+
+  wififiles:
+    root: WiFiFiles
+    type: unknown
+    description: "WiFiFiles — файловый менеджер и сетевой сервер (HTTP/WebDAV/FTP/SMB) для PocketBook 650. Интерфейс на 4 языках: русский, английский, немецкий, французский"
+    tags: []
+
+  browser-fetcher-service:
+    root: quart-platform/browser-fetcher-service
+    parent: quart-platform
+    type: unknown
+    description: "Bootstrap repository"
+    tags: []
+
+  browser-service:
+    root: quart-platform/browser-service
+    parent: quart-platform
+    type: python-service
+    description: "Persistent per-agent headless-Chrome session service with CDP for browser-harness"
+    tags: []
+
+  content-harvester-service:
+    root: quart-platform/content-harvester-service
+    parent: quart-platform
+    type: unknown
+    description: "Bootstrap repository"
+    tags: []
+
+  js-chat-engine:
+    root: quart-platform/JS_chat-engine
+    parent: quart-platform
+    type: python-service
+    description: "JS chat engine — hardened delivery lane"
+    tags: []
+
+  lana.xloud:
+    root: astra/sites/lana.xloud
+    type: node-service
+    description: "Lana.xloud — Astro 5 site (extracted from astra monorepo)"
+    tags: []
+
+  rag-quality-service:
+    root: quart-platform/rag-quality-service
+    parent: quart-platform
+    type: python-service
+    description: "RAG quality evaluation, answer assurance, verified-answer eligibility, and benchmark evidence service"
+    tags: []
+
+  site-audit-platform:
+    root: quart-platform/site-audit-platform
+    parent: quart-platform
+    type: python-service
+    description: "Site audit platform: deep site audits, crawler/browser/performance/security workers, quality evidence, CRM integration"
+    tags: []
+
+  watermarks-remover:
+    root: quart-platform/watermarks-remover
+    parent: quart-platform
+    type: unknown
+    description: "Watermark detection and removal service"
+    tags: []
+
+  xloud:
+    root: astra/sites/xloud
+    type: node-service
+    description: "XLOUD — public product site for comprehensive website-audit service (xloud.ru)"
+    tags: []
