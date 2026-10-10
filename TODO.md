@@ -191,6 +191,23 @@ Open backlog count after cleanup: **42**
    the external ChatGPT resource-catalog refresh/filter/cache layer rather than
    Gateway deployment, FastMCP registration or public MCP/OAuth reconnect behavior.
 
+   **2026-10-10 MCP notification boundary evidence:** PR #504 merged as
+   `4955470c1f8a...`; post-merge run #15403 completed build-and-push, deploy and
+   host-smoke successfully, and live Gateway/MCP health reported exact build SHA
+   `4955470c1f8a...` with 139 registered tools. The deployed `tools_manifest`
+   emitted the standard MCP `notifications/tools/list_changed` signal successfully
+   for toolset hash `sha256:88b62a9a5c4c...`, but the attached ChatGPT
+   `api_tool` catalog still omitted both newly exposed `candidate_cleanup` and
+   the older `gitea_rerun_action_job`. A second `tools_manifest` call again
+   reported `catalog_refresh_signal.status=sent` rather than `already_sent`,
+   proving these tool calls are bound to separate short-lived MCP lifecycles from
+   the external schema-catalog snapshot. Server-side list-change notification is
+   therefore implemented and deployed, but it cannot invalidate this caller's
+   catalog. Keep #6 open at the external client/platform boundary; do not add a
+   Gateway call-by-name bypass. Closure requires the external catalog itself to
+   refresh/rebind (or expose an explicit stale/refresh control) and then prove the
+   real callable schemas for `candidate_cleanup` and `gitea_rerun_action_job`.
+
 7. ⬜ **Reconcile Gitea Actions lifecycle, stranded jobs and cancellable runs.**
    CI runs/jobs can remain `waiting` / `in_progress` after all useful work is
    done, after cleanup timeouts, or after old workflow jobs later become runnable.
@@ -624,6 +641,20 @@ Open backlog count after cleanup: **42**
     therefore outside the Gateway process/session implementation: close this item
     only when the external resource catalog either refreshes on server build/toolset
     change or surfaces an explicit stale state plus bounded refresh action.
+
+    **2026-10-10 notification/lifecycle isolation evidence:** PR #504 deployed
+    exact `master@4955470c1f8a...` in successful post-merge run #15403. The live
+    server toolset hash changed to `sha256:88b62a9a5c4c...`; invoking the already
+    caller-visible `tools_manifest` twice caused two successful standard
+    `notifications/tools/list_changed` emissions, but each call reported
+    `status=sent` rather than the second reporting `already_sent`. The attached
+    `api_tool` catalog remained unchanged after both emissions and still omitted
+    `candidate_cleanup` and `gitea_rerun_action_job`. This proves the schema
+    snapshot is not scoped to, or revalidated by, the MCP lifecycle that executes
+    tools. A Gateway session-cache change cannot close #45 by itself: acceptance
+    requires the external catalog owner to bind cache identity/invalidation to
+    connector/build/toolset identity or expose an explicit refresh/reconnect
+    action whose postcondition is a freshly fetched `tools/list`.
 
 46. ⬜ **Make `info(project)` verification commands executable verbatim.**
     Verification guidance must include any project-specific mypy targets/options,
