@@ -1,15 +1,17 @@
 # Agent SSH Gateway — TODO
 
-Last cleaned: 2026-10-09.
+Last reconciled: 2026-10-10.
 
 This file is the active backlog only. Completed audit notes, fixed CI blockers,
 merged PR evidence, and superseded diagnostics should live in PR history,
 changelogs, or dedicated audit archives — not in TODO.
 
-On 2026-10-09 the cleaned `master` backlog and the long-lived dirty canonical
-`TODO.md` were reconciled into this single view. Historical duplicates and
-superseded diagnostics were not reintroduced; unique still-open findings and
-useful current evidence were folded into the corresponding active items.
+On 2026-10-10 the current committed `master` backlog was reconciled again with
+unique evidence from the long-lived dirty canonical `TODO.md`. The three dirty
+runtime/tooling intake entries were not promoted as duplicate roadmap items:
+their still-open substance was folded into existing #14, #2/#51 and #6/#45;
+fresh cancellation reproductions were folded into #15. Historical duplicates,
+completed subcases and superseded diagnostics were not reintroduced.
 
 Open backlog count after cleanup: **42**
 
@@ -125,12 +127,33 @@ Open backlog count after cleanup: **42**
    operator tool, so item #2 remains open for caller-visible inspect/reconcile/
    cleanup and dependant-self-containment recovery rather than for this fence.
 
+   **2026-10-10 bundle-backed delivery evidence:** standard
+   `prepare_candidate_clone` candidates in `gpakoh/nod-gateway` use an immutable
+   local bundle as their trusted source. Multiple clean, scoped candidates then
+   failed `gitea_push_verified_commit` before remote mutation during the
+   `clone_bundle` staging phase (`GIT_PUSH_FAILED` / later
+   `CANDIDATE_SOURCE_UNAVAILABLE`); fresh Gitea reads proved the destination refs
+   absent for the definite pre-mutation cases. Fold this into #2 rather than a
+   new P2 item: the candidate Git write plane must reliably materialize exact
+   bundle-backed heads, or return a bounded typed recovery action without
+   requiring candidate reconstruction. The response-lost/timeout ambiguity of
+   the same incident is tracked under existing #51.
+
 4. ⬜ **Reconcile stale unbound fleet leases without duplicate work.**
    Historical `attempted` / `legacy_unknown` lease rows can consume all fleet
    capacity even when no lease has a recent heartbeat. Add fleet status that
    separates live workers, reclaimable never-attempted leases and ambiguous rows;
    require explicit evidence/acknowledgement before deleting ambiguous leases;
    tombstone every reclaimed lease exactly once.
+
+   **2026-10-10 implementation status:** PR #506 (`fix(fleet): reconcile stale
+   unbound leases safely`) implements the intended status/reconciliation/tombstone
+   contract and reports targeted local verification, but its current head
+   `eaf2e2a64886...` is behind `master@7044f0e96054...` by two commits. Treat #4
+   as implemented/locally verified on a branch only; it remains open until the
+   branch is refreshed to current base, exact-head CI is green, the PR is merged,
+   post-merge deploy/host-smoke succeeds, and the live operator surface is
+   acceptance-tested without duplicate work or ambiguous lease deletion.
 
 6. ⬜ **Keep ChatGPT-visible tool schemas in parity with server manifests.**
    Tools can appear available in `tools_manifest` while missing or having a
@@ -207,6 +230,17 @@ Open backlog count after cleanup: **42**
    Gateway call-by-name bypass. Closure requires the external catalog itself to
    refresh/rebind (or expose an explicit stale/refresh control) and then prove the
    real callable schemas for `candidate_cleanup` and `gitea_rerun_action_job`.
+
+   **2026-10-10 closed-unmerged cleanup evidence:** agent-memory-service PR #13
+   and opencode-adapter PRs #82/#84 were independently proven superseded by
+   current-base merged replacements, including byte-identical useful blobs and
+   green post-merge evidence, yet their stale exact-SHA branches could not be
+   driven to terminal cleanup from this caller. The server already advertises
+   the guarded cleanup/create-at-SHA capabilities needed to record supersession,
+   while the attached external catalog hides the relevant callable schema. Fold
+   these reproductions into #6/#45 rather than creating a separate cleanup item;
+   once external schema parity is restored, re-run one proven-superseded branch
+   through the audited exact-SHA cleanup path without force/reset or dummy commit.
 
 7. ⬜ **Reconcile Gitea Actions lifecycle, stranded jobs and cancellable runs.**
    CI runs/jobs can remain `waiting` / `in_progress` after all useful work is
@@ -373,6 +407,17 @@ Open backlog count after cleanup: **42**
    **Acceptance:** Existing item #14 acceptance plus: on gateway_client (or a fixture with pinned native dependency unsupported on a newer interpreter), targeted pytest selects the declared/CI-supported interpreter or reports typed environment incompatibility before test status; targeted compileall compiles requested files without full dependency bootstrap; helper result distinguishes bootstrap/toolchain failure from product code/test failure; returned metadata identifies interpreter/toolchain plane; regression demonstrates CI-equivalent Python 3.11 succeeds while accidental Python 3.14 selection is not reported as a code failure.
    **Related evidence:** gateway_client main c4a634b50f2c01f3cb8f4f5a69075eaa2a4cd16d; post-merge Gitea runs 15292, 15293, 15294, 15295 SUCCESS. Gateway run_pytest job 01eca165-e930-4c52-ba97-280ca0d33a55; run_compileall job c05f6a3a-ced2-4136-98c5-ace8f9ff9ee6.
 
+   **2026-10-10 registered-subproject evidence:** targeted `run_pytest` for the
+   registered NOD `master_server` service failed before pytest collection because
+   the helper assumed a project-root `pyproject.toml`; targeting the nested test
+   through the parent candidate instead built the parent environment and failed
+   collection on missing service dependency `pydantic`. This is the same #14
+   environment-resolution defect, not a separate roadmap item. Acceptance must
+   cover requirements-based registered subprojects with their configured cwd and
+   dependency contract, and return an explicit unsupported-environment/bootstrap
+   diagnostic rather than a misleading product-test failure when resolution is
+   impossible.
+
 15. ⬜ **Make agent cancellation and submission atomic/reconcilable.**
     Cancellation can mark a local job ambiguous while the remote runner keeps
     heartbeating, and rate-limited submission can return failure after a runner
@@ -382,6 +427,18 @@ Open backlog count after cleanup: **42**
     Preserve a cancellable/fenceable remote handle or prove no runner/proxy
     acquisition occurred before returning failure; replacement work must remain
     blocked until the old writer is terminal or fenced.
+
+    **2026-10-10 live split-state evidence:** two independent pilots reproduced
+    the same failure mode. Browser task `port-provider-challenge-currentbase-20261010`
+    became locally `ambiguous` after cancellation while remote runner PID 1498
+    continued fresh heartbeats. Supervisor task `pilot-gateway-dispatch` likewise
+    became locally ambiguous while remote PID 33878 kept heartbeating and was later
+    classified `likely_hung/reasoning_loop`; a second cancellation was rejected
+    solely because the control-plane job was already ambiguous. Both candidate
+    worktrees remained clean, so no late write was observed, but remote termination
+    was not proven. Keep #15 open until an ambiguous local cancellation retains a
+    durable remote stop/fence path and replacement admission is impossible until
+    that remote writer is terminal or fenced.
 
 16. ⬜ **Reconcile agent jobs durably across Gateway restarts/deploys.**
     Restart/deploy can make returned job ids disappear while artifacts still show
@@ -528,6 +585,15 @@ Open backlog count after cleanup: **42**
     `MUTATION_OUTCOME_UNKNOWN` with no blind-retry guidance. Regression coverage
     must include response-lost-after-success and timeout-before-write cases.
 
+    **2026-10-10 bundle-delivery timeout evidence:** during the NOD bundle-backed
+    candidate incident, an initial staging failure was followed by a client
+    timeout; fresh Gitea reads after the unknown outcome proved the destination
+    branch absent before any retry. Keep the deterministic `clone_bundle` staging
+    defect under #2, but retain the timeout half here: `gitea_push_verified_commit`
+    must reconcile remote state itself after response loss and report proven
+    success, proven no-mutation, or typed unknown outcome without requiring the
+    caller to infer safety from an exception.
+
 ## P3 / Capability and ergonomics wishlist
 
 35. ⬜ **Add project catalog filtering and pagination.**
@@ -655,6 +721,15 @@ Open backlog count after cleanup: **42**
     requires the external catalog owner to bind cache identity/invalidation to
     connector/build/toolset identity or expose an explicit refresh/reconnect
     action whose postcondition is a freshly fetched `tools/list`.
+
+    **2026-10-10 typed refresh-contract progress:** PR #507 merged to
+    `master@7044f0e96054...`; post-merge run #15518 completed successfully. The
+    server now exposes a typed catalog state plus bounded `tools/list` refresh
+    guidance keyed to the live server toolset hash. This satisfies the Gateway
+    side of explicit stale-catalog diagnostics, but does not close #45: the
+    external ChatGPT resource catalog still owns its separate schema snapshot and
+    must prove that it consumes the refresh/rebind contract and fetches the new
+    callable schema in a long-lived caller.
 
 46. ⬜ **Make `info(project)` verification commands executable verbatim.**
     Verification guidance must include any project-specific mypy targets/options,
