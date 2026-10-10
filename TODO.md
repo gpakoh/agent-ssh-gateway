@@ -722,6 +722,15 @@ Open backlog count after cleanup: **42**
     connector/build/toolset identity or expose an explicit refresh/reconnect
     action whose postcondition is a freshly fetched `tools/list`.
 
+    **2026-10-10 typed refresh-contract progress:** PR #507 merged to
+    `master@7044f0e96054...`; post-merge run #15518 completed successfully. The
+    server now exposes a typed catalog state plus bounded `tools/list` refresh
+    guidance keyed to the live server toolset hash. This satisfies the Gateway
+    side of explicit stale-catalog diagnostics, but does not close #45: the
+    external ChatGPT resource catalog still owns its separate schema snapshot and
+    must prove that it consumes the refresh/rebind contract and fetches the new
+    callable schema in a long-lived caller.
+
 46. ⬜ **Make `info(project)` verification commands executable verbatim.**
     Verification guidance must include any project-specific mypy targets/options,
     not just a generic `uv run --extra dev mypy`. A JS Chat Engine delivery
