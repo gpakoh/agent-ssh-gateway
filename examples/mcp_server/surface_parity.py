@@ -31,6 +31,7 @@ class ClientSurfaceAttestation:
 
 
 _SESSION_ATTESTATIONS: dict[object, ClientSurfaceAttestation] = {}
+_SESSION_TOOL_LIST_REFRESH_HASHES: dict[object, str] = {}
 
 
 def _normalize_tool_names(names: list[str], *, max_names: int) -> tuple[str, ...]:
@@ -118,16 +119,42 @@ def load_session_attestation(
     return attestation
 
 
+def tool_list_refresh_notification_sent(
+    lifecycle_owner: object | None,
+    toolset_hash: str | None,
+) -> bool:
+    """Return whether this lifecycle already received a refresh cue for this toolset."""
+
+    if lifecycle_owner is None or not isinstance(toolset_hash, str) or not toolset_hash:
+        return False
+    return _SESSION_TOOL_LIST_REFRESH_HASHES.get(lifecycle_owner) == toolset_hash
+
+
+def record_tool_list_refresh_notification(
+    lifecycle_owner: object,
+    toolset_hash: str,
+) -> None:
+    """Record one successfully delivered refresh cue for a lifecycle/toolset pair."""
+
+    if lifecycle_owner is None:
+        raise ValueError("lifecycle_owner is required")
+    if not isinstance(toolset_hash, str) or not toolset_hash:
+        raise ValueError("toolset_hash is required")
+    _SESSION_TOOL_LIST_REFRESH_HASHES[lifecycle_owner] = toolset_hash
+
+
 def clear_session_attestation(lifecycle_owner: object) -> None:
-    """Forget exactly one lifecycle's client attestation."""
+    """Forget one lifecycle's client observation and refresh-notification state."""
 
     _SESSION_ATTESTATIONS.pop(lifecycle_owner, None)
+    _SESSION_TOOL_LIST_REFRESH_HASHES.pop(lifecycle_owner, None)
 
 
 def clear_all_attestations_for_tests() -> None:
     """Reset process-local test state."""
 
     _SESSION_ATTESTATIONS.clear()
+    _SESSION_TOOL_LIST_REFRESH_HASHES.clear()
 
 
 def evaluate_required_guards(

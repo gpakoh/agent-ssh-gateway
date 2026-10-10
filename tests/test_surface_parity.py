@@ -17,6 +17,8 @@ from examples.mcp_server.surface_parity import (
     normalize_client_visible_tool_names,
     normalize_required_guard_tool_names,
     record_session_attestation,
+    record_tool_list_refresh_notification,
+    tool_list_refresh_notification_sent,
 )
 
 
@@ -37,6 +39,8 @@ def _clear_attestations() -> None:
             "normalize_client_visible_tool_names": parity.normalize_client_visible_tool_names,
             "normalize_required_guard_tool_names": parity.normalize_required_guard_tool_names,
             "record_session_attestation": parity.record_session_attestation,
+            "record_tool_list_refresh_notification": parity.record_tool_list_refresh_notification,
+            "tool_list_refresh_notification_sent": parity.tool_list_refresh_notification_sent,
         }
     )
     parity.clear_all_attestations_for_tests()
@@ -66,6 +70,20 @@ def test_parallel_lifecycles_with_same_auth_do_not_cross_overwrite_or_clear() ->
     clear_session_attestation(first)
     assert load_session_attestation(first, "same-auth", "hash") is None
     assert load_session_attestation(second, "same-auth", "hash") is not None
+
+
+def test_tool_list_refresh_notification_is_bound_to_lifecycle_and_toolset_hash() -> None:
+    owner = object()
+    other = object()
+
+    assert tool_list_refresh_notification_sent(owner, "hash-a") is False
+    record_tool_list_refresh_notification(owner, "hash-a")
+    assert tool_list_refresh_notification_sent(owner, "hash-a") is True
+    assert tool_list_refresh_notification_sent(owner, "hash-b") is False
+    assert tool_list_refresh_notification_sent(other, "hash-a") is False
+
+    clear_session_attestation(owner)
+    assert tool_list_refresh_notification_sent(owner, "hash-a") is False
 
 
 def test_none_lifecycle_cannot_be_stored() -> None:
@@ -142,6 +160,7 @@ async def test_mcp_lifespan_teardown_clears_attestation_before_network_cleanup(
     def _tracking_detach(owner: object) -> list[tuple[Any, Any]]:
         cleared_during_release.append(
             load_session_attestation(owner, "auth", "hash") is None
+            and not tool_list_refresh_notification_sent(owner, "hash")
         )
         return []
 
@@ -152,10 +171,87 @@ async def test_mcp_lifespan_teardown_clears_attestation_before_network_cleanup(
 
     async with live_server._mcp_lifespan(live_server.mcp) as owner:
         record_session_attestation(owner, "auth", "hash", ["alpha"], True)
+        record_tool_list_refresh_notification(owner, "hash")
         assert load_session_attestation(owner, "auth", "hash") is not None
+        assert tool_list_refresh_notification_sent(owner, "hash") is True
 
     assert cleared_during_release == [True, True]
     assert load_session_attestation(owner, "auth", "hash") is None
+    assert tool_list_refresh_notification_sent(owner, "hash") is False
+
+
+@pytest.mark.asyncio
+async def test_protocol_tools_manifest_sends_one_refresh_signal_per_lifecycle_toolset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live_server = server_module()
+    owner = object()
+
+    class Session:
+        calls = 0
+
+        async def send_tool_list_changed(self) -> None:
+            self.calls += 1
+
+    session = Session()
+    monkeypatch.setattr(live_server, "_current_mcp_lifecycle_owner", lambda: owner)
+    monkeypatch.setattr(live_server, "_current_mcp_session", lambda: session)
+    monkeypatch.setattr(live_server, "_current_auth_reuse_key", lambda: "auth")
+    monkeypatch.setattr(live_server, "compute_toolset_hash", lambda _mcp: "hash-a")
+
+    first = await live_server._gateway_tools_manifest_protocol(include_descriptions=False)
+    second = await live_server._gateway_tools_manifest_protocol(include_descriptions=False)
+
+    assert first["ok"] is True
+    assert first["result"]["operator_surface_contract"]["catalog_refresh_signal"] == {
+        "method": "notifications/tools/list_changed",
+        "toolset_hash": "hash-a",
+        "status": "sent",
+    }
+    assert second["result"]["operator_surface_contract"]["catalog_refresh_signal"][
+        "status"
+    ] == "already_sent"
+    assert session.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_protocol_tools_manifest_refresh_failure_is_retryable_and_nonfatal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live_server = server_module()
+    owner = object()
+
+    class Session:
+        calls = 0
+
+        async def send_tool_list_changed(self) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("simulated transport drop")
+
+    session = Session()
+    monkeypatch.setattr(live_server, "_current_mcp_lifecycle_owner", lambda: owner)
+    monkeypatch.setattr(live_server, "_current_mcp_session", lambda: session)
+    monkeypatch.setattr(live_server, "_current_auth_reuse_key", lambda: "auth")
+    monkeypatch.setattr(live_server, "compute_toolset_hash", lambda _mcp: "hash-a")
+
+    failed_signal = await live_server._gateway_tools_manifest_protocol(
+        include_descriptions=False
+    )
+
+    assert failed_signal["ok"] is True
+    failure = failed_signal["result"]["operator_surface_contract"]["catalog_refresh_signal"]
+    assert failure["status"] == "send_failed"
+    assert failure["retryable"] is True
+    assert failure["error_class"] == "RuntimeError"
+    assert tool_list_refresh_notification_sent(owner, "hash-a") is False
+
+    retried = await live_server._gateway_tools_manifest_protocol(include_descriptions=False)
+    assert tool_list_refresh_notification_sent(owner, "hash-a") is True
+    assert retried["result"]["operator_surface_contract"]["catalog_refresh_signal"][
+        "status"
+    ] == "sent"
+    assert session.calls == 2
 
 
 def test_tools_manifest_unbound_report_is_one_shot_and_not_retained(
