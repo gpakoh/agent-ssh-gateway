@@ -398,6 +398,88 @@ jobs:
           echo "::error::pip-audit exited retry loop unexpectedly"
           exit 1
 
+  fleet-postgres:
+    needs: [scope]
+    if: github.event_name == 'pull_request' && needs.scope.outputs.full_ci == 'true' && github.server_url != 'https://github.com'
+    name: Fleet PostgreSQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CI_PACKAGE_HTTP_PROXY: ${{ secrets.CI_PACKAGE_HTTP_PROXY }}
+      CI_PACKAGE_HTTPS_PROXY: ${{ secrets.CI_PACKAGE_HTTPS_PROXY }}
+      CI_PACKAGE_NO_PROXY: ${{ secrets.CI_PACKAGE_NO_PROXY }}
+      FLEET_TEST_PG_DSN: postgresql://postgres:fleet-ci-only@postgres:5432/fleet_test
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: fleet-ci-only
+          POSTGRES_DB: fleet_test
+        options: >-
+          --health-cmd "pg_isready -U postgres -d fleet_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify exact PR head
+        run: |
+          set -euo pipefail
+          expected="${{ github.event.pull_request.head.sha || github.sha }}"
+          test "$(git rev-parse HEAD)" = "$expected"
+          test -z "$(git status --porcelain)"
+      - name: Configure package proxy
+        run: |
+          set -euo pipefail
+          if [ -n "${CI_PACKAGE_HTTP_PROXY:-}" ]; then
+            echo "HTTP_PROXY=$CI_PACKAGE_HTTP_PROXY" >> "$GITHUB_ENV"
+            echo "http_proxy=$CI_PACKAGE_HTTP_PROXY" >> "$GITHUB_ENV"
+          fi
+          package_https_proxy="${CI_PACKAGE_HTTPS_PROXY:-${CI_PACKAGE_HTTP_PROXY:-}}"
+          if [ -n "$package_https_proxy" ]; then
+            echo "HTTPS_PROXY=$package_https_proxy" >> "$GITHUB_ENV"
+            echo "https_proxy=$package_https_proxy" >> "$GITHUB_ENV"
+          fi
+          package_no_proxy="${CI_PACKAGE_NO_PROXY:-${{ vars.CI_PACKAGE_NO_PROXY }}}"
+          package_no_proxy="${package_no_proxy:+${package_no_proxy},}postgres,127.0.0.1,localhost"
+          echo "NO_PROXY=$package_no_proxy" >> "$GITHUB_ENV"
+          echo "no_proxy=$package_no_proxy" >> "$GITHUB_ENV"
+      - name: Install Python 3.12 test environment
+        run: |
+          set -euo pipefail
+          pip_install=(python3 -m pip)
+          "${pip_install[@]}" install uv
+          UV_HTTP_TIMEOUT=60 uv python install 3.12
+          python_path="$(uv python find 3.12)"
+          test "$("$python_path" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" = "3.12"
+          echo "UV_PYTHON=$python_path" >> "$GITHUB_ENV"
+          UV_PYTHON="$python_path" UV_HTTP_TIMEOUT=60 uv sync --frozen --extra dev
+      - name: Fleet recovery real-Postgres regressions
+        run: |
+          set -euo pipefail
+          uv run pytest tests/test_fleet_recovery_pg.py -q -rs --junitxml=fleet-pg-results.xml
+          uv run python - <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse("fleet-pg-results.xml").getroot()
+          suites = [root] if root.tag == "testsuite" else list(root.findall("testsuite"))
+          tests = sum(int(suite.attrib.get("tests", "0")) for suite in suites)
+          skipped = sum(int(suite.attrib.get("skipped", "0")) for suite in suites)
+          failures = sum(int(suite.attrib.get("failures", "0")) for suite in suites)
+          errors = sum(int(suite.attrib.get("errors", "0")) for suite in suites)
+          if tests <= 0 or skipped != 0 or failures != 0 or errors != 0:
+              print(
+                  f"Fleet PostgreSQL execution proof failed: tests={tests}, "
+                  f"skipped={skipped}, failures={failures}, errors={errors}",
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
+          print(f"Fleet PostgreSQL execution proof: tests={tests}, skipped=0")
+          PY
+
   e2e:
     # MAJOR audit finding: pytest -m "not host_smoke and not e2e" above
     # deliberately excludes tests/test_webui_e2e.py's 4 Selenium/headless-
