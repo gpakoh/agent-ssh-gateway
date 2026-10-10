@@ -1006,6 +1006,22 @@ class TestFleetPostgresCiGate:
         assert "github.server_url != 'https://github.com'" in condition
         assert "always()" not in condition
 
+    def test_fleet_postgres_bootstrap_does_not_assume_python_module_pip(self):
+        job = _load_workflow(CI_WORKFLOW_PATH)["jobs"]["fleet-postgres"]
+        install = next(
+            item
+            for item in job["steps"]
+            if item.get("name") == "Install Python 3.12 test environment"
+        )
+        run = install["run"]
+        assert "pip_install=(python -m pip)" in run
+        assert "command -v pip3" in run
+        assert "command -v pip" in run
+        assert "python -m venv .ci-bootstrap-venv" in run
+        assert '"${pip_install[@]}" --version' in run
+        assert '"${pip_install[@]}" install uv' in run
+        assert "pip_install=(python3 -m pip)" not in run
+
     def test_fleet_postgres_job_uses_isolated_service_and_forbids_skips(self):
         job = _load_workflow(CI_WORKFLOW_PATH)["jobs"]["fleet-postgres"]
         service = job["services"]["postgres"]

@@ -449,7 +449,19 @@ jobs:
       - name: Install Python 3.12 test environment
         run: |
           set -euo pipefail
-          pip_install=(python3 -m pip)
+          pip_install=(python -m pip)
+          if ! "${pip_install[@]}" --version >/dev/null 2>&1; then
+            if command -v pip3 >/dev/null 2>&1 && pip3 --version >/dev/null 2>&1; then
+              pip_install=(pip3)
+            elif command -v pip >/dev/null 2>&1 && pip --version >/dev/null 2>&1; then
+              pip_install=(pip)
+            else
+              rm -rf .ci-bootstrap-venv
+              python -m venv .ci-bootstrap-venv
+              pip_install=(.ci-bootstrap-venv/bin/python -m pip)
+            fi
+          fi
+          "${pip_install[@]}" --version
           "${pip_install[@]}" install uv
           UV_HTTP_TIMEOUT=60 uv python install 3.12
           python_path="$(uv python find 3.12)"
