@@ -285,7 +285,7 @@ jobs:
           echo "collected $(wc -w < shard-files.txt) test files for shard ${{ matrix.shard }}"
           cat shard-files.txt
 
-      - name: Tests + coverage (shard)
+      - name: Tests + coverage
         # One of six parallel shards. scripts/split_unit_shards.py later
         # recomputes the exact same partition on its own (deterministic, pure
         # function of repo state), so no cross-job coordination is needed --

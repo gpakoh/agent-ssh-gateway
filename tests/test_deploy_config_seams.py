@@ -2108,8 +2108,10 @@ class TestInstallPackageNetworkResilience:
             assert "|| true" not in configure_run
             assert "continue-on-error" not in install_run
             assert "|| true" not in install_run
+        # pip-audit moved to the `test-gates` job when the unit suite was
+        # sharded; the `test` job now only fans out the six unit shards.
         pip_audit = next(
-            s for s in wf["jobs"]["test"]["steps"] if s.get("name") == "pip-audit"
+            s for s in wf["jobs"]["test-gates"]["steps"] if s.get("name") == "pip-audit"
         )
         assert "continue-on-error" not in pip_audit
         assert "|| true" not in pip_audit["run"]
@@ -2124,7 +2126,8 @@ class TestPipAuditNetworkResilience:
 
     def test_pip_audit_uses_extended_osv_timeout_and_retry_budget(self):
         wf = _load_workflow(CI_WORKFLOW_PATH)
-        steps = wf["jobs"]["test"]["steps"]
+        # pip-audit lives in `test-gates` after the unit suite was sharded.
+        steps = wf["jobs"]["test-gates"]["steps"]
         step = next(s for s in steps if s.get("name") == "pip-audit")
         run = step["run"]
 
@@ -2138,7 +2141,7 @@ class TestPipAuditNetworkResilience:
 
     def test_pip_audit_retry_signature_covers_osv_tls_handshake_timeouts(self):
         wf = _load_workflow(CI_WORKFLOW_PATH)
-        steps = wf["jobs"]["test"]["steps"]
+        steps = wf["jobs"]["test-gates"]["steps"]
         run = next(s for s in steps if s.get("name") == "pip-audit")["run"]
 
         for signature in (
@@ -2154,7 +2157,7 @@ class TestPipAuditNetworkResilience:
 
     def test_pip_audit_real_findings_still_fail_without_retry(self):
         wf = _load_workflow(CI_WORKFLOW_PATH)
-        steps = wf["jobs"]["test"]["steps"]
+        steps = wf["jobs"]["test-gates"]["steps"]
         run = next(s for s in steps if s.get("name") == "pip-audit")["run"]
 
         assert "exit $status" in run
@@ -2164,7 +2167,7 @@ class TestPipAuditNetworkResilience:
     @staticmethod
     def _pip_audit_run() -> str:
         wf = _load_workflow(CI_WORKFLOW_PATH)
-        steps = wf["jobs"]["test"]["steps"]
+        steps = wf["jobs"]["test-gates"]["steps"]
         return next(s for s in steps if s.get("name") == "pip-audit")["run"]
 
     @classmethod
@@ -2300,7 +2303,9 @@ class TestMakeCheckMirrorsCiExactly:
 
     def test_ci_lint_mypy_lockfile_testcount_steps_call_make_targets(self):
         wf = _load_workflow(CI_WORKFLOW_PATH)
-        steps = {s.get("name"): s.get("run", "").strip() for s in wf["jobs"]["test"]["steps"]}
+        # The non-test gates (lint, mypy, lockfile, integration, smoke, count)
+        # live in `test-gates` now that `test` fans out the six unit shards.
+        steps = {s.get("name"): s.get("run", "").strip() for s in wf["jobs"]["test-gates"]["steps"]}
         assert steps.get("Lockfile freshness") == "make lockfile-check"
         assert steps.get("Ruff") == "make lint"
         assert steps.get("Mypy") == "make mypy"
