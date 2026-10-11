@@ -1538,8 +1538,28 @@ jobs:
 
       - name: Set up Python
         run: |
+          set -euo pipefail
           python3 --version
-          /media/1TB/Anaconda/bin/uv sync --frozen --extra dev
+          sync_ready=false
+          for attempt in 1 2 3; do
+            if UV_HTTP_TIMEOUT=60 /media/1TB/Anaconda/bin/uv sync --frozen --extra dev; then
+              sync_ready=true
+              break
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              delay=$((attempt * 10))
+              echo "::warning::host-smoke uv sync attempt ${attempt}/3 failed, retrying in ${delay}s..."
+              sleep "$delay"
+            fi
+          done
+          if [ "$sync_ready" != "true" ]; then
+            echo "::warning::host-smoke uv sync retries exhausted; trying one direct fallback without proxy env"
+            if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy \
+              UV_HTTP_TIMEOUT=60 /media/1TB/Anaconda/bin/uv sync --frozen --extra dev; then
+              sync_ready=true
+            fi
+          fi
+          [ "$sync_ready" = "true" ] || exit 1
 
       - name: Fail-closed pre-smoke — all three containers must run this commit
         # BUILD_SHA is baked into each image at build time; the only way a
