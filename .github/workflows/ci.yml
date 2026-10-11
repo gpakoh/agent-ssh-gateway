@@ -1703,6 +1703,7 @@ jobs:
       # never enters MCP args or tracked files; the deploy job provisions the
       # operator-owned volume below from the Actions secret store.
       MCP_COMPOSE_DOCKER_CONFIG_VOLUME: mcp-compose-registry-auth
+      MCP_ACTIONS_SECRET_SOURCE_VOLUME: mcp-actions-secret-sources
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1765,6 +1766,42 @@ jobs:
             "$runner_ref" \
             -c 'set -eu; umask 077; cat > /docker-config/config.json; chmod 600 /docker-config/config.json' \
             < "$auth_config"
+      - name: Provision approved Actions secret source volume
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_volume="${MCP_ACTIONS_SECRET_SOURCE_VOLUME:?MCP_ACTIONS_SECRET_SOURCE_VOLUME must be set}"
+          source_file=/deploy/secrets/registry.token
+          test -s "$source_file"
+          : "${REGISTRY:?REGISTRY must be set}"
+
+          # Reuse the exact MCP artifact from this workflow run as an immutable
+          # helper. The root-owned registry token is streamed over stdin into a
+          # dedicated named volume; neither the host path nor plaintext enters
+          # MCP args, Compose variables, logs, or container environment.
+          runner_tag="$REGISTRY/gpakoh/mcp-server:${{ github.sha }}"
+          docker pull "$runner_tag" >/dev/null
+          runner_ref="$(docker image inspect --format '{{index .RepoDigests 0}}' "$runner_tag")"
+          case "$runner_ref" in
+            "$REGISTRY/gpakoh/mcp-server@sha256:"*) ;;
+            *)
+              echo "::error::mcp-server registry digest is missing or from an unexpected repository" >&2
+              exit 1
+              ;;
+          esac
+          printf '%s\n' "${runner_ref##*@sha256:}" | grep -Eq '^[0-9a-f]{64}$' || {
+            echo "::error::mcp-server registry digest is not sha256:64hex" >&2
+            exit 1
+          }
+
+          docker volume create "$source_volume" >/dev/null
+          docker run --rm -i \
+            --user 0:0 \
+            -v "$source_volume:/secret-sources" \
+            --entrypoint /bin/sh \
+            "$runner_ref" \
+            -c 'set -eu; umask 077; tmp=/secret-sources/.registry_token.tmp; trap '\''rm -f "$tmp"'\'' EXIT; cat > "$tmp"; test -s "$tmp"; chown 1000:1000 "$tmp"; chmod 400 "$tmp"; mv -f "$tmp" /secret-sources/registry_token; trap - EXIT' \
+            < "$source_file"
       - name: Deploy, smoke-test, roll back on failure
         # DEPLOY_SHA pins deploy-from-registry.sh to the exact commit that
         # triggered this run (build-and-push already tagged images with

@@ -52,6 +52,7 @@ from examples.mcp_server.managed_git import (
 from examples.mcp_server.mcp_audit import AuditWriteError, McpAuditEvent
 from examples.mcp_server.mcp_infra._server_ref import server_attr
 from examples.mcp_server.mcp_infra.tool_registry import register_tool
+from examples.mcp_server.secret_sources import SecretSourceError, read_approved_secret_source
 from examples.mcp_server.task_candidate import (
     CandidateError,
     materialize_task_candidate,
@@ -429,6 +430,14 @@ _ACTION_RERUN_RECONCILE_ATTEMPTS = 3
 _ACTION_RERUN_RECONCILE_DELAY_SECONDS = 0.05
 _GITEA_GOVERNANCE_RECONCILE_ATTEMPTS = 3
 _GITEA_GOVERNANCE_RECONCILE_DELAY_SECONDS = 0.05
+_GITEA_SECRET_RECONCILE_ATTEMPTS = 3
+_GITEA_SECRET_RECONCILE_DELAY_SECONDS = 0.05
+_GITEA_ACTIONS_SECRET_PROVISION_POLICY: frozenset[tuple[str, str, str, str]] = frozenset(
+    {
+        ("registry_token", "gpakoh", "work-session-service", "REGISTRY_TOKEN"),
+    }
+)
+_GITEA_ACTIONS_SECRET_DESCRIPTION_PREFIX = "mcp-source-sha256:"
 _GITEA_CI_PAGE_LIMIT = 50
 _GITEA_CI_MAX_RUNS = 1000
 _GITEA_CI_MAX_PAGES = 20
@@ -2819,6 +2828,403 @@ async def gitea_set_default_branch(
     return tool_success("gitea_set_default_branch", result=data, source="gitea")
 
 
+def _valid_sha256(value: Any) -> str | None:
+    text = str(value or "").strip().lower()
+    if len(text) != 64 or any(ch not in "0123456789abcdef" for ch in text):
+        return None
+    return text
+
+
+def _action_secret_metadata_match(
+    item: Any,
+    *,
+    secret_name: str,
+    expected_description: str,
+) -> bool:
+    if not isinstance(item, dict):
+        return False
+    name = str(item.get("name") or "").strip()
+    description = str(item.get("description") or "")
+    return name.upper() == secret_name.upper() and description == expected_description
+
+
+async def _find_gitea_action_secret(
+    client: Any,
+    owner: str,
+    repo: str,
+    *,
+    secret_name: str,
+    expected_description: str | None = None,
+) -> dict[str, Any] | None:
+    page = 1
+    while page <= 20:
+        items = await client.list_action_secrets(owner, repo, page=page, limit=50)
+        for item in items:
+            if not isinstance(item, dict):
+                raise ValueError("Gitea Actions secret metadata is malformed")
+            name = str(item.get("name") or "").strip()
+            if name.upper() != secret_name.upper():
+                continue
+            if expected_description is not None and not _action_secret_metadata_match(
+                item,
+                secret_name=secret_name,
+                expected_description=expected_description,
+            ):
+                return None
+            return item
+        if len(items) < 50:
+            return None
+        page += 1
+    raise ValueError("Gitea Actions secret list exceeded bounded pagination")
+
+
+async def _reconcile_gitea_action_secret(
+    client: Any,
+    owner: str,
+    repo: str,
+    *,
+    secret_name: str,
+    expected_description: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    attempts = 0
+    last_observed: dict[str, Any] = {}
+    last_read_error_class: str | None = None
+    for attempt in range(_GITEA_SECRET_RECONCILE_ATTEMPTS):
+        attempts = attempt + 1
+        try:
+            item = await _find_gitea_action_secret(
+                client,
+                owner,
+                repo,
+                secret_name=secret_name,
+            )
+        except Exception as exc:
+            last_read_error_class = type(exc).__name__
+        else:
+            if item is None:
+                last_observed = {"present": False}
+            else:
+                description = str(item.get("description") or "")
+                last_observed = {
+                    "present": True,
+                    "name": str(item.get("name") or ""),
+                    "description_matches": description == expected_description,
+                    "created_at": item.get("created_at"),
+                }
+                if description == expected_description:
+                    return item, {
+                        "reconciliation_attempts": attempts,
+                        "observed": last_observed,
+                    }
+        if attempt + 1 < _GITEA_SECRET_RECONCILE_ATTEMPTS:
+            await asyncio.sleep(_GITEA_SECRET_RECONCILE_DELAY_SECONDS)
+    details: dict[str, Any] = {
+        "reconciliation_attempts": attempts,
+        "observed": last_observed,
+    }
+    if last_read_error_class:
+        details["last_read_error_class"] = last_read_error_class
+    return None, details
+
+
+async def gitea_actions_secret_source_status(source_id: str) -> dict[str, Any]:
+    """Return opaque fingerprint evidence for one approved secret source."""
+    tool = "gitea_actions_secret_source_status"
+    source_id = str(source_id or "").strip()
+    try:
+        source = read_approved_secret_source(source_id)
+    except SecretSourceError as exc:
+        return tool_error(
+            tool=tool,
+            code="SECRET_SOURCE_UNAVAILABLE",
+            message=str(exc),
+            details={"source_id": source_id},
+            source="gitea",
+        )
+    fingerprint = source.sha256
+    normalized_source_id = source.source_id
+    del source
+    return tool_success(
+        tool,
+        result={
+            "source_id": normalized_source_id,
+            "source_sha256": fingerprint,
+            "available": True,
+        },
+        redacted=True,
+        source="gitea",
+    )
+
+
+async def gitea_provision_actions_secret(
+    owner: str,
+    repo: str,
+    secret_name: str,
+    source_id: str,
+    expected_source_sha256: str,
+    reason: str,
+) -> dict[str, Any]:
+    """Provision one allowlisted Gitea Actions secret from an approved source.
+
+    Secret plaintext is read only from an operator-provisioned local source and
+    is never returned or written to audit metadata.  The mutation is leased by
+    the expected source SHA-256 and reconciled by a non-secret description
+    marker carrying that fingerprint.
+    """
+    tool = "gitea_provision_actions_secret"
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return tool_error(
+            tool=tool,
+            code="DEPENDENCY_MISSING",
+            message="GITEA_TOKEN not configured",
+            source="gitea",
+        )
+
+    owner = str(owner or "").strip()
+    repo = str(repo or "").strip()
+    secret_name = str(secret_name or "").strip()
+    source_id = str(source_id or "").strip()
+    expected_source_sha256 = _valid_sha256(expected_source_sha256) or ""
+    reason = str(reason or "").strip()
+    if not expected_source_sha256:
+        return tool_error(
+            tool=tool,
+            code="INVALID_INPUT",
+            message="expected_source_sha256 must be a lowercase 64-hex SHA-256",
+            source="gitea",
+        )
+    if not reason or len(reason) > 500 or _contains_ascii_control(reason):
+        return tool_error(
+            tool=tool,
+            code="INVALID_INPUT",
+            message="reason must be 1..500 characters and contain no control characters",
+            source="gitea",
+        )
+    policy_key = (source_id, owner, repo, secret_name)
+    if policy_key not in _GITEA_ACTIONS_SECRET_PROVISION_POLICY:
+        return tool_error(
+            tool=tool,
+            code="POLICY_DENIED",
+            message="source/target Actions secret mapping is not approved",
+            details={
+                "source_id": source_id,
+                "owner": owner,
+                "repo": repo,
+                "secret_name": secret_name,
+                "mutation_occurred": False,
+            },
+            source="gitea",
+        )
+
+    try:
+        source = read_approved_secret_source(source_id)
+    except SecretSourceError as exc:
+        return tool_error(
+            tool=tool,
+            code="SECRET_SOURCE_UNAVAILABLE",
+            message=str(exc),
+            details={"source_id": source_id, "mutation_occurred": False},
+            source="gitea",
+        )
+    observed_source_sha256 = source.sha256
+    del source
+    if observed_source_sha256 != expected_source_sha256:
+        return tool_error(
+            tool=tool,
+            code="SOURCE_HASH_MISMATCH",
+            message="approved secret source changed; re-read its fingerprint before provisioning",
+            details={
+                "source_id": source_id,
+                "expected_source_sha256": expected_source_sha256,
+                "observed_source_sha256": observed_source_sha256,
+                "mutation_occurred": False,
+            },
+            source="gitea",
+        )
+
+    expected_description = (
+        f"{_GITEA_ACTIONS_SECRET_DESCRIPTION_PREFIX}{expected_source_sha256}"
+    )
+    audit_metadata: dict[str, Any] | None = None
+    mutation_error: BaseException | None = None
+    try:
+        async with _server_gitea_client()(token) as client:
+            metadata = await client.get_repo(owner, repo)
+            if metadata.get("archived") is True:
+                return tool_error(
+                    tool=tool,
+                    code="POLICY_DENIED",
+                    message="provisioning Actions secrets in an archived repository is not allowed",
+                    source="gitea",
+                )
+            permissions = metadata.get("permissions") or {}
+            if not permissions.get("admin"):
+                return tool_error(
+                    tool=tool,
+                    code="AUTH_ERROR",
+                    message="Configured Gitea identity requires repository admin access",
+                    source="gitea",
+                )
+            identity = await _require_gitea_identity(client)
+            if identity is None:
+                return tool_error(
+                    tool=tool,
+                    code="AUTH_ERROR",
+                    message="Authenticated Gitea identity and caller fingerprint are required",
+                    source="gitea",
+                )
+            username, fingerprint = identity
+
+            # Re-read the approved source immediately before crossing the
+            # mutation boundary so the source hash is a real lease, not stale
+            # evidence from the beginning of the call.
+            try:
+                fresh_source = read_approved_secret_source(source_id)
+            except SecretSourceError as exc:
+                return tool_error(
+                    tool=tool,
+                    code="SECRET_SOURCE_UNAVAILABLE",
+                    message=str(exc),
+                    details={"source_id": source_id, "mutation_occurred": False},
+                    source="gitea",
+                )
+            if fresh_source.sha256 != expected_source_sha256:
+                return tool_error(
+                    tool=tool,
+                    code="SOURCE_HASH_MISMATCH",
+                    message="approved secret source changed during preflight",
+                    retryable=True,
+                    details={
+                        "source_id": source_id,
+                        "expected_source_sha256": expected_source_sha256,
+                        "observed_source_sha256": fresh_source.sha256,
+                        "mutation_occurred": False,
+                    },
+                    source="gitea",
+                )
+
+            correlation_id = uuid.uuid4().hex
+            audit_metadata = {
+                "owner": owner,
+                "repo": repo,
+                "secret_name": secret_name,
+                "source_id": source_id,
+                "source_sha256": expected_source_sha256,
+                "gitea_username": username,
+                "caller_fingerprint": fingerprint,
+                "correlation_id": correlation_id,
+            }
+            audit_logger = _get_gitea_audit_logger()
+            try:
+                audit_logger.append_required(
+                    McpAuditEvent(
+                        event_type="mcp.gitea_admin_intent",
+                        tool=tool,
+                        action="provision_actions_secret",
+                        decision="allow",
+                        reason=reason,
+                        metadata=audit_metadata,
+                    )
+                )
+            except AuditWriteError:
+                return tool_error(
+                    tool=tool,
+                    code="AUDIT_UNAVAILABLE",
+                    message="Audit log unavailable; secret provisioning refused",
+                    source="gitea",
+                )
+
+            try:
+                await client.put_action_secret(
+                    owner,
+                    repo,
+                    secret_name=secret_name,
+                    value=fresh_source.value,
+                    description=expected_description,
+                )
+            except asyncio.CancelledError as exc:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    current_task.uncancel()
+                mutation_error = exc
+            except Exception as exc:
+                if not _gitea_governance_exception_is_ambiguous(exc):
+                    raise
+                mutation_error = exc
+            finally:
+                # Drop the last plaintext-bearing object as soon as the PUT
+                # boundary has been crossed. CPython cannot guarantee memory
+                # zeroization, but the value is never persisted or surfaced.
+                del fresh_source
+
+            confirmed, reconciliation = await _reconcile_gitea_action_secret(
+                client,
+                owner,
+                repo,
+                secret_name=secret_name,
+                expected_description=expected_description,
+            )
+            if confirmed is None:
+                details: dict[str, Any] = {
+                    "owner": owner,
+                    "repo": repo,
+                    "secret_name": secret_name,
+                    "source_id": source_id,
+                    "source_sha256": expected_source_sha256,
+                    "mutation_started": True,
+                    **reconciliation,
+                }
+                if mutation_error is not None:
+                    details["mutation_error_class"] = type(mutation_error).__name__
+                    if isinstance(mutation_error, httpx.HTTPStatusError):
+                        details["mutation_http_status"] = mutation_error.response.status_code
+                return tool_error(
+                    tool=tool,
+                    code="MUTATION_OUTCOME_UNKNOWN",
+                    message="Actions secret mutation was attempted but opaque-hash postcondition could not be proven",
+                    retryable=False,
+                    hint="Do not replay blindly. Re-read target metadata and reconcile the source fingerprint first.",
+                    details=details,
+                    source="gitea",
+                )
+
+            if audit_metadata is not None:
+                try:
+                    _get_gitea_audit_logger().append(
+                        McpAuditEvent(
+                            event_type="mcp.gitea_admin_success",
+                            tool=tool,
+                            action="provision_actions_secret",
+                            decision="allow",
+                            reason=reason,
+                            metadata=audit_metadata,
+                        )
+                    )
+                except Exception:
+                    pass
+            data = {
+                "owner": owner,
+                "repo": repo,
+                "secret_name": secret_name,
+                "source_id": source_id,
+                "source_sha256": expected_source_sha256,
+                "target_present": True,
+                "target_fingerprint_attested": True,
+                "created_at": confirmed.get("created_at"),
+                "outcome": (
+                    "completed_after_ambiguous_response"
+                    if mutation_error is not None
+                    else "completed"
+                ),
+                "verified": True,
+                "reconciliation_attempts": reconciliation["reconciliation_attempts"],
+            }
+    except Exception as exc:
+        return _remote_api_error(tool, "gitea", exc)
+    return tool_success(tool, result=data, source="gitea")
+
+
 async def gitea_list_action_runs(
     owner: str, repo: str, status: str | None = None, limit: int = 10
 ) -> dict[str, Any]:
@@ -4368,6 +4774,8 @@ def register_all() -> None:
     register_tool("gitea_delete_branch")(gitea_delete_branch)
     register_tool("gitea_create_branch_at_sha")(gitea_create_branch_at_sha)
     register_tool("gitea_set_default_branch")(gitea_set_default_branch)
+    register_tool("gitea_actions_secret_source_status")(gitea_actions_secret_source_status)
+    register_tool("gitea_provision_actions_secret")(gitea_provision_actions_secret)
     register_tool("gitea_materialize_task_candidate")(gitea_materialize_task_candidate)
     register_tool("gitea_push_local_ref")(gitea_push_local_ref)
     register_tool("gitea_push_verified_commit")(gitea_push_verified_commit)
