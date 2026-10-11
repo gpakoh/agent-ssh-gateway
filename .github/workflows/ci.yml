@@ -969,28 +969,45 @@ jobs:
         # container before the tests run.
         run: |
           set -euo pipefail
-          pg_name="fleet-pg-${GITHUB_RUN_ID}"
+          pg_name="fleet-pg-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"
           pg_net="$(docker inspect "$(hostname)" \
             --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}};{{end}}' \
             | cut -d';' -f1)"
           [ -n "$pg_net" ] || { echo "::error::could not detect job container network" >&2; exit 1; }
-          docker ps -a --filter "name=^/${pg_name}$" --format '{{.Names}}' | grep -qx "$pg_name" || \
-            docker run -d --rm --name "$pg_name" \
-              --network "$pg_net" --network-alias "$pg_name" \
-              -e POSTGRES_PASSWORD=fleet-ci-only \
-              -e POSTGRES_DB=fleet_test \
-              pgvector/pgvector:pg16 >/dev/null
+
+          # A previous interrupted attempt may have left this exact attempt
+          # name behind. Reconcile that bounded identity before creating the
+          # new container; never use a broad prune/name pattern.
+          docker rm -f "$pg_name" >/dev/null 2>&1 || true
+          docker run -d --name "$pg_name" \
+            --network "$pg_net" --network-alias "$pg_name" \
+            -e POSTGRES_PASSWORD=fleet-ci-only \
+            -e POSTGRES_DB=fleet_test \
+            pgvector/pgvector:pg16 >/dev/null
+
           ready=""
           for i in $(seq 1 90); do
             if docker exec "$pg_name" pg_isready -U postgres -d fleet_test -h 127.0.0.1 >/dev/null 2>&1; then
               ready=1
               break
             fi
+            if ! docker inspect "$pg_name" >/dev/null 2>&1; then
+              echo "::error::Fleet postgres vanished before readiness" >&2
+              exit 1
+            fi
+            running="$(docker inspect --format '{{.State.Running}}' "$pg_name")"
+            if [ "$running" != "true" ]; then
+              echo "::error::Fleet postgres exited before readiness" >&2
+              docker inspect --format '{{json .State}}' "$pg_name" 2>&1 || true
+              docker logs --tail 100 "$pg_name" 2>&1 || true
+              exit 1
+            fi
             sleep 2
           done
           if [ "$ready" != "1" ]; then
             echo "::error::Fleet postgres did not become ready" >&2
-            docker logs --tail 30 "$pg_name" 2>&1 || true
+            docker inspect --format '{{json .State}}' "$pg_name" 2>&1 || true
+            docker logs --tail 100 "$pg_name" 2>&1 || true
             exit 1
           fi
           pg_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$pg_name")"
@@ -1028,7 +1045,7 @@ jobs:
         # Job-scoped cleanup: a trap inside the start step would run when that
         # step's shell exits, deleting the container before the tests connect.
         if: always()
-        run: docker rm -f "fleet-pg-${GITHUB_RUN_ID}" >/dev/null 2>&1 || true
+        run: docker rm -f "fleet-pg-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}" >/dev/null 2>&1 || true
 
   e2e:
     # MAJOR audit finding: pytest -m "not host_smoke and not e2e" above

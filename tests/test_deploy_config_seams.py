@@ -1062,11 +1062,29 @@ class TestFleetPostgresCiGate:
             if item.get("name") == "Start isolated Fleet postgres"
         )
         run = start["run"]
-        assert 'pg_name="fleet-pg-${GITHUB_RUN_ID}"' in run
+        assert 'pg_name="fleet-pg-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"' in run
+        assert "docker run -d --rm" not in run, (
+            "an exited Fleet postgres must remain inspectable until the always() cleanup step"
+        )
+        assert 'docker rm -f "$pg_name"' in run, (
+            "a rerun may reconcile only its exact run+attempt container before create"
+        )
         assert "--network-alias" in run
         assert "POSTGRES_PASSWORD=fleet-ci-only" in run
         assert "POSTGRES_DB=fleet_test" in run
         assert "pg_isready -U postgres -d fleet_test" in run
+        assert "Fleet postgres vanished before readiness" in run
+        assert "Fleet postgres exited before readiness" in run
+        assert "docker inspect --format '{{json .State}}'" in run
+        assert "docker logs --tail 100" in run
+        syntax = subprocess.run(
+            ["bash", "-n"],
+            input=run,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert syntax.returncode == 0, syntax.stderr
         assert "trap cleanup_pg EXIT" not in run, (
             "an EXIT trap in the start step fires when the step's shell ends "
             "and deletes the container before the tests connect"
@@ -1105,7 +1123,10 @@ class TestFleetPostgresCiGate:
         assert cleanup.get("if") == "always()", (
             "cleanup must be job-scoped and run even when tests fail"
         )
-        assert 'docker rm -f "fleet-pg-${GITHUB_RUN_ID}"' in cleanup["run"]
+        assert (
+            'docker rm -f "fleet-pg-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"'
+            in cleanup["run"]
+        )
 
 
 class TestE2eFailsClosedWithoutBrowserToolchain:

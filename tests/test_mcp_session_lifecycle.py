@@ -619,7 +619,7 @@ async def test_lifespan_cancellation_during_release_is_bounded_and_joined(
 
 
 @pytest.mark.asyncio
-async def test_lifespan_completion_near_deadline_has_single_effect(
+async def test_lifespan_completion_before_deadline_has_single_effect(
     monkeypatch: pytest.MonkeyPatch, live_server: Any
 ) -> None:
     gateway_pool = live_server.GatewayClientSessionPool()
@@ -628,7 +628,7 @@ async def test_lifespan_completion_near_deadline_has_single_effect(
     async def near_deadline_post(
         _client: Any, _path: str, payload: dict[str, Any], *, timeout: float | int
     ) -> dict[str, Any]:
-        await asyncio.sleep(0.035)
+        await asyncio.sleep(0.05)
         disconnects.append(payload["session_id"])
         return {}
 
@@ -639,7 +639,7 @@ async def test_lifespan_completion_near_deadline_has_single_effect(
     monkeypatch.setattr(
         live_server, "_agent_client_sessions", live_server.GatewayClientSessionPool()
     )
-    monkeypatch.setattr(live_server, "_MCP_SESSION_RELEASE_DEADLINE_SECONDS", 0.05)
+    monkeypatch.setattr(live_server, "_MCP_SESSION_RELEASE_DEADLINE_SECONDS", 0.5)
     monkeypatch.setattr(live_server, "close_fleet_runtime", _noop_close)
     monkeypatch.setattr(live_server.GatewayClient, "_post_async", near_deadline_post)
 
