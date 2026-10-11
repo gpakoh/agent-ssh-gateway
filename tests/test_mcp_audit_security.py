@@ -80,7 +80,7 @@ class TestBearerTokenRedacted:
 class TestForbiddenKeyLeakage:
     """Forbidden keys must never appear in JSONL output or in-memory buffer."""
 
-    @pytest.mark.parametrize("key", list(FORBIDDEN_KEYS))
+    @pytest.mark.parametrize("key", sorted(FORBIDDEN_KEYS))
     def test_forbidden_key_never_in_jsonl(self, tmp_path: Path, key: str) -> None:
         logger = _tmp_logger(tmp_path)
         event = McpAuditEvent(
@@ -93,7 +93,7 @@ class TestForbiddenKeyLeakage:
         assert "sensitive value here" not in text
         assert f'"{key}"' not in text
 
-    @pytest.mark.parametrize("key", list(FORBIDDEN_KEYS))
+    @pytest.mark.parametrize("key", sorted(FORBIDDEN_KEYS))
     def test_forbidden_key_never_in_buffer(self, tmp_path: Path, key: str) -> None:
         logger = _tmp_logger(tmp_path)
         event = McpAuditEvent(
