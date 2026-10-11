@@ -1149,20 +1149,25 @@ jobs:
         # PRs build+smoke-test the image above but never push it -- an
         # unmerged commit must never become :latest or be pullable by
         # deploy-from-registry.sh.
+        #
+        # Push :latest before :<sha>: once its layers are in the registry,
+        # the :<sha> push reduces to tag metadata and has no upload left to
+        # lose. Both pushes go through ci-docker-push-retry.sh so transient
+        # registry/network errors are retried (docker push is idempotent).
         if: github.event_name == 'push'
         run: |
-          docker push "$REGISTRY/gpakoh/agent-ssh-gateway:${{ github.sha }}"
-          docker push "$REGISTRY/gpakoh/agent-ssh-gateway:latest"
+          bash scripts/ci-docker-push-retry.sh "$REGISTRY/gpakoh/agent-ssh-gateway:latest"
+          bash scripts/ci-docker-push-retry.sh "$REGISTRY/gpakoh/agent-ssh-gateway:${{ github.sha }}"
       - name: Push mcp-server image
         if: github.event_name == 'push'
         run: |
-          docker push "$REGISTRY/gpakoh/mcp-server:${{ github.sha }}"
-          docker push "$REGISTRY/gpakoh/mcp-server:latest"
+          bash scripts/ci-docker-push-retry.sh "$REGISTRY/gpakoh/mcp-server:latest"
+          bash scripts/ci-docker-push-retry.sh "$REGISTRY/gpakoh/mcp-server:${{ github.sha }}"
       - name: Push sshd executor image
         if: github.event_name == 'push'
         run: |
-          docker push "$REGISTRY/gpakoh/ssh-gateway-sshd:${{ github.sha }}"
-          docker push "$REGISTRY/gpakoh/ssh-gateway-sshd:latest"
+          bash scripts/ci-docker-push-retry.sh "$REGISTRY/gpakoh/ssh-gateway-sshd:latest"
+          bash scripts/ci-docker-push-retry.sh "$REGISTRY/gpakoh/ssh-gateway-sshd:${{ github.sha }}"
 
   deploy:
     # Runs right after real images are pushed — pulls them, redeploys
