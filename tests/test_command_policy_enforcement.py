@@ -19,6 +19,18 @@ from app.config import settings
 @pytest.fixture(autouse=True)
 def _setup_globals(monkeypatch):
     """Set up mocked state globals for all tests in this module."""
+    state_attrs = (
+        "manager",
+        "audit_logger",
+        "file_editor",
+        "job_manager",
+        "bulk_ops",
+        "context_manager",
+        "batch_manager",
+        "server_manager",
+    )
+    original_state = {name: getattr(state_module, name) for name in state_attrs}
+
     monkeypatch.setattr(settings, "command_policy_mode", "enforce")
     monkeypatch.setattr(settings, "command_policy_profile", "default")
 
@@ -55,14 +67,8 @@ def _setup_globals(monkeypatch):
 
     yield
 
-    for attr in [
-        "manager", "audit_logger", "file_editor", "job_manager",
-        "bulk_ops", "context_manager", "batch_manager", "server_manager",
-    ]:
-        try:
-            delattr(state_module, attr)
-        except AttributeError:
-            pass
+    for name, value in original_state.items():
+        setattr(state_module, name, value)
 
 
 def _auth_headers():

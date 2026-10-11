@@ -31,6 +31,18 @@ from app.state import _auto_code, _err
 
 @pytest.fixture(autouse=True)
 def _setup_globals():
+    state_attrs = (
+        "manager",
+        "audit_logger",
+        "file_editor",
+        "job_manager",
+        "bulk_ops",
+        "context_manager",
+        "batch_manager",
+        "server_manager",
+    )
+    original_state = {name: getattr(state_module, name) for name in state_attrs}
+
     state_module.manager = AsyncMock()
     state_module.manager.create_session = AsyncMock(return_value="mock-session-id")
     state_module.manager.execute = AsyncMock(
@@ -60,20 +72,8 @@ def _setup_globals():
 
     yield
 
-    for n in [
-        "manager",
-        "audit_logger",
-        "file_editor",
-        "job_manager",
-        "bulk_ops",
-        "context_manager",
-        "batch_manager",
-        "server_manager",
-    ]:
-        try:
-            delattr(state_module, n)
-        except AttributeError:
-            pass
+    for name, value in original_state.items():
+        setattr(state_module, name, value)
 
 
 @pytest.mark.parametrize(
