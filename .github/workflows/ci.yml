@@ -298,21 +298,29 @@ jobs:
         # a real regression still fails on the first attempt.
         #
         # Coverage: pytest-cov honors $COVERAGE_FILE, so every shard writes an
-        # independent .coverage.<py>.<shard> data file uploaded as an artifact.
+        # independent coverage.<py>.<shard> data file uploaded as an artifact.
+        # The name deliberately has no leading dot: artifact actions on this
+        # runner exclude dot-files (upload-artifact@v3 has no
+        # include-hidden-files knob, and v4 aborts on Gitea with
+        # GHESNotSupportedError), so a hidden .coverage.* file would never
+        # reach the coverage job. `coverage combine` is then called with an
+        # explicit glob rather than the .coverage* default pattern.
         # A single shard runs ~1/6 of the suite and cannot reach 69% on its
         # own, so PYTEST_UNIT_COV_FAIL_UNDER=0 defers the real 69% gate to the
         # `coverage` job, which combines all six data files and reports.
         env:
-          COVERAGE_FILE: .coverage.${{ matrix.python-version }}.${{ matrix.shard }}
+          COVERAGE_FILE: coverage.${{ matrix.python-version }}.${{ matrix.shard }}
         run: make test-unit PYTEST_UNIT_TARGETS="$(cat shard-files.txt)" PYTEST_UNIT_COV_FAIL_UNDER=0 PYTEST_UNIT_ARGS="--junitxml=test-results-${{ matrix.shard }}.xml"
 
       - name: Upload coverage data
-        uses: actions/upload-artifact@v4
+        # upload-artifact@v4 aborts on Gitea (detected as GHES) with
+        # GHESNotSupportedError; the v3 line is the supported path on this
+        # runner pool.
+        uses: actions/upload-artifact@v3
         with:
           name: coverage-${{ matrix.python-version }}-${{ matrix.shard }}
-          path: .coverage.${{ matrix.python-version }}.${{ matrix.shard }}
+          path: coverage.${{ matrix.python-version }}.${{ matrix.shard }}
           if-no-files-found: error
-          include-hidden-files: true
 
   test-gates:
     needs: [scope]
@@ -789,16 +797,44 @@ jobs:
           fi
           exit 1
 
-      - name: Download coverage data (all shards)
-        uses: actions/download-artifact@v4
+      # download-artifact@v4 aborts on Gitea (GHES) and its `pattern` /
+      # `merge-multiple` inputs do not exist in v3, so each shard artifact is
+      # fetched explicitly by name into one flat directory.
+      - name: Download coverage data (shard 0)
+        uses: actions/download-artifact@v3
         with:
-          pattern: coverage-${{ matrix.python-version }}-*
+          name: coverage-${{ matrix.python-version }}-0
           path: covdata
-          merge-multiple: "true"
+      - name: Download coverage data (shard 1)
+        uses: actions/download-artifact@v3
+        with:
+          name: coverage-${{ matrix.python-version }}-1
+          path: covdata
+      - name: Download coverage data (shard 2)
+        uses: actions/download-artifact@v3
+        with:
+          name: coverage-${{ matrix.python-version }}-2
+          path: covdata
+      - name: Download coverage data (shard 3)
+        uses: actions/download-artifact@v3
+        with:
+          name: coverage-${{ matrix.python-version }}-3
+          path: covdata
+      - name: Download coverage data (shard 4)
+        uses: actions/download-artifact@v3
+        with:
+          name: coverage-${{ matrix.python-version }}-4
+          path: covdata
+      - name: Download coverage data (shard 5)
+        uses: actions/download-artifact@v3
+        with:
+          name: coverage-${{ matrix.python-version }}-5
+          path: covdata
 
       - name: Combine coverage and apply floor
         run: |
-          uv run coverage combine covdata/
+          ls -la covdata
+          uv run coverage combine covdata/coverage.${{ matrix.python-version }}.*
           uv run coverage report -m --fail-under=69
 
   fleet-postgres:
