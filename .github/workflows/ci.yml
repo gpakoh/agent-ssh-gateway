@@ -613,7 +613,9 @@ jobs:
 
 
   coverage:
-    needs: [test]
+    # scope must be a direct dependency: `needs.scope.outputs.full_ci` is only
+    # populated for jobs listed in `needs`, and without it the gate is skipped.
+    needs: [scope, test]
     if: github.event_name == 'pull_request' && needs.scope.outputs.full_ci == 'true'
     name: Coverage ${{ matrix.python-version }}
     runs-on: ubuntu-latest
