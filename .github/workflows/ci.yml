@@ -461,9 +461,11 @@ jobs:
         # `services:` postgres would give every parallel run the same DNS alias
         # on one network and resolve round-robin onto a foreign container
         # (asyncpg InvalidPasswordError). Start a per-run container on the job
-        # container's own network instead, and reach it by container IP: the
-        # shared internal_net resolver has been seen to intermittently return
-        # NXDOMAIN for a freshly created alias here.
+        # container's own network instead, reach it by container IP (the shared
+        # internal_net resolver has been seen to intermittently return NXDOMAIN
+        # for a fresh alias), and remove it in a dedicated always() step: an
+        # EXIT trap here would fire when this step's shell ends and delete the
+        # container before the tests run.
         run: |
           set -euo pipefail
           pg_name="fleet-pg-${GITHUB_RUN_ID}"
@@ -471,8 +473,6 @@ jobs:
             --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}};{{end}}' \
             | cut -d';' -f1)"
           [ -n "$pg_net" ] || { echo "::error::could not detect job container network" >&2; exit 1; }
-          cleanup_pg() { docker rm -f "$pg_name" >/dev/null 2>&1 || true; }
-          trap cleanup_pg EXIT
           docker ps -a --filter "name=^/${pg_name}$" --format '{{.Names}}' | grep -qx "$pg_name" || \
             docker run -d --rm --name "$pg_name" \
               --network "$pg_net" --network-alias "$pg_name" \
@@ -523,6 +523,11 @@ jobs:
               raise SystemExit(1)
           print(f"Fleet PostgreSQL execution proof: tests={tests}, skipped=0")
           PY
+      - name: Remove isolated Fleet postgres
+        # Job-scoped cleanup: a trap inside the start step would run when that
+        # step's shell exits, deleting the container before the tests connect.
+        if: always()
+        run: docker rm -f "fleet-pg-${GITHUB_RUN_ID}" >/dev/null 2>&1 || true
 
   e2e:
     # MAJOR audit finding: pytest -m "not host_smoke and not e2e" above

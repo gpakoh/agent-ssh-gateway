@@ -1042,8 +1042,10 @@ class TestFleetPostgresCiGate:
         assert "POSTGRES_PASSWORD=fleet-ci-only" in run
         assert "POSTGRES_DB=fleet_test" in run
         assert "pg_isready -U postgres -d fleet_test" in run
-        assert "trap cleanup_pg EXIT" in run
-        assert "docker rm -f" in run
+        assert "trap cleanup_pg EXIT" not in run, (
+            "an EXIT trap in the start step fires when the step's shell ends "
+            "and deletes the container before the tests connect"
+        )
         assert "pg_ip=" in run, (
             "DSN must use the container IP; the shared internal_net resolver "
             "intermittently returns NXDOMAIN for a fresh alias"
@@ -1070,6 +1072,15 @@ class TestFleetPostgresCiGate:
         assert "raise SystemExit(1)" in run
         assert "|| true" not in run
         assert "continue-on-error" not in step
+        cleanup = next(
+            item
+            for item in job["steps"]
+            if item.get("name") == "Remove isolated Fleet postgres"
+        )
+        assert cleanup.get("if") == "always()", (
+            "cleanup must be job-scoped and run even when tests fail"
+        )
+        assert 'docker rm -f "fleet-pg-${GITHUB_RUN_ID}"' in cleanup["run"]
 
 
 class TestE2eFailsClosedWithoutBrowserToolchain:
