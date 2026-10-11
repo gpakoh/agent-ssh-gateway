@@ -1044,10 +1044,17 @@ class TestFleetPostgresCiGate:
         assert "pg_isready -U postgres -d fleet_test" in run
         assert "trap cleanup_pg EXIT" in run
         assert "docker rm -f" in run
+        assert "pg_ip=" in run, (
+            "DSN must use the container IP; the shared internal_net resolver "
+            "intermittently returns NXDOMAIN for a fresh alias"
+        )
         assert (
             "FLEET_TEST_PG_DSN=postgresql://postgres:fleet-ci-only@"
-            "${pg_name}:5432/fleet_test"
+            "${pg_ip}:5432/fleet_test"
         ) in run
+        assert "${pg_name}:5432" not in run, (
+            "DSN must not depend on name resolution on the shared network"
+        )
         assert "continue-on-error" not in start
         step = next(
             item

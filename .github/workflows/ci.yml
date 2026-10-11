@@ -460,8 +460,10 @@ jobs:
         # Every job container on this runner pool shares internal_net, so a
         # `services:` postgres would give every parallel run the same DNS alias
         # on one network and resolve round-robin onto a foreign container
-        # (asyncpg InvalidPasswordError). Start a per-run container with a
-        # unique name + alias on the job container's own network instead.
+        # (asyncpg InvalidPasswordError). Start a per-run container on the job
+        # container's own network instead, and reach it by container IP: the
+        # shared internal_net resolver has been seen to intermittently return
+        # NXDOMAIN for a freshly created alias here.
         run: |
           set -euo pipefail
           pg_name="fleet-pg-${GITHUB_RUN_ID}"
@@ -490,7 +492,14 @@ jobs:
             docker logs --tail 30 "$pg_name" 2>&1 || true
             exit 1
           fi
-          echo "FLEET_TEST_PG_DSN=postgresql://postgres:fleet-ci-only@${pg_name}:5432/fleet_test" >> "$GITHUB_ENV"
+          pg_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$pg_name")"
+          if [ -z "$pg_ip" ]; then
+            echo "::error::could not resolve Fleet postgres IP on $pg_net" >&2
+            docker inspect "$pg_name" 2>&1 || true
+            exit 1
+          fi
+          echo "fleet postgres: name=$pg_name net=$pg_net ip=$pg_ip"
+          echo "FLEET_TEST_PG_DSN=postgresql://postgres:fleet-ci-only@${pg_ip}:5432/fleet_test" >> "$GITHUB_ENV"
       - name: Fleet recovery real-Postgres regressions
         run: |
           set -euo pipefail
