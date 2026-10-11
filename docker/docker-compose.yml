@@ -302,6 +302,13 @@ services:
       - MCP_GATEWAY_PROJECT_ROOT=${MCP_OAUTH_PROJECT_ROOT:-}
       - MCP_PROJECT_MAP_JSON=${MCP_OAUTH_PROJECT_MAP_JSON:-}
       - MCP_GATEWAY_TOOL_MODE=mcp_client_write
+      # Docker project operations remain path-allowlisted.  The admin OAuth
+      # plane already has the exact MCP_OAUTH_PROJECT_ROOT mounted rw for its
+      # registered workspaces; use that same root as the default allowlist
+      # unless operators provide a narrower explicit list.  This makes logical
+      # projects such as site-audit-platform usable without leaking host paths
+      # through tool responses.
+      - MCP_ALLOWED_PROJECT_ROOTS=${MCP_ALLOWED_PROJECT_ROOTS:-${MCP_OAUTH_PROJECT_ROOT:?set MCP_OAUTH_PROJECT_ROOT}}
       # Only the admin OAuth plane may delegate Compose configuration reads.
       # deploy-from-registry sets this to the exact MCP image digest.
       - MCP_COMPOSE_RUNNER_IMAGE=${MCP_COMPOSE_RUNNER_IMAGE:-}
@@ -403,6 +410,7 @@ services:
       - mcp_oauth_audit:/var/lib/mcp-audit
       - mcp_supervisor_journal:/var/lib/mcp-supervisor
       - mcp_candidate_store:/var/lib/mcp-candidates
+      - site_audit_deploy_state:/var/lib/site-audit-deploy-state
       - agent_runtime:/var/lib/mcp-agent
       - agent_sources:/var/lib/mcp-agent/sources
       - type: bind
@@ -631,6 +639,9 @@ volumes:
     driver: local
   mcp_candidate_store:
     name: ${MCP_TASK_CANDIDATE_VOLUME_NAME:-ssh-gateway-mcp-candidates}
+    driver: local
+  site_audit_deploy_state:
+    name: ssh-gateway-site-audit-deploy-state
     driver: local
   agent_runtime:
     driver: local
