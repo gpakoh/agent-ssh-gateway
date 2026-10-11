@@ -72,6 +72,16 @@ dev = [
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
+[tool.coverage]
+# pytest-cov data files store absolute source paths by default. CI runs
+# the unit suite as 6 parallel shards, each in its own job container, and
+# Gitea job containers may use different absolute workspace paths. With
+# relative_files every shard writes paths relative to this project root, so
+# the `coverage` workflow job can `coverage combine` the per-shard data
+# files back together and enforce the real coverage floor there.
+[tool.coverage.run]
+relative_files = true
+
 [tool.setuptools.packages.find]
 include = ["app*"]
 

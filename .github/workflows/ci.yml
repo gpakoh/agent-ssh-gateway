@@ -91,17 +91,233 @@ jobs:
         id: classify
         run: python3 scripts/ci_change_scope.py
 
+
   test:
     needs: [scope]
     if: github.event_name == 'pull_request' && needs.scope.outputs.full_ci == 'true'
-    name: Python ${{ matrix.python-version }}
+    name: Unit ${{ matrix.python-version }} shard ${{ matrix.shard }}
     runs-on: ubuntu-latest
-    # No job in this workflow had a timeout at all -- a genuinely hung
-    # step (network stall, a test deadlocking) would run until GitHub's
-    # own default (360 minutes) or the self-hosted runner's own limits,
-    # occupying a runner slot the whole time instead of failing fast.
-    # Keep this above Makefile's 70m unit-suite process guard so integration,
-    # smoke, collection-count and audit steps retain bounded completion time.
+    timeout-minutes: 90
+    env:
+      CI_PACKAGE_HTTP_PROXY: ${{ secrets.CI_PACKAGE_HTTP_PROXY }}
+      CI_PACKAGE_HTTPS_PROXY: ${{ secrets.CI_PACKAGE_HTTPS_PROXY }}
+      CI_PACKAGE_NO_PROXY: ${{ secrets.CI_PACKAGE_NO_PROXY }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+        shard: [0, 1, 2, 3, 4, 5]
+
+    steps:
+
+      - name: Checkout exact event commit from Gitea
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+        run: |
+          set -euo pipefail
+          set +x
+          expected_sha="${{ github.event.pull_request.head.sha || github.sha }}"
+          printf '%s\n' "$expected_sha" | grep -qxE '[0-9a-f]{40}' || {
+            echo "::error::event head is not a lowercase 40-hex SHA" >&2
+            exit 1
+          }
+          : "${GITEA_TOKEN:?GITEA_TOKEN is required for the private repository checkout}"
+          repo_url="${{ github.server_url }}/${{ github.repository }}.git"
+          gitea_token="$GITEA_TOKEN"
+          unset GITEA_TOKEN
+          auth_header="Authorization: Basic $(printf '%s' "x-access-token:${gitea_token}" | base64 | tr -d '\r\n')"
+          gitea_token=""
+          unset gitea_token
+
+          if [ -z "${GITHUB_WORKSPACE:-}" ] || [ ! -d "$GITHUB_WORKSPACE" ] || [ -L "$GITHUB_WORKSPACE" ]; then
+            echo "::error::GITHUB_WORKSPACE must be an existing non-symlink directory" >&2
+            exit 1
+          fi
+          case "$GITHUB_WORKSPACE" in
+            /*) ;;
+            *) echo "::error::GITHUB_WORKSPACE must be absolute" >&2; exit 1 ;;
+          esac
+          case "$GITHUB_WORKSPACE" in
+            *[!/]*) ;;
+            *) echo "::error::GITHUB_WORKSPACE must not be the filesystem root" >&2; exit 1 ;;
+          esac
+          case "/$GITHUB_WORKSPACE/" in
+            *"/../"*) echo "::error::GITHUB_WORKSPACE must not contain .. segments" >&2; exit 1 ;;
+          esac
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+          git init -q "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git remote add origin "$repo_url"
+          (
+            export GIT_TERMINAL_PROMPT=0
+            export GIT_CONFIG_COUNT=2
+            export GIT_CONFIG_KEY_0="http.${repo_url}.extraHeader"
+            export GIT_CONFIG_VALUE_0="$auth_header"
+            export GIT_CONFIG_KEY_1="http.${repo_url}.followRedirects"
+            export GIT_CONFIG_VALUE_1="false"
+            git fetch -q --no-tags origin "$expected_sha" '+refs/heads/*:refs/remotes/origin/*'
+          )
+          auth_header=""
+          unset auth_header
+          git checkout -q -f --detach "$expected_sha"
+          git clean -fdx
+          test "$(git rev-parse HEAD)" = "$expected_sha"
+          test -z "$(git status --porcelain)"
+
+      - name: Configure package proxy
+        run: |
+          package_proxy_enabled=false
+          if [ -n "${CI_PACKAGE_HTTP_PROXY:-}" ]; then
+            echo "HTTP_PROXY=$CI_PACKAGE_HTTP_PROXY" >> "$GITHUB_ENV"
+            echo "http_proxy=$CI_PACKAGE_HTTP_PROXY" >> "$GITHUB_ENV"
+            package_proxy_enabled=true
+          fi
+          package_https_proxy="${CI_PACKAGE_HTTPS_PROXY:-${CI_PACKAGE_HTTP_PROXY:-}}"
+          if [ -n "$package_https_proxy" ]; then
+            echo "HTTPS_PROXY=$package_https_proxy" >> "$GITHUB_ENV"
+            echo "https_proxy=$package_https_proxy" >> "$GITHUB_ENV"
+            package_proxy_enabled=true
+          fi
+          if [ "$package_proxy_enabled" = "true" ]; then
+            package_no_proxy="${CI_PACKAGE_NO_PROXY:-${{ vars.CI_PACKAGE_NO_PROXY }}}"
+            echo "NO_PROXY=$package_no_proxy" >> "$GITHUB_ENV"
+            echo "no_proxy=$package_no_proxy" >> "$GITHUB_ENV"
+            echo "::notice::CI package proxy enabled for dependency install and audit steps"
+          fi
+
+      - name: Install package (frozen lockfile)
+        run: |
+          pip_install=(python -m pip)
+          if ! "${pip_install[@]}" --version >/dev/null 2>&1; then
+            if command -v pip3 >/dev/null 2>&1 && pip3 --version >/dev/null 2>&1; then
+              pip_install=(pip3)
+            elif command -v pip >/dev/null 2>&1 && pip --version >/dev/null 2>&1; then
+              pip_install=(pip)
+            else
+              rm -rf .ci-bootstrap-venv
+              python -m venv .ci-bootstrap-venv
+              pip_install=(.ci-bootstrap-venv/bin/python -m pip)
+            fi
+          fi
+          "${pip_install[@]}" --version
+          uv_ready=false
+          for attempt in 1 2 3 4 5; do
+            if "${pip_install[@]}" install uv; then
+              uv_ready=true
+              break
+            fi
+            if [ "$attempt" -lt 5 ]; then
+              delay=$((attempt * 10))
+              echo "::warning::pip install uv attempt ${attempt}/5 failed, retrying in ${delay}s..."
+              sleep "$delay"
+            fi
+          done
+          if [ "$uv_ready" != "true" ]; then
+            echo "::warning::pip install uv retries exhausted; trying one direct fallback without proxy env"
+            if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy "${pip_install[@]}" install uv; then
+              uv_ready=true
+            fi
+          fi
+          if [ "$uv_ready" != "true" ]; then
+            exit 1
+          fi
+
+          requested_python="${{ matrix.python-version }}"
+          if python_path="$(uv python find "$requested_python" 2>/dev/null)"; then
+            :
+          else
+            python_path=""
+          fi
+          if [ -z "$python_path" ]; then
+            python_ready=false
+            for attempt in 1 2 3 4 5; do
+              if UV_HTTP_TIMEOUT=60 uv python install "$requested_python"; then
+                python_ready=true
+                break
+              fi
+              if [ "$attempt" -lt 5 ]; then
+                delay=$((attempt * 10))
+                echo "::warning::uv python install $requested_python attempt ${attempt}/5 failed, retrying in ${delay}s..."
+                sleep "$delay"
+              fi
+            done
+            if [ "$python_ready" != "true" ]; then
+              echo "::warning::uv python install retries exhausted; trying one direct fallback without proxy env"
+              if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy UV_HTTP_TIMEOUT=60 uv python install "$requested_python"; then
+                python_ready=true
+              fi
+            fi
+            if [ "$python_ready" != "true" ]; then
+              exit 1
+            fi
+            python_path="$(uv python find "$requested_python")"
+          fi
+          actual_python="$("$python_path" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+          if [ "$actual_python" != "$requested_python" ]; then
+            echo "::error::resolved Python $actual_python at $python_path, expected $requested_python" >&2
+            exit 1
+          fi
+          export UV_PYTHON="$python_path"
+          echo "UV_PYTHON=$python_path" >> "$GITHUB_ENV"
+          echo "Using Python $actual_python from $python_path"
+
+          for attempt in 1 2 3 4 5; do
+            if UV_HTTP_TIMEOUT=60 uv sync --frozen --extra dev; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 5 ]; then
+              delay=$((attempt * 10))
+              echo "::warning::uv sync attempt ${attempt}/5 failed, retrying in ${delay}s..."
+              sleep "$delay"
+            fi
+          done
+          echo "::warning::uv sync retries exhausted; trying one direct fallback without proxy env"
+          if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy UV_HTTP_TIMEOUT=60 uv sync --frozen --extra dev; then
+            exit 0
+          fi
+          exit 1
+
+      - name: Resolve shard file list
+        run: |
+          uv run python scripts/split_unit_shards.py --total 6 --shard '${{ matrix.shard }}' | tr '\n' ' ' > shard-files.txt
+          test -s shard-files.txt || { echo '::error::shard file list empty' >&2; exit 1; }
+          echo "collected $(wc -w < shard-files.txt) test files for shard ${{ matrix.shard }}"
+          cat shard-files.txt
+
+      - name: Tests + coverage (shard)
+        # One of six parallel shards. scripts/split_unit_shards.py later
+        # recomputes the exact same partition on its own (deterministic, pure
+        # function of repo state), so no cross-job coordination is needed --
+        # each shard lists its own files into shard-files.txt above and passes
+        # them through PYTEST_UNIT_TARGETS, reusing the canonical Makefile
+        # recipe (CI-04: flags live in exactly one place).
+        #
+        # CI-005 rerun policy: --only-rerun WebSocketDisconnect retries only
+        # that specific resource-contention signature (see test-integration);
+        # a real regression still fails on the first attempt.
+        #
+        # Coverage: pytest-cov honors $COVERAGE_FILE, so every shard writes an
+        # independent .coverage.<py>.<shard> data file uploaded as an artifact.
+        # A single shard runs ~1/6 of the suite and cannot reach 69% on its
+        # own, so PYTEST_UNIT_COV_FAIL_UNDER=0 defers the real 69% gate to the
+        # `coverage` job, which combines all six data files and reports.
+        env:
+          COVERAGE_FILE: .coverage.${{ matrix.python-version }}.${{ matrix.shard }}
+        run: make test-unit PYTEST_UNIT_TARGETS="$(cat shard-files.txt)" PYTEST_UNIT_COV_FAIL_UNDER=0 PYTEST_UNIT_ARGS="--junitxml=test-results-${{ matrix.shard }}.xml"
+
+      - name: Upload coverage data
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.python-version }}-${{ matrix.shard }}
+          path: .coverage.${{ matrix.python-version }}.${{ matrix.shard }}
+          if-no-files-found: error
+
+  test-gates:
+    needs: [scope]
+    if: github.event_name == 'pull_request' && needs.scope.outputs.full_ci == 'true'
+    name: Checks ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
       CI_PACKAGE_HTTP_PROXY: ${{ secrets.CI_PACKAGE_HTTP_PROXY }}
@@ -114,6 +330,7 @@ jobs:
         python-version: ["3.11", "3.12"]
 
     steps:
+
       - name: Checkout exact event commit from Gitea
         env:
           GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
@@ -290,19 +507,6 @@ jobs:
       - name: Mypy
         run: make mypy
 
-      - name: Tests + coverage
-        # --only-rerun WebSocketDisconnect: Starlette's in-process WebSocket
-        # TestClient occasionally drops a pending response under CI resource
-        # contention (not reproducible locally, see TODO.md [CI-005]) — retry
-        # ONLY that specific failure signature so a real regression in any
-        # other test still fails the build on the first try.
-        #
-        # MAJOR audit finding (CI-04): this step and `make test-unit` used
-        # to be two separately-maintained copies of the same pytest
-        # invocation, free to drift apart silently. Now calls the Makefile
-        # target directly -- the flags exist in exactly one place.
-        run: make test-unit PYTEST_UNIT_ARGS="--junitxml=test-results.xml"
-
       - name: Integration tests
         run: make test-integration
 
@@ -397,6 +601,204 @@ jobs:
           done
           echo "::error::pip-audit exited retry loop unexpectedly"
           exit 1
+
+
+  coverage:
+    needs: [test]
+    if: github.event_name == 'pull_request' && needs.scope.outputs.full_ci == 'true'
+    name: Coverage ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CI_PACKAGE_HTTP_PROXY: ${{ secrets.CI_PACKAGE_HTTP_PROXY }}
+      CI_PACKAGE_HTTPS_PROXY: ${{ secrets.CI_PACKAGE_HTTPS_PROXY }}
+      CI_PACKAGE_NO_PROXY: ${{ secrets.CI_PACKAGE_NO_PROXY }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+
+      - name: Checkout exact event commit from Gitea
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+        run: |
+          set -euo pipefail
+          set +x
+          expected_sha="${{ github.event.pull_request.head.sha || github.sha }}"
+          printf '%s\n' "$expected_sha" | grep -qxE '[0-9a-f]{40}' || {
+            echo "::error::event head is not a lowercase 40-hex SHA" >&2
+            exit 1
+          }
+          : "${GITEA_TOKEN:?GITEA_TOKEN is required for the private repository checkout}"
+          repo_url="${{ github.server_url }}/${{ github.repository }}.git"
+          gitea_token="$GITEA_TOKEN"
+          unset GITEA_TOKEN
+          auth_header="Authorization: Basic $(printf '%s' "x-access-token:${gitea_token}" | base64 | tr -d '\r\n')"
+          gitea_token=""
+          unset gitea_token
+
+          if [ -z "${GITHUB_WORKSPACE:-}" ] || [ ! -d "$GITHUB_WORKSPACE" ] || [ -L "$GITHUB_WORKSPACE" ]; then
+            echo "::error::GITHUB_WORKSPACE must be an existing non-symlink directory" >&2
+            exit 1
+          fi
+          case "$GITHUB_WORKSPACE" in
+            /*) ;;
+            *) echo "::error::GITHUB_WORKSPACE must be absolute" >&2; exit 1 ;;
+          esac
+          case "$GITHUB_WORKSPACE" in
+            *[!/]*) ;;
+            *) echo "::error::GITHUB_WORKSPACE must not be the filesystem root" >&2; exit 1 ;;
+          esac
+          case "/$GITHUB_WORKSPACE/" in
+            *"/../"*) echo "::error::GITHUB_WORKSPACE must not contain .. segments" >&2; exit 1 ;;
+          esac
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+          git init -q "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git remote add origin "$repo_url"
+          (
+            export GIT_TERMINAL_PROMPT=0
+            export GIT_CONFIG_COUNT=2
+            export GIT_CONFIG_KEY_0="http.${repo_url}.extraHeader"
+            export GIT_CONFIG_VALUE_0="$auth_header"
+            export GIT_CONFIG_KEY_1="http.${repo_url}.followRedirects"
+            export GIT_CONFIG_VALUE_1="false"
+            git fetch -q --no-tags origin "$expected_sha" '+refs/heads/*:refs/remotes/origin/*'
+          )
+          auth_header=""
+          unset auth_header
+          git checkout -q -f --detach "$expected_sha"
+          git clean -fdx
+          test "$(git rev-parse HEAD)" = "$expected_sha"
+          test -z "$(git status --porcelain)"
+
+      - name: Configure package proxy
+        run: |
+          package_proxy_enabled=false
+          if [ -n "${CI_PACKAGE_HTTP_PROXY:-}" ]; then
+            echo "HTTP_PROXY=$CI_PACKAGE_HTTP_PROXY" >> "$GITHUB_ENV"
+            echo "http_proxy=$CI_PACKAGE_HTTP_PROXY" >> "$GITHUB_ENV"
+            package_proxy_enabled=true
+          fi
+          package_https_proxy="${CI_PACKAGE_HTTPS_PROXY:-${CI_PACKAGE_HTTP_PROXY:-}}"
+          if [ -n "$package_https_proxy" ]; then
+            echo "HTTPS_PROXY=$package_https_proxy" >> "$GITHUB_ENV"
+            echo "https_proxy=$package_https_proxy" >> "$GITHUB_ENV"
+            package_proxy_enabled=true
+          fi
+          if [ "$package_proxy_enabled" = "true" ]; then
+            package_no_proxy="${CI_PACKAGE_NO_PROXY:-${{ vars.CI_PACKAGE_NO_PROXY }}}"
+            echo "NO_PROXY=$package_no_proxy" >> "$GITHUB_ENV"
+            echo "no_proxy=$package_no_proxy" >> "$GITHUB_ENV"
+            echo "::notice::CI package proxy enabled for dependency install and audit steps"
+          fi
+
+      - name: Install package (frozen lockfile)
+        run: |
+          pip_install=(python -m pip)
+          if ! "${pip_install[@]}" --version >/dev/null 2>&1; then
+            if command -v pip3 >/dev/null 2>&1 && pip3 --version >/dev/null 2>&1; then
+              pip_install=(pip3)
+            elif command -v pip >/dev/null 2>&1 && pip --version >/dev/null 2>&1; then
+              pip_install=(pip)
+            else
+              rm -rf .ci-bootstrap-venv
+              python -m venv .ci-bootstrap-venv
+              pip_install=(.ci-bootstrap-venv/bin/python -m pip)
+            fi
+          fi
+          "${pip_install[@]}" --version
+          uv_ready=false
+          for attempt in 1 2 3 4 5; do
+            if "${pip_install[@]}" install uv; then
+              uv_ready=true
+              break
+            fi
+            if [ "$attempt" -lt 5 ]; then
+              delay=$((attempt * 10))
+              echo "::warning::pip install uv attempt ${attempt}/5 failed, retrying in ${delay}s..."
+              sleep "$delay"
+            fi
+          done
+          if [ "$uv_ready" != "true" ]; then
+            echo "::warning::pip install uv retries exhausted; trying one direct fallback without proxy env"
+            if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy "${pip_install[@]}" install uv; then
+              uv_ready=true
+            fi
+          fi
+          if [ "$uv_ready" != "true" ]; then
+            exit 1
+          fi
+
+          requested_python="${{ matrix.python-version }}"
+          if python_path="$(uv python find "$requested_python" 2>/dev/null)"; then
+            :
+          else
+            python_path=""
+          fi
+          if [ -z "$python_path" ]; then
+            python_ready=false
+            for attempt in 1 2 3 4 5; do
+              if UV_HTTP_TIMEOUT=60 uv python install "$requested_python"; then
+                python_ready=true
+                break
+              fi
+              if [ "$attempt" -lt 5 ]; then
+                delay=$((attempt * 10))
+                echo "::warning::uv python install $requested_python attempt ${attempt}/5 failed, retrying in ${delay}s..."
+                sleep "$delay"
+              fi
+            done
+            if [ "$python_ready" != "true" ]; then
+              echo "::warning::uv python install retries exhausted; trying one direct fallback without proxy env"
+              if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy UV_HTTP_TIMEOUT=60 uv python install "$requested_python"; then
+                python_ready=true
+              fi
+            fi
+            if [ "$python_ready" != "true" ]; then
+              exit 1
+            fi
+            python_path="$(uv python find "$requested_python")"
+          fi
+          actual_python="$("$python_path" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+          if [ "$actual_python" != "$requested_python" ]; then
+            echo "::error::resolved Python $actual_python at $python_path, expected $requested_python" >&2
+            exit 1
+          fi
+          export UV_PYTHON="$python_path"
+          echo "UV_PYTHON=$python_path" >> "$GITHUB_ENV"
+          echo "Using Python $actual_python from $python_path"
+
+          for attempt in 1 2 3 4 5; do
+            if UV_HTTP_TIMEOUT=60 uv sync --frozen --extra dev; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 5 ]; then
+              delay=$((attempt * 10))
+              echo "::warning::uv sync attempt ${attempt}/5 failed, retrying in ${delay}s..."
+              sleep "$delay"
+            fi
+          done
+          echo "::warning::uv sync retries exhausted; trying one direct fallback without proxy env"
+          if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy UV_HTTP_TIMEOUT=60 uv sync --frozen --extra dev; then
+            exit 0
+          fi
+          exit 1
+
+      - name: Download coverage data (all shards)
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-${{ matrix.python-version }}-*
+          path: covdata
+          merge-multiple: "true"
+
+      - name: Combine coverage and apply floor
+        run: |
+          uv run coverage combine covdata/
+          uv run coverage report -m --fail-under=69
 
   fleet-postgres:
     needs: [scope]
