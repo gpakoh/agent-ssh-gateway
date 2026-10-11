@@ -1456,6 +1456,25 @@ class TestHostSmokeRunsAfterSuccessfulDeploy:
         run = "\n".join(s.get("run", "") for s in steps)
         assert "uv run make host-smoke" in run or "make host-smoke" in run
 
+    def test_host_smoke_python_bootstrap_retries_and_falls_back_direct(self):
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        steps = wf["jobs"]["host-smoke"]["steps"]
+        setup = next(s for s in steps if s.get("name") == "Set up Python")
+        run = setup["run"]
+
+        assert "set -euo pipefail" in run
+        assert "for attempt in 1 2 3" in run
+        assert "UV_HTTP_TIMEOUT=60 /media/1TB/Anaconda/bin/uv sync --frozen --extra dev" in run
+        assert "host-smoke uv sync attempt ${attempt}/3 failed" in run
+        assert "host-smoke uv sync retries exhausted; trying one direct fallback without proxy env" in run
+        assert (
+            "env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy "
+            "-u ALL_PROXY -u all_proxy"
+        ) in run
+        assert '[ "$sync_ready" = "true" ] || exit 1' in run
+        assert "continue-on-error" not in setup
+        assert "|| true" not in run
+
     def test_make_host_smoke_sets_oauth_timeout_budget(self):
         makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
         assert "MCP_SMOKE_TIMEOUT ?= 90" in makefile
