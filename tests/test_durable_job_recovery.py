@@ -785,10 +785,11 @@ class TestManagerAtoManagerBRecovery:
         rid = await mgr_b.recover_job(envelope)
         assert rid == "j1"
 
-        # Wait for the job to finish.
+        # Wait for eventual restart recovery. This timeout is a deadlock guard,
+        # not a latency SLA; shared CI runners can be heavily CPU-contended.
         job = await mgr_b.get_job("j1")
         assert job is not None
-        await asyncio.wait_for(job.completed_event.wait(), timeout=5)
+        await asyncio.wait_for(job.completed_event.wait(), timeout=15)
 
         assert job.status == "completed"
         assert job.stdout == "hello\n"
