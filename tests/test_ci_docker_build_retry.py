@@ -37,6 +37,13 @@ case "$FAKE_DOCKER_MODE" in
     fi
     exit 0
     ;;
+  registry_auth_internal_server_error_then_success)
+    if [ "$count" -eq 1 ]; then
+      echo 'failed to authorize: failed to fetch anonymous token: Get "https://auth.docker.io/token": Internal Server Error' >&2
+      exit 1
+    fi
+    exit 0
+    ;;
   persistent_transient)
     echo 'failed to fetch anonymous token: TLS handshake timeout' >&2
     exit 1
@@ -174,6 +181,18 @@ def _run_wrapper_with_proxy_args(
 
 def test_transient_registry_failure_retries_and_recovers(tmp_path: Path) -> None:
     result, counter = _run_wrapper(tmp_path, "transient_then_success")
+
+    assert result.returncode == 0
+    assert counter.read_text(encoding="utf-8").strip() == "2"
+    assert "transient network/registry error; retrying" in result.stderr
+
+
+def test_registry_auth_internal_server_error_is_classified_as_transient(
+    tmp_path: Path,
+) -> None:
+    result, counter = _run_wrapper(
+        tmp_path, "registry_auth_internal_server_error_then_success"
+    )
 
     assert result.returncode == 0
     assert counter.read_text(encoding="utf-8").strip() == "2"

@@ -450,12 +450,72 @@ jobs:
             fi
           fi
           "${pip_install[@]}" --version
-          "${pip_install[@]}" install uv
-          UV_HTTP_TIMEOUT=60 uv python install 3.12
+          uv_ready=false
+          for attempt in 1 2 3; do
+            if "${pip_install[@]}" install uv; then
+              uv_ready=true
+              break
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              delay=$((attempt * 10))
+              echo "::warning::pip install uv attempt ${attempt}/3 failed, retrying in ${delay}s..."
+              sleep "$delay"
+            fi
+          done
+          if [ "$uv_ready" != "true" ]; then
+            echo "::warning::pip install uv retries exhausted; trying one direct fallback without proxy env"
+            if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy \
+              "${pip_install[@]}" install uv; then
+              uv_ready=true
+            fi
+          fi
+          [ "$uv_ready" = "true" ] || exit 1
+
+          python_ready=false
+          for attempt in 1 2 3; do
+            if UV_HTTP_TIMEOUT=60 uv python install 3.12; then
+              python_ready=true
+              break
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              delay=$((attempt * 10))
+              echo "::warning::uv python install 3.12 attempt ${attempt}/3 failed, retrying in ${delay}s..."
+              sleep "$delay"
+            fi
+          done
+          if [ "$python_ready" != "true" ]; then
+            echo "::warning::uv python install retries exhausted; trying one direct fallback without proxy env"
+            if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy \
+              UV_HTTP_TIMEOUT=60 uv python install 3.12; then
+              python_ready=true
+            fi
+          fi
+          [ "$python_ready" = "true" ] || exit 1
+
           python_path="$(uv python find 3.12)"
           test "$("$python_path" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" = "3.12"
           echo "UV_PYTHON=$python_path" >> "$GITHUB_ENV"
-          UV_PYTHON="$python_path" UV_HTTP_TIMEOUT=60 uv sync --frozen --extra dev
+
+          sync_ready=false
+          for attempt in 1 2 3; do
+            if UV_PYTHON="$python_path" UV_HTTP_TIMEOUT=60 uv sync --frozen --extra dev; then
+              sync_ready=true
+              break
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              delay=$((attempt * 10))
+              echo "::warning::uv sync attempt ${attempt}/3 failed, retrying in ${delay}s..."
+              sleep "$delay"
+            fi
+          done
+          if [ "$sync_ready" != "true" ]; then
+            echo "::warning::uv sync retries exhausted; trying one direct fallback without proxy env"
+            if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy \
+              UV_PYTHON="$python_path" UV_HTTP_TIMEOUT=60 uv sync --frozen --extra dev; then
+              sync_ready=true
+            fi
+          fi
+          [ "$sync_ready" = "true" ] || exit 1
       - name: Start isolated Fleet postgres
         # Every job container on this runner pool shares internal_net, so a
         # `services:` postgres would give every parallel run the same DNS alias
