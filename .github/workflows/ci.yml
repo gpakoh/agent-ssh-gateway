@@ -408,18 +408,6 @@ jobs:
       CI_PACKAGE_HTTP_PROXY: ${{ secrets.CI_PACKAGE_HTTP_PROXY }}
       CI_PACKAGE_HTTPS_PROXY: ${{ secrets.CI_PACKAGE_HTTPS_PROXY }}
       CI_PACKAGE_NO_PROXY: ${{ secrets.CI_PACKAGE_NO_PROXY }}
-      FLEET_TEST_PG_DSN: postgresql://postgres:fleet-ci-only@postgres:5432/fleet_test
-    services:
-      postgres:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_PASSWORD: fleet-ci-only
-          POSTGRES_DB: fleet_test
-        options: >-
-          --health-cmd "pg_isready -U postgres -d fleet_test"
-          --health-interval 2s
-          --health-timeout 3s
-          --health-retries 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -468,6 +456,41 @@ jobs:
           test "$("$python_path" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" = "3.12"
           echo "UV_PYTHON=$python_path" >> "$GITHUB_ENV"
           UV_PYTHON="$python_path" UV_HTTP_TIMEOUT=60 uv sync --frozen --extra dev
+      - name: Start isolated Fleet postgres
+        # Every job container on this runner pool shares internal_net, so a
+        # `services:` postgres would give every parallel run the same DNS alias
+        # on one network and resolve round-robin onto a foreign container
+        # (asyncpg InvalidPasswordError). Start a per-run container with a
+        # unique name + alias on the job container's own network instead.
+        run: |
+          set -euo pipefail
+          pg_name="fleet-pg-${GITHUB_RUN_ID}"
+          pg_net="$(docker inspect "$(hostname)" \
+            --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}};{{end}}' \
+            | cut -d';' -f1)"
+          [ -n "$pg_net" ] || { echo "::error::could not detect job container network" >&2; exit 1; }
+          cleanup_pg() { docker rm -f "$pg_name" >/dev/null 2>&1 || true; }
+          trap cleanup_pg EXIT
+          docker ps -a --filter "name=^/${pg_name}$" --format '{{.Names}}' | grep -qx "$pg_name" || \
+            docker run -d --rm --name "$pg_name" \
+              --network "$pg_net" --network-alias "$pg_name" \
+              -e POSTGRES_PASSWORD=fleet-ci-only \
+              -e POSTGRES_DB=fleet_test \
+              pgvector/pgvector:pg16 >/dev/null
+          ready=""
+          for i in $(seq 1 90); do
+            if docker exec "$pg_name" pg_isready -U postgres -d fleet_test -h 127.0.0.1 >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" != "1" ]; then
+            echo "::error::Fleet postgres did not become ready" >&2
+            docker logs --tail 30 "$pg_name" 2>&1 || true
+            exit 1
+          fi
+          echo "FLEET_TEST_PG_DSN=postgresql://postgres:fleet-ci-only@${pg_name}:5432/fleet_test" >> "$GITHUB_ENV"
       - name: Fleet recovery real-Postgres regressions
         run: |
           set -euo pipefail

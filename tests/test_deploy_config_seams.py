@@ -1022,16 +1022,33 @@ class TestFleetPostgresCiGate:
         assert '"${pip_install[@]}" install uv' in run
         assert "pip_install=(python3 -m pip)" not in run
 
-    def test_fleet_postgres_job_uses_isolated_service_and_forbids_skips(self):
+    def test_fleet_postgres_job_uses_unique_per_run_container_and_forbids_skips(self):
         job = _load_workflow(CI_WORKFLOW_PATH)["jobs"]["fleet-postgres"]
-        service = job["services"]["postgres"]
-        assert service["image"] == "pgvector/pgvector:pg16"
-        assert service["env"]["POSTGRES_DB"] == "fleet_test"
-        assert service["env"]["POSTGRES_PASSWORD"] == "fleet-ci-only"
-        assert "pg_isready -U postgres -d fleet_test" in service["options"]
-        assert job["env"]["FLEET_TEST_PG_DSN"] == (
-            "postgresql://postgres:fleet-ci-only@postgres:5432/fleet_test"
+        assert "services" not in job, (
+            "shared-network services block would alias every parallel run's "
+            "postgres onto the same network"
         )
+        assert "FLEET_TEST_PG_DSN" not in job.get("env", {}), (
+            "DSN must derive from the unique per-run container name"
+        )
+        start = next(
+            item
+            for item in job["steps"]
+            if item.get("name") == "Start isolated Fleet postgres"
+        )
+        run = start["run"]
+        assert 'pg_name="fleet-pg-${GITHUB_RUN_ID}"' in run
+        assert "--network-alias" in run
+        assert "POSTGRES_PASSWORD=fleet-ci-only" in run
+        assert "POSTGRES_DB=fleet_test" in run
+        assert "pg_isready -U postgres -d fleet_test" in run
+        assert "trap cleanup_pg EXIT" in run
+        assert "docker rm -f" in run
+        assert (
+            "FLEET_TEST_PG_DSN=postgresql://postgres:fleet-ci-only@"
+            "${pg_name}:5432/fleet_test"
+        ) in run
+        assert "continue-on-error" not in start
         step = next(
             item
             for item in job["steps"]
