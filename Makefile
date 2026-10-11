@@ -39,6 +39,12 @@ PYTEST_UNIT_ARGS ?=
 # ceiling, so a genuine runaway still fails instead of hanging.
 PYTEST_UNIT_TIMEOUT ?= 70m
 PYTEST_UNIT_KEEPALIVE_SECONDS ?= 60
+# PYTEST_UNIT_WORKERS: pytest-xdist worker count for the unit suite. The CI
+# test job runs in a container capped at 2 CPUs, so the default is 2 workers;
+# `-n auto` would read the *host's* CPU count and over-subscribe the cgroup.
+# The suite is largely asyncio I/O-bound, so >workers-than-CPUs can still pay
+# off when contention allows; override for local runs on beefier hardware.
+PYTEST_UNIT_WORKERS ?= 2
 test-unit:
 	@set -u; \
 	heartbeat_pid=""; \
@@ -56,7 +62,7 @@ test-unit:
 		done \
 	) & \
 	heartbeat_pid="$$!"; \
-	timeout --signal=TERM --kill-after=30s $(PYTEST_UNIT_TIMEOUT) uv run pytest -m "not host_smoke and not e2e and not integration and not smoke" --reruns 2 --reruns-delay 2 --only-rerun 'WebSocketDisconnect' --cov=app --cov-report=term-missing --cov-fail-under=69 -q $(PYTEST_UNIT_ARGS); \
+	timeout --signal=TERM --kill-after=30s $(PYTEST_UNIT_TIMEOUT) uv run pytest -n $(PYTEST_UNIT_WORKERS) --dist loadfile -m "not host_smoke and not e2e and not integration and not smoke" --reruns 2 --reruns-delay 2 --only-rerun 'WebSocketDisconnect' --cov=app --cov-report=term-missing --cov-fail-under=69 -q $(PYTEST_UNIT_ARGS); \
 	status="$$?"; \
 	cleanup_heartbeat; \
 	exit "$$status"
