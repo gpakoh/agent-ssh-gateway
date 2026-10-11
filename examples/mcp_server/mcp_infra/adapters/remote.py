@@ -428,6 +428,15 @@ _MERGE_RECONCILE_ATTEMPTS = 3
 _MERGE_RECONCILE_DELAY_SECONDS = 0.05
 _ACTION_RERUN_RECONCILE_ATTEMPTS = 3
 _ACTION_RERUN_RECONCILE_DELAY_SECONDS = 0.05
+_ACTION_CANCEL_RECONCILE_ATTEMPTS = 3
+_ACTION_CANCEL_RECONCILE_DELAY_SECONDS = 0.05
+_ACTION_RUN_TERMINAL_STATUS = "completed"
+_ACTION_RUN_CANCELLABLE_STATUSES = frozenset(
+    {"waiting", "in_progress", "queued", "requested", "pending", "running"}
+)
+_ACTION_ACTIVE_JOB_STATUSES = frozenset(
+    {"waiting", "queued", "in_progress", "requested", "pending", "running"}
+)
 _GITEA_GOVERNANCE_RECONCILE_ATTEMPTS = 3
 _GITEA_GOVERNANCE_RECONCILE_DELAY_SECONDS = 0.05
 _GITEA_SECRET_RECONCILE_ATTEMPTS = 3
@@ -3439,6 +3448,111 @@ async def _reconcile_action_job_rerun_postcondition(
     return None, details
 
 
+def _action_run_status(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _action_cancel_exception_is_ambiguous(exc: BaseException) -> bool:
+    if isinstance(
+        exc,
+        (GiteaMutationOutcomeUnknown, asyncio.CancelledError, httpx.TransportError, TimeoutError),
+    ):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        response = exc.response
+        return response is not None and (
+            response.status_code == 409 or response.status_code >= 500
+        )
+    return False
+
+
+async def _reconcile_action_cancel_postcondition(
+    client: Any,
+    owner: str,
+    repo: str,
+    run_id: int,
+    *,
+    expected_head_sha: str,
+    expected_run_attempt: int,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    last_observed: dict[str, Any] = {}
+    last_read_error_class: str | None = None
+    attempts = 0
+    for attempt in range(_ACTION_CANCEL_RECONCILE_ATTEMPTS):
+        attempts = attempt + 1
+        try:
+            run = await client.get_action_run(owner, repo, run_id)
+        except Exception as exc:
+            last_read_error_class = type(exc).__name__
+        else:
+            observed_id = _action_run_id(run.get("id"))
+            observed_head_sha = _valid_commit_sha(run.get("head_sha"))
+            observed_attempt = _action_run_attempt(run.get("run_attempt"))
+            observed_status = _action_run_status(run.get("status"))
+            last_observed = {
+                "id": observed_id,
+                "head_sha": observed_head_sha,
+                "run_attempt": observed_attempt,
+                "status": observed_status,
+                "conclusion": run.get("conclusion"),
+            }
+            if (
+                observed_id == run_id
+                and observed_head_sha == expected_head_sha
+                and observed_attempt == expected_run_attempt
+                and observed_status == _ACTION_RUN_TERMINAL_STATUS
+            ):
+                return run, {
+                    "reconciliation_attempts": attempts,
+                    "observed": last_observed,
+                }
+        if attempt + 1 < _ACTION_CANCEL_RECONCILE_ATTEMPTS:
+            await asyncio.sleep(_ACTION_CANCEL_RECONCILE_DELAY_SECONDS)
+    details: dict[str, Any] = {
+        "reconciliation_attempts": attempts,
+        "observed": last_observed,
+    }
+    if last_read_error_class:
+        details["last_read_error_class"] = last_read_error_class
+    return None, details
+
+
+def _summarize_action_run_jobs(payload: Any) -> dict[str, Any] | None:
+    jobs = _action_jobs(payload)
+    if jobs is None:
+        return None
+    by_status: dict[str, int] = {}
+    active: list[dict[str, Any]] = []
+    for job in jobs:
+        status = _action_run_status(job.get("status")) or "unknown"
+        by_status[status] = by_status.get(status, 0) + 1
+        if status in _ACTION_ACTIVE_JOB_STATUSES:
+            active.append(
+                {
+                    "id": _action_job_id(job.get("id")),
+                    "name": _action_job_name(job.get("name")),
+                    "status": status,
+                }
+            )
+    return {"total": len(jobs), "by_status": by_status, "active": active}
+
+
+async def _safe_actions_jobs_summary(
+    client: Any,
+    owner: str,
+    repo: str,
+    run_id: int,
+) -> dict[str, Any] | None:
+    try:
+        payload = await client.list_action_run_jobs(owner, repo, run_id)
+    except Exception:
+        return None
+    return _summarize_action_run_jobs(payload)
+
+
 async def gitea_rerun_action_run(
     owner: str,
     repo: str,
@@ -3938,6 +4052,285 @@ async def gitea_rerun_action_job(
                 else "started",
                 "verified": True,
                 "reconciliation_attempts": reconciliation["reconciliation_attempts"],
+            }
+    except Exception as exc:
+        return _remote_api_error(tool, "gitea", exc)
+    return tool_success(tool, result=data, source="gitea")
+
+
+async def gitea_cancel_action_run(
+    owner: str,
+    repo: str,
+    run_id: int,
+    expected_head_sha: str,
+    expected_run_attempt: int,
+) -> dict[str, Any]:
+    """Cancel one exact non-terminal Actions run and reconcile its terminal state."""
+    tool = "gitea_cancel_action_run"
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return tool_error(
+            tool=tool,
+            code="DEPENDENCY_MISSING",
+            message="GITEA_TOKEN not configured",
+            source="gitea",
+        )
+    if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id < 1:
+        return tool_error(
+            tool=tool,
+            code="INVALID_INPUT",
+            message="run_id must be a positive integer",
+            source="gitea",
+        )
+    if (
+        isinstance(expected_run_attempt, bool)
+        or not isinstance(expected_run_attempt, int)
+        or expected_run_attempt < 1
+    ):
+        return tool_error(
+            tool=tool,
+            code="INVALID_INPUT",
+            message="expected_run_attempt must be a positive integer",
+            source="gitea",
+        )
+    if (
+        not isinstance(expected_head_sha, str)
+        or len(expected_head_sha) != 40
+        or any(ch not in "0123456789abcdef" for ch in expected_head_sha)
+    ):
+        return tool_error(
+            tool=tool,
+            code="INVALID_INPUT",
+            message="expected_head_sha must be an exact lowercase 40-hex SHA-1",
+            source="gitea",
+        )
+
+    audit_metadata: dict[str, Any] | None = None
+    try:
+        async with _server_gitea_client()(token) as client:
+            before = await client.get_action_run(owner, repo, run_id)
+            actual_id = _action_run_id(before.get("id"))
+            actual_head_sha = _valid_commit_sha(before.get("head_sha"))
+            actual_attempt = _action_run_attempt(before.get("run_attempt"))
+            actual_status = _action_run_status(before.get("status"))
+            if actual_id != run_id:
+                return tool_error(
+                    tool=tool,
+                    code="RUN_ID_MISMATCH",
+                    message="Gitea returned a different workflow run id; refusing cancel",
+                    source="gitea",
+                )
+            if actual_head_sha != expected_head_sha:
+                return tool_error(
+                    tool=tool,
+                    code="HEAD_MISMATCH",
+                    message="workflow run head changed or differs from expected_head_sha",
+                    details={
+                        "run_id": run_id,
+                        "expected_head_sha": expected_head_sha,
+                        "observed_head_sha": actual_head_sha,
+                        "mutation_occurred": False,
+                    },
+                    source="gitea",
+                )
+            if actual_attempt is None or actual_attempt != expected_run_attempt:
+                return tool_error(
+                    tool=tool,
+                    code="RUN_STATE_UNPROVEN",
+                    message="workflow run_attempt differs from the exact expected attempt",
+                    details={
+                        "run_id": run_id,
+                        "expected_run_attempt": expected_run_attempt,
+                        "observed_run_attempt": actual_attempt,
+                        "mutation_occurred": False,
+                    },
+                    source="gitea",
+                )
+            if actual_status is None:
+                return tool_error(
+                    tool=tool,
+                    code="RUN_STATE_UNPROVEN",
+                    message="workflow run status is unavailable or malformed; refusing cancel",
+                    source="gitea",
+                )
+            if actual_status == _ACTION_RUN_TERMINAL_STATUS:
+                return tool_success(
+                    tool,
+                    result={
+                        "owner": owner,
+                        "repo": repo,
+                        "run_id": run_id,
+                        "head_sha": expected_head_sha,
+                        "run_attempt": actual_attempt,
+                        "status": actual_status,
+                        "conclusion": before.get("conclusion"),
+                        "event": before.get("event"),
+                        "html_url": before.get("html_url"),
+                        "already_terminal": True,
+                        "mutation_attempted": False,
+                        "cancelled": before.get("conclusion") == "cancelled",
+                        "verified": True,
+                        "outcome": "already_terminal",
+                        "jobs_summary": await _safe_actions_jobs_summary(
+                            client, owner, repo, run_id
+                        ),
+                    },
+                    source="gitea",
+                )
+            if actual_status not in _ACTION_RUN_CANCELLABLE_STATUSES:
+                return tool_error(
+                    tool=tool,
+                    code="RUN_STATE_UNPROVEN",
+                    message="workflow run status is not a proven cancellable state",
+                    details={
+                        "run_id": run_id,
+                        "status": actual_status,
+                        "mutation_occurred": False,
+                    },
+                    source="gitea",
+                )
+
+            identity = await _require_gitea_identity(client)
+            if identity is None:
+                return tool_error(
+                    tool=tool,
+                    code="AUTH_ERROR",
+                    message=(
+                        "Authenticated Gitea identity and caller fingerprint are required "
+                        "to cancel a workflow run"
+                    ),
+                    source="gitea",
+                )
+            username, fingerprint = identity
+            correlation_id = uuid.uuid4().hex
+            audit_metadata = {
+                "owner": owner,
+                "repo": repo,
+                "run_id": run_id,
+                "expected_head_sha": expected_head_sha,
+                "expected_run_attempt": expected_run_attempt,
+                "observed_status": actual_status,
+                "gitea_username": username,
+                "caller_fingerprint": fingerprint,
+                "correlation_id": correlation_id,
+            }
+            audit_logger = _get_gitea_audit_logger()
+            try:
+                audit_logger.append_required(
+                    McpAuditEvent(
+                        event_type="mcp.gitea_destructive_intent",
+                        tool=tool,
+                        action="cancel_action_run",
+                        decision="allow",
+                        reason="cancel Gitea Actions workflow run",
+                        metadata=audit_metadata,
+                    )
+                )
+            except AuditWriteError:
+                return tool_error(
+                    tool=tool,
+                    code="AUDIT_UNAVAILABLE",
+                    message="Audit log unavailable; destructive operation refused",
+                    source="gitea",
+                )
+
+            mutation_error: BaseException | None = None
+            try:
+                await client.cancel_action_run(owner, repo, run_id)
+            except asyncio.CancelledError as exc:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    current_task.uncancel()
+                mutation_error = exc
+            except Exception as exc:
+                if not _action_cancel_exception_is_ambiguous(exc):
+                    raise
+                mutation_error = exc
+
+            confirmed, reconciliation = await _reconcile_action_cancel_postcondition(
+                client,
+                owner,
+                repo,
+                run_id,
+                expected_head_sha=expected_head_sha,
+                expected_run_attempt=expected_run_attempt,
+            )
+            if confirmed is None:
+                details: dict[str, Any] = {
+                    "owner": owner,
+                    "repo": repo,
+                    "run_id": run_id,
+                    "expected_head_sha": expected_head_sha,
+                    "expected_run_attempt": expected_run_attempt,
+                    "mutation_started": True,
+                    **reconciliation,
+                }
+                if mutation_error is not None:
+                    details["mutation_error_class"] = type(mutation_error).__name__
+                    if isinstance(mutation_error, httpx.HTTPStatusError):
+                        details["mutation_http_status"] = mutation_error.response.status_code
+                return tool_error(
+                    tool=tool,
+                    code="MUTATION_OUTCOME_UNKNOWN",
+                    message=(
+                        "workflow run cancellation was attempted but a terminal exact "
+                        "run/head/attempt could not be proven"
+                    ),
+                    retryable=False,
+                    hint=(
+                        "Do not replay the cancel mutation. Re-read this run until "
+                        "status is authoritative for the exact run/head/attempt."
+                    ),
+                    details=details,
+                    source="gitea",
+                )
+
+            if audit_metadata is not None:
+                try:
+                    _get_gitea_audit_logger().append(
+                        McpAuditEvent(
+                            event_type="mcp.gitea_destructive_success",
+                            tool=tool,
+                            action="cancel_action_run",
+                            decision="allow",
+                            reason="cancel Gitea Actions workflow run",
+                            metadata=audit_metadata,
+                        )
+                    )
+                except Exception:
+                    pass
+
+            conclusion = confirmed.get("conclusion")
+            cancelled = conclusion == "cancelled"
+            if cancelled:
+                outcome = (
+                    "cancelled_after_ambiguous_response"
+                    if mutation_error is not None
+                    else "cancelled"
+                )
+            else:
+                outcome = (
+                    "terminal_after_ambiguous_response"
+                    if mutation_error is not None
+                    else "terminal_after_cancel_attempt"
+                )
+            data = {
+                "owner": owner,
+                "repo": repo,
+                "run_id": run_id,
+                "head_sha": expected_head_sha,
+                "run_attempt": confirmed.get("run_attempt"),
+                "status": confirmed.get("status"),
+                "conclusion": conclusion,
+                "event": confirmed.get("event"),
+                "html_url": confirmed.get("html_url"),
+                "already_terminal": False,
+                "mutation_attempted": True,
+                "cancelled": cancelled,
+                "verified": True,
+                "outcome": outcome,
+                "reconciliation_attempts": reconciliation["reconciliation_attempts"],
+                "jobs_summary": await _safe_actions_jobs_summary(client, owner, repo, run_id),
             }
     except Exception as exc:
         return _remote_api_error(tool, "gitea", exc)
@@ -4783,6 +5176,7 @@ def register_all() -> None:
     register_tool("gitea_get_action_run")(gitea_get_action_run)
     register_tool("gitea_rerun_action_run")(gitea_rerun_action_run)
     register_tool("gitea_rerun_action_job")(gitea_rerun_action_job)
+    register_tool("gitea_cancel_action_run")(gitea_cancel_action_run)
     register_tool("gitea_list_action_run_jobs")(gitea_list_action_run_jobs)
     register_tool("gitea_list_action_jobs")(gitea_list_action_jobs)
     register_tool("gitea_get_action_job_logs")(gitea_get_action_job_logs)

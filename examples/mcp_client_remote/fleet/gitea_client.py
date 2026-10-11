@@ -94,6 +94,7 @@ ALLOWED_ACTION_WRITE_ENDPOINTS = frozenset(
     {
         "/repos/{owner}/{repo}/actions/runs/{run_id}/rerun",
         "/repos/{owner}/{repo}/actions/runs/{run_id}/jobs/{job_id}/rerun",
+        "/repos/{owner}/{repo}/actions/runs/{run_id}/cancel",
     }
 )
 # Secret writes use PUT and are isolated from lifecycle reruns.  The only
@@ -1046,6 +1047,22 @@ class GiteaClient:
             job_id=job_id,
         )
         return minimize_action_job_payload(job)
+
+    async def cancel_action_run(
+        self,
+        owner: str,
+        repo: str,
+        run_id: int,
+    ) -> dict[str, Any]:
+        """Cancel one existing workflow run via Gitea's dedicated endpoint."""
+        run_id = _validate_positive_int(run_id, "run_id")
+        run = await self._post_action(
+            "/repos/{owner}/{repo}/actions/runs/{run_id}/cancel",
+            owner=owner,
+            repo=repo,
+            run_id=run_id,
+        )
+        return minimize_action_run_payload(run)
 
     async def list_action_run_jobs(
         self,

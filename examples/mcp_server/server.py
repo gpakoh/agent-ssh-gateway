@@ -637,6 +637,7 @@ gitea_get_pull_request = remote.gitea_get_pull_request
 gitea_list_action_runs = remote.gitea_list_action_runs
 gitea_get_action_run = remote.gitea_get_action_run
 gitea_rerun_action_run = remote.gitea_rerun_action_run
+gitea_cancel_action_run = remote.gitea_cancel_action_run
 gitea_create_branch_at_sha = remote.gitea_create_branch_at_sha
 gitea_set_default_branch = remote.gitea_set_default_branch
 gitea_actions_secret_source_status = remote.gitea_actions_secret_source_status
