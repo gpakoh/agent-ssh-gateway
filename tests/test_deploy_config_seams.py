@@ -1022,6 +1022,31 @@ class TestFleetPostgresCiGate:
         assert '"${pip_install[@]}" install uv' in run
         assert "pip_install=(python3 -m pip)" not in run
 
+    def test_fleet_postgres_python_bootstrap_retries_transient_network_failures(self):
+        job = _load_workflow(CI_WORKFLOW_PATH)["jobs"]["fleet-postgres"]
+        install = next(
+            item
+            for item in job["steps"]
+            if item.get("name") == "Install Python 3.12 test environment"
+        )
+        run = install["run"]
+
+        assert run.count("for attempt in 1 2 3") == 3
+        assert "pip install uv attempt ${attempt}/3 failed" in run
+        assert "uv python install 3.12 attempt ${attempt}/3 failed" in run
+        assert "uv sync attempt ${attempt}/3 failed" in run
+        assert "pip install uv retries exhausted; trying one direct fallback without proxy env" in run
+        assert "uv python install retries exhausted; trying one direct fallback without proxy env" in run
+        assert "uv sync retries exhausted; trying one direct fallback without proxy env" in run
+        direct_fallback = (
+            "env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy "
+            "-u ALL_PROXY -u all_proxy"
+        )
+        assert run.count(direct_fallback) == 3
+        assert '[ "$uv_ready" = "true" ] || exit 1' in run
+        assert '[ "$python_ready" = "true" ] || exit 1' in run
+        assert '[ "$sync_ready" = "true" ] || exit 1' in run
+
     def test_fleet_postgres_job_uses_unique_per_run_container_and_forbids_skips(self):
         job = _load_workflow(CI_WORKFLOW_PATH)["jobs"]["fleet-postgres"]
         assert "services" not in job, (
