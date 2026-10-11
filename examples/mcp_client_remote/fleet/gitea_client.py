@@ -68,6 +68,7 @@ ALLOWED_ENDPOINTS = frozenset(
         "/repos/{owner}/{repo}/actions/jobs/{job_id}",
         "/repos/{owner}/{repo}/actions/jobs/{job_id}/logs",
         "/repos/{owner}/{repo}/actions/workflows",
+        "/repos/{owner}/{repo}/actions/secrets",
     }
 )
 
@@ -95,6 +96,14 @@ ALLOWED_ACTION_WRITE_ENDPOINTS = frozenset(
         "/repos/{owner}/{repo}/actions/runs/{run_id}/jobs/{job_id}/rerun",
     }
 )
+# Secret writes use PUT and are isolated from lifecycle reruns.  The only
+# allowed endpoint is one repository Actions secret selected by a validated
+# secret-name path segment.
+ALLOWED_ACTION_SECRET_WRITE_ENDPOINTS = frozenset(
+    {
+        "/repos/{owner}/{repo}/actions/secrets/{secretname}",
+    }
+)
 # Repository-governance writes stay separate from PR/Actions writes. Branch
 # creation is the only allowed POST and repository PATCH is reserved solely
 # for changing ``default_branch``.
@@ -109,6 +118,7 @@ ALLOWED_REPO_ADMIN_ENDPOINTS = frozenset(
     }
 )
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+_ACTION_SECRET_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
 MAX_PR_TITLE = 200
 MAX_PR_BODY = 20_000
@@ -132,6 +142,20 @@ def _validate_branch_name(value: str, label: str) -> str:
         or value.endswith("/")
     ):
         raise ValueError(f"Invalid {label} branch name: {value!r}")
+    return value
+
+
+def _validate_action_secret_name(value: str) -> str:
+    value = str(value or "").strip()
+    upper = value.upper()
+    if (
+        not value
+        or len(value) > 255
+        or not _ACTION_SECRET_NAME_RE.fullmatch(value)
+        or upper.startswith("GITHUB_")
+        or upper.startswith("GITEA_")
+    ):
+        raise ValueError("invalid Gitea Actions secret name")
     return value
 
 
@@ -481,6 +505,46 @@ class GiteaClient:
         except ValueError as exc:
             raise GiteaMutationOutcomeUnknown(
                 "gitea actions mutation returned an undecodable success response"
+            ) from exc
+
+    async def _put_action_secret(
+        self,
+        endpoint: str,
+        payload: dict[str, Any],
+        **path_params: Any,
+    ) -> Any:
+        """PUT one narrowly allowlisted repository Actions secret."""
+        if endpoint not in ALLOWED_ACTION_SECRET_WRITE_ENDPOINTS:
+            raise ValueError(f"Actions secret endpoint not allowed: {endpoint}")
+        if "owner" in path_params:
+            validate_repo_owner_or_name(path_params["owner"], label="owner")
+        if "repo" in path_params:
+            validate_repo_owner_or_name(path_params["repo"], label="repo")
+        path_params = dict(path_params)
+        path_params["secretname"] = quote(
+            _validate_action_secret_name(str(path_params.get("secretname") or "")),
+            safe="",
+        )
+        path = endpoint.format(**path_params)
+        resp = await self._client.put(path, json=payload)
+        if resp.status_code in (401, 403):
+            detail = resp.json().get("message", "unauthorized")
+            raise PermissionError(f"gitea api {path}: {detail}")
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise httpx.HTTPStatusError(
+                f"gitea api {path}: {resp.status_code} {resp.reason_phrase}",
+                request=exc.request,
+                response=exc.response,
+            ) from None
+        if not resp.content:
+            return {}
+        try:
+            return resp.json()
+        except ValueError as exc:
+            raise GiteaMutationOutcomeUnknown(
+                "gitea actions secret mutation returned an undecodable success response"
             ) from exc
 
     async def _post_branch(
@@ -1072,6 +1136,48 @@ class GiteaClient:
             "/repos/{owner}/{repo}/actions/workflows",
             owner=owner,
             repo=repo,
+        )
+
+    async def list_action_secrets(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        page: int = 1,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        page = _validate_positive_int(page, "page")
+        limit = _validate_action_job_limit(limit)
+        data = await self._get(
+            "/repos/{owner}/{repo}/actions/secrets",
+            params={"page": page, "limit": limit},
+            owner=owner,
+            repo=repo,
+        )
+        if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
+            raise ValueError("gitea actions secrets response must be a list")
+        return data
+
+    async def put_action_secret(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        secret_name: str,
+        value: str,
+        description: str,
+    ) -> None:
+        secret_name = _validate_action_secret_name(secret_name)
+        if not isinstance(value, str) or not value:
+            raise ValueError("secret value must be a non-empty string")
+        if not isinstance(description, str) or not description or len(description) > 255:
+            raise ValueError("secret description must be 1..255 characters")
+        await self._put_action_secret(
+            "/repos/{owner}/{repo}/actions/secrets/{secretname}",
+            {"data": value, "description": description},
+            owner=owner,
+            repo=repo,
+            secretname=secret_name,
         )
 
     async def aclose(self) -> None:
