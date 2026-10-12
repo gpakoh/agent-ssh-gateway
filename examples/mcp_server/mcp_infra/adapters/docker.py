@@ -27,6 +27,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from dotenv import dotenv_values
 from tool_results import tool_error, tool_success, validate_pagination
 
 from examples.mcp_client_remote.fleet.docker_client import (
@@ -1646,6 +1647,408 @@ async def _accept_content_harvester_payload(
     return {"state": state, "live": second}
 
 
+def _content_harvester_database_url(env_file: Path) -> str:
+    try:
+        text = env_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ValueError("Content Harvester operator env file is unreadable") from exc
+    assignments = [
+        line
+        for line in text.splitlines()
+        if re.match(r"^\s*(?:export\s+)?HARVESTER_DATABASE_URL\s*=", line)
+    ]
+    if len(assignments) != 1:
+        raise ValueError(
+            "Content Harvester operator env must define HARVESTER_DATABASE_URL exactly once"
+        )
+    try:
+        values = dotenv_values(dotenv_path=env_file, interpolate=False)
+    except Exception as exc:
+        raise ValueError("Content Harvester operator env file could not be parsed") from exc
+    database_url = values.get("HARVESTER_DATABASE_URL")
+    if (
+        not isinstance(database_url, str)
+        or not database_url.strip()
+        or any(ch in database_url for ch in ("\x00", "\n", "\r"))
+    ):
+        raise ValueError("HARVESTER_DATABASE_URL must be one non-empty literal value")
+    if "${" in database_url:
+        raise ValueError("HARVESTER_DATABASE_URL interpolation is not allowed for guarded migration")
+    return database_url.strip()
+
+
+def _content_harvester_migration_contract_fingerprint(
+    candidate_root: Path,
+    expected_head_sha: str,
+) -> str:
+    runner_blob = _git_capture(
+        candidate_root,
+        "rev-parse",
+        f"{expected_head_sha}:app/schema_migrations.py",
+    )
+    migrations_tree = _git_capture(
+        candidate_root,
+        "rev-parse",
+        f"{expected_head_sha}:migrations",
+    )
+    pyproject_blob = _git_capture(
+        candidate_root,
+        "rev-parse",
+        f"{expected_head_sha}:pyproject.toml",
+    )
+    for value in (runner_blob, migrations_tree, pyproject_blob):
+        if not re.fullmatch(r"[0-9a-f]{40}", value):
+            raise ValueError("Content Harvester migration source identity is malformed")
+    raw = f"{runner_blob}\n{migrations_tree}\n{pyproject_blob}\n".encode()
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+async def _prepare_content_harvester_migration(
+    *,
+    candidate_project: str,
+    expected_head_sha: str,
+    source_revision: str,
+    image_namespace: str,
+    runtime_network: str,
+) -> dict[str, Any]:
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_head_sha):
+        raise ValueError("expected_head_sha must be a 40-character lowercase SHA")
+    if source_revision != expected_head_sha:
+        raise ValueError("source_revision must exactly match expected_head_sha")
+    target_image = _content_harvester_target_image(image_namespace, source_revision)
+
+    registry = server_attr("_get_workspace_registry")()
+    candidate_info = registry.project_info(candidate_project)
+    candidate_root = _safe_registered_root(candidate_info, expected_type="candidate-clone")
+    metadata = _read_candidate_metadata(candidate_root)
+    if metadata.get("project_id") != candidate_project:
+        raise ValueError("candidate metadata project identity mismatch")
+    if metadata.get("source_project") != _CONTENT_HARVESTER_SOURCE_PROJECT:
+        raise ValueError("candidate source project is not authorized for Content Harvester migration")
+    if metadata.get("head") != expected_head_sha or metadata.get("base_sha") != expected_head_sha:
+        raise ValueError("candidate metadata is not pinned to the expected Content Harvester head")
+    if _git_capture(candidate_root, "rev-parse", "HEAD").lower() != expected_head_sha:
+        raise ValueError("candidate HEAD changed")
+    if _git_capture(candidate_root, "status", "--porcelain=v1", "--untracked-files=all"):
+        raise ValueError("candidate workspace must be clean")
+
+    operator_info = registry.project_info(_CONTENT_HARVESTER_SOURCE_PROJECT)
+    operator_root = _safe_registered_root(operator_info)
+    client = _docker_client()
+    client._validate_project_dir(str(operator_root))
+    env_file = _safe_regular_under(operator_root, ".env", "Content Harvester operator env file")
+    database_url = _content_harvester_database_url(env_file)
+
+    target_image_id = await client.image_id(target_image)
+    if await client.image_revision(target_image_id) != source_revision:
+        raise RuntimeError("Content Harvester migration image OCI revision differs from source revision")
+    network = await client.network_metadata(runtime_network)
+    if network.get("Name") != runtime_network:
+        raise RuntimeError("Content Harvester migration runtime network identity mismatch")
+    if network.get("Scope") not in (None, "", "local"):
+        raise RuntimeError("Content Harvester migration runtime network must be local")
+    if not isinstance(network.get("Driver"), str) or not network.get("Driver"):
+        raise RuntimeError("Content Harvester migration runtime network driver is unavailable")
+
+    return {
+        "candidate_root": str(candidate_root),
+        "env_file": str(env_file),
+        "source_revision": source_revision,
+        "image_namespace": image_namespace.strip().rstrip("/"),
+        "target_image": target_image,
+        "target_image_id": target_image_id,
+        "runtime_network": runtime_network,
+        "runtime_network_fingerprint": _content_harvester_resource_fingerprint("network", network),
+        "database_url": database_url,
+        "database_url_fingerprint": "sha256:" + hashlib.sha256(database_url.encode()).hexdigest(),
+        "migration_contract_fingerprint": _content_harvester_migration_contract_fingerprint(
+            candidate_root,
+            expected_head_sha,
+        ),
+    }
+
+
+def _content_harvester_migration_report(run: RunResult) -> dict[str, Any] | None:
+    if run.exit_code not in {0, 3}:
+        return None
+    try:
+        payload = json.loads((run.stdout or "").strip())
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict) or payload.get("status") not in {"current", "pending"}:
+        return None
+    applied = payload.get("applied_versions")
+    pending = payload.get("pending_versions")
+    total = payload.get("total_migrations")
+    if (
+        not isinstance(applied, list)
+        or not all(isinstance(item, str) for item in applied)
+        or not isinstance(pending, list)
+        or not all(isinstance(item, str) for item in pending)
+        or not isinstance(total, int)
+        or isinstance(total, bool)
+        or total < 1
+    ):
+        return None
+    if payload["status"] == "current" and (run.exit_code != 0 or pending):
+        return None
+    if payload["status"] == "pending" and (run.exit_code != 3 or not pending):
+        return None
+    return {
+        "status": payload["status"],
+        "applied_versions": applied,
+        "pending_versions": pending,
+        "total_migrations": total,
+    }
+
+
+async def _check_content_harvester_migrations(
+    client: Any,
+    *,
+    plan: dict[str, Any],
+    timeout: int,
+) -> tuple[RunResult, dict[str, Any] | None]:
+    run = await client.run_content_harvester_migration(
+        image=plan["target_image"],
+        runtime_network=plan["runtime_network"],
+        database_url=plan["database_url"],
+        mode="check",
+        timeout=timeout,
+    )
+    return run, _content_harvester_migration_report(run)
+
+
+async def docker_migrate_content_harvester(
+    candidate_project: str,
+    expected_head_sha: str,
+    source_revision: str,
+    image_namespace: str,
+    runtime_network: str = "infra-quart_infra-net",
+    timeout: int = 300,
+) -> dict[str, Any]:
+    """Prepare a guarded Content Harvester schema migration on the exact release image."""
+    timeout = max(60, min(timeout, 600))
+    try:
+        plan = await _prepare_content_harvester_migration(
+            candidate_project=candidate_project,
+            expected_head_sha=expected_head_sha,
+            source_revision=source_revision,
+            image_namespace=image_namespace,
+            runtime_network=runtime_network,
+        )
+        client = _docker_client()
+        check_run, report = await _check_content_harvester_migrations(
+            client,
+            plan=plan,
+            timeout=min(timeout, 120),
+        )
+    except ValueError as exc:
+        return tool_error(
+            tool="docker_migrate_content_harvester",
+            code="INVALID_INPUT",
+            message=str(exc),
+            source="docker",
+            retryable=False,
+        )
+    except RuntimeError as exc:
+        return tool_error(
+            tool="docker_migrate_content_harvester",
+            code="MIGRATION_PRECONDITION_FAILED",
+            message=str(exc),
+            source="docker",
+            retryable=False,
+        )
+    if report is None:
+        return tool_error(
+            tool="docker_migrate_content_harvester",
+            code="MIGRATION_CHECK_FAILED",
+            message="Content Harvester migration check did not return trusted ledger evidence",
+            result={"output_tail": _sanitize_deploy_tail(client, check_run.stderr or check_run.stdout)},
+            source="docker",
+            retryable=False,
+            redacted=True,
+        )
+    if report["status"] == "current":
+        return tool_success(
+            "docker_migrate_content_harvester",
+            result={
+                "status": "current",
+                "mutation_required": False,
+                "source_revision": source_revision,
+                "target_image": plan["target_image"],
+                "target_image_id": plan["target_image_id"],
+                "migration_contract_fingerprint": plan["migration_contract_fingerprint"],
+                "report": report,
+            },
+            source="docker",
+            redacted=True,
+        )
+
+    action = _confirm_store().create_action(
+        "docker_migrate_content_harvester",
+        {
+            "candidate_project": candidate_project,
+            "expected_head_sha": expected_head_sha,
+            "source_revision": source_revision,
+            "image_namespace": plan["image_namespace"],
+            "runtime_network": runtime_network,
+            "target_image": plan["target_image"],
+            "target_image_id": plan["target_image_id"],
+            "runtime_network_fingerprint": plan["runtime_network_fingerprint"],
+            "database_url_fingerprint": plan["database_url_fingerprint"],
+            "migration_contract_fingerprint": plan["migration_contract_fingerprint"],
+            "pending_versions": report["pending_versions"],
+            "timeout": timeout,
+        },
+        (
+            f"Apply Content Harvester migrations from {candidate_project}@"
+            f"{expected_head_sha[:12]} using exact release image"
+        ),
+        risk="high",
+        required_scope="mcp:docker:admin",
+    )
+    return _confirmation_response(action)
+
+
+async def _docker_migrate_content_harvester_impl(
+    candidate_project: str,
+    expected_head_sha: str,
+    source_revision: str,
+    image_namespace: str,
+    runtime_network: str,
+    target_image: str,
+    target_image_id: str,
+    runtime_network_fingerprint: str,
+    database_url_fingerprint: str,
+    migration_contract_fingerprint: str,
+    pending_versions: list[str],
+    timeout: int = 300,
+) -> dict[str, Any]:
+    try:
+        plan = await _prepare_content_harvester_migration(
+            candidate_project=candidate_project,
+            expected_head_sha=expected_head_sha,
+            source_revision=source_revision,
+            image_namespace=image_namespace,
+            runtime_network=runtime_network,
+        )
+        confirmed = {
+            "target_image": target_image,
+            "target_image_id": target_image_id,
+            "runtime_network_fingerprint": runtime_network_fingerprint,
+            "database_url_fingerprint": database_url_fingerprint,
+            "migration_contract_fingerprint": migration_contract_fingerprint,
+        }
+        if any(plan[key] != value for key, value in confirmed.items()):
+            raise RuntimeError("Content Harvester migration confirmation identities changed")
+        client = _docker_client()
+        _precheck_run, precheck = await _check_content_harvester_migrations(
+            client,
+            plan=plan,
+            timeout=min(timeout, 120),
+        )
+        if precheck is None:
+            raise RuntimeError("Content Harvester migration pre-check evidence is invalid")
+        if precheck["status"] == "current":
+            return tool_success(
+                "docker_migrate_content_harvester",
+                result={
+                    "status": "current",
+                    "mutation_required": False,
+                    "source_revision": source_revision,
+                    "target_image": target_image,
+                    "target_image_id": target_image_id,
+                    "reconciled_before_apply": True,
+                    "report": precheck,
+                },
+                source="docker",
+                dangerous=True,
+                redacted=True,
+            )
+        if precheck["pending_versions"] != pending_versions:
+            raise RuntimeError("Content Harvester pending migration set changed before execution")
+    except (ValueError, RuntimeError) as exc:
+        return tool_error(
+            tool="docker_migrate_content_harvester",
+            code="MIGRATION_PRECONDITION_FAILED",
+            message=str(exc),
+            source="docker",
+            retryable=False,
+        )
+
+    apply_run = await client.run_content_harvester_migration(
+        image=plan["target_image"],
+        runtime_network=plan["runtime_network"],
+        database_url=plan["database_url"],
+        mode="apply",
+        timeout=timeout,
+    )
+    check_run, report = await _check_content_harvester_migrations(
+        client,
+        plan=plan,
+        timeout=min(timeout, 120),
+    )
+    apply_tail = _sanitize_deploy_tail(client, (apply_run.stdout or "") + "\n" + (apply_run.stderr or ""))
+    check_tail = _sanitize_deploy_tail(client, (check_run.stdout or "") + "\n" + (check_run.stderr or ""))
+
+    if report is not None and report["status"] == "current":
+        return tool_success(
+            "docker_migrate_content_harvester",
+            result={
+                "status": "current",
+                "mutation_required": True,
+                "source_revision": source_revision,
+                "target_image": target_image,
+                "target_image_id": target_image_id,
+                "reconciled_after_unknown": apply_run.exit_code == -1,
+                "apply_exit_code": apply_run.exit_code,
+                "report": report,
+                "apply_output_tail": apply_tail,
+            },
+            source="docker",
+            dangerous=True,
+            redacted=True,
+        )
+    if report is not None and report["status"] == "pending":
+        return tool_error(
+            tool="docker_migrate_content_harvester",
+            code="MIGRATION_INCOMPLETE_RECONCILED",
+            message="Content Harvester migration did not reach current state; a fresh check proves pending work remains",
+            result={
+                "source_revision": source_revision,
+                "target_image": target_image,
+                "apply_exit_code": apply_run.exit_code,
+                "report": report,
+                "apply_output_tail": apply_tail,
+                "check_output_tail": check_tail,
+            },
+            source="docker",
+            retryable=True,
+            redacted=True,
+            hint="Run a fresh migration preflight; do not reuse the consumed confirmation.",
+        )
+    return tool_error(
+        tool="docker_migrate_content_harvester",
+        code=(
+            "MIGRATION_OUTCOME_AMBIGUOUS"
+            if apply_run.exit_code == -1
+            else "MIGRATION_VERIFICATION_FAILED"
+        ),
+        message="Content Harvester migration outcome could not be proven by the ledger check",
+        result={
+            "source_revision": source_revision,
+            "target_image": target_image,
+            "apply_exit_code": apply_run.exit_code,
+            "apply_output_tail": apply_tail,
+            "check_output_tail": check_tail,
+        },
+        source="docker",
+        retryable=False,
+        redacted=True,
+        hint="Do not retry apply until a later read-only migration check can prove current or pending state.",
+    )
+
+
 async def docker_deploy_content_harvester(
     candidate_project: str,
     expected_head_sha: str,
@@ -2493,6 +2896,7 @@ _CONFIRM_HANDLERS: dict[str, Callable[..., Any]] = {
     "docker_deploy_contract": _docker_deploy_contract_impl,
     "docker_deploy_site_audit": _docker_deploy_site_audit_impl,
     "docker_deploy_content_harvester": _docker_deploy_content_harvester_impl,
+    "docker_migrate_content_harvester": _docker_migrate_content_harvester_impl,
 }
 
 
@@ -3153,6 +3557,7 @@ def register_all() -> None:
         "docker_deploy_contract",
         "docker_deploy_site_audit",
         "docker_deploy_content_harvester",
+        "docker_migrate_content_harvester",
         "confirm_operation",
         "docker_pending_actions",
     ):

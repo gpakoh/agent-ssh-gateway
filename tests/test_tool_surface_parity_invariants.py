@@ -134,6 +134,12 @@ class TestLiveServerToolSurface:
             "artifact_volume",
             "runtime_network",
         ],
+        "docker_migrate_content_harvester": [
+            "candidate_project",
+            "expected_head_sha",
+            "source_revision",
+            "image_namespace",
+        ],
         "git_fetch_ref": ["project"],
         "git_refresh_branch_to_head": [
             "project",
@@ -192,6 +198,7 @@ class TestLiveServerToolSurface:
             if name not in {
                 "docker_deploy_site_audit",
                 "docker_deploy_content_harvester",
+                "docker_migrate_content_harvester",
             }:
                 assert entry["available"] is True
         assert contract["catalog_refresh"]["catalog_state"] == "current"

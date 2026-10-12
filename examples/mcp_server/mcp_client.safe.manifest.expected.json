@@ -2,8 +2,8 @@
   "mode": "mcp_client",
   "safe_mode": true,
   "expected_safe_count": 82,
-  "expected_blocked_count": 33,
-  "expected_mcp_client_full_count": 111,
+  "expected_blocked_count": 34,
+  "expected_mcp_client_full_count": 112,
   "must_include": [
     "health",
     "info",
@@ -15,6 +15,7 @@
   "must_exclude": [
     "docker_compose_up",
     "docker_deploy_content_harvester",
+    "docker_migrate_content_harvester",
     "docker_exec",
     "apply_patch",
     "run_agent",

@@ -229,11 +229,13 @@ class DockerClient:
         self,
         argv: list[str],
         timeout: float = SUBPROCESS_TIMEOUT,
+        env: dict[str, str] | None = None,
     ) -> RunResult:
         proc = await asyncio.create_subprocess_exec(
             *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
         try:
             stdout, stderr = await asyncio.wait_for(
@@ -1269,6 +1271,58 @@ class DockerClient:
         if recover:
             argv.append("--recover")
         return await self._run_with_result(argv, timeout=float(timeout))
+
+    async def run_content_harvester_migration(
+        self,
+        *,
+        image: str,
+        runtime_network: str,
+        database_url: str,
+        mode: str,
+        timeout: int = 300,
+    ) -> RunResult:
+        """Run the fixed Harvester migration CLI with database-only credentials.
+
+        The database URL is inherited by the Docker CLI process and forwarded
+        with ``--env HARVESTER_DATABASE_URL`` so its value never appears in
+        process argv. No Telegram/API credentials are passed to the migration
+        container.
+        """
+        self._validate_image_name(image)
+        if "@" in image or ":" not in image.rsplit("/", 1)[-1]:
+            raise ValueError("migration image must be a tagged image reference")
+        self._validate_network_name(runtime_network)
+        if mode not in {"check", "apply"}:
+            raise ValueError("migration mode must be check or apply")
+        if (
+            not isinstance(database_url, str)
+            or not database_url.strip()
+            or any(ch in database_url for ch in ("\x00", "\n", "\r"))
+        ):
+            raise ValueError("database_url must be one non-empty line")
+        timeout = max(30, min(timeout, 600))
+        argv = [
+            DOCKER_BIN,
+            "run",
+            "--rm",
+            "--network",
+            runtime_network,
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,nodev,size=16m",
+            "--env",
+            "HARVESTER_DATABASE_URL",
+            "--entrypoint",
+            "content-harvester-migrate",
+            image,
+            mode,
+        ]
+        process_env = {**os.environ, "HARVESTER_DATABASE_URL": database_url.strip()}
+        return await self._run_with_result(argv, timeout=float(timeout), env=process_env)
 
     async def rm(self, container: str, force: bool = False) -> RunResult:
         self._validate_container_name(container)
