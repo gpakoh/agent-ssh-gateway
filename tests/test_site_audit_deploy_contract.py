@@ -749,3 +749,8 @@ async def test_site_audit_client_helper_uses_fixed_runner_and_recover_flag(monke
     assert any("/candidate/site-audit" in mount and "readonly" in mount for mount in mounts)
     assert any("/operator/site-audit" in mount and "readonly" in mount for mount in mounts)
     assert any(docker_adapter._SITE_AUDIT_STATE_VOLUME in mount for mount in mounts)
+    env_values = [argv[i + 1] for i, value in enumerate(argv[:-1]) if value == "--env"]
+    assert "GIT_CONFIG_COUNT=1" in env_values
+    assert "GIT_CONFIG_KEY_0=safe.directory" in env_values
+    assert "GIT_CONFIG_VALUE_0=/candidate/site-audit" in env_values
+    assert not any("safe.directory=*" in value for value in env_values)
