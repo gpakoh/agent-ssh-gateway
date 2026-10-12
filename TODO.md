@@ -1,23 +1,23 @@
 # Agent SSH Gateway — TODO
 
-Last reconciled: 2026-10-10.
+Last reconciled: 2026-10-12.
 
 This file is the active backlog only. Completed audit notes, fixed CI blockers,
 merged PR evidence, and superseded diagnostics should live in PR history,
 changelogs, or dedicated audit archives — not in TODO.
 
-On 2026-10-10 the current committed `master` backlog was reconciled again with
-unique evidence from the long-lived dirty canonical `TODO.md`. The three dirty
-runtime/tooling intake entries were not promoted as duplicate roadmap items:
-their still-open substance was folded into existing #14, #2/#51 and #6/#45;
-fresh cancellation reproductions were folded into #15. Historical duplicates,
-completed subcases and superseded diagnostics were not reintroduced.
+On 2026-10-12 the active backlog was reconciled against current merged/runtime
+evidence. Five entries with completed acceptance were removed: #4 (fleet stale
+lease reconciliation), #12 (typed CI merge-policy evidence), #28 (CI teardown
+terminalization), #39 (post-merge heavy-CI fast path), and #42 (machine-readable
+Docker inventory scope). Partial progress on still-open items remains recorded
+under those items rather than being treated as closure.
 
-Open backlog count after cleanup: **42**
+Open backlog count after cleanup: **37**
 
-- **P1 / critical:** 11
-- **P2 / important:** 20
-- **P3 / capability / wishlist:** 11
+- **P1 / critical:** 8
+- **P2 / important:** 19
+- **P3 / capability / wishlist:** 10
 
 ## P1 / Critical blockers
 
@@ -139,22 +139,6 @@ Open backlog count after cleanup: **42**
    requiring candidate reconstruction. The response-lost/timeout ambiguity of
    the same incident is tracked under existing #51.
 
-4. ⬜ **Reconcile stale unbound fleet leases without duplicate work.**
-   Historical `attempted` / `legacy_unknown` lease rows can consume all fleet
-   capacity even when no lease has a recent heartbeat. Add fleet status that
-   separates live workers, reclaimable never-attempted leases and ambiguous rows;
-   require explicit evidence/acknowledgement before deleting ambiguous leases;
-   tombstone every reclaimed lease exactly once.
-
-   **2026-10-10 implementation status:** PR #506 (`fix(fleet): reconcile stale
-   unbound leases safely`) implements the intended status/reconciliation/tombstone
-   contract and reports targeted local verification, but its current head
-   `eaf2e2a64886...` is behind `master@7044f0e96054...` by two commits. Treat #4
-   as implemented/locally verified on a branch only; it remains open until the
-   branch is refreshed to current base, exact-head CI is green, the PR is merged,
-   post-merge deploy/host-smoke succeeds, and the live operator surface is
-   acceptance-tested without duplicate work or ambiguous lease deletion.
-
 6. ⬜ **Keep ChatGPT-visible tool schemas in parity with server manifests.**
    Tools can appear available in `tools_manifest` while missing or having a
    different callable schema in the ChatGPT resource catalog. PR-A measurement
@@ -242,12 +226,25 @@ Open backlog count after cleanup: **42**
    once external schema parity is restored, re-run one proven-superseded branch
    through the audited exact-SHA cleanup path without force/reset or dummy commit.
 
+   **2026-10-12 fresh-caller progress:** this newly attached caller now exposes
+   `candidate_cleanup`, `gitea_rerun_action_job`, `gitea_create_branch_at_sha`,
+   `gitea_set_default_branch`, guarded deploy tools and Actions-secret provisioning.
+   Live `tools_manifest` reports 147 registered tools and no names missing from the
+   supplied client observation, but the observation remains explicitly incomplete
+   and not independently verified. Keep #6 open for complete schema parity,
+   including optional arguments and a proven long-lived refresh/rebind path.
+
 7. ⬜ **Reconcile Gitea Actions lifecycle, stranded jobs and cancellable runs.**
    CI runs/jobs can remain `waiting` / `in_progress` after all useful work is
    done, after cleanup timeouts, or after old workflow jobs later become runnable.
    Add exact-run/head cancellation, stale/orphaned container reconciliation,
    terminalization of false-condition/dependency-blocked jobs, and safe rerun
    eligibility diagnostics.
+
+   **2026-10-12 progress:** PR #518 merged guarded exact-run cancellation with
+   run/head/attempt fencing, audit-before-mutation and bounded postcondition
+   reconciliation. Keep #7 open for stale/orphaned runner-container cleanup and
+   terminalization/reconciliation of stranded dependency-blocked jobs.
 
 8. ⬜ **Add a repo-owned deploy-script / deploy-contract runner.**
    Some repositories intentionally encode safety in a reviewed deploy script
@@ -295,6 +292,15 @@ Open backlog count after cleanup: **42**
    state records the new LKG, unrelated services are not recreated, and an
    induced failed health/readiness gate proves rollback remains available.
 
+   **2026-10-12 progress:** the live callable surface now includes generic
+   `docker_deploy_contract` plus dedicated Site Audit and Content Harvester
+   guarded deploy paths; Content Harvester also has a guarded migration path.
+   Site Audit's candidate Git-trust edge case was fixed by PR #523, merged as
+   `0588fdcfa86f...`; post-merge run #16188 attempt 2 completed successfully.
+   Keep #8 open until guarded Site Audit is re-accepted live after that deploy
+   and the generic rollback contract has final cross-project acceptance rather
+   than capability-presence evidence alone.
+
 9. ⬜ **Add one-shot Compose/Docker execution with secret-safe env inheritance.**
     Operators need to run migrations, readiness commands and read-only database
     inventory against Compose-backed services without exposing DSNs or mutating
@@ -308,34 +314,16 @@ Open backlog count after cleanup: **42**
     exact expected current state. Add CAS-style settings updates with audit
     evidence and post-write verification.
 
+    **2026-10-12 progress:** guarded exact-SHA branch creation and leased default-
+    branch mutation are merged and callable as `gitea_create_branch_at_sha` and
+    `gitea_set_default_branch`. Keep #10 open for typed required-checks, approval
+    and branch-protection mutation against exact expected current policy state.
+
 11. ⬜ **Isolate PR Docker jobs from the shared host daemon or document the trust boundary.**
     PR-controlled Docker build/smoke steps can mutate the shared runner Docker
     daemon. Prefer disposable per-job daemon/VM isolation; otherwise enforce and
     document that every same-repo PR writer is intentionally trusted as host
     admin and prevent untrusted/fork PRs from privileged labels.
-
-12. ⬜ **Make CI merge gating distinguish missing, incompatible and stale evidence.**
-    Merge tools should distinguish no workflow, no exact-head run, stale run,
-    trigger-incompatible workflow (for example push-only), intentionally skipped
-    jobs, ordinary red CI, and repositories whose branch policy explicitly has no
-    required status checks. When checks are disabled, either allow the exact-head
-    merge or return a typed product-policy requirement that Actions are mandatory;
-    do not collapse that state into `NO_REQUIRED_RUN_FOUND`. Exact-head acceptable
-    evidence must be explicit in repository policy and never silently weakened.
-
-42. ⬜ **Make Docker inventory scope explicit and machine-readable.**
-   `docker_ps(all=true)` still returns only the containers visible through the
-   Gateway's configured Docker endpoint, but the response does not identify that
-   endpoint/context or state whether the inventory is host-complete. Historical
-   operator evidence showed a 39-vs-151 mismatch; a fresh 2026-10-07 call still
-   returned only 38 rows with no endpoint/scope/completeness metadata. Absence
-   from this view must not be treated as proof of system-wide absence.
-
-   Acceptance: Docker inventory responses expose a safe endpoint/context identity
-   and an explicit scope/completeness field; documentation defines what `count`
-   means; configured multiple endpoints are selectable or explicitly reported as
-   unavailable; regression coverage prevents a scoped daemon view from being
-   presented as system-wide inventory.
 
 47. ⬜ **Provide redacted secret propagation/provisioning across approved deployment and CI scopes.**
     Production deploys and cross-repository CI can require an existing root-only
@@ -376,6 +364,13 @@ Open backlog count after cleanup: **42**
     no plaintext returned or logged. Evidence: run #15200 quality/postgres green,
     agent-memory-e2e failed only at registry login; corrected head
     `565cd8a0eb77...` retains explicit `REGISTRY_TOKEN`.
+
+    **2026-10-12 progress:** PR #517 merged guarded Actions-secret provisioning
+    for the approved `registry_token` source into `work-session-service` as
+    `REGISTRY_TOKEN`, with source-hash leasing, audit-before-write, redacted
+    results and ambiguous-response reconciliation. Keep #47 open for the second
+    half of the contract: secret-safe deploy-time consumption/injection and its
+    production acceptance without plaintext exposure.
 
 ## P2 / Important bugs and reliability gaps
 
@@ -472,19 +467,6 @@ Open backlog count after cleanup: **42**
     the compose context, HOME/buildx/cache, builder state or daemon namespace,
     and offer a sanctioned writable-builder-cache recovery path.
 
-28. ⬜ **Terminalize successful CI jobs after Docker teardown timeout.**
-    If all declared job steps succeeded but final runner container cleanup times
-    out, the CI controller should still reach a bounded terminal state and
-    release downstream jobs, or fail/reconcile explicitly rather than leaving the
-    workflow indefinitely `in_progress`.
-
-    **2026-10-07 update:** PR #468 removed `setup-python`'s unused pip-cache
-    post-action from uv-driven test/E2E jobs, eliminating the concrete teardown
-    path that broke run #14371. Exact rerun #14371 attempt 2 and post-merge run
-    #14458 both completed successfully. Keep this item open for the broader
-    controller-level guarantee: an unrelated future teardown timeout must still
-    terminalize or reconcile explicitly rather than strand the workflow.
-
 30. ⬜ **Add Gitea Actions artifact listing and bounded download.**
     Operators can inspect runs/jobs/logs, but need first-class artifact metadata
     and safe archive/file retrieval with run/head provenance, size limits,
@@ -520,6 +502,12 @@ Open backlog count after cleanup: **42**
     catalog still cannot call it. Therefore no additional Gateway rerun code is
     required here; the only remaining closure step is external catalog exposure
     followed by one real failed-job rerun acceptance from that external caller.
+
+    **2026-10-12 caller-visible progress:** `gitea_rerun_action_job` is now present
+    in this caller's callable catalog, so the prior exposure blocker is no longer
+    reproduced in a fresh attachment. Keep #31 open only until one real current
+    failed/cancelled job is rerun through this external surface and the exact
+    run/head advances to the reconciled new attempt without rerunning the workflow.
 
 33. ⬜ **Align outer `run_agent` success envelopes with non-submission results.**
     Pre-submit validation failures, blocked terminal replays and other
@@ -655,12 +643,6 @@ Open backlog count after cleanup: **42**
     162 bytes and the expected verification body. Do not redeploy that release
     merely to collect evidence.
 
-39. ⬜ **Avoid duplicate heavy CI after already-green PR heads.**
-    Post-merge `master` pushes should be able to fast-path to quick sanity plus
-    build/deploy/host-smoke when the merge commit is a clean merge of an exact
-    green PR head. Direct pushes and ambiguous histories must fall back to full
-    CI.
-
 40. ⬜ **Model agent roles and authoritative closeout explicitly.**
     Agent reports may say implementation/review/checks are complete, but should
     not self-close findings or mark a project ready. Gateway should preserve
@@ -730,6 +712,14 @@ Open backlog count after cleanup: **42**
     external ChatGPT resource catalog still owns its separate schema snapshot and
     must prove that it consumes the refresh/rebind contract and fetches the new
     callable schema in a long-lived caller.
+
+    **2026-10-12 fresh-attachment evidence:** a newly attached caller now exposes
+    the previously missing guarded schemas, including `candidate_cleanup` and
+    `gitea_rerun_action_job`, against live toolset hash
+    `sha256:50b7ce5e8ea37ad31d68e3bafce99df230342b5c2d9a82c206f3dffa5a26be4b`.
+    This proves fresh attachment can converge, but not the required in-place
+    invalidation of a client that remained attached across a toolset/build change;
+    keep #45 open for that long-lived acceptance only.
 
 46. ⬜ **Make `info(project)` verification commands executable verbatim.**
     Verification guidance must include any project-specific mypy targets/options,
