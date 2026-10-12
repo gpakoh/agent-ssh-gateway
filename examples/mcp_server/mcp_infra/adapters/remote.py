@@ -484,6 +484,46 @@ def _configured_workflow_count(payload: Any) -> int | None:
     return None
 
 
+def _gitea_branch_ci_policy_signature(
+    payload: Any,
+) -> tuple[str, tuple[str, ...]] | None:
+    """Return a stable effective status-check policy signature or None."""
+    if not isinstance(payload, dict):
+        return None
+    enabled = payload.get("enable_status_check")
+    contexts = payload.get("status_check_contexts")
+    if not isinstance(enabled, bool) or not isinstance(contexts, list):
+        return None
+    normalized: list[str] = []
+    for context in contexts:
+        if not isinstance(context, str) or not context.strip():
+            return None
+        normalized.append(context.strip())
+    if len(set(normalized)) != len(normalized):
+        return None
+    normalized_contexts = tuple(sorted(normalized))
+    if enabled is False:
+        if normalized_contexts:
+            return None
+        return ("CI_POLICY_NO_REQUIRED_CHECKS", normalized_contexts)
+    return ("CI_REQUIRED", normalized_contexts)
+
+
+def _gitea_branch_ci_policy(payload: Any) -> str:
+    """Classify Gitea's effective branch status-check policy strictly.
+
+    A branch that explicitly disables status checks is *not* permission for
+    the Gateway to merge without CI: product policy still requires one exact
+    pull_request run for the head. This classifier exists so absence of such a
+    run is reported as a repository-policy mismatch instead of the misleading
+    NO_REQUIRED_RUN_FOUND state.
+    """
+    signature = _gitea_branch_ci_policy_signature(payload)
+    if signature is None:
+        return "CI_POLICY_UNKNOWN"
+    return signature[0]
+
+
 def _run_ids_descend_from(run_ids: list[int], previous_oldest_id: int | None) -> bool:
     if any(left <= right for left, right in zip(run_ids, run_ids[1:], strict=False)):
         return False
@@ -525,6 +565,21 @@ def _validated_action_run_page(
 
 
 _CI_EVIDENCE_ERROR_POLICIES: dict[str, tuple[str, bool, str]] = {
+    "CI_POLICY_NO_REQUIRED_CHECKS": (
+        "repository branch policy explicitly has no required status checks, but Gateway product policy still requires exact-head pull_request CI",
+        False,
+        "Run successful pull_request CI for the exact head, and consider enabling required status checks in branch protection so repository policy matches the Gateway merge gate.",
+    ),
+    "CI_POLICY_UNKNOWN": (
+        "repository branch status-check policy is missing, malformed, or internally inconsistent",
+        True,
+        "Re-read the effective target branch protection state before relying on CI evidence.",
+    ),
+    "CI_POLICY_CHANGED": (
+        "repository branch status-check policy changed while merge evidence was being verified",
+        True,
+        "Re-read branch protection and CI evidence from the current repository state before merging.",
+    ),
     "CI_NOT_CONFIGURED": (
         "Gitea Actions has no configured workflows for this repository",
         False,
@@ -558,6 +613,7 @@ async def _gitea_ci_evidence(
     owner: str,
     repo: str,
     expected_head_sha: str,
+    branch_ci_policy: str = "CI_REQUIRED",
 ) -> str:
     workflow_payload = await client.list_workflows(owner, repo)
     if _configured_workflow_count(workflow_payload) is None:
@@ -649,6 +705,8 @@ async def _gitea_ci_evidence(
 
     if latest_exact_head_run is None:
         if not saw_exact_head_run:
+            if branch_ci_policy == "CI_POLICY_NO_REQUIRED_CHECKS":
+                return "CI_POLICY_NO_REQUIRED_CHECKS"
             return "NO_REQUIRED_RUN_FOUND"
         return "CI_TRIGGER_INCOMPATIBLE"
     if (
@@ -1149,6 +1207,12 @@ async def gitea_merge_pull_request(
                     message=f"merging into base branch {base_ref!r} is not allowed",
                     source="gitea",
                 )
+            branch_ci_policy_signature = _gitea_branch_ci_policy_signature(
+                await client.get_branch(owner, repo, base_ref)
+            )
+            if branch_ci_policy_signature is None:
+                return _ci_evidence_tool_error("CI_POLICY_UNKNOWN")
+            branch_ci_policy = branch_ci_policy_signature[0]
             if pr.get("mergeable") is not True:
                 return tool_error(
                     tool="gitea_merge_pull_request",
@@ -1185,6 +1249,7 @@ async def gitea_merge_pull_request(
                 owner,
                 repo,
                 expected_head_sha,
+                branch_ci_policy,
             )
             if ci_status != "CI_GREEN":
                 return _ci_evidence_tool_error(ci_status)
@@ -1258,11 +1323,36 @@ async def gitea_merge_pull_request(
                     source="gitea",
                 )
 
+            latest_branch_ci_policy_signature = _gitea_branch_ci_policy_signature(
+                await client.get_branch(owner, repo, latest_base_ref)
+            )
+            if latest_branch_ci_policy_signature is None:
+                return _ci_evidence_tool_error("CI_POLICY_UNKNOWN")
+            latest_branch_ci_policy = latest_branch_ci_policy_signature[0]
+            if latest_branch_ci_policy_signature != branch_ci_policy_signature:
+                return tool_error(
+                    tool="gitea_merge_pull_request",
+                    code="CI_POLICY_CHANGED",
+                    message="target branch status-check policy changed after CI evidence was read",
+                    retryable=True,
+                    hint="Re-read branch protection and exact-head CI from the current repository state before merging.",
+                    details={
+                        "initial_policy": branch_ci_policy,
+                        "initial_contexts": list(branch_ci_policy_signature[1]),
+                        "observed_policy": latest_branch_ci_policy,
+                        "observed_contexts": list(latest_branch_ci_policy_signature[1]),
+                        "base_ref": latest_base_ref,
+                        "mutation_occurred": False,
+                    },
+                    source="gitea",
+                )
+
             ci_status = await _gitea_ci_evidence(
                 client,
                 owner,
                 repo,
                 expected_head_sha,
+                latest_branch_ci_policy,
             )
             if ci_status != "CI_GREEN":
                 return _ci_evidence_tool_error(ci_status)
