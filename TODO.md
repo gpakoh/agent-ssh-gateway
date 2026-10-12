@@ -7,17 +7,17 @@ merged PR evidence, and superseded diagnostics should live in PR history,
 changelogs, or dedicated audit archives — not in TODO.
 
 On 2026-10-12 the active backlog was reconciled against current merged/runtime
-evidence. Six entries with completed acceptance were removed: #4 (fleet stale
+evidence. Seven entries with completed acceptance were removed: #4 (fleet stale
 lease reconciliation), #12 (typed CI merge-policy evidence), #21 (immutable
-Gitea file ref binding), #28 (CI teardown terminalization), #39 (post-merge
-heavy-CI fast path), and #42 (machine-readable Docker inventory scope). Partial
-progress on still-open items remains recorded under those items rather than being
-treated as closure.
+Gitea file ref binding), #28 (CI teardown terminalization), #31 (guarded job-level
+Actions rerun), #39 (post-merge heavy-CI fast path), and #42 (machine-readable
+Docker inventory scope). Partial progress on still-open items remains recorded
+under those items rather than being treated as closure.
 
-Open backlog count after cleanup: **36**
+Open backlog count after cleanup: **35**
 
 - **P1 / critical:** 8
-- **P2 / important:** 18
+- **P2 / important:** 17
 - **P3 / capability / wishlist:** 10
 
 ## P1 / Critical blockers
@@ -466,43 +466,6 @@ Open backlog count after cleanup: **36**
     Operators can inspect runs/jobs/logs, but need first-class artifact metadata
     and safe archive/file retrieval with run/head provenance, size limits,
     checksum where available, path traversal protection and expiry diagnostics.
-
-31. ⬜ **Add guarded Gitea Actions rerun primitives.**
-    Exact-head failed-job/full-run reruns should be possible without fake commits
-    or PR recreation. Require expected run id/head SHA/terminal failed state,
-    reconcile ambiguous mutation responses, and return previous/new attempt plus
-    selected jobs.
-
-    **2026-10-09 implementation/deploy evidence:** full-run rerun was already
-    live; PR #489 added `gitea_rerun_action_job` with exact run/job/head/current-
-    attempt fencing, failed/cancelled-only policy, logical-job uniqueness and
-    bounded ambiguous-response reconciliation. Exact head `6d932cc09f5b...`
-    passed PR run #14967; merge `0e357599a6aa...` passed post-merge run #14985,
-    including build-and-push, deploy and host-smoke. The live authoritative
-    `tools_manifest` now reports both rerun tools enabled/available with
-    `mcp:repo` + `mcp:admin`, and a session-bound incomplete client attestation
-    correctly leaves `gitea_rerun_action_job` guard coverage `unknown`.
-
-    Keep this item open only for caller-visible acceptance: the current external
-    ChatGPT resource catalog still omits the new job-rerun tool even though the
-    deployed server surface contains it. Do not add another rerun primitive or
-    bypass the catalog; finish exposure/parity under item 6 (and cache invalidation
-    under item 45), then prove a real external caller can invoke one failed job
-    without rerunning the whole workflow.
-
-    **2026-10-09 reconnect acceptance:** PRs #491/#492 plus successful post-merge
-    run #15114 now prove fresh bearer/public-OAuth MCP reconnects after a full
-    redeploy accept the current schema surface. `tools_manifest` still reports
-    `gitea_rerun_action_job` enabled/available, but the attached ChatGPT resource
-    catalog still cannot call it. Therefore no additional Gateway rerun code is
-    required here; the only remaining closure step is external catalog exposure
-    followed by one real failed-job rerun acceptance from that external caller.
-
-    **2026-10-12 caller-visible progress:** `gitea_rerun_action_job` is now present
-    in this caller's callable catalog, so the prior exposure blocker is no longer
-    reproduced in a fresh attachment. Keep #31 open only until one real current
-    failed/cancelled job is rerun through this external surface and the exact
-    run/head advances to the reconciled new attempt without rerunning the workflow.
 
 33. ⬜ **Align outer `run_agent` success envelopes with non-submission results.**
     Pre-submit validation failures, blocked terminal replays and other
