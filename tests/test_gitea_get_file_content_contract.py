@@ -42,6 +42,7 @@ from examples.mcp_client_remote.fleet.gitea_client import (  # noqa: E402
 from examples.mcp_server import server as mcp_server_mod  # noqa: E402
 
 SMALL_TEXT = b"def hello():\n    return 42\n"
+RESOLVED_SHA = "1" * 40
 FILE_PAYLOAD = {
     "path": "examples/main.py",
     "name": "main.py",
@@ -56,6 +57,8 @@ FILE_PAYLOAD = {
 
 def _file_transport(content: str) -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/commits"):
+            return httpx.Response(200, json=[{"sha": RESOLVED_SHA}], request=request)
         payload = dict(FILE_PAYLOAD)
         payload["content"] = content
         return httpx.Response(200, json=payload, request=request)
@@ -92,6 +95,59 @@ class TestGiteaClientGetFileContentContract:
         assert "truncated" not in result
         assert "content_omitted" not in result
         assert result["path"] == "examples/main.py" and result["sha"] == "abc123def456"
+        assert result["requested_ref"] is None
+        assert result["resolved_commit_sha"] == RESOLVED_SHA
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_symbolic_ref_is_resolved_once_and_content_fetch_is_sha_bound(self):
+        """A moving symbolic ref must not be reused for the content request."""
+        old_sha = "2" * 40
+        seen: list[tuple[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/commits"):
+                seen.append(("resolve", request.url.params.get("sha", "")))
+                return httpx.Response(200, json=[{"sha": old_sha}], request=request)
+            seen.append(("content", request.url.params.get("ref", "")))
+            payload = dict(FILE_PAYLOAD)
+            payload["content"] = _b64(b"old-head-content")
+            return httpx.Response(200, json=payload, request=request)
+
+        client = GiteaClient("fake-token")
+        client._client = httpx.AsyncClient(
+            base_url="https://gitea.example/api/v1",
+            transport=httpx.MockTransport(handler),
+        )
+        result = await client.get_file("gpakoh", "repo", "main.py", branch="main")
+
+        assert seen == [("resolve", "main"), ("content", old_sha)]
+        assert result["requested_ref"] == "main"
+        assert result["resolved_commit_sha"] == old_sha
+        assert result["content"] == _b64(b"old-head-content")
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_exact_sha_ref_mismatch_fails_before_content_fetch(self):
+        requested_sha = "3" * 40
+        different_sha = "4" * 40
+        content_fetches = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal content_fetches
+            if request.url.path.endswith("/commits"):
+                return httpx.Response(200, json=[{"sha": different_sha}], request=request)
+            content_fetches += 1
+            return httpx.Response(200, json=FILE_PAYLOAD, request=request)
+
+        client = GiteaClient("fake-token")
+        client._client = httpx.AsyncClient(
+            base_url="https://gitea.example/api/v1",
+            transport=httpx.MockTransport(handler),
+        )
+        with pytest.raises(ValueError, match="different commit SHA"):
+            await client.get_file("gpakoh", "repo", "main.py", branch=requested_sha)
+        assert content_fetches == 0
         await client.aclose()
 
     @pytest.mark.asyncio
