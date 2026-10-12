@@ -7,16 +7,17 @@ merged PR evidence, and superseded diagnostics should live in PR history,
 changelogs, or dedicated audit archives — not in TODO.
 
 On 2026-10-12 the active backlog was reconciled against current merged/runtime
-evidence. Five entries with completed acceptance were removed: #4 (fleet stale
-lease reconciliation), #12 (typed CI merge-policy evidence), #28 (CI teardown
-terminalization), #39 (post-merge heavy-CI fast path), and #42 (machine-readable
-Docker inventory scope). Partial progress on still-open items remains recorded
-under those items rather than being treated as closure.
+evidence. Six entries with completed acceptance were removed: #4 (fleet stale
+lease reconciliation), #12 (typed CI merge-policy evidence), #21 (immutable
+Gitea file ref binding), #28 (CI teardown terminalization), #39 (post-merge
+heavy-CI fast path), and #42 (machine-readable Docker inventory scope). Partial
+progress on still-open items remains recorded under those items rather than being
+treated as closure.
 
-Open backlog count after cleanup: **37**
+Open backlog count after cleanup: **36**
 
 - **P1 / critical:** 8
-- **P2 / important:** 19
+- **P2 / important:** 18
 - **P3 / capability / wishlist:** 10
 
 ## P1 / Critical blockers
@@ -440,12 +441,6 @@ Open backlog count after cleanup: **37**
     stale `running` status. Inspect/status APIs should derive terminal states
     such as `lost_after_restart`, `orphaned_attempt` or `artifact_incomplete`,
     including last useful activity and safe recovery guidance.
-
-21. ⬜ **Bind `gitea_get_file` content to the requested ref.**
-    File reads must resolve branch/tag/SHA to an exact commit, fetch content from
-    that exact commit, and return `requested_ref` plus `resolved_commit_sha`.
-    Cache keys must include exact resolved commit and path, not only repo/path or
-    symbolic branch.
 
 23. ⬜ **Make candidate verifier containers concurrency-safe.**
     Parallel verified-push/delivery operations must not collide on a fixed Docker
