@@ -322,6 +322,9 @@ class TestErrorCodes:
     def test_ci_evidence_codes_not_degraded(self):
         for code in (
             "AUDIT_UNAVAILABLE",
+            "CI_POLICY_NO_REQUIRED_CHECKS",
+            "CI_POLICY_UNKNOWN",
+            "CI_POLICY_CHANGED",
             "CI_NOT_CONFIGURED",
             "NO_REQUIRED_RUN_FOUND",
             "CI_TRIGGER_INCOMPATIBLE",

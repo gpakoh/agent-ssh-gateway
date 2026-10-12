@@ -18,6 +18,7 @@ SHA = "a" * 40
 BASE_SHA = "1" * 40
 NEW_BASE_SHA = "2" * 40
 _DEFAULT_WORKFLOW_PAYLOAD = object()
+_DEFAULT_BRANCH_POLICY_PAYLOAD = object()
 
 
 @pytest.mark.asyncio
@@ -127,6 +128,8 @@ class FakeMergeClient:
         ci_event: str = "pull_request",
         default_branch: str = "master",
         base_ref: str = "master",
+        branch_policy_payload: object = _DEFAULT_BRANCH_POLICY_PAYLOAD,
+        second_branch_policy_payload: object | None = None,
     ):
         assert token == "token"
         self.ci_conclusion = ci_conclusion
@@ -148,6 +151,13 @@ class FakeMergeClient:
         self.ci_event = ci_event
         self.default_branch = default_branch
         self.base_ref = base_ref
+        self.branch_policy_payload = (
+            {"enable_status_check": True, "status_check_contexts": ["ci"]}
+            if branch_policy_payload is _DEFAULT_BRANCH_POLICY_PAYLOAD
+            else branch_policy_payload
+        )
+        self.second_branch_policy_payload = second_branch_policy_payload
+        self.branch_reads = 0
         self.merged = False
         self.compare_calls: list[tuple[str, str]] = []
         self.merge_calls: list[dict] = []
@@ -186,6 +196,13 @@ class FakeMergeClient:
 
     async def get_repo(self, owner: str, repo: str):
         return {"default_branch": self.default_branch}
+
+    async def get_branch(self, owner: str, repo: str, branch: str):
+        assert branch == self.base_ref
+        self.branch_reads += 1
+        if self.branch_reads >= 2 and self.second_branch_policy_payload is not None:
+            return self.second_branch_policy_payload
+        return self.branch_policy_payload
 
     async def list_workflows(self, owner: str, repo: str):
         self.workflow_reads += 1
@@ -292,6 +309,7 @@ def _ci_descending_page(
 async def _ci_evidence_status(
     action_pages: list[object],
     workflow_payload: object = _DEFAULT_WORKFLOW_PAYLOAD,
+    branch_ci_policy: str = "CI_REQUIRED",
 ) -> tuple[str, AsyncMock]:
     client = AsyncMock()
     client.list_workflows.return_value = (
@@ -300,7 +318,9 @@ async def _ci_evidence_status(
         else workflow_payload
     )
     client.list_action_runs.side_effect = action_pages
-    status = await remote._gitea_ci_evidence(client, "owner", "repo", SHA)
+    status = await remote._gitea_ci_evidence(
+        client, "owner", "repo", SHA, branch_ci_policy
+    )
     return status, client
 
 
@@ -324,6 +344,35 @@ async def _ci_evidence_status(
 )
 def test_configured_workflow_count_requires_consistent_signals(payload, expected):
     assert remote._configured_workflow_count(payload) == expected
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"enable_status_check": True, "status_check_contexts": ["ci"]}, "CI_REQUIRED"),
+        ({"enable_status_check": True, "status_check_contexts": []}, "CI_REQUIRED"),
+        (
+            {"enable_status_check": False, "status_check_contexts": []},
+            "CI_POLICY_NO_REQUIRED_CHECKS",
+        ),
+        ({"enable_status_check": False, "status_check_contexts": ["ci"]}, "CI_POLICY_UNKNOWN"),
+        ({"enable_status_check": "false", "status_check_contexts": []}, "CI_POLICY_UNKNOWN"),
+        ({"enable_status_check": False}, "CI_POLICY_UNKNOWN"),
+        (None, "CI_POLICY_UNKNOWN"),
+    ],
+)
+def test_branch_ci_policy_classifies_effective_gitea_state_strictly(payload, expected):
+    assert remote._gitea_branch_ci_policy(payload) == expected
+
+
+@pytest.mark.asyncio
+async def test_ci_evidence_reports_product_policy_when_branch_requires_no_checks():
+    empty_page = _ci_page([], total_count=0)
+    status, _ = await _ci_evidence_status(
+        [empty_page, empty_page],
+        branch_ci_policy="CI_POLICY_NO_REQUIRED_CHECKS",
+    )
+    assert status == "CI_POLICY_NO_REQUIRED_CHECKS"
 
 
 @pytest.mark.asyncio
@@ -653,6 +702,9 @@ async def test_ci_evidence_rejects_page_one_reread_drift(reread):
 @pytest.mark.parametrize(
     ("status", "retryable"),
     [
+        ("CI_POLICY_NO_REQUIRED_CHECKS", False),
+        ("CI_POLICY_UNKNOWN", True),
+        ("CI_POLICY_CHANGED", True),
         ("CI_NOT_CONFIGURED", False),
         ("NO_REQUIRED_RUN_FOUND", False),
         ("CI_TRIGGER_INCOMPATIBLE", False),
@@ -816,6 +868,133 @@ async def test_adapter_merges_bootstrap_pull_request_with_no_configured_workflow
     assert client.action_run_pages == [1, 1, 1, 1]
     assert len(client.merge_calls) == 1
     assert client.merge_calls[0]["expected_head_sha"] == SHA
+
+
+@pytest.mark.asyncio
+async def test_adapter_allows_green_exact_head_when_branch_requires_no_status_checks(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient(
+        "token",
+        branch_policy_payload={
+            "enable_status_check": False,
+            "status_check_contexts": [],
+        },
+    )
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request("owner", "repo", 25, SHA)
+
+    assert result["ok"] is True
+    assert result["result"]["merged"] is True
+    assert client.branch_reads == 2
+    assert len(client.merge_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_adapter_reports_no_required_checks_policy_without_exact_head_ci(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient(
+        "token",
+        ci_head_sha="c" * 40,
+        branch_policy_payload={
+            "enable_status_check": False,
+            "status_check_contexts": [],
+        },
+    )
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request("owner", "repo", 25, SHA)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CI_POLICY_NO_REQUIRED_CHECKS"
+    assert result["error"]["retryable"] is False
+    assert client.branch_reads == 1
+    assert client.merge_calls == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_fails_closed_on_unknown_branch_ci_policy(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient(
+        "token",
+        branch_policy_payload={"protected": False},
+    )
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request("owner", "repo", 25, SHA)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CI_POLICY_UNKNOWN"
+    assert result["error"]["retryable"] is True
+    assert client.workflow_reads == 0
+    assert client.action_run_pages == []
+    assert client.merge_calls == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_blocks_branch_ci_policy_drift_after_green_evidence(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient(
+        "token",
+        branch_policy_payload={
+            "enable_status_check": True,
+            "status_check_contexts": ["ci"],
+        },
+        second_branch_policy_payload={
+            "enable_status_check": False,
+            "status_check_contexts": [],
+        },
+    )
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request("owner", "repo", 25, SHA)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CI_POLICY_CHANGED"
+    assert result["error"]["details"] == {
+        "initial_policy": "CI_REQUIRED",
+        "initial_contexts": ["ci"],
+        "observed_policy": "CI_POLICY_NO_REQUIRED_CHECKS",
+        "observed_contexts": [],
+        "base_ref": "master",
+        "mutation_occurred": False,
+    }
+    assert client.branch_reads == 2
+    assert client.workflow_reads == 1
+    assert client.merge_calls == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_blocks_required_context_drift_after_green_evidence(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient(
+        "token",
+        branch_policy_payload={
+            "enable_status_check": True,
+            "status_check_contexts": ["lint", "tests"],
+        },
+        second_branch_policy_payload={
+            "enable_status_check": True,
+            "status_check_contexts": ["lint", "security"],
+        },
+    )
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request("owner", "repo", 25, SHA)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CI_POLICY_CHANGED"
+    assert result["error"]["details"] == {
+        "initial_policy": "CI_REQUIRED",
+        "initial_contexts": ["lint", "tests"],
+        "observed_policy": "CI_REQUIRED",
+        "observed_contexts": ["lint", "security"],
+        "base_ref": "master",
+        "mutation_occurred": False,
+    }
+    assert client.branch_reads == 2
+    assert client.workflow_reads == 1
+    assert client.merge_calls == []
 
 
 @pytest.mark.asyncio
