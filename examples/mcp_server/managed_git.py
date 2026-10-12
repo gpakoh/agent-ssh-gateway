@@ -33,6 +33,15 @@ class ManagedGitError(RuntimeError):
     """A sanitized managed-Git failure safe to expose through MCP."""
 
 
+class ManagedGitMutationError(ManagedGitError):
+    """A managed-Git failure after a remote mutation command was started.
+
+    The remote may already have accepted the write even when the local Git
+    process times out or exits non-zero, so callers must reconcile the remote
+    postcondition before deciding whether a retry is safe.
+    """
+
+
 def validate_feature_branch(branch: str) -> str:
     branch = branch.strip()
     if (
@@ -204,11 +213,11 @@ def push_exact_sha(
                 env=auth_env,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise ManagedGitError("managed Git push did not complete") from exc
+            raise ManagedGitMutationError("managed Git push did not complete") from exc
         if pushed.returncode != 0:
             # Never surface raw stdout/stderr: Git can echo remote URLs and auth
             # diagnostics. The caller gets only a stable, credential-free error.
-            raise ManagedGitError(
+            raise ManagedGitMutationError(
                 f"managed Git push failed with exit code {pushed.returncode}"
             )
 

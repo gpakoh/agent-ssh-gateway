@@ -42,6 +42,7 @@ from examples.mcp_server.candidate_verifier import (
 )
 from examples.mcp_server.managed_git import (
     ManagedGitError,
+    ManagedGitMutationError,
     configured_gitea_git_base,
     delete_remote_branch_with_lease,
     push_exact_sha,
@@ -4855,6 +4856,92 @@ def _contract_lines(value: str) -> list[str]:
     return lines
 
 
+_GITEA_VERIFIED_PUSH_RECONCILE_ATTEMPTS = 3
+_GITEA_VERIFIED_PUSH_RECONCILE_DELAY_SECONDS = 0.05
+
+
+def _gitea_branch_state(branch: Any) -> tuple[bool, str | None]:
+    if branch is None:
+        return False, None
+    return True, _gitea_branch_head_sha(branch)
+
+
+async def _reconcile_verified_push_postcondition(
+    client: Any,
+    owner: str,
+    repo: str,
+    branch: str,
+    *,
+    expected_head_sha: str,
+    previous_branch: dict[str, Any] | None,
+) -> tuple[str, dict[str, Any] | None, dict[str, Any]]:
+    """Classify a post-push remote state as success, no-mutation, or unknown."""
+    previous_present, previous_head_sha = _gitea_branch_state(previous_branch)
+    previous_state_proven = not previous_present or previous_head_sha is not None
+    all_reads_match_previous = previous_state_proven
+    last_observed: dict[str, Any] = {}
+    last_read_error_class: str | None = None
+    attempts = 0
+
+    for attempt in range(_GITEA_VERIFIED_PUSH_RECONCILE_ATTEMPTS):
+        attempts = attempt + 1
+        try:
+            observed_branch = await _gitea_branch_or_none(client, owner, repo, branch)
+        except asyncio.CancelledError:
+            current_task = asyncio.current_task()
+            if current_task is not None and current_task.cancelling():
+                current_task.uncancel()
+            last_read_error_class = "CancelledError"
+            all_reads_match_previous = False
+        except Exception as exc:
+            last_read_error_class = type(exc).__name__
+            all_reads_match_previous = False
+        else:
+            observed_present, observed_head_sha = _gitea_branch_state(observed_branch)
+            last_observed = {
+                "present": observed_present,
+                "head_sha": observed_head_sha,
+            }
+            if observed_present and observed_head_sha == expected_head_sha:
+                return "success", observed_branch, {
+                    "reconciliation_attempts": attempts,
+                    "previous": {
+                        "present": previous_present,
+                        "head_sha": previous_head_sha,
+                    },
+                    "observed": last_observed,
+                }
+            matches_previous = previous_state_proven and (
+                observed_present == previous_present
+                and (not observed_present or observed_head_sha == previous_head_sha)
+            )
+            if not matches_previous:
+                all_reads_match_previous = False
+        if attempt + 1 < _GITEA_VERIFIED_PUSH_RECONCILE_ATTEMPTS:
+            try:
+                await asyncio.sleep(_GITEA_VERIFIED_PUSH_RECONCILE_DELAY_SECONDS)
+            except asyncio.CancelledError:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    current_task.uncancel()
+                last_read_error_class = "CancelledError"
+                all_reads_match_previous = False
+
+    details: dict[str, Any] = {
+        "reconciliation_attempts": attempts,
+        "previous": {
+            "present": previous_present,
+            "head_sha": previous_head_sha,
+        },
+        "observed": last_observed,
+    }
+    if last_read_error_class is not None:
+        details["last_read_error_class"] = last_read_error_class
+    if all_reads_match_previous:
+        return "no_mutation", None, details
+    return "unknown", None, details
+
+
 async def gitea_push_verified_commit(
     project: str,
     owner: str,
@@ -4985,13 +5072,13 @@ async def gitea_push_verified_commit(
                     message="Trusted delivery push to the repository default branch is not allowed",
                     source="gitea",
                 )
-            try:
-                remote_branch = await client.get_branch(owner, repo, destination_branch)
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code != 404:
-                    raise
-                remote_branch = None
-            if remote_branch is not None and remote_branch.get("protected") is not False:
+            remote_before = await _gitea_branch_or_none(
+                client,
+                owner,
+                repo,
+                destination_branch,
+            )
+            if remote_before is not None and remote_before.get("protected") is not False:
                 return tool_error(
                     tool="gitea_push_verified_commit",
                     code="POLICY_DENIED",
@@ -5006,24 +5093,134 @@ async def gitea_push_verified_commit(
                     message="Configured Gitea identity has no usable username",
                     source="gitea",
                 )
-            await asyncio.to_thread(
-                push_exact_sha,
-                project_root=project_root,
-                owner=owner,
-                repo=repo,
-                destination_branch=destination_branch,
-                expected_sha=expected_head,
-                username=username,
-                token=token,
-                git_base=git_base,
+
+            mutation_error: BaseException | None = None
+            pre_mutation_error: ManagedGitError | None = None
+            push_task = asyncio.create_task(
+                asyncio.to_thread(
+                    push_exact_sha,
+                    project_root=project_root,
+                    owner=owner,
+                    repo=repo,
+                    destination_branch=destination_branch,
+                    expected_sha=expected_head,
+                    username=username,
+                    token=token,
+                    git_base=git_base,
+                )
             )
-            remote_branch = await client.get_branch(owner, repo, destination_branch)
+            try:
+                await asyncio.shield(push_task)
+            except asyncio.CancelledError as exc:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    current_task.uncancel()
+                mutation_error = exc
+                try:
+                    await push_task
+                except ManagedGitMutationError as push_exc:
+                    mutation_error = push_exc
+                except ManagedGitError as push_exc:
+                    pre_mutation_error = push_exc
+                except Exception as push_exc:
+                    mutation_error = push_exc
+            except ManagedGitMutationError as exc:
+                mutation_error = exc
+            except ManagedGitError as exc:
+                pre_mutation_error = exc
+            except Exception as exc:
+                mutation_error = exc
+
+            if pre_mutation_error is not None:
+                return tool_error(
+                    tool="gitea_push_verified_commit",
+                    code="GIT_PUSH_FAILED",
+                    message=str(pre_mutation_error),
+                    retryable=True,
+                    hint="The remote mutation command was not started; retry is safe after fixing the local push precondition.",
+                    details={
+                        "phase": "push_preflight",
+                        "mutation_started": False,
+                        "mutation_occurred": False,
+                        "expected_head_sha": expected_head,
+                        "branch": destination_branch,
+                    },
+                    source="gitea",
+                )
+
+            reconciliation_outcome, remote_branch, reconciliation = (
+                await _reconcile_verified_push_postcondition(
+                    client,
+                    owner,
+                    repo,
+                    destination_branch,
+                    expected_head_sha=expected_head,
+                    previous_branch=remote_before,
+                )
+            )
+            if reconciliation_outcome == "no_mutation":
+                details: dict[str, Any] = {
+                    "phase": "push_postcondition",
+                    "mutation_started": True,
+                    "mutation_occurred": False,
+                    "expected_head_sha": expected_head,
+                    "branch": destination_branch,
+                    **reconciliation,
+                }
+                if mutation_error is not None:
+                    details["mutation_error_class"] = type(mutation_error).__name__
+                return tool_error(
+                    tool="gitea_push_verified_commit",
+                    code=("GIT_PUSH_FAILED" if mutation_error is not None else "CHECK_FAILED"),
+                    message=(
+                        "Trusted push did not establish expected_head_sha; bounded fresh reads "
+                        "proved the remote branch remained at its pre-push state"
+                    ),
+                    retryable=True,
+                    hint=(
+                        "The remote branch is proven unchanged, so a retry is safe after "
+                        "resolving the transient push failure."
+                    ),
+                    details=details,
+                    source="gitea",
+                )
+            if reconciliation_outcome != "success" or remote_branch is None:
+                details = {
+                    "phase": "push_postcondition",
+                    "mutation_started": True,
+                    "mutation_occurred": None,
+                    "expected_head_sha": expected_head,
+                    "branch": destination_branch,
+                    **reconciliation,
+                }
+                if mutation_error is not None:
+                    details["mutation_error_class"] = type(mutation_error).__name__
+                return tool_error(
+                    tool="gitea_push_verified_commit",
+                    code="MUTATION_OUTCOME_UNKNOWN",
+                    message=(
+                        "Trusted push was attempted but the exact remote postcondition could "
+                        "not be proven and the pre-push state was not proven unchanged"
+                    ),
+                    retryable=False,
+                    hint=(
+                        "Do not retry the push mutation. Re-read the destination branch until "
+                        "its exact head is authoritative, then reconcile from that state."
+                    ),
+                    details=details,
+                    source="gitea",
+                )
     except ManagedGitError as exc:
         return tool_error(
             tool="gitea_push_verified_commit",
             code="GIT_PUSH_FAILED",
             message=str(exc),
             retryable=True,
+            details={
+                "phase": "push_preflight",
+                "mutation_started": False,
+                "mutation_occurred": False,
+            },
             source="gitea",
         )
     except Exception as exc:
@@ -5034,12 +5231,20 @@ async def gitea_push_verified_commit(
     if observed_sha != expected_head:
         return tool_error(
             tool="gitea_push_verified_commit",
-            code="CHECK_FAILED",
-            message="Remote branch does not resolve to expected_head_sha after trusted push",
-            retryable=True,
+            code="MUTATION_OUTCOME_UNKNOWN",
+            message=(
+                "Trusted push reconciliation returned a branch whose head no longer "
+                "matches expected_head_sha"
+            ),
+            retryable=False,
+            hint=(
+                "Do not retry the push mutation. Re-read the destination branch until "
+                "its exact head is authoritative, then reconcile from that state."
+            ),
             details={
-                "phase": "push_preflight",
-                "mutation_occurred": True,
+                "phase": "push_postcondition",
+                "mutation_started": True,
+                "mutation_occurred": None,
                 "expected_head_sha": expected_head,
                 "observed_head_sha": observed_sha,
                 "branch": destination_branch,
@@ -5062,6 +5267,12 @@ async def gitea_push_verified_commit(
             "scope_verified": True,
             "checks_verified": True,
             "remote_observed_sha": observed_sha,
+            "outcome": (
+                "completed_after_ambiguous_response"
+                if mutation_error is not None
+                else "completed"
+            ),
+            "reconciliation_attempts": reconciliation["reconciliation_attempts"],
             "verified": True,
         },
         source="gitea",
