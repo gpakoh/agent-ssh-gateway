@@ -142,6 +142,35 @@ def test_push_exact_sha_bundle_bridge_failure_is_sanitized(
         )
 
 
+def test_push_exact_sha_timeout_after_remote_push_starts_is_ambiguous(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        managed_git,
+        "clone_registered_commit_via_bundle",
+        lambda **_kwargs: None,
+    )
+
+    def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if argv[1:3] == ["rev-parse", "--verify"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=f"{SHA}\n", stderr="")
+        assert argv[1:3] == ["push", "--porcelain"]
+        raise subprocess.TimeoutExpired(argv, 60)
+
+    monkeypatch.setattr(managed_git.subprocess, "run", fake_run)
+    with pytest.raises(managed_git.ManagedGitMutationError, match="did not complete"):
+        managed_git.push_exact_sha(
+            project_root=tmp_path,
+            owner="gpakoh",
+            repo="gpt-browser-bridge",
+            destination_branch="hardening/runtime-deploy",
+            expected_sha=SHA,
+            username="gpakoh",
+            token="secret",
+            git_base="https://git.example.test",
+        )
+
+
 def test_push_exact_sha_rejects_protected_branch_before_git(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -200,6 +229,7 @@ def test_push_failure_does_not_surface_remote_or_secret(
             token=token,
             git_base="https://git.example.test",
         )
+    assert isinstance(exc_info.value, managed_git.ManagedGitMutationError)
     message = str(exc_info.value)
     assert token not in message
     assert "git.example.test" not in message
@@ -929,11 +959,173 @@ async def test_verified_commit_post_push_mismatch_marks_mutation(
 
     assert pushed["done"] is True
     assert result["ok"] is False
-    assert result["error"]["code"] == "CHECK_FAILED"
+    assert result["error"]["code"] == "MUTATION_OUTCOME_UNKNOWN"
+    assert result["error"]["retryable"] is False
+    assert result["error"]["details"]["mutation_occurred"] is None
+    assert result["error"]["details"]["phase"] == "push_postcondition"
+    assert result["error"]["details"]["observed"]["head_sha"] == "0" * 40
+    assert "Do not retry" in result["error"]["hint"]
+
+
+
+def _install_verified_push_reconciliation_mocks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    client_type: type[_FakeGiteaClient],
+    push_impl: Any,
+) -> None:
+    monkeypatch.setenv("GITEA_TOKEN", "managed-token")
+    monkeypatch.setenv("GITEA_GIT_BASE", "https://git.example.test")
+    monkeypatch.setattr(remote, "_server_workspace_registry", lambda: _Registry(tmp_path))
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: client_type)
+    monkeypatch.setattr(
+        remote,
+        "verify_registered_delivery_workspace",
+        lambda **_kwargs: _delivery_proof(),
+    )
+    monkeypatch.setattr(remote, "verify_workspace_via_docker", lambda **_kwargs: None)
+    monkeypatch.setattr(remote, "push_exact_sha", push_impl)
+    monkeypatch.setattr(remote, "_GITEA_VERIFIED_PUSH_RECONCILE_DELAY_SECONDS", 0)
+
+
+def _missing_branch_error() -> httpx.HTTPStatusError:
+    request = httpx.Request("GET", "https://git.example.test/branch")
+    response = httpx.Response(404, request=request)
+    return httpx.HTTPStatusError("not found", request=request, response=response)
+
+
+@pytest.mark.asyncio
+async def test_verified_commit_reconciles_response_lost_after_success(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state: dict[str, Any] = {"sha": "1" * 40, "push_calls": 0, "reads": 0}
+
+    class ResponseLostClient(_FakeGiteaClient):
+        async def get_branch(self, owner: str, repo: str, branch: str) -> dict[str, Any]:
+            state["reads"] += 1
+            return {"name": branch, "protected": False, "commit": {"id": state["sha"]}}
+
+    def push(**_kwargs: Any) -> None:
+        state["push_calls"] += 1
+        state["sha"] = SHA
+        raise managed_git.ManagedGitMutationError("managed Git push did not complete")
+
+    _install_verified_push_reconciliation_mocks(
+        monkeypatch, tmp_path, ResponseLostClient, push
+    )
+    result = await remote.gitea_push_verified_commit(
+        project="gpt-browser-bridge-hardening",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_base_sha="0" * 40,
+        expected_head_sha=SHA,
+        allowed_files="app/**",
+        required_checks="pytest -q",
+    )
+
+    assert state["push_calls"] == 1
+    assert result["ok"] is True
+    assert result["result"]["remote_observed_sha"] == SHA
+    assert result["result"]["outcome"] == "completed_after_ambiguous_response"
+    assert result["result"]["reconciliation_attempts"] == 1
+    assert state["reads"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "initial_sha",
+    [None, "1" * 40],
+    ids=["branch-absent", "old-tip"],
+)
+async def test_verified_commit_proves_no_mutation_after_push_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    initial_sha: str | None,
+) -> None:
+    state: dict[str, Any] = {"sha": initial_sha, "push_calls": 0, "reads": 0}
+
+    class TimeoutBeforeWriteClient(_FakeGiteaClient):
+        async def get_branch(self, owner: str, repo: str, branch: str) -> dict[str, Any]:
+            state["reads"] += 1
+            if state["sha"] is None:
+                raise _missing_branch_error()
+            return {"name": branch, "protected": False, "commit": {"id": state["sha"]}}
+
+    def push(**_kwargs: Any) -> None:
+        state["push_calls"] += 1
+        raise managed_git.ManagedGitMutationError("managed Git push did not complete")
+
+    _install_verified_push_reconciliation_mocks(
+        monkeypatch, tmp_path, TimeoutBeforeWriteClient, push
+    )
+    result = await remote.gitea_push_verified_commit(
+        project="gpt-browser-bridge-hardening",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_base_sha="0" * 40,
+        expected_head_sha=SHA,
+        allowed_files="app/**",
+        required_checks="pytest -q",
+    )
+
+    assert state["push_calls"] == 1
+    assert result["ok"] is False
+    assert result["error"]["code"] == "GIT_PUSH_FAILED"
     assert result["error"]["retryable"] is True
-    assert result["error"]["details"]["mutation_occurred"] is True
-    assert result["error"]["details"]["phase"] == "push_preflight"
-    assert result["error"]["details"]["observed_head_sha"] == "0" * 40
+    details = result["error"]["details"]
+    assert details["mutation_started"] is True
+    assert details["mutation_occurred"] is False
+    assert details["reconciliation_attempts"] == 3
+    assert details["previous"] == {
+        "present": initial_sha is not None,
+        "head_sha": initial_sha,
+    }
+    assert "proven unchanged" in result["error"]["hint"]
+    assert state["reads"] == 4
+
+
+@pytest.mark.asyncio
+async def test_verified_commit_returns_unknown_when_remote_moves_elsewhere(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    unexpected_sha = "2" * 40
+    state: dict[str, Any] = {"sha": "1" * 40, "push_calls": 0}
+
+    class UnexpectedHeadClient(_FakeGiteaClient):
+        async def get_branch(self, owner: str, repo: str, branch: str) -> dict[str, Any]:
+            return {"name": branch, "protected": False, "commit": {"id": state["sha"]}}
+
+    def push(**_kwargs: Any) -> None:
+        state["push_calls"] += 1
+        state["sha"] = unexpected_sha
+        raise managed_git.ManagedGitMutationError("managed Git push did not complete")
+
+    _install_verified_push_reconciliation_mocks(
+        monkeypatch, tmp_path, UnexpectedHeadClient, push
+    )
+    result = await remote.gitea_push_verified_commit(
+        project="gpt-browser-bridge-hardening",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_base_sha="0" * 40,
+        expected_head_sha=SHA,
+        allowed_files="app/**",
+        required_checks="pytest -q",
+    )
+
+    assert state["push_calls"] == 1
+    assert result["ok"] is False
+    assert result["error"]["code"] == "MUTATION_OUTCOME_UNKNOWN"
+    assert result["error"]["retryable"] is False
+    details = result["error"]["details"]
+    assert details["mutation_started"] is True
+    assert details["mutation_occurred"] is None
+    assert details["observed"] == {"present": True, "head_sha": unexpected_sha}
+    assert details["reconciliation_attempts"] == 3
+    assert "Do not retry" in result["error"]["hint"]
 
 
 def test_trusted_staging_push_never_clones_or_uses_another_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
