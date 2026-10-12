@@ -7,17 +7,18 @@ merged PR evidence, and superseded diagnostics should live in PR history,
 changelogs, or dedicated audit archives — not in TODO.
 
 On 2026-10-12 the active backlog was reconciled against current merged/runtime
-evidence. Seven entries with completed acceptance were removed: #4 (fleet stale
+evidence. Eight entries with completed acceptance were removed: #4 (fleet stale
 lease reconciliation), #12 (typed CI merge-policy evidence), #21 (immutable
 Gitea file ref binding), #28 (CI teardown terminalization), #31 (guarded job-level
-Actions rerun), #39 (post-merge heavy-CI fast path), and #42 (machine-readable
-Docker inventory scope). Partial progress on still-open items remains recorded
-under those items rather than being treated as closure.
+Actions rerun), #39 (post-merge heavy-CI fast path), #42 (machine-readable
+Docker inventory scope), and #51 (verified-push ambiguous-outcome reconciliation).
+Partial progress on still-open items remains recorded under those items rather
+than being treated as closure.
 
-Open backlog count after cleanup: **35**
+Open backlog count after cleanup: **34**
 
 - **P1 / critical:** 8
-- **P2 / important:** 17
+- **P2 / important:** 16
 - **P3 / capability / wishlist:** 10
 
 ## P1 / Critical blockers
@@ -521,24 +522,6 @@ Open backlog count after cleanup: **35**
     `workspace_mkdir`/scaffold primitive with project-relative paths, depth/name
     limits, symlink/root-escape protection and receipts. Default behavior must
     remain fail-closed with a typed `PARENT_MISSING` diagnostic.
-
-51. ⬜ **Reconcile `gitea_push_verified_commit` after ambiguous client/transport timeout.**
-    A caller timeout can occur after the remote feature branch has already moved
-    to the exact expected head, creating a false-negative delivery result and
-    making a blind retry unsafe. After timeout/5xx, perform bounded fresh remote
-    reads: return reconciled success when the exact head/postcondition is proven;
-    return definite no-mutation only when the old tip is proven; otherwise return
-    `MUTATION_OUTCOME_UNKNOWN` with no blind-retry guidance. Regression coverage
-    must include response-lost-after-success and timeout-before-write cases.
-
-    **2026-10-10 bundle-delivery timeout evidence:** during the NOD bundle-backed
-    candidate incident, an initial staging failure was followed by a client
-    timeout; fresh Gitea reads after the unknown outcome proved the destination
-    branch absent before any retry. Keep the deterministic `clone_bundle` staging
-    defect under #2, but retain the timeout half here: `gitea_push_verified_commit`
-    must reconcile remote state itself after response loss and report proven
-    success, proven no-mutation, or typed unknown outcome without requiring the
-    caller to infer safety from an exception.
 
 ## P3 / Capability and ergonomics wishlist
 
