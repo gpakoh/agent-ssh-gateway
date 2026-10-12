@@ -124,6 +124,16 @@ class TestLiveServerToolSurface:
             "source_revision",
             "image_namespace",
         ],
+        "docker_deploy_content_harvester": [
+            "candidate_project",
+            "expected_head_sha",
+            "expected_script_blob_sha",
+            "expected_script_sha256",
+            "source_revision",
+            "image_namespace",
+            "artifact_volume",
+            "runtime_network",
+        ],
         "git_fetch_ref": ["project"],
         "git_refresh_branch_to_head": [
             "project",
@@ -179,7 +189,10 @@ class TestLiveServerToolSurface:
             # not a schema-registration invariant.  Unit environments may
             # correctly report it unavailable; live post-deploy acceptance
             # proves availability separately.
-            if name != "docker_deploy_site_audit":
+            if name not in {
+                "docker_deploy_site_audit",
+                "docker_deploy_content_harvester",
+            }:
                 assert entry["available"] is True
         assert contract["catalog_refresh"]["catalog_state"] == "current"
 

@@ -205,6 +205,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "docker_volume_rm": ["mcp:docker:admin"],
     "docker_deploy_contract": ["mcp:docker:admin"],
     "docker_deploy_site_audit": ["mcp:docker:admin"],
+    "docker_deploy_content_harvester": ["mcp:docker:admin"],
     # postgres — mcp:postgres
     "postgres_health": ["mcp:postgres"],
     "postgres_list_schemas": ["mcp:postgres"],
