@@ -756,6 +756,31 @@ class GiteaClient:
             basehead=f"{base}...{head}",
         )
 
+    async def _resolve_file_ref(
+        self,
+        owner: str,
+        repo: str,
+        requested_ref: str | None,
+    ) -> tuple[str | None, str]:
+        """Resolve one symbolic/default file ref to an immutable commit SHA."""
+        if requested_ref is not None:
+            requested_ref = requested_ref.strip()
+            if not requested_ref:
+                requested_ref = None
+            elif len(requested_ref) > 255:
+                raise ValueError("branch/ref must be at most 255 characters")
+
+        commits = await self.list_commits(owner, repo, sha=requested_ref, limit=1)
+        if not isinstance(commits, list) or not commits or not isinstance(commits[0], dict):
+            raise ValueError("gitea ref did not resolve to a commit")
+        resolved_commit_sha = commits[0].get("sha")
+        if not isinstance(resolved_commit_sha, str) or not _SHA1_RE.fullmatch(resolved_commit_sha):
+            raise ValueError("gitea ref resolved to an invalid commit SHA")
+        if requested_ref is not None and _SHA1_RE.fullmatch(requested_ref):
+            if resolved_commit_sha != requested_ref:
+                raise ValueError("exact commit ref resolved to a different commit SHA")
+        return requested_ref, resolved_commit_sha
+
     async def get_file(
         self,
         owner: str,
@@ -772,6 +797,11 @@ class GiteaClient:
         of substituting {path} at all -- P2 audit finding: there was
         previously no way to list a repo's top level through this tool.
 
+        The requested branch/tag/SHA (or the repository default when omitted)
+        is resolved once through the commits API, then the contents request is
+        pinned to that immutable SHA. File metadata includes ``requested_ref``
+        and ``resolved_commit_sha``; directory entries carry the same provenance.
+
         Content contract (keeps large base64 blobs out of chat by default):
           * include_content=False drops the "content" field and sets
             "content_omitted": true, keeping all metadata (path, name, sha,
@@ -782,9 +812,12 @@ class GiteaClient:
           * max_content_bytes=None falls back to MAX_FILE_SIZE (256 KiB), so
             existing callers keep their previous behavior.
         """
-        params: dict[str, str] = {}
-        if branch:
-            params["ref"] = branch
+        # Reject an unsafe path before any ref-resolution request leaves the
+        # process, preserving the path-traversal fail-closed boundary.
+        if path:
+            validate_repo_path(path)
+        requested_ref, resolved_commit_sha = await self._resolve_file_ref(owner, repo, branch)
+        params: dict[str, str] = {"ref": resolved_commit_sha}
         if path:
             result = await self._get(
                 "/repos/{owner}/{repo}/contents/{path}",
@@ -800,6 +833,16 @@ class GiteaClient:
                 owner=owner,
                 repo=repo,
             )
+        if isinstance(result, dict):
+            result["requested_ref"] = requested_ref
+            result["resolved_commit_sha"] = resolved_commit_sha
+        elif isinstance(result, list):
+            for item in result:
+                if not isinstance(item, dict):
+                    raise ValueError("gitea contents listing must contain objects")
+                item["requested_ref"] = requested_ref
+                item["resolved_commit_sha"] = resolved_commit_sha
+
         if isinstance(result, dict) and "content" in result:
             if not include_content:
                 result.pop("content", None)

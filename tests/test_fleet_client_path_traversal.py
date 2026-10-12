@@ -34,7 +34,9 @@ def test_httpx_normalizes_dotdot_past_repos_prefix():
 
 def _recording_transport(seen: dict) -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
-        seen["url"] = str(request.url)
+        seen["url"] = str(request.url.copy_with(query=None))
+        if request.url.path.endswith("/commits"):
+            return httpx.Response(200, json=[{"sha": "1" * 40}], request=request)
         return httpx.Response(200, json={"ok": True}, request=request)
 
     return httpx.MockTransport(handler)
