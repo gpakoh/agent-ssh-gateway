@@ -39,6 +39,7 @@ ALLOWED_PRUNE_TYPES_ALL: set[str] = ALLOWED_PRUNE_TYPES | ALLOWED_ADMIN_PRUNE_TY
 IMAGE_TAG_RE = re.compile(r"^[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+$")
 IMAGE_REF_RE = re.compile(r"^[a-zA-Z0-9._/-]+(:[a-zA-Z0-9._-]+)?$")
 VOLUME_NAME_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
+NETWORK_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
 
 EXEC_ARGV_COMMAND_DENYLIST: set[str] = {"env", "printenv"}
 EXEC_ARGV_PATTERN_DENYLIST: set[str] = {
@@ -311,6 +312,11 @@ class DockerClient:
     def _validate_volume_name(self, name: str) -> str:
         if not VOLUME_NAME_RE.match(name):
             raise ValueError(f"Invalid volume name: {shlex.quote(name)}")
+        return name
+
+    def _validate_network_name(self, name: str) -> str:
+        if not NETWORK_NAME_RE.match(name):
+            raise ValueError(f"Invalid network name: {shlex.quote(name)}")
         return name
 
     def _validate_exec_argv(self, argv: list[str]) -> None:
@@ -947,6 +953,53 @@ class DockerClient:
             raise RuntimeError("docker returned invalid volume metadata")
         return payload
 
+    async def network_metadata(self, network: str) -> dict:
+        """Return raw metadata for one explicitly named Docker network."""
+        self._validate_network_name(network)
+        raw = await self._run(
+            [DOCKER_BIN, "network", "inspect", "--format", "{{json .}}", network],
+            timeout=30.0,
+        )
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("docker returned invalid network metadata") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("docker returned invalid network metadata")
+        return payload
+
+    async def image_revision(self, image: str) -> str:
+        """Return the exact OCI source revision label for a local image."""
+        if not isinstance(image, str) or not image or not image.isascii():
+            raise ValueError("image must be a non-empty ASCII reference")
+        revision = (
+            await self._run(
+                [
+                    DOCKER_BIN,
+                    "image",
+                    "inspect",
+                    "--format",
+                    '{{index .Config.Labels "org.opencontainers.image.revision"}}',
+                    image,
+                ],
+                timeout=30.0,
+            )
+        ).strip()
+        if not re.fullmatch(r"[0-9a-f]{40}", revision):
+            raise RuntimeError("docker image OCI revision label is missing or invalid")
+        return revision
+
+    async def container_exists(self, container: str) -> bool:
+        """Return False only for a proven Docker 'no such container/object' result."""
+        self._validate_container_name(container)
+        run = await self._run_with_result([DOCKER_BIN, "inspect", container], timeout=30.0)
+        if run.exit_code == 0:
+            return True
+        lowered = (run.stderr or "").lower()
+        if "no such container" in lowered or "no such object" in lowered:
+            return False
+        raise RuntimeError("docker container existence check failed")
+
     @staticmethod
     def _validate_deploy_mount_path(path: str, label: str) -> str:
         if not isinstance(path, str) or not path.startswith("/"):
@@ -1125,6 +1178,91 @@ class DockerClient:
             image_namespace,
             "--source-revision",
             source_revision,
+            "--timeout",
+            str(max(60, timeout - 30)),
+        ]
+        if recover:
+            argv.append("--recover")
+        return await self._run_with_result(argv, timeout=float(timeout))
+
+    async def run_content_harvester_deploy_contract_helper(
+        self,
+        *,
+        helper_image_id: str,
+        candidate_root: str,
+        operator_root: str,
+        script_path: str,
+        env_file: str,
+        state_volume: str,
+        image_namespace: str,
+        source_revision: str,
+        artifact_volume: str,
+        runtime_network: str,
+        timeout: int = 600,
+        recover: bool = False,
+    ) -> RunResult:
+        """Run the fixed Content Harvester Telegram-canary transaction helper."""
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", helper_image_id):
+            raise ValueError("helper_image_id must be an immutable sha256 image ID")
+        candidate_root = self._validate_deploy_mount_path(candidate_root, "candidate_root")
+        operator_root = self._validate_deploy_mount_path(operator_root, "operator_root")
+        script_path = self._validate_deploy_mount_path(script_path, "script_path")
+        env_file = self._validate_deploy_mount_path(env_file, "env_file")
+        self._validate_volume_name(state_volume)
+        self._validate_volume_name(artifact_volume)
+        self._validate_network_name(runtime_network)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", image_namespace):
+            raise ValueError("image_namespace is invalid")
+        if not re.fullmatch(r"[0-9a-f]{40}", source_revision):
+            raise ValueError("source_revision must be an exact lowercase 40-hex SHA")
+        timeout = max(120, min(timeout, 900))
+
+        state_root = "/var/lib/content-harvester-deploy-state"
+        state_file = f"{state_root}/deploy.json"
+        argv = [
+            DOCKER_BIN,
+            "run",
+            "--rm",
+            "--network",
+            "host",
+            "--user",
+            "0:0",
+            "--cap-drop",
+            "ALL",
+            "--cap-add",
+            "DAC_OVERRIDE",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--read-only",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,nodev,size=64m",
+            "--mount",
+            "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock",
+            "--mount",
+            f"type=bind,src={candidate_root},dst={candidate_root},readonly",
+            "--mount",
+            f"type=bind,src={operator_root},dst={operator_root},readonly",
+            "--mount",
+            f"type=volume,src={state_volume},dst={state_root}",
+            helper_image_id,
+            "python3",
+            "/app/scripts/content_harvester_deploy_contract_runner.py",
+            "--script",
+            script_path,
+            "--source-root",
+            candidate_root,
+            "--env-file",
+            env_file,
+            "--state-file",
+            state_file,
+            "--image-namespace",
+            image_namespace,
+            "--source-revision",
+            source_revision,
+            "--artifact-volume",
+            artifact_volume,
+            "--runtime-network",
+            runtime_network,
             "--timeout",
             str(max(60, timeout - 30)),
         ]

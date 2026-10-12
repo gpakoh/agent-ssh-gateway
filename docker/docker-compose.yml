@@ -411,6 +411,7 @@ services:
       - mcp_supervisor_journal:/var/lib/mcp-supervisor
       - mcp_candidate_store:/var/lib/mcp-candidates
       - site_audit_deploy_state:/var/lib/site-audit-deploy-state
+      - content_harvester_deploy_state:/var/lib/content-harvester-deploy-state
       # Operator-provisioned secret sources are exposed read-only and only to
       # the admin OAuth plane. Tools select logical source ids; no host path or
       # plaintext secret is accepted as an MCP argument.
@@ -646,6 +647,9 @@ volumes:
     driver: local
   site_audit_deploy_state:
     name: ssh-gateway-site-audit-deploy-state
+    driver: local
+  content_harvester_deploy_state:
+    name: ssh-gateway-content-harvester-deploy-state
     driver: local
   actions_secret_sources:
     name: ${MCP_ACTIONS_SECRET_SOURCE_VOLUME:-mcp-actions-secret-sources}

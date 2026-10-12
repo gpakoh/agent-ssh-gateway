@@ -120,6 +120,16 @@ _SITE_AUDIT_PROTECTED_CONTAINERS: tuple[str, ...] = (
     "site-audit-crm-daemon",
 )
 
+_CONTENT_HARVESTER_SOURCE_PROJECT = "content-harvester-service"
+_CONTENT_HARVESTER_SCRIPT_PATH = "deploy-content-harvester.sh"
+_CONTENT_HARVESTER_STATE_VOLUME = "ssh-gateway-content-harvester-deploy-state"
+_CONTENT_HARVESTER_VERIFY_STABILITY_SECONDS = 5
+_CONTENT_HARVESTER_TARGETS: tuple[tuple[str, str], ...] = (
+    ("api", "content-harvester-api"),
+    ("telegram-worker", "content-harvester-telegram-worker"),
+    ("telegram-scheduler", "content-harvester-telegram-scheduler"),
+)
+
 
 def _trusted_image_repo(spec: dict[str, str]) -> str:
     """Resolve the trusted image repository for a deploy contract.
@@ -1182,6 +1192,762 @@ async def _accept_site_audit_payload(
     return {"state": state, "live": second}
 
 
+def _content_harvester_target_image(image_namespace: str, source_revision: str) -> str:
+    namespace = image_namespace.strip().rstrip("/") if isinstance(image_namespace, str) else ""
+    if (
+        not namespace
+        or "@" in namespace
+        or "//" in namespace
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", namespace)
+    ):
+        raise ValueError("image_namespace must be a safe registry/repository namespace")
+    if not re.fullmatch(r"[0-9a-f]{40}", source_revision):
+        raise ValueError("source_revision must be an exact lowercase 40-hex SHA")
+    return f"{namespace}/content-harvester-service:{source_revision}"
+
+
+def _content_harvester_resource_fingerprint(kind: str, metadata: dict[str, Any]) -> str:
+    if kind == "volume":
+        stable = {
+            key: metadata.get(key)
+            for key in ("Name", "Driver", "Scope", "Options", "Labels")
+        }
+    elif kind == "network":
+        stable = {
+            key: metadata.get(key)
+            for key in (
+                "Name",
+                "Id",
+                "Driver",
+                "Scope",
+                "Internal",
+                "Attachable",
+                "Ingress",
+                "Options",
+                "Labels",
+            )
+        }
+    else:
+        raise ValueError("unsupported deploy resource fingerprint kind")
+    raw = json.dumps(stable, sort_keys=True, separators=(",", ":"), default=str).encode()
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+async def _content_harvester_topology_fingerprint(client: Any) -> tuple[str, str]:
+    existing: list[str] = []
+    for _service, container in _CONTENT_HARVESTER_TARGETS:
+        if await client.container_exists(container):
+            existing.append(container)
+    if not existing:
+        return "absent", "sha256:" + hashlib.sha256(b"absent").hexdigest()
+    if len(existing) != len(_CONTENT_HARVESTER_TARGETS):
+        raise RuntimeError(
+            "partial prior Content Harvester topology is ambiguous; all three targets or none are required"
+        )
+
+    evidence: list[dict[str, Any]] = []
+    prior_image_id: str | None = None
+    prior_config_image: str | None = None
+    for _service, container in _CONTENT_HARVESTER_TARGETS:
+        inspected = _single_inspect(await client.inspect(container, max_lines=10))
+        runtime = inspected.get("State")
+        config = inspected.get("Config")
+        if not isinstance(runtime, dict) or not isinstance(config, dict):
+            raise RuntimeError("prior Content Harvester target metadata is incomplete")
+        if runtime.get("Running") is not True:
+            raise RuntimeError("prior Content Harvester target is not running")
+        image_id = inspected.get("Image")
+        config_image = config.get("Image")
+        if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+            raise RuntimeError("prior Content Harvester image ID is malformed")
+        if not isinstance(config_image, str) or not config_image:
+            raise RuntimeError("prior Content Harvester image reference is unavailable")
+        if prior_image_id is None:
+            prior_image_id = image_id
+            prior_config_image = config_image
+        elif image_id != prior_image_id or config_image != prior_config_image:
+            raise RuntimeError("prior Content Harvester roles do not share one proven image generation")
+        if container == "content-harvester-api":
+            health = runtime.get("Health")
+            if not isinstance(health, dict) or health.get("Status") != "healthy":
+                raise RuntimeError("prior Content Harvester API is not Docker-healthy")
+        evidence.append(
+            {
+                "container": container,
+                "container_id": inspected.get("Id"),
+                "image_id": image_id,
+                "config_image": config_image,
+                "started_at": runtime.get("StartedAt"),
+            }
+        )
+    raw = json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
+    return "present", "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+async def _prepare_content_harvester_deploy(
+    *,
+    candidate_project: str,
+    expected_head_sha: str,
+    expected_script_blob_sha: str,
+    expected_script_sha256: str,
+    source_revision: str,
+    image_namespace: str,
+    artifact_volume: str,
+    runtime_network: str,
+    require_stable_topology: bool = True,
+) -> dict[str, Any]:
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_head_sha):
+        raise ValueError("expected_head_sha must be a 40-character lowercase SHA")
+    if source_revision != expected_head_sha:
+        raise ValueError("source_revision must exactly match expected_head_sha")
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_script_blob_sha):
+        raise ValueError("expected_script_blob_sha must be a 40-character lowercase SHA")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_script_sha256):
+        raise ValueError("expected_script_sha256 must be a 64-character lowercase SHA-256")
+    target_image = _content_harvester_target_image(image_namespace, source_revision)
+
+    registry = server_attr("_get_workspace_registry")()
+    candidate_info = registry.project_info(candidate_project)
+    candidate_root = _safe_registered_root(candidate_info, expected_type="candidate-clone")
+    metadata = _read_candidate_metadata(candidate_root)
+    if metadata.get("project_id") != candidate_project:
+        raise ValueError("candidate metadata project identity mismatch")
+    if metadata.get("source_project") != _CONTENT_HARVESTER_SOURCE_PROJECT:
+        raise ValueError("candidate source project is not authorized for Content Harvester deployment")
+    if metadata.get("head") != expected_head_sha or metadata.get("base_sha") != expected_head_sha:
+        raise ValueError("candidate metadata is not pinned to the expected Content Harvester head")
+    if _git_capture(candidate_root, "rev-parse", "HEAD").lower() != expected_head_sha:
+        raise ValueError("candidate HEAD changed")
+    if _git_capture(candidate_root, "status", "--porcelain=v1", "--untracked-files=all"):
+        raise ValueError("candidate workspace must be clean")
+
+    script = _safe_regular_under(
+        candidate_root,
+        _CONTENT_HARVESTER_SCRIPT_PATH,
+        "Content Harvester deploy script",
+    )
+    blob_sha = _git_capture(
+        candidate_root,
+        "rev-parse",
+        f"{expected_head_sha}:{_CONTENT_HARVESTER_SCRIPT_PATH}",
+    )
+    if blob_sha != expected_script_blob_sha:
+        raise ValueError("Content Harvester deploy script Git blob identity mismatch")
+    if hashlib.sha256(script.read_bytes()).hexdigest() != expected_script_sha256:
+        raise ValueError("Content Harvester deploy script SHA-256 identity mismatch")
+
+    operator_info = registry.project_info(_CONTENT_HARVESTER_SOURCE_PROJECT)
+    operator_root = _safe_registered_root(operator_info)
+    client = _docker_client()
+    client._validate_project_dir(str(operator_root))
+    env_file = _safe_regular_under(operator_root, ".env", "Content Harvester operator env file")
+
+    state_volume = await client.volume_metadata(_CONTENT_HARVESTER_STATE_VOLUME)
+    if state_volume.get("Name") != _CONTENT_HARVESTER_STATE_VOLUME:
+        raise RuntimeError("Content Harvester deploy-state volume identity mismatch")
+    if state_volume.get("Driver") not in (None, "", "local") or state_volume.get("Options") not in (
+        None,
+        {},
+        [],
+    ):
+        raise RuntimeError("Content Harvester deploy-state volume is not a plain local volume")
+
+    artifact = await client.volume_metadata(artifact_volume)
+    if artifact.get("Name") != artifact_volume:
+        raise RuntimeError("Content Harvester artifact volume identity mismatch")
+    if artifact.get("Driver") not in (None, "", "local") or artifact.get("Options") not in (
+        None,
+        {},
+        [],
+    ):
+        raise RuntimeError("Content Harvester artifact volume is not a plain local volume")
+
+    network = await client.network_metadata(runtime_network)
+    if network.get("Name") != runtime_network:
+        raise RuntimeError("Content Harvester runtime network identity mismatch")
+    if network.get("Scope") not in (None, "", "local"):
+        raise RuntimeError("Content Harvester runtime network must be local to this Docker daemon")
+    if not isinstance(network.get("Driver"), str) or not network.get("Driver"):
+        raise RuntimeError("Content Harvester runtime network driver is unavailable")
+
+    if require_stable_topology:
+        prior_mode, topology_fingerprint = await _content_harvester_topology_fingerprint(client)
+    else:
+        prior_mode = "recovery"
+        topology_fingerprint = ""
+
+    helper_container = os.environ.get("MCP_DEPLOY_HELPER_CONTAINER", _DEPLOY_HELPER_CONTAINER).strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", helper_container):
+        raise ValueError("MCP_DEPLOY_HELPER_CONTAINER is invalid")
+    helper_image_id = await client.container_image_id(helper_container)
+
+    return {
+        "candidate_root": str(candidate_root),
+        "operator_root": str(operator_root),
+        "script_path": str(script),
+        "env_file": str(env_file),
+        "state_volume": _CONTENT_HARVESTER_STATE_VOLUME,
+        "state_volume_fingerprint": _content_harvester_resource_fingerprint("volume", state_volume),
+        "artifact_volume": artifact_volume,
+        "artifact_volume_fingerprint": _content_harvester_resource_fingerprint("volume", artifact),
+        "runtime_network": runtime_network,
+        "runtime_network_fingerprint": _content_harvester_resource_fingerprint("network", network),
+        "helper_image_id": helper_image_id,
+        "source_revision": source_revision,
+        "image_namespace": image_namespace.strip().rstrip("/"),
+        "target_image": target_image,
+        "prior_mode": prior_mode,
+        "topology_fingerprint": topology_fingerprint,
+    }
+
+
+def _content_harvester_state(
+    state: dict[str, Any],
+    *,
+    source_revision: str,
+    target_image: str,
+    artifact_volume: str,
+    runtime_network: str,
+) -> dict[str, Any]:
+    if state.get("schema_version") != 1:
+        raise RuntimeError("Content Harvester deployment state schema_version is invalid")
+    if state.get("source_revision") != source_revision:
+        raise RuntimeError("Content Harvester deployment state source revision mismatch")
+    generation = state.get("deploy_generation")
+    if not isinstance(generation, str) or not re.fullmatch(
+        r"[0-9a-f]{12}-[0-9]{8}T[0-9]{6}Z", generation
+    ):
+        raise RuntimeError("Content Harvester deployment generation is malformed")
+    if state.get("image") != target_image:
+        raise RuntimeError("Content Harvester deployment state image reference changed")
+    image_id = state.get("image_id")
+    if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+        raise RuntimeError("Content Harvester deployment state image ID is malformed")
+    if state.get("artifact_volume") != artifact_volume:
+        raise RuntimeError("Content Harvester deployment state artifact volume changed")
+    if state.get("runtime_network") != runtime_network:
+        raise RuntimeError("Content Harvester deployment state runtime network changed")
+    stability = state.get("stability_seconds")
+    if not isinstance(stability, int) or isinstance(stability, bool) or not 1 <= stability <= 600:
+        raise RuntimeError("Content Harvester deployment stability evidence is malformed")
+    if state.get("services") != ["api", "telegram-worker", "telegram-scheduler"]:
+        raise RuntimeError("Content Harvester deployment service set changed")
+    return state
+
+
+async def _verify_content_harvester_resources(client: Any, plan: dict[str, Any]) -> None:
+    state_volume = await client.volume_metadata(plan["state_volume"])
+    artifact = await client.volume_metadata(plan["artifact_volume"])
+    network = await client.network_metadata(plan["runtime_network"])
+    if _content_harvester_resource_fingerprint("volume", state_volume) != plan[
+        "state_volume_fingerprint"
+    ]:
+        raise RuntimeError("Content Harvester deploy-state volume changed during rollout")
+    if _content_harvester_resource_fingerprint("volume", artifact) != plan[
+        "artifact_volume_fingerprint"
+    ]:
+        raise RuntimeError("Content Harvester artifact volume changed during rollout")
+    if _content_harvester_resource_fingerprint("network", network) != plan[
+        "runtime_network_fingerprint"
+    ]:
+        raise RuntimeError("Content Harvester runtime network changed during rollout")
+
+
+async def _verify_content_harvester_live(
+    client: Any,
+    *,
+    state: dict[str, Any],
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    validated_state = _content_harvester_state(
+        state,
+        source_revision=plan["source_revision"],
+        target_image=plan["target_image"],
+        artifact_volume=plan["artifact_volume"],
+        runtime_network=plan["runtime_network"],
+    )
+    target_image_id = str(validated_state["image_id"])
+    if await client.image_id(plan["target_image"]) != target_image_id:
+        raise RuntimeError("Content Harvester built image reference no longer resolves to LKG image ID")
+    if await client.image_revision(target_image_id) != plan["source_revision"]:
+        raise RuntimeError("Content Harvester built image OCI revision differs from source revision")
+    await _verify_content_harvester_resources(client, plan)
+    snapshot: dict[str, dict[str, Any]] = {}
+    for service, container in _CONTENT_HARVESTER_TARGETS:
+        inspected = _single_inspect(await client.inspect(container, max_lines=10))
+        runtime = inspected.get("State")
+        config = inspected.get("Config")
+        if not isinstance(runtime, dict) or not isinstance(config, dict):
+            raise RuntimeError("Content Harvester target container metadata is incomplete")
+        if runtime.get("Running") is not True:
+            raise RuntimeError("Content Harvester target is not running")
+        if inspected.get("Image") != target_image_id:
+            raise RuntimeError("Content Harvester target image ID differs from LKG image")
+        if config.get("Image") != plan["target_image"]:
+            raise RuntimeError("Content Harvester target image reference differs from confirmed image")
+        if inspected.get("RestartCount") != 0:
+            raise RuntimeError("Content Harvester target restarted after rollout")
+        labels = config.get("Labels")
+        if not isinstance(labels, dict) or labels.get("org.opencontainers.image.revision") != plan[
+            "source_revision"
+        ]:
+            raise RuntimeError("Content Harvester target OCI revision differs from source revision")
+        health_value = "running"
+        if service == "api":
+            health = runtime.get("Health")
+            if not isinstance(health, dict) or health.get("Status") != "healthy":
+                raise RuntimeError("Content Harvester API is not Docker-healthy")
+            health_value = "healthy"
+        snapshot[container] = {
+            "container_id": inspected.get("Id"),
+            "image_id": inspected.get("Image"),
+            "image": config.get("Image"),
+            "restart_count": inspected.get("RestartCount"),
+            "started_at": runtime.get("StartedAt"),
+            "health": health_value,
+            "revision": plan["source_revision"],
+        }
+    return snapshot
+
+
+def _content_harvester_pending(
+    pending: dict[str, Any],
+    *,
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    if pending.get("schema_version") != 1 or pending.get("status") != "pending":
+        raise RuntimeError("Content Harvester pending evidence schema/status is invalid")
+    if pending.get("source_revision") != plan["source_revision"]:
+        raise RuntimeError("Content Harvester pending source revision mismatch")
+    generation = pending.get("generation")
+    if not isinstance(generation, str) or not re.fullmatch(
+        r"[0-9a-f]{12}-[0-9]{8}T[0-9]{6}Z", generation
+    ):
+        raise RuntimeError("Content Harvester pending generation is malformed")
+    if pending.get("target_image") != plan["target_image"]:
+        raise RuntimeError("Content Harvester pending target image changed")
+    target_image_id = pending.get("target_image_id")
+    if not isinstance(target_image_id, str) or not re.fullmatch(
+        r"sha256:[0-9a-f]{64}", target_image_id
+    ):
+        raise RuntimeError("Content Harvester pending target image ID is malformed")
+    if pending.get("artifact_volume") != plan["artifact_volume"]:
+        raise RuntimeError("Content Harvester pending artifact volume changed")
+    if pending.get("runtime_network") != plan["runtime_network"]:
+        raise RuntimeError("Content Harvester pending runtime network changed")
+    previous_mode = pending.get("previous_mode")
+    if previous_mode not in {"absent", "present"}:
+        raise RuntimeError("Content Harvester pending previous mode is invalid")
+    if previous_mode == "absent":
+        if any(
+            pending.get(key) is not None
+            for key in ("previous_image_id", "previous_config_image", "rollback_ref")
+        ):
+            raise RuntimeError("Content Harvester absent pending state contains rollback identity")
+    else:
+        previous_image_id = pending.get("previous_image_id")
+        if not isinstance(previous_image_id, str) or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", previous_image_id
+        ):
+            raise RuntimeError("Content Harvester pending previous image ID is malformed")
+        for key in ("previous_config_image", "rollback_ref"):
+            value = pending.get(key)
+            if not isinstance(value, str) or not value or "\n" in value or "\t" in value:
+                raise RuntimeError(f"Content Harvester pending {key} is malformed")
+    return pending
+
+
+async def _verify_content_harvester_recovery(
+    client: Any,
+    *,
+    pending: dict[str, Any],
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    pending = _content_harvester_pending(pending, plan=plan)
+    await _verify_content_harvester_resources(client, plan)
+    if pending["previous_mode"] == "absent":
+        for _service, container in _CONTENT_HARVESTER_TARGETS:
+            if await client.container_exists(container):
+                raise RuntimeError("Content Harvester bootstrap recovery left a target container")
+        return {"outcome": "bootstrap_absent_restored", "deploy_generation": pending["generation"]}
+
+    previous_image_id = pending["previous_image_id"]
+    previous_revision = await client.image_revision(previous_image_id)
+    refs: set[str] = set()
+    live: dict[str, dict[str, Any]] = {}
+    for service, container in _CONTENT_HARVESTER_TARGETS:
+        inspected = _single_inspect(await client.inspect(container, max_lines=10))
+        runtime = inspected.get("State")
+        config = inspected.get("Config")
+        if not isinstance(runtime, dict) or not isinstance(config, dict):
+            raise RuntimeError("Content Harvester recovery target metadata is incomplete")
+        if runtime.get("Running") is not True or inspected.get("Image") != previous_image_id:
+            raise RuntimeError("Content Harvester recovery did not restore the previous image ID")
+        config_image = config.get("Image")
+        if config_image not in {pending["previous_config_image"], pending["rollback_ref"]}:
+            raise RuntimeError("Content Harvester recovery image reference is not a proven previous alias")
+        refs.add(str(config_image))
+        if service == "api":
+            health = runtime.get("Health")
+            if not isinstance(health, dict) or health.get("Status") != "healthy":
+                raise RuntimeError("Content Harvester recovered API is not Docker-healthy")
+        live[container] = {
+            "image_id": inspected.get("Image"),
+            "image": config_image,
+            "restart_count": inspected.get("RestartCount"),
+            "started_at": runtime.get("StartedAt"),
+        }
+    if len(refs) != 1:
+        raise RuntimeError("Content Harvester recovery roles do not share one proven image reference")
+    only_ref = next(iter(refs))
+    outcome = (
+        "previous_generation_unchanged"
+        if only_ref == pending["previous_config_image"]
+        else "rolled_back_to_previous_image_id"
+    )
+    if outcome == "rolled_back_to_previous_image_id" and any(
+        item["restart_count"] != 0 for item in live.values()
+    ):
+        raise RuntimeError("Content Harvester rollback generation has restart evidence")
+    return {
+        "outcome": outcome,
+        "previous_image_id": previous_image_id,
+        "previous_revision": previous_revision,
+        "targets": live,
+        "deploy_generation": pending["generation"],
+    }
+
+
+def _content_harvester_helper_payload(client: Any, run: RunResult) -> tuple[dict[str, Any] | None, str]:
+    output_tail = _sanitize_deploy_tail(client, (run.stdout or "") + "\n" + (run.stderr or ""))
+    try:
+        parsed = json.loads((run.stdout or "").strip())
+    except json.JSONDecodeError:
+        return None, output_tail
+    return (parsed if isinstance(parsed, dict) else None), output_tail
+
+
+async def _accept_content_harvester_payload(
+    client: Any,
+    *,
+    payload: dict[str, Any],
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    if payload.get("pending_exists") is not False:
+        raise RuntimeError("Content Harvester pending transaction evidence remains")
+    state = payload.get("state")
+    if not isinstance(state, dict) or not state:
+        raise RuntimeError("Content Harvester helper returned malformed LKG state")
+    first = await _verify_content_harvester_live(client, state=state, plan=plan)
+    await asyncio.sleep(_CONTENT_HARVESTER_VERIFY_STABILITY_SECONDS)
+    second = await _verify_content_harvester_live(client, state=state, plan=plan)
+    if first != second:
+        raise RuntimeError("Content Harvester deployment changed during Gateway stability verification")
+    return {"state": state, "live": second}
+
+
+async def docker_deploy_content_harvester(
+    candidate_project: str,
+    expected_head_sha: str,
+    expected_script_blob_sha: str,
+    expected_script_sha256: str,
+    source_revision: str,
+    image_namespace: str,
+    artifact_volume: str,
+    runtime_network: str,
+    timeout: int = 720,
+) -> dict[str, Any]:
+    """Prepare a guarded Content Harvester Telegram-canary three-role rollout."""
+    timeout = max(180, min(timeout, 900))
+    try:
+        plan = await _prepare_content_harvester_deploy(
+            candidate_project=candidate_project,
+            expected_head_sha=expected_head_sha,
+            expected_script_blob_sha=expected_script_blob_sha,
+            expected_script_sha256=expected_script_sha256,
+            source_revision=source_revision,
+            image_namespace=image_namespace,
+            artifact_volume=artifact_volume,
+            runtime_network=runtime_network,
+        )
+    except ValueError as exc:
+        return tool_error(
+            tool="docker_deploy_content_harvester",
+            code="INVALID_INPUT",
+            message=str(exc),
+            source="docker",
+            retryable=False,
+        )
+    except RuntimeError as exc:
+        return tool_error(
+            tool="docker_deploy_content_harvester",
+            code="DEPLOY_CONTRACT_PRECONDITION_FAILED",
+            message=str(exc),
+            source="docker",
+            retryable=False,
+        )
+    action = _confirm_store().create_action(
+        "docker_deploy_content_harvester",
+        {
+            "candidate_project": candidate_project,
+            "expected_head_sha": expected_head_sha,
+            "expected_script_blob_sha": expected_script_blob_sha,
+            "expected_script_sha256": expected_script_sha256,
+            "source_revision": source_revision,
+            "image_namespace": plan["image_namespace"],
+            "artifact_volume": artifact_volume,
+            "runtime_network": runtime_network,
+            "target_image": plan["target_image"],
+            "state_volume_fingerprint": plan["state_volume_fingerprint"],
+            "artifact_volume_fingerprint": plan["artifact_volume_fingerprint"],
+            "runtime_network_fingerprint": plan["runtime_network_fingerprint"],
+            "prior_mode": plan["prior_mode"],
+            "topology_fingerprint": plan["topology_fingerprint"],
+            "timeout": timeout,
+        },
+        (
+            f"Deploy Content Harvester Telegram canary from {candidate_project}@"
+            f"{expected_head_sha[:12]} as three exact roles"
+        ),
+        risk="high",
+        required_scope="mcp:docker:admin",
+    )
+    return _confirmation_response(action)
+
+
+async def _docker_deploy_content_harvester_impl(
+    candidate_project: str,
+    expected_head_sha: str,
+    expected_script_blob_sha: str,
+    expected_script_sha256: str,
+    source_revision: str,
+    image_namespace: str,
+    artifact_volume: str,
+    runtime_network: str,
+    target_image: str,
+    state_volume_fingerprint: str,
+    artifact_volume_fingerprint: str,
+    runtime_network_fingerprint: str,
+    prior_mode: str,
+    topology_fingerprint: str,
+    timeout: int = 720,
+) -> dict[str, Any]:
+    try:
+        plan = await _prepare_content_harvester_deploy(
+            candidate_project=candidate_project,
+            expected_head_sha=expected_head_sha,
+            expected_script_blob_sha=expected_script_blob_sha,
+            expected_script_sha256=expected_script_sha256,
+            source_revision=source_revision,
+            image_namespace=image_namespace,
+            artifact_volume=artifact_volume,
+            runtime_network=runtime_network,
+        )
+        confirmed = {
+            "target_image": target_image,
+            "state_volume_fingerprint": state_volume_fingerprint,
+            "artifact_volume_fingerprint": artifact_volume_fingerprint,
+            "runtime_network_fingerprint": runtime_network_fingerprint,
+            "prior_mode": prior_mode,
+            "topology_fingerprint": topology_fingerprint,
+        }
+        if any(plan[key] != value for key, value in confirmed.items()):
+            raise RuntimeError("Content Harvester confirmation identities changed before execution")
+    except (ValueError, RuntimeError) as exc:
+        return tool_error(
+            tool="docker_deploy_content_harvester",
+            code="DEPLOY_CONTRACT_PRECONDITION_FAILED",
+            message=str(exc),
+            source="docker",
+            retryable=False,
+        )
+
+    client = _docker_client()
+    helper_kwargs = {
+        "helper_image_id": plan["helper_image_id"],
+        "candidate_root": plan["candidate_root"],
+        "operator_root": plan["operator_root"],
+        "script_path": plan["script_path"],
+        "env_file": plan["env_file"],
+        "state_volume": plan["state_volume"],
+        "image_namespace": plan["image_namespace"],
+        "source_revision": source_revision,
+        "artifact_volume": artifact_volume,
+        "runtime_network": runtime_network,
+        "timeout": timeout,
+    }
+    run = await client.run_content_harvester_deploy_contract_helper(
+        **helper_kwargs, recover=False
+    )
+    payload, output_tail = _content_harvester_helper_payload(client, run)
+    ambiguous = run.exit_code == -1 or (
+        isinstance(payload, dict) and payload.get("exit_code") == 124
+    )
+
+    if ambiguous:
+        try:
+            recovery_plan = await _prepare_content_harvester_deploy(
+                candidate_project=candidate_project,
+                expected_head_sha=expected_head_sha,
+                expected_script_blob_sha=expected_script_blob_sha,
+                expected_script_sha256=expected_script_sha256,
+                source_revision=source_revision,
+                image_namespace=image_namespace,
+                artifact_volume=artifact_volume,
+                runtime_network=runtime_network,
+                require_stable_topology=False,
+            )
+            for key in (
+                "target_image",
+                "state_volume_fingerprint",
+                "artifact_volume_fingerprint",
+                "runtime_network_fingerprint",
+            ):
+                if recovery_plan[key] != plan[key]:
+                    raise RuntimeError(f"Content Harvester {key} changed before recovery")
+        except (ValueError, RuntimeError) as exc:
+            return tool_error(
+                tool="docker_deploy_content_harvester",
+                code="DEPLOY_CONTRACT_OUTCOME_AMBIGUOUS",
+                message=(
+                    "Content Harvester deploy outcome is unknown and recovery preflight no longer "
+                    f"matches the confirmed source/resources: {exc}"
+                ),
+                result={"source_revision": source_revision, "output_tail": output_tail},
+                source="docker",
+                retryable=False,
+                hint="Do not retry deploy. Reconcile durable pending/LKG evidence with the original confirmation.",
+            )
+        recovery_kwargs = {**helper_kwargs}
+        for key in (
+            "helper_image_id",
+            "candidate_root",
+            "operator_root",
+            "script_path",
+            "env_file",
+            "state_volume",
+            "image_namespace",
+        ):
+            if key in recovery_plan:
+                recovery_kwargs[key] = recovery_plan[key]
+        recovery = await client.run_content_harvester_deploy_contract_helper(
+            **recovery_kwargs, recover=True
+        )
+        recovery_payload, recovery_tail = _content_harvester_helper_payload(client, recovery)
+        if (
+            recovery.exit_code == 0
+            and isinstance(recovery_payload, dict)
+            and recovery_payload.get("exit_code") == 0
+            and recovery_payload.get("mode") == "recover"
+            and recovery_payload.get("pending_exists") is False
+        ):
+            state = recovery_payload.get("state")
+            if isinstance(state, dict) and state.get("source_revision") == source_revision:
+                try:
+                    accepted = await _accept_content_harvester_payload(
+                        client, payload=recovery_payload, plan=plan
+                    )
+                except RuntimeError:
+                    accepted = None
+                if accepted is not None:
+                    return tool_success(
+                        "docker_deploy_content_harvester",
+                        result={
+                            "source_revision": source_revision,
+                            "target_image": plan["target_image"],
+                            "target_image_id": accepted["state"]["image_id"],
+                            "reconciled_after_unknown": True,
+                            "recovery_result": "target_accepted",
+                            "deployment": accepted,
+                            "output_tail": recovery_tail,
+                        },
+                        source="docker",
+                        dangerous=True,
+                        redacted=True,
+                    )
+            pending_before = recovery_payload.get("pending_before")
+            if isinstance(pending_before, dict) and pending_before:
+                try:
+                    recovered = await _verify_content_harvester_recovery(
+                        client, pending=pending_before, plan=plan
+                    )
+                except RuntimeError:
+                    recovered = None
+                if recovered is not None:
+                    return tool_error(
+                        tool="docker_deploy_content_harvester",
+                        code="DEPLOY_CONTRACT_RECOVERED_NOT_DEPLOYED",
+                        message=(
+                            "Content Harvester unknown outcome was safely reconciled without "
+                            "accepting the requested target generation"
+                        ),
+                        result={
+                            "source_revision": source_revision,
+                            "reconciled_after_unknown": True,
+                            "recovery": recovered,
+                            "output_tail": recovery_tail,
+                        },
+                        source="docker",
+                        retryable=True,
+                        hint="Create a fresh preflight/confirmation before any later deploy attempt.",
+                    )
+        return tool_error(
+            tool="docker_deploy_content_harvester",
+            code="DEPLOY_CONTRACT_OUTCOME_AMBIGUOUS",
+            message=(
+                "Content Harvester deploy outcome could not be proven after the repo-owned "
+                "--recover reconciliation path"
+            ),
+            result={"source_revision": source_revision, "output_tail": recovery_tail},
+            source="docker",
+            retryable=False,
+            hint="Reconcile durable pending/LKG state before creating a new deploy confirmation.",
+        )
+
+    if run.exit_code != 0 or not isinstance(payload, dict) or payload.get("exit_code") != 0:
+        return tool_error(
+            tool="docker_deploy_content_harvester",
+            code=("DEPLOY_CONTRACT_EVIDENCE_INVALID" if payload is None else "DEPLOY_CONTRACT_FAILED"),
+            message=(
+                "Content Harvester deploy helper returned invalid evidence"
+                if payload is None
+                else str(payload.get("error") or "Content Harvester deploy contract failed")
+            ),
+            result={"output_tail": output_tail},
+            source="docker",
+            retryable=False,
+        )
+    try:
+        accepted = await _accept_content_harvester_payload(client, payload=payload, plan=plan)
+    except RuntimeError as exc:
+        return tool_error(
+            tool="docker_deploy_content_harvester",
+            code="DEPLOY_CONTRACT_VERIFICATION_FAILED",
+            message=str(exc),
+            result={"output_tail": output_tail},
+            source="docker",
+            retryable=False,
+        )
+    return tool_success(
+        "docker_deploy_content_harvester",
+        result={
+            "source_revision": source_revision,
+            "script_blob_sha": expected_script_blob_sha,
+            "script_sha256": expected_script_sha256,
+            "target_image": plan["target_image"],
+            "target_image_id": accepted["state"]["image_id"],
+            "artifact_volume": artifact_volume,
+            "runtime_network": runtime_network,
+            "reconciled_after_unknown": False,
+            "deployment": accepted,
+            "output_tail": output_tail,
+        },
+        source="docker",
+        dangerous=True,
+        redacted=True,
+    )
+
+
 async def docker_deploy_site_audit(
     candidate_project: str,
     expected_head_sha: str,
@@ -1726,6 +2492,7 @@ _CONFIRM_HANDLERS: dict[str, Callable[..., Any]] = {
     "docker_volume_rm": _docker_volume_rm_impl,
     "docker_deploy_contract": _docker_deploy_contract_impl,
     "docker_deploy_site_audit": _docker_deploy_site_audit_impl,
+    "docker_deploy_content_harvester": _docker_deploy_content_harvester_impl,
 }
 
 
@@ -2385,6 +3152,7 @@ def register_all() -> None:
         "docker_volume_rm",
         "docker_deploy_contract",
         "docker_deploy_site_audit",
+        "docker_deploy_content_harvester",
         "confirm_operation",
         "docker_pending_actions",
     ):
