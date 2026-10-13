@@ -321,6 +321,26 @@ Open backlog count after cleanup: **34**
     `gitea_set_default_branch`. Keep #10 open for typed required-checks, approval
     and branch-protection mutation against exact expected current policy state.
 
+    **2026-10-13 deployed branch-protection progress / external-schema blocker:**
+    PR #538 merged the guarded CAS branch-protection lifecycle as
+    `master@44e05b529e71...` after exact current-base PR run #16427 completed
+    successfully. Post-merge run #16431 then completed build-and-push, deploy and
+    host-smoke successfully on that exact merge SHA; host-smoke proved
+    `web-ssh-gateway`, `mcp-server` and `mcp-oauth` all running
+    `BUILD_SHA=44e05b529e71...`, the OAuth->SSH black-box smoke passed, and live
+    `health` reported both Gateway and MCP ready on the same exact build SHA.
+    The authoritative live `tools_manifest` now reports 151 tools and exposes
+    `gitea_get_branch_protection` plus admin-only
+    `gitea_set_branch_protection`/`gitea_delete_branch_protection` as enabled and
+    available, with toolset hash
+    `sha256:f9ee11f3310547f8f54f192364f55d6b819eb4405178608086444128e2b85f79`.
+    However, this long-lived attached ChatGPT resource catalog still omits all
+    three callable schemas even after the server emitted
+    `notifications/tools/list_changed` and the catalog was queried again. Keep
+    #10 open only for external live create/read/(update)/delete acceptance once
+    #6/#45 refresh/rebind exposes the real schemas; do not bypass the guarded
+    contract with raw Gitea/HTTP mutation.
+
 11. ⬜ **Isolate PR Docker jobs from the shared host daemon or document the trust boundary.**
     PR-controlled Docker build/smoke steps can mutate the shared runner Docker
     daemon. Prefer disposable per-job daemon/VM isolation; otherwise enforce and
