@@ -1,6 +1,6 @@
 # Agent SSH Gateway — TODO
 
-Last reconciled: 2026-10-12.
+Last reconciled: 2026-10-13.
 
 This file is the active backlog only. Completed audit notes, fixed CI blockers,
 merged PR evidence, and superseded diagnostics should live in PR history,
@@ -15,11 +15,11 @@ Docker inventory scope), and #51 (verified-push ambiguous-outcome reconciliation
 Partial progress on still-open items remains recorded under those items rather
 than being treated as closure.
 
-Open backlog count after cleanup: **34**
+Open backlog count after cleanup: **33**
 
 - **P1 / critical:** 8
 - **P2 / important:** 16
-- **P3 / capability / wishlist:** 10
+- **P3 / capability / wishlist:** 9
 
 ## P1 / Critical blockers
 
@@ -709,15 +709,6 @@ Open backlog count after cleanup: **34**
     external resource catalog again still returned the stale schema. This is a
     direct argument-level (not merely tool-name) acceptance failure for #45/#6
     and currently blocks external `create_parents=true` acceptance for #50.
-
-46. ⬜ **Make `info(project)` verification commands executable verbatim.**
-    Verification guidance must include any project-specific mypy targets/options,
-    not just a generic `uv run --extra dev mypy`. A JS Chat Engine delivery
-    observed the advertised bare mypy command fail with `Missing target module,
-    package, files, or command`, while `uv run --extra dev mypy app scripts tests`
-    was the actual project contract. Add a round-trip contract test that every
-    command advertised by `info(project).verification.commands` can be executed
-    verbatim from the registered project root.
 
 52. ⬜ **Expose guarded Gitea issue-state mutation.**
     The external surface can list/read Gitea issues but cannot reconcile an issue
