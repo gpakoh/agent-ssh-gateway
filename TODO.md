@@ -523,6 +523,22 @@ Open backlog count after cleanup: **34**
     limits, symlink/root-escape protection and receipts. Default behavior must
     remain fail-closed with a typed `PARENT_MISSING` diagnostic.
 
+    **2026-10-13 deployed progress / external-schema blocker:** PR #533 merged
+    guarded `create_parents` support as `master@0cf0c0b651ce...`; post-merge run
+    #16365 completed build-and-push, deploy and host-smoke successfully, and live
+    Gateway/MCP health reported exact build SHA `0cf0c0b651ce...`, ready=true.
+    The deployed server manifest documents `create_parents` on
+    `workspace_file_write` and emits toolset hash `sha256:f250b44e2878...`.
+    A live external call through the currently attached client proved the default
+    path now returns typed non-retryable `PARENT_MISSING` with zero filesystem
+    mutation (`acceptance-parent/**` remained absent). However, even after the
+    server sent `notifications/tools/list_changed` and the external catalog was
+    queried again, this attached callable schema still omitted the new optional
+    `create_parents` argument. Do not close #50 until a fresh/correct external
+    schema can invoke `create_parents=true` and prove nested creation plus the
+    returned parent/post-write verification receipt. Track the stale optional-
+    argument refresh defect under #6/#45; do not bypass it with raw transport.
+
 ## P3 / Capability and ergonomics wishlist
 
 35. ⬜ **Add project catalog filtering and pagination.**
@@ -661,6 +677,18 @@ Open backlog count after cleanup: **34**
     This proves fresh attachment can converge, but not the required in-place
     invalidation of a client that remained attached across a toolset/build change;
     keep #45 open for that long-lived acceptance only.
+
+    **2026-10-13 in-place optional-argument reproducer:** PR #533 deployed exact
+    `master@0cf0c0b651ce...`; live MCP toolset hash changed to
+    `sha256:f250b44e2878a8de141b5b6d8da773c02c4a42315d0d7ba5008377f6d2e724ef`,
+    and authoritative `tools_manifest` immediately documented the new optional
+    `create_parents` argument on `workspace_file_write`. The same long-lived
+    attached external catalog still returned the pre-deploy schema without that
+    argument. `tools_manifest` emitted `notifications/tools/list_changed` with the
+    new hash and explicitly instructed an MCP `tools/list` refresh; querying the
+    external resource catalog again still returned the stale schema. This is a
+    direct argument-level (not merely tool-name) acceptance failure for #45/#6
+    and currently blocks external `create_parents=true` acceptance for #50.
 
 46. ⬜ **Make `info(project)` verification commands executable verbatim.**
     Verification guidance must include any project-specific mypy targets/options,
