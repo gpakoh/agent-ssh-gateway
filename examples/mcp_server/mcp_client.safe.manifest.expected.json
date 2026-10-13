@@ -1,9 +1,9 @@
 {
   "mode": "mcp_client",
   "safe_mode": true,
-  "expected_safe_count": 83,
+  "expected_safe_count": 84,
   "expected_blocked_count": 34,
-  "expected_mcp_client_full_count": 113,
+  "expected_mcp_client_full_count": 114,
   "must_include": [
     "docker_site_audit_deploy_status",
     "health",
@@ -11,6 +11,7 @@
     "git_write_capabilities",
     "repo_status",
     "scan_command",
+    "gitea_get_branch_protection",
     "tools_manifest"
   ],
   "must_exclude": [

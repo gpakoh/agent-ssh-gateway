@@ -82,7 +82,8 @@ def test_tools_manifest_gitea_delete_branch_matches_invokable_schema():
 
     assert manifest["ok"] is True
     items = manifest["result"]["tools"]
-    assert [item["name"] for item in items] == ["gitea_delete_branch"]
+    item_names = {item["name"] for item in items}
+    assert "gitea_delete_branch" in item_names
     assert "gitea_delete_branch" in tools
     tool = tools["gitea_delete_branch"]
     assert tool.parameters["required"] == [

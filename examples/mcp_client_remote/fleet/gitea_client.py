@@ -53,6 +53,7 @@ ALLOWED_ENDPOINTS = frozenset(
         "/repos/{owner}/{repo}",
         "/repos/{owner}/{repo}/branches",
         "/repos/{owner}/{repo}/branches/{branch}",
+        "/repos/{owner}/{repo}/branch_protections/{name}",
         "/repos/{owner}/{repo}/commits",
         "/repos/{owner}/{repo}/compare/{basehead}",
         "/repos/{owner}/{repo}/contents",
@@ -118,6 +119,16 @@ ALLOWED_REPO_ADMIN_ENDPOINTS = frozenset(
         "/repos/{owner}/{repo}",
     }
 )
+ALLOWED_BRANCH_PROTECTION_CREATE_ENDPOINTS = frozenset(
+    {
+        "/repos/{owner}/{repo}/branch_protections",
+    }
+)
+ALLOWED_BRANCH_PROTECTION_WRITE_ENDPOINTS = frozenset(
+    {
+        "/repos/{owner}/{repo}/branch_protections/{name}",
+    }
+)
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 _ACTION_SECRET_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -157,6 +168,19 @@ def _validate_action_secret_name(value: str) -> str:
         or upper.startswith("GITEA_")
     ):
         raise ValueError("invalid Gitea Actions secret name")
+    return value
+
+
+def _validate_branch_protection_name(value: str) -> str:
+    value = str(value or "").strip()
+    if (
+        not value
+        or len(value) > 255
+        or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
+    ):
+        raise ValueError(
+            "branch protection name must be 1..255 characters without controls"
+        )
     return value
 
 
@@ -618,6 +642,150 @@ class GiteaClient:
                 "gitea repository admin mutation returned an undecodable success response"
             ) from exc
 
+    async def _get_optional_branch_protection(
+        self,
+        endpoint: str,
+        **path_params: Any,
+    ) -> dict[str, Any] | None:
+        """GET one exact protection rule, returning None only for HTTP 404."""
+        if endpoint not in ALLOWED_ENDPOINTS:
+            raise ValueError(f"Endpoint not allowed: {endpoint}")
+        validate_repo_owner_or_name(path_params["owner"], label="owner")
+        validate_repo_owner_or_name(path_params["repo"], label="repo")
+        path_params = dict(path_params)
+        path_params["name"] = quote(
+            _validate_branch_protection_name(str(path_params.get("name") or "")),
+            safe="",
+        )
+        path = endpoint.format(**path_params)
+        resp = await self._client.get(path)
+        if resp.status_code == 404:
+            return None
+        if resp.status_code in (401, 403):
+            detail = resp.json().get("message", "unauthorized")
+            raise PermissionError(f"gitea api {path}: {detail}")
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise httpx.HTTPStatusError(
+                f"gitea api {path}: {resp.status_code} {resp.reason_phrase}",
+                request=exc.request,
+                response=exc.response,
+            ) from None
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise ValueError("gitea branch protection response must be an object")
+        return data
+
+    async def _post_branch_protection(
+        self,
+        endpoint: str,
+        payload: dict[str, Any],
+        **path_params: Any,
+    ) -> dict[str, Any]:
+        """POST one narrowly allowlisted branch-protection creation."""
+        if endpoint not in ALLOWED_BRANCH_PROTECTION_CREATE_ENDPOINTS:
+            raise ValueError(f"Branch protection create endpoint not allowed: {endpoint}")
+        validate_repo_owner_or_name(path_params["owner"], label="owner")
+        validate_repo_owner_or_name(path_params["repo"], label="repo")
+        path = endpoint.format(**path_params)
+        resp = await self._client.post(path, json=payload)
+        if resp.status_code in (401, 403):
+            detail = resp.json().get("message", "unauthorized")
+            raise PermissionError(f"gitea api {path}: {detail}")
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise httpx.HTTPStatusError(
+                f"gitea api {path}: {resp.status_code} {resp.reason_phrase}",
+                request=exc.request,
+                response=exc.response,
+            ) from None
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise GiteaMutationOutcomeUnknown(
+                "gitea branch protection creation returned an undecodable success response"
+            ) from exc
+        if not isinstance(data, dict):
+            raise GiteaMutationOutcomeUnknown(
+                "gitea branch protection creation returned a non-object response"
+            )
+        return data
+
+    async def _patch_branch_protection(
+        self,
+        endpoint: str,
+        payload: dict[str, Any],
+        **path_params: Any,
+    ) -> dict[str, Any]:
+        """PATCH one narrowly allowlisted branch-protection rule."""
+        if endpoint not in ALLOWED_BRANCH_PROTECTION_WRITE_ENDPOINTS:
+            raise ValueError(f"Branch protection endpoint not allowed: {endpoint}")
+        validate_repo_owner_or_name(path_params["owner"], label="owner")
+        validate_repo_owner_or_name(path_params["repo"], label="repo")
+        path_params = dict(path_params)
+        path_params["name"] = quote(
+            _validate_branch_protection_name(str(path_params.get("name") or "")),
+            safe="",
+        )
+        path = endpoint.format(**path_params)
+        resp = await self._client.patch(path, json=payload)
+        if resp.status_code in (401, 403):
+            detail = resp.json().get("message", "unauthorized")
+            raise PermissionError(f"gitea api {path}: {detail}")
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise httpx.HTTPStatusError(
+                f"gitea api {path}: {resp.status_code} {resp.reason_phrase}",
+                request=exc.request,
+                response=exc.response,
+            ) from None
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise GiteaMutationOutcomeUnknown(
+                "gitea branch protection mutation returned an undecodable success response"
+            ) from exc
+        if not isinstance(data, dict):
+            raise GiteaMutationOutcomeUnknown(
+                "gitea branch protection mutation returned a non-object response"
+            )
+        return data
+
+    async def _delete_branch_protection(
+        self,
+        endpoint: str,
+        **path_params: Any,
+    ) -> bool:
+        """DELETE one exact rule. Return False only for an observed HTTP 404."""
+        if endpoint not in ALLOWED_BRANCH_PROTECTION_WRITE_ENDPOINTS:
+            raise ValueError(f"Branch protection endpoint not allowed: {endpoint}")
+        validate_repo_owner_or_name(path_params["owner"], label="owner")
+        validate_repo_owner_or_name(path_params["repo"], label="repo")
+        path_params = dict(path_params)
+        path_params["name"] = quote(
+            _validate_branch_protection_name(str(path_params.get("name") or "")),
+            safe="",
+        )
+        path = endpoint.format(**path_params)
+        resp = await self._client.delete(path)
+        if resp.status_code == 404:
+            return False
+        if resp.status_code in (401, 403):
+            detail = resp.json().get("message", "unauthorized")
+            raise PermissionError(f"gitea api {path}: {detail}")
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise httpx.HTTPStatusError(
+                f"gitea api {path}: {resp.status_code} {resp.reason_phrase}",
+                request=exc.request,
+                response=exc.response,
+            ) from None
+        return True
+
     async def _patch(
         self,
         endpoint: str,
@@ -672,6 +840,73 @@ class GiteaClient:
             owner=owner,
             repo=repo,
             branch=branch,
+        )
+
+    async def get_branch_protection(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        name: str,
+    ) -> dict[str, Any] | None:
+        """Get one exact protection rule, or None when it is absent."""
+        name = _validate_branch_protection_name(name)
+        return await self._get_optional_branch_protection(
+            "/repos/{owner}/{repo}/branch_protections/{name}",
+            owner=owner,
+            repo=repo,
+            name=name,
+        )
+
+    async def create_branch_protection(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        name: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Create one protection rule from an already-validated payload."""
+        name = _validate_branch_protection_name(name)
+        return await self._post_branch_protection(
+            "/repos/{owner}/{repo}/branch_protections",
+            {"rule_name": name, "branch_name": name, **payload},
+            owner=owner,
+            repo=repo,
+        )
+
+    async def update_branch_protection(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        name: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Update only caller-supplied fields on one existing rule."""
+        name = _validate_branch_protection_name(name)
+        return await self._patch_branch_protection(
+            "/repos/{owner}/{repo}/branch_protections/{name}",
+            payload,
+            owner=owner,
+            repo=repo,
+            name=name,
+        )
+
+    async def delete_branch_protection(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        name: str,
+    ) -> bool:
+        """Delete one exact rule; False means the server observed it absent."""
+        name = _validate_branch_protection_name(name)
+        return await self._delete_branch_protection(
+            "/repos/{owner}/{repo}/branch_protections/{name}",
+            owner=owner,
+            repo=repo,
+            name=name,
         )
 
     async def create_branch_at_ref(
