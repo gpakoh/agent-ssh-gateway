@@ -101,7 +101,7 @@ def _state() -> dict:
         "artifact_volume": ARTIFACT_VOLUME,
         "runtime_network": RUNTIME_NETWORK,
         "stability_seconds": 60,
-        "services": ["api", "telegram-worker", "telegram-scheduler"],
+        "services": ["api", "telegram-worker", "telegram-scheduler", "backup-worker"],
     }
 
 
@@ -247,6 +247,7 @@ async def test_content_harvester_confirmation_pins_binary_resources_and_topology
     pending = result["result"]
     assert pending["status"] == "confirmation_required"
     assert pending["risk"] == "high"
+    assert "four exact roles" in pending["summary"]
     import examples.mcp_server.server as srv
 
     action, _ = srv._confirm_store.peek_action_id(pending["action_id"])
@@ -260,7 +261,7 @@ async def test_content_harvester_confirmation_pins_binary_resources_and_topology
 
 
 @pytest.mark.asyncio
-async def test_content_harvester_happy_path_verifies_three_targets_and_resources(monkeypatch):
+async def test_content_harvester_happy_path_verifies_four_targets_and_resources(monkeypatch):
     client = FakeHarvesterClient([RunResult(_payload(), "", 0)])
     monkeypatch.setattr(
         docker_adapter,
@@ -290,7 +291,8 @@ async def test_content_harvester_happy_path_verifies_three_targets_and_resources
 
     assert result["ok"] is True
     assert result["result"]["reconciled_after_unknown"] is False
-    assert len(result["result"]["deployment"]["live"]) == 3
+    assert len(result["result"]["deployment"]["live"]) == 4
+    assert "content-harvester-backup-worker" in result["result"]["deployment"]["live"]
     assert result["result"]["target_image_id"] == TARGET_IMAGE_ID
     assert "expected_image_id" not in client.helper_calls[0]
     assert client.helper_calls[0]["recover"] is False
@@ -304,9 +306,24 @@ async def test_content_harvester_partial_prior_topology_fails_closed():
         "content-harvester-api": True,
         "content-harvester-telegram-worker": False,
         "content-harvester-telegram-scheduler": False,
+        "content-harvester-backup-worker": False,
     }
     with pytest.raises(RuntimeError, match="partial prior"):
         await docker_adapter._content_harvester_topology_fingerprint(client)
+
+
+def test_content_harvester_state_rejects_legacy_three_role_service_set():
+    state = _state()
+    state["services"] = ["api", "telegram-worker", "telegram-scheduler"]
+
+    with pytest.raises(RuntimeError, match="service set"):
+        docker_adapter._content_harvester_state(
+            state,
+            source_revision=HEAD,
+            target_image=TARGET_IMAGE,
+            artifact_volume=ARTIFACT_VOLUME,
+            runtime_network=RUNTIME_NETWORK,
+        )
 
 
 @pytest.mark.asyncio

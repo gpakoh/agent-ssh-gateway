@@ -129,6 +129,7 @@ _CONTENT_HARVESTER_TARGETS: tuple[tuple[str, str], ...] = (
     ("api", "content-harvester-api"),
     ("telegram-worker", "content-harvester-telegram-worker"),
     ("telegram-scheduler", "content-harvester-telegram-scheduler"),
+    ("backup-worker", "content-harvester-backup-worker"),
 )
 
 
@@ -1243,7 +1244,7 @@ async def _content_harvester_topology_fingerprint(client: Any) -> tuple[str, str
         return "absent", "sha256:" + hashlib.sha256(b"absent").hexdigest()
     if len(existing) != len(_CONTENT_HARVESTER_TARGETS):
         raise RuntimeError(
-            "partial prior Content Harvester topology is ambiguous; all three targets or none are required"
+            "partial prior Content Harvester topology is ambiguous; all guarded targets or none are required"
         )
 
     evidence: list[dict[str, Any]] = []
@@ -1431,7 +1432,8 @@ def _content_harvester_state(
     stability = state.get("stability_seconds")
     if not isinstance(stability, int) or isinstance(stability, bool) or not 1 <= stability <= 600:
         raise RuntimeError("Content Harvester deployment stability evidence is malformed")
-    if state.get("services") != ["api", "telegram-worker", "telegram-scheduler"]:
+    expected_services = [service for service, _container in _CONTENT_HARVESTER_TARGETS]
+    if state.get("services") != expected_services:
         raise RuntimeError("Content Harvester deployment service set changed")
     return state
 
@@ -2060,7 +2062,7 @@ async def docker_deploy_content_harvester(
     runtime_network: str,
     timeout: int = 720,
 ) -> dict[str, Any]:
-    """Prepare a guarded Content Harvester Telegram-canary three-role rollout."""
+    """Prepare a guarded Content Harvester Telegram-canary four-role rollout."""
     timeout = max(180, min(timeout, 900))
     try:
         plan = await _prepare_content_harvester_deploy(
@@ -2110,7 +2112,7 @@ async def docker_deploy_content_harvester(
         },
         (
             f"Deploy Content Harvester Telegram canary from {candidate_project}@"
-            f"{expected_head_sha[:12]} as three exact roles"
+            f"{expected_head_sha[:12]} as four exact roles"
         ),
         risk="high",
         required_scope="mcp:docker:admin",
