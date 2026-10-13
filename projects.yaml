@@ -597,3 +597,9 @@ projects:
     type: node-service
     description: "XLOUD — public product site for comprehensive website-audit service (xloud.ru)"
     tags: []
+
+  clicker_orchestrator:
+    root: clicker_orchestrator
+    type: python-service
+    description: "Clicker v2 orchestration baseline (private)"
+    tags: []
