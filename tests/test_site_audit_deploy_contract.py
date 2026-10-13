@@ -711,6 +711,134 @@ async def test_site_audit_confirmation_expires_fail_closed(monkeypatch):
     assert result["error"]["code"] == "CONFIRM_TOKEN_EXPIRED"
 
 
+class FakeSiteAuditStatusClient(FakeSiteAuditClient):
+    def __init__(self, payload: dict, state: dict | None = None) -> None:
+        super().__init__([], state=state)
+        self.status_payload = payload
+        self.status_calls: list[dict] = []
+
+    async def volume_metadata(self, volume: str) -> dict:
+        return {"Name": volume, "Driver": "local", "Options": {}}
+
+    async def container_image_id(self, container: str) -> str:
+        assert container == "mcp-oauth"
+        return HELPER_ID
+
+    async def read_site_audit_deploy_state(self, **kwargs) -> RunResult:
+        self.status_calls.append(kwargs)
+        return RunResult(json.dumps(self.status_payload), "", 0)
+
+
+@pytest.mark.asyncio
+async def test_site_audit_status_reads_durable_lkg_and_reverifies_live(monkeypatch):
+    state = _state()
+    state["untrusted_extra"] = "must-not-be-returned"
+    client = FakeSiteAuditStatusClient(
+        {
+            "version": 1,
+            "state_exists": True,
+            "pending_exists": False,
+            "state": state,
+        },
+        state=state,
+    )
+    monkeypatch.setattr(docker_adapter, "_docker_client", lambda: client)
+    sleep = AsyncMock()
+    monkeypatch.setattr(docker_adapter.asyncio, "sleep", sleep)
+
+    result = await docker_adapter.docker_site_audit_deploy_status()
+
+    assert result["ok"] is True
+    evidence = result["result"]
+    assert evidence["status"] == "accepted_lkg"
+    assert evidence["source_revision"] == HEAD
+    assert evidence["deploy_generation"] == GENERATION
+    assert evidence["stability_seconds"] == 90
+    assert evidence["crm_route_surface_verified"] is True
+    assert evidence["pending_exists"] is False
+    assert evidence["image_namespace"] == NAMESPACE
+    assert len(evidence["targets"]) == 5
+    assert len(evidence["protected"]) == 7
+    assert "untrusted_extra" not in json.dumps(evidence)
+    assert client.status_calls == [
+        {
+            "helper_image_id": HELPER_ID,
+            "state_volume": docker_adapter._SITE_AUDIT_STATE_VOLUME,
+        }
+    ]
+    sleep.assert_awaited_once_with(docker_adapter._SITE_AUDIT_VERIFY_STABILITY_SECONDS)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (
+            {"version": 1, "state_exists": True, "pending_exists": True, "state": _state()},
+            "pending deploy evidence",
+        ),
+        (
+            {"version": 1, "state_exists": False, "pending_exists": False, "state": {}},
+            "LKG state is missing or unsafe",
+        ),
+    ],
+)
+async def test_site_audit_status_fails_closed_without_accepted_durable_state(
+    monkeypatch, payload, message
+):
+    client = FakeSiteAuditStatusClient(payload)
+    monkeypatch.setattr(docker_adapter, "_docker_client", lambda: client)
+
+    result = await docker_adapter.docker_site_audit_deploy_status()
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "DEPLOY_CONTRACT_VERIFICATION_FAILED"
+    assert message in result["error"]["message"]
+    assert result["error"]["retryable"] is False
+
+
+@pytest.mark.asyncio
+async def test_site_audit_state_reader_is_fixed_read_only_and_has_no_docker_socket(monkeypatch):
+    client = DockerClient()
+    run = AsyncMock(return_value=RunResult('{"version":1}', "", 0))
+    monkeypatch.setattr(client, "_run_with_result", run)
+
+    await client.read_site_audit_deploy_state(
+        helper_image_id=HELPER_ID,
+        state_volume=docker_adapter._SITE_AUDIT_STATE_VOLUME,
+    )
+
+    argv = run.await_args.args[0]
+    assert argv[0] == "/usr/bin/docker"
+    assert argv[1:3] == ["run", "--rm"]
+    assert "--network" in argv
+    assert argv[argv.index("--network") + 1] == "none"
+    assert "--read-only" in argv
+    assert "/var/run/docker.sock" not in " ".join(argv)
+    mounts = [argv[i + 1] for i, value in enumerate(argv[:-1]) if value == "--mount"]
+    assert mounts == [
+        "type=volume,src="
+        + docker_adapter._SITE_AUDIT_STATE_VOLUME
+        + ",dst=/var/lib/site-audit-deploy-state,readonly"
+    ]
+    assert "python3" in argv
+    assert "deploy.json" in argv[-1]
+    assert "deploy.json.pending" in argv[-1]
+
+
+def test_site_audit_status_is_read_only_docker_surface():
+    from examples.mcp_server.tool_modes import (
+        MCP_CLIENT_BLOCKED_TOOLS,
+        TOOL_NAMES_BY_MODE,
+    )
+    from examples.mcp_server.tool_scopes import TOOL_SCOPES
+
+    tool = "docker_site_audit_deploy_status"
+    assert tool in TOOL_NAMES_BY_MODE["mcp_client"]
+    assert tool not in MCP_CLIENT_BLOCKED_TOOLS
+    assert TOOL_SCOPES[tool] == ["mcp:docker"]
+
+
 def test_site_audit_oauth_plane_wires_project_allowlist_and_durable_state_volume():
     compose = (
         Path(__file__).resolve().parents[1] / "docker" / "docker-compose.yml"
