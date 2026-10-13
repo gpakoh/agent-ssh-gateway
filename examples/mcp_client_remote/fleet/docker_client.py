@@ -1101,6 +1101,58 @@ class DockerClient:
         ]
         return await self._run_with_result(argv, timeout=float(timeout))
 
+    async def read_site_audit_deploy_state(
+        self,
+        *,
+        helper_image_id: str,
+        state_volume: str,
+    ) -> RunResult:
+        """Read the fixed Site Audit durable deploy state without host access.
+
+        The helper gets only the named deploy-state volume, mounted read-only.
+        It has no Docker socket, no network, and accepts no caller-controlled
+        path or command.  The MCP adapter performs schema and live-state
+        verification before exposing any evidence to callers.
+        """
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", helper_image_id):
+            raise ValueError("helper_image_id must be an immutable sha256 image ID")
+        self._validate_volume_name(state_volume)
+
+        state_root = "/var/lib/site-audit-deploy-state"
+        reader = (
+            "import json, stat; "
+            "from pathlib import Path; "
+            f"root=Path({state_root!r}); "
+            "state_path=root/'deploy.json'; pending_path=root/'deploy.json.pending'; "
+            "payload={'version':1,'state_exists':False,'pending_exists':pending_path.exists(),'state':{}}; "
+            "info=state_path.lstat() if state_path.exists() else None; "
+            "safe=info is not None and stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode); "
+            "payload['state_exists']=bool(safe); "
+            "payload['state']=json.loads(state_path.read_text(encoding='utf-8')) if safe else {}; "
+            "print(json.dumps(payload, sort_keys=True))"
+        )
+        argv = [
+            DOCKER_BIN,
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--user",
+            "0:0",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--read-only",
+            "--mount",
+            f"type=volume,src={state_volume},dst={state_root},readonly",
+            helper_image_id,
+            "python3",
+            "-c",
+            reader,
+        ]
+        return await self._run_with_result(argv, timeout=30.0)
+
     async def run_site_audit_deploy_contract_helper(
         self,
         *,

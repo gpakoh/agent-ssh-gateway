@@ -182,6 +182,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "docker_inspect": ["mcp:docker"],
     "docker_logs": ["mcp:docker"],
     "docker_stats": ["mcp:docker"],
+    "docker_site_audit_deploy_status": ["mcp:docker"],
     "docker_compose_ps": ["mcp:docker"],
     "docker_compose_services": ["mcp:docker"],
     # docker write operations (Session 160) — mcp:docker

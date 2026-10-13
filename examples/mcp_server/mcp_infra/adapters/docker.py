@@ -746,6 +746,49 @@ def _site_audit_target_images(
     }
 
 
+def _site_audit_lkg_target_images(
+    state: dict[str, Any],
+) -> tuple[str, str, dict[str, dict[str, str]]]:
+    """Derive the guarded image namespace from an LKG without caller input."""
+    source_revision = state.get("source_revision")
+    if not isinstance(source_revision, str) or not re.fullmatch(
+        r"[0-9a-f]{40}", source_revision
+    ):
+        raise RuntimeError("Site Audit LKG source revision is missing or malformed")
+    deployed = state.get("deployed")
+    if not isinstance(deployed, list) or len(deployed) != len(_SITE_AUDIT_TARGETS):
+        raise RuntimeError("Site Audit LKG must contain exactly five deployed targets")
+
+    by_service: dict[str, dict[str, Any]] = {}
+    for item in deployed:
+        if not isinstance(item, dict):
+            raise RuntimeError("Site Audit deployed target evidence is malformed")
+        service = item.get("service")
+        if not isinstance(service, str) or service in by_service:
+            raise RuntimeError("Site Audit deployed target service set is malformed")
+        by_service[service] = item
+
+    namespaces: set[str] = set()
+    for service, _container, image_name in _SITE_AUDIT_TARGETS:
+        item = by_service.get(service)
+        if item is None:
+            raise RuntimeError("Site Audit LKG service set differs from guarded contract")
+        image = item.get("image")
+        suffix = f"/{image_name}:{source_revision}"
+        if not isinstance(image, str) or not image.endswith(suffix):
+            raise RuntimeError("Site Audit LKG image reference differs from guarded contract")
+        namespace = image[: -len(suffix)]
+        if not namespace:
+            raise RuntimeError("Site Audit LKG image namespace is missing")
+        namespaces.add(namespace)
+    if len(namespaces) != 1:
+        raise RuntimeError("Site Audit LKG targets do not share one image namespace")
+
+    image_namespace = next(iter(namespaces))
+    target_images = _site_audit_target_images(image_namespace, source_revision)
+    return source_revision, image_namespace, target_images
+
+
 def _safe_regular_under(root: Path, relative_path: str, label: str) -> Path:
     path = root / relative_path
     try:
@@ -2353,6 +2396,85 @@ async def _docker_deploy_content_harvester_impl(
     )
 
 
+async def docker_site_audit_deploy_status() -> dict[str, Any]:
+    """Read and verify the durable Site Audit LKG against the live stack.
+
+    This surface is intentionally parameterless: it reads only the fixed
+    deploy-state volume used by the guarded Site Audit rollout contract.  The
+    volume is mounted read-only into an isolated helper with no Docker socket
+    and no network.  Raw state is never returned; only schema-validated,
+    live-verified acceptance evidence is exposed.
+    """
+    client = _docker_client()
+    try:
+        volume = await client.volume_metadata(_SITE_AUDIT_STATE_VOLUME)
+        if volume.get("Name") != _SITE_AUDIT_STATE_VOLUME:
+            raise RuntimeError("Site Audit deploy-state volume identity mismatch")
+        if volume.get("Driver") not in (None, "", "local"):
+            raise RuntimeError("Site Audit deploy-state volume driver is unsupported")
+        if volume.get("Options") not in (None, {}, []):
+            raise RuntimeError("Site Audit deploy-state volume has unsupported driver options")
+
+        helper_container = os.environ.get(
+            "MCP_DEPLOY_HELPER_CONTAINER", _DEPLOY_HELPER_CONTAINER
+        ).strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", helper_container):
+            raise RuntimeError("MCP_DEPLOY_HELPER_CONTAINER is invalid")
+        helper_image_id = await client.container_image_id(helper_container)
+        run = await client.read_site_audit_deploy_state(
+            helper_image_id=helper_image_id,
+            state_volume=_SITE_AUDIT_STATE_VOLUME,
+        )
+        if run.exit_code != 0:
+            raise RuntimeError("Site Audit durable deploy state could not be read safely")
+        try:
+            payload = json.loads((run.stdout or "").strip())
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Site Audit durable deploy state reader returned invalid evidence") from exc
+        if not isinstance(payload, dict) or payload.get("version") != 1:
+            raise RuntimeError("Site Audit durable deploy state reader schema is invalid")
+        if payload.get("pending_exists") is not False:
+            raise RuntimeError("Site Audit has unresolved pending deploy evidence")
+        if payload.get("state_exists") is not True:
+            raise RuntimeError("Site Audit durable LKG state is missing or unsafe")
+        state = payload.get("state")
+        if not isinstance(state, dict):
+            raise RuntimeError("Site Audit durable LKG state is malformed")
+        source_revision, image_namespace, target_images = _site_audit_lkg_target_images(state)
+        accepted = await _accept_site_audit_payload(
+            client,
+            payload={"pending_exists": False, "state": state},
+            source_revision=source_revision,
+            target_images=target_images,
+        )
+    except (ValueError, RuntimeError) as exc:
+        return tool_error(
+            tool="docker_site_audit_deploy_status",
+            code="DEPLOY_CONTRACT_VERIFICATION_FAILED",
+            message=str(exc),
+            source="docker",
+            retryable=False,
+            redacted=True,
+        )
+
+    return tool_success(
+        "docker_site_audit_deploy_status",
+        result={
+            "status": "accepted_lkg",
+            "source_revision": source_revision,
+            "deploy_generation": state["deploy_generation"],
+            "stability_seconds": state["stability_seconds"],
+            "crm_route_surface_verified": True,
+            "pending_exists": False,
+            "image_namespace": image_namespace,
+            "targets": accepted["live"]["targets"],
+            "protected": accepted["live"]["protected"],
+        },
+        source="docker",
+        redacted=True,
+    )
+
+
 async def docker_deploy_site_audit(
     candidate_project: str,
     expected_head_sha: str,
@@ -3557,6 +3679,7 @@ def register_all() -> None:
         "docker_rmi",
         "docker_volume_rm",
         "docker_deploy_contract",
+        "docker_site_audit_deploy_status",
         "docker_deploy_site_audit",
         "docker_deploy_content_harvester",
         "docker_migrate_content_harvester",

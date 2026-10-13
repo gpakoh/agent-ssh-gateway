@@ -138,6 +138,7 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "docker_inspect",
         "docker_logs",
         "docker_stats",
+        "docker_site_audit_deploy_status",
         "docker_compose_ps",
         "docker_compose_services",
         # "docker_start" deliberately absent: it has an impl function
