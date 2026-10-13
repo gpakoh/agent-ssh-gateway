@@ -628,8 +628,18 @@ def _gitea_branch_ci_policy_signature(
     if not isinstance(payload, dict):
         return None
     enabled = payload.get("enable_status_check")
+    if not isinstance(enabled, bool) or "status_check_contexts" not in payload:
+        return None
     contexts = payload.get("status_check_contexts")
-    if not isinstance(enabled, bool) or not isinstance(contexts, list):
+    # Gitea serializes disabled required checks on protected branches as
+    # `status_check_contexts: null`. Treat that explicit null as an empty set
+    # only while status checks are disabled; an enabled policy with no context
+    # list remains unprovable and therefore fails closed.
+    if contexts is None:
+        if enabled:
+            return None
+        contexts = []
+    if not isinstance(contexts, list):
         return None
     normalized: list[str] = []
     for context in contexts:

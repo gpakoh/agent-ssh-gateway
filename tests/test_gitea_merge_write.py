@@ -355,6 +355,11 @@ def test_configured_workflow_count_requires_consistent_signals(payload, expected
             {"enable_status_check": False, "status_check_contexts": []},
             "CI_POLICY_NO_REQUIRED_CHECKS",
         ),
+        (
+            {"enable_status_check": False, "status_check_contexts": None},
+            "CI_POLICY_NO_REQUIRED_CHECKS",
+        ),
+        ({"enable_status_check": True, "status_check_contexts": None}, "CI_POLICY_UNKNOWN"),
         ({"enable_status_check": False, "status_check_contexts": ["ci"]}, "CI_POLICY_UNKNOWN"),
         ({"enable_status_check": "false", "status_check_contexts": []}, "CI_POLICY_UNKNOWN"),
         ({"enable_status_check": False}, "CI_POLICY_UNKNOWN"),
@@ -877,7 +882,7 @@ async def test_adapter_allows_green_exact_head_when_branch_requires_no_status_ch
         "token",
         branch_policy_payload={
             "enable_status_check": False,
-            "status_check_contexts": [],
+            "status_check_contexts": None,
         },
     )
     monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
