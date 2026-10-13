@@ -258,6 +258,39 @@ def test_write_no_receipt_by_default():
 
 
 @requires_server
+def test_write_create_parents_passes_through():
+    mock_result = {
+        "project_id": "p",
+        "path": "nested/f.txt",
+        "size": 3,
+        "encoding": "utf-8",
+        "parent_creation": {
+            "requested": True,
+            "created": ["nested"],
+            "verified": True,
+        },
+    }
+    with patch(
+        "examples.mcp_server.server._get_workspace_registry"
+    ) as mock_reg, patch(
+        "app.workspace.edit.project_file_write",
+        return_value=mock_result,
+    ) as mock_fn:
+        mock_reg.return_value = MagicMock()
+        from examples.mcp_server.server import gateway_workspace_file_write
+
+        result = gateway_workspace_file_write(
+            project_id="p",
+            relative_path="nested/f.txt",
+            content="abc",
+            create_parents=True,
+        )
+    assert result["ok"] is True
+    assert mock_fn.call_args.kwargs["create_parents"] is True
+    assert result["result"]["parent_creation"]["verified"] is True
+
+
+@requires_server
 def test_edit_no_receipt_by_default():
     """workspace_file_edit without safe returns no receipt."""
     mock_result = {
@@ -662,6 +695,30 @@ def test_write_safe_error_returns_tool_error():
         )
     assert result["error"]["code"] == "TOOL_EXECUTION_FAILED"
     assert "disk full" in result["error"]["message"]
+
+
+@requires_server
+def test_write_missing_parent_returns_typed_diagnostic():
+    from app.workspace.edit import ParentMissingError
+
+    with patch(
+        "examples.mcp_server.server._get_workspace_registry"
+    ) as mock_reg, patch(
+        "app.workspace.edit.project_file_write",
+        side_effect=ParentMissingError("Parent directory does not exist"),
+    ):
+        mock_reg.return_value = MagicMock()
+        from examples.mcp_server.server import gateway_workspace_file_write
+
+        result = gateway_workspace_file_write(
+            project_id="p",
+            relative_path="nested/f.txt",
+            content="x",
+        )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "PARENT_MISSING"
+    assert result["error"]["retryable"] is False
+    assert "create_parents=true" in result["error"]["hint"]
 
 
 @requires_server

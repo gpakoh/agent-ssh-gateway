@@ -87,6 +87,17 @@ def _workspace_candidate_required(
 
 def _workspace_mutation_error(tool: str, exc: Exception) -> dict[str, Any]:
     """Classify workspace write failures without hiding the operator action."""
+    from app.workspace.edit import ParentMissingError
+
+    if isinstance(exc, ParentMissingError):
+        return tool_error(
+            tool=tool,
+            code="PARENT_MISSING",
+            message="Parent directory does not exist",
+            retryable=False,
+            hint="Retry workspace_file_write with create_parents=true after verifying the project-relative target path.",
+            source="gateway",
+        )
     if isinstance(exc, OSError) and exc.errno == errno.EROFS:
         return tool_error(
             tool=tool,
@@ -115,6 +126,7 @@ def gateway_workspace_file_write(
     content: str,
     max_bytes: int = 1_000_000,
     safe: bool = False,
+    create_parents: bool = False,
 ) -> dict[str, Any]:
     """Write (create or overwrite) a UTF-8 text file inside a project.
 
@@ -124,6 +136,8 @@ def gateway_workspace_file_write(
         content: UTF-8 text content to write.
         max_bytes: Maximum content size in bytes (default 1MB).
         safe: If True, include change receipt in response for rollback.
+        create_parents: If True, create a bounded missing parent chain inside
+            the registered project root. Defaults to False (fail closed).
 
     Returns:
         Contract v1 dict with project_id, path, size, encoding.
@@ -153,6 +167,7 @@ def gateway_workspace_file_write(
             max_bytes=max_bytes,
             registry=registry,
             safe=safe,
+            create_parents=create_parents,
         )
         return tool_success(tool="workspace_file_write", result=result)
     except Exception as exc:

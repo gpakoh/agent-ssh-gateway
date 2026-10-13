@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 # Default cap for write operations
 _WRITE_MAX_BYTES = 1_000_000
+_CREATE_PARENTS_MAX_DEPTH = 16
+_CREATE_PARENTS_MAX_COMPONENT_BYTES = 255
 
 
 # ── Exceptions ──────────────────────────────────────────────────
@@ -33,6 +35,10 @@ _WRITE_MAX_BYTES = 1_000_000
 
 class WriteError(WorkspacePolicyError):
     """Raised when a write operation fails due to content or policy."""
+
+
+class ParentMissingError(WriteError):
+    """Raised when a write target's parent is absent and creation is disabled."""
 
 
 # ── Shared helpers ───────────────────────────────────────────────
@@ -109,10 +115,67 @@ def _symlink_safe_preflight(target_path: Path, project_root: Path) -> None:
     partial = project_root
     for part in relative.parts:
         partial = partial / part
-        if partial.exists() and partial.is_symlink():
+        if partial.is_symlink():
             raise SymlinkEscapeError(
                 f"Symlink component rejected: .../{'/'.join(relative.parts)} is a symlink"
             )
+
+
+def _validate_parent_creation_parts(parts: tuple[str, ...]) -> None:
+    """Validate parent path shape without touching the filesystem."""
+    if len(parts) > _CREATE_PARENTS_MAX_DEPTH:
+        raise WriteError(
+            f"Parent path depth exceeds maximum of {_CREATE_PARENTS_MAX_DEPTH} components"
+        )
+    for part in parts:
+        if len(part.encode("utf-8")) > _CREATE_PARENTS_MAX_COMPONENT_BYTES:
+            raise WriteError(
+                "Parent path component exceeds maximum of "
+                f"{_CREATE_PARENTS_MAX_COMPONENT_BYTES} UTF-8 bytes"
+            )
+
+
+def _create_parent_directories(target_path: Path, project_root: Path) -> list[str]:
+    """Create a bounded missing parent chain below *project_root*.
+
+    The complete relative parent path is validated before the first mkdir so
+    invalid depth/name input cannot leave a partial directory tree behind.
+    Existing components must be real directories, never symlinks.
+    """
+    try:
+        relative_parent = target_path.parent.relative_to(project_root)
+    except ValueError as exc:
+        raise WorkspacePolicyError("Parent path is not under project root") from exc
+
+    parts = relative_parent.parts
+    _validate_parent_creation_parts(parts)
+
+    created: list[str] = []
+    current = project_root
+    for part in parts:
+        current = current / part
+        if current.is_symlink():
+            raise SymlinkEscapeError(
+                f"Symlink component rejected: .../{relative_parent.as_posix()} is a symlink"
+            )
+        if current.exists():
+            if not current.is_dir():
+                raise WriteError("Parent path component is not a directory")
+            continue
+        try:
+            current.mkdir(mode=0o755)
+        except FileExistsError:
+            if current.is_symlink() or not current.is_dir():
+                raise WriteError("Parent path changed during creation") from None
+        except OSError as exc:
+            safe_msg = getattr(exc, "strerror", None) or type(exc).__name__
+            raise WriteError(f"Parent directory creation failed: {safe_msg}") from exc
+        if current.is_symlink() or not current.is_dir():
+            raise WriteError("Parent directory creation could not be verified")
+        created.append(current.relative_to(project_root).as_posix())
+
+    _symlink_safe_preflight(target_path, project_root)
+    return created
 
 
 def _atomic_write(target_path: Path, content_bytes: bytes) -> None:
@@ -127,9 +190,7 @@ def _atomic_write(target_path: Path, content_bytes: bytes) -> None:
         WriteError: parent directory missing, write failed.
     """
     if not target_path.parent.exists():
-        raise WriteError(
-            "Parent directory does not exist"
-        )
+        raise ParentMissingError("Parent directory does not exist")
 
     # Unique, unpredictable name in the same directory
     unique_suffix = f".{uuid.uuid4().hex}.tmp"
@@ -191,6 +252,7 @@ def project_file_write(
     max_bytes: int = _WRITE_MAX_BYTES,
     registry: WorkspaceRegistry | None = None,
     safe: bool = False,
+    create_parents: bool = False,
 ) -> dict[str, Any]:
     """Write (create or overwrite) a UTF-8 text file inside a project.
 
@@ -201,6 +263,8 @@ def project_file_write(
         max_bytes: maximum allowed content size (default 1 MB).
         registry: optional WorkspaceRegistry instance.
         safe: if True, include change receipt in response.
+        create_parents: if True, create a bounded missing parent chain under
+            the registered project root. Defaults to False.
 
     Returns:
         Dict with project_id, path, size, encoding.
@@ -214,6 +278,9 @@ def project_file_write(
         TraversalError: path traversal detected.
         WorkspacePolicyError: path is a directory or parent dir missing.
     """
+    if create_parents:
+        _validate_parent_creation_parts(Path(relative_path).parent.parts)
+
     r = registry or get_registry()
     full = r._policy.validate_write(project_id, relative_path)
     project_root = r._policy._resolve_project_root(project_id)
@@ -235,6 +302,12 @@ def project_file_write(
     if b"\x00" in utf8_bytes:
         raise WriteError("Binary content is not allowed")
 
+    created_parent_directories: list[str] = []
+    if not full.parent.exists():
+        if not create_parents:
+            raise ParentMissingError("Parent directory does not exist")
+        created_parent_directories = _create_parent_directories(full, project_root)
+
     before_content = None
     if safe:
         from app.workspace.receipts import read_file_bytes
@@ -249,6 +322,15 @@ def project_file_write(
         "path": relative_path,
         "size": len(utf8_bytes),
         "encoding": "utf-8",
+        "parent_creation": {
+            "requested": create_parents,
+            "created": created_parent_directories,
+            "verified": all(
+                (project_root / relative_parent).is_dir()
+                and not (project_root / relative_parent).is_symlink()
+                for relative_parent in created_parent_directories
+            ),
+        },
         "post_write": _post_write_confirmation(
             project_id=project_id,
             relative_path=relative_path,
