@@ -15,11 +15,11 @@ Docker inventory scope), and #51 (verified-push ambiguous-outcome reconciliation
 Partial progress on still-open items remains recorded under those items rather
 than being treated as closure.
 
-Open backlog count after cleanup: **33**
+Open backlog count after cleanup: **34**
 
 - **P1 / critical:** 8
 - **P2 / important:** 16
-- **P3 / capability / wishlist:** 9
+- **P3 / capability / wishlist:** 10
 
 ## P1 / Critical blockers
 
@@ -725,3 +725,19 @@ Open backlog count after cleanup: **33**
     project-relative path validation, parent creation under policy, aggregate and
     per-file hashes, dry-run support and atomic/fail-closed semantics. Acceptance
     includes a ≥10-file bootstrap plus traversal/oversize/partial-failure tests.
+
+54. ⬜ **Recover and review the local Selenium session reaper before worktree cleanup.**
+   <!-- gateway-todo-key: local-selenium-session-reaper-unreviewed -->
+   **Severity:** P3
+
+   **Observed behavior:** A clean local-only historical worktree `/media/ssd120/tmp/opencode/asg-selenium-reaper` at `fix/selenium-session-reaper-20261003@4fc863ef` is reported to contain one unique commit touching only `examples/mcp_server/candidate_clone.py` and `tests/test_candidate_clone.py` (+236/-1). Current authoritative master has no `selenium`/`reap` match in `candidate_clone.py` and no Selenium match in `tests/test_candidate_clone.py`, so the change is not obviously absorbed. The historical worktree is outside the currently registered/allowlisted Gateway project root, so the supervisor cannot yet inspect its exact diff through the guarded project surface.
+
+   **Reproduction:** Read current `gpakoh/agent-ssh-gateway` master and search `examples/mcp_server/candidate_clone.py` for `selenium` and `reap`, and `tests/test_candidate_clone.py` for `selenium`; observe zero matches. Attempt read-only registration of the historical `/media/ssd120/tmp/opencode/asg-selenium-reaper` worktree through the current Gateway project root; observe that the external path is not available through the safe relative-root contract.
+
+   **Expected behavior:** Before any historical-worktree cleanup, make the exact `4fc863ef` patch available through a trusted read-only inspection path or otherwise preserve it immutably, review it against current master, and make an explicit evidence-backed decision to port, supersede, or reject it. Do not delete or mutate the original worktree while that decision is unresolved.
+
+   **Impact:** Without an explicit preservation/review step, a local-only reliability patch may be silently lost during workspace cleanup. Conversely, blindly cherry-picking it could reintroduce stale October assumptions into a substantially newer candidate/session implementation.
+
+   **Acceptance:** Obtain and hash the exact `4fc863ef` diff; verify its parent/base and changed-file scope; compare each behavioral hunk with current `candidate_clone.py` and current regression coverage; if still applicable, reimplement or port it on a fresh exact-current-master candidate with focused tests and normal PR/CI delivery; if superseded or invalid, record concrete current-master evidence proving why. Only after one of those terminal outcomes may the historical worktree be considered safe for deletion.
+
+   **Related evidence:** Historical local candidate: `asg-selenium-reaper`, branch `fix/selenium-session-reaper-20261003`, HEAD `4fc863ef`; reported unique scope `examples/mcp_server/candidate_clone.py` +81 and `tests/test_candidate_clone.py` +156. Current master at review start: `6bbcee7cac283868a61691674c48598010d75e4b`; current `candidate_clone.py` last-change blob `8a980c8ad3bc0a9d845b760c62e261508d08cf21`; guarded searches returned zero Selenium/reap matches on the cited current files.
