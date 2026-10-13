@@ -7,6 +7,7 @@ import stat
 import pytest
 
 from app.workspace.edit import (
+    ParentMissingError,
     PatchError,
     WriteError,
     _exact_read,
@@ -137,6 +138,88 @@ class TestFileWrite:
         )
         content = (edit_workspace["project"] / "README.md").read_text()
         assert content == "# New README\n"
+
+    def test_missing_parent_fails_closed_by_default(self, edit_workspace):
+        project = edit_workspace["project"]
+        with pytest.raises(ParentMissingError, match="Parent directory does not exist"):
+            project_file_write(
+                "edit-project",
+                "generated/nested/file.txt",
+                "content",
+                registry=edit_workspace["registry"],
+            )
+        assert not (project / "generated").exists()
+
+    def test_create_parents_builds_bounded_chain_and_reports_receipt(self, edit_workspace):
+        project = edit_workspace["project"]
+        result = project_file_write(
+            "edit-project",
+            "generated/nested/file.txt",
+            "content",
+            registry=edit_workspace["registry"],
+            create_parents=True,
+        )
+        assert (project / "generated" / "nested" / "file.txt").read_text() == "content"
+        assert result["parent_creation"] == {
+            "requested": True,
+            "created": ["generated", "generated/nested"],
+            "verified": True,
+        }
+        assert result["post_write"]["verified"] is True
+
+    def test_create_parents_rejects_excessive_depth_before_mutation(self, edit_workspace):
+        project = edit_workspace["project"]
+        parents = [f"p{i}" for i in range(17)]
+        relative_path = "/".join([*parents, "file.txt"])
+        with pytest.raises(WriteError, match="depth exceeds maximum"):
+            project_file_write(
+                "edit-project",
+                relative_path,
+                "content",
+                registry=edit_workspace["registry"],
+                create_parents=True,
+            )
+        assert not (project / "p0").exists()
+
+    def test_create_parents_rejects_oversized_component_before_mutation(self, edit_workspace):
+        project = edit_workspace["project"]
+        too_long = "x" * 256
+        with pytest.raises(WriteError, match="component exceeds maximum"):
+            project_file_write(
+                "edit-project",
+                f"{too_long}/file.txt",
+                "content",
+                registry=edit_workspace["registry"],
+                create_parents=True,
+            )
+        assert list(project.glob("x*")) == []
+
+    def test_create_parents_rejects_broken_symlink_parent(self, edit_workspace):
+        project = edit_workspace["project"]
+        broken = project / "generated"
+        broken.symlink_to(project / "does-not-exist", target_is_directory=True)
+        with pytest.raises(SymlinkEscapeError):
+            project_file_write(
+                "edit-project",
+                "generated/file.txt",
+                "content",
+                registry=edit_workspace["registry"],
+                create_parents=True,
+            )
+        assert broken.is_symlink()
+
+    def test_create_parents_keeps_traversal_policy_fail_closed(self, edit_workspace):
+        project = edit_workspace["project"]
+        with pytest.raises(WorkspacePolicyError, match="traversal"):
+            project_file_write(
+                "edit-project",
+                "generated/../escape.txt",
+                "content",
+                registry=edit_workspace["registry"],
+                create_parents=True,
+            )
+        assert not (project / "generated").exists()
+        assert not (edit_workspace["tmp_path"] / "escape.txt").exists()
 
     def test_content_exceeds_max_bytes(self, edit_workspace):
         with pytest.raises(WorkspacePolicyError, match="exceeds maximum"):
