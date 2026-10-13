@@ -1403,8 +1403,78 @@ def working_directory(client: GatewayClient, project: str) -> dict[str, Any]:
 
 
 
+def _makefile_target_uv_argv(
+    resolved: Path, target: str, tool_name: str
+) -> list[str] | None:
+    """Extract one simple repo-owned ``uv run`` recipe as executable argv.
+
+    This intentionally supports only a single direct recipe line. Complex make
+    recipes, variable expansion, pipelines and shell control operators are not
+    advertised because ``info()`` must return commands that callers can execute
+    verbatim without requiring ``make`` or re-interpreting project shell code.
+    """
+    target_pattern = re.compile(rf"^[ \t]*{re.escape(target)}[ \t]*:[^=\n]*$")
+    shell_tokens = {"&&", "||", ";", "|", ">", ">>", "<", "<<"}
+    for name in ("GNUmakefile", "Makefile", "makefile"):
+        makefile = resolved / name
+        if not makefile.is_file():
+            continue
+        try:
+            lines = makefile.read_text(encoding="utf-8")[:200_000].splitlines()
+        except OSError:
+            continue
+        for index, line in enumerate(lines):
+            if not target_pattern.match(line):
+                continue
+            recipes: list[str] = []
+            for following in lines[index + 1 :]:
+                if following.startswith("\t"):
+                    command = following[1:].strip()
+                    if command and not command.startswith("#"):
+                        recipes.append(command)
+                    continue
+                if not following.strip() or following.lstrip().startswith("#"):
+                    continue
+                break
+            if len(recipes) != 1:
+                return None
+            recipe = recipes[0]
+            if recipe.startswith("@"):
+                recipe = recipe[1:].lstrip()
+            try:
+                argv = shlex.split(recipe, posix=True)
+            except ValueError:
+                return None
+            if len(argv) < 3 or argv[:2] != ["uv", "run"]:
+                return None
+            if tool_name not in argv[2:]:
+                return None
+            if any(token in shell_tokens for token in argv):
+                return None
+            if any("$" in token or "`" in token for token in argv):
+                return None
+            return argv
+    return None
+
+
+def _mypy_config_has_files(parsed: dict[str, Any]) -> bool:
+    """Return True when [tool.mypy] owns the target set via ``files``."""
+    tool = parsed.get("tool")
+    if not isinstance(tool, dict):
+        return False
+    mypy = tool.get("mypy")
+    if not isinstance(mypy, dict):
+        return False
+    files = mypy.get("files")
+    if isinstance(files, str):
+        return bool(files.strip())
+    if isinstance(files, list):
+        return any(isinstance(item, str) and item.strip() for item in files)
+    return False
+
+
 def _project_verification_hints(resolved: Path) -> dict[str, Any]:
-    """Return host-path-free verification hints for agent/operator workflows."""
+    """Return host-path-free, verbatim-executable verification hints."""
     hints: dict[str, Any] = {
         "cwd": ".",
         "cwd_required": True,
@@ -1421,11 +1491,13 @@ def _project_verification_hints(resolved: Path) -> dict[str, Any]:
 
     content = raw_content.lower()
     has_dev_extra = False
+    parsed: dict[str, Any] = {}
     try:
         import tomllib
 
-        parsed = tomllib.loads(raw_content)
-        project = parsed.get("project") if isinstance(parsed, dict) else None
+        loaded = tomllib.loads(raw_content)
+        parsed = loaded if isinstance(loaded, dict) else {}
+        project = parsed.get("project")
         optional = (
             project.get("optional-dependencies")
             if isinstance(project, dict)
@@ -1443,8 +1515,45 @@ def _project_verification_hints(resolved: Path) -> dict[str, Any]:
         commands.append({"name": "pytest", "argv": [*base, "pytest"]})
     if "ruff" in content:
         commands.append({"name": "ruff", "argv": [*base, "ruff", "check"]})
-    if "mypy" in content:
-        commands.append({"name": "mypy", "argv": [*base, "mypy"]})
+    makefile_mypy_argv = _makefile_target_uv_argv(resolved, "mypy", "mypy")
+    if (
+        makefile_mypy_argv is not None
+        and has_dev_extra
+        and "--extra" not in makefile_mypy_argv
+        and "--all-extras" not in makefile_mypy_argv
+    ):
+        makefile_mypy_argv = [
+            *makefile_mypy_argv[:2],
+            "--extra",
+            "dev",
+            *makefile_mypy_argv[2:],
+        ]
+    if makefile_mypy_argv is not None:
+        commands.append(
+            {
+                "name": "mypy",
+                "argv": makefile_mypy_argv,
+                "contract_source": "Makefile:mypy",
+            }
+        )
+    elif "mypy" in content and _mypy_config_has_files(parsed):
+        commands.append(
+            {
+                "name": "mypy",
+                "argv": [*base, "mypy"],
+                "contract_source": "pyproject.toml:[tool.mypy].files",
+            }
+        )
+    elif "mypy" in content:
+        hints.setdefault("omitted_commands", []).append(
+            {
+                "name": "mypy",
+                "reason": (
+                    "mypy is configured/installed but no project-owned target set was found; "
+                    "not advertising a bare command that can fail with Missing target module/package/files"
+                ),
+            }
+        )
     hints["commands"] = commands
     return hints
 

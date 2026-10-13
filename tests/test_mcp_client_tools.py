@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -1069,11 +1070,157 @@ dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
         assert {command["name"] for command in verification["commands"]} == {
             "pytest",
             "ruff",
-            "mypy",
         }
         assert ["uv", "run", "--extra", "dev", "pytest"] in [
             command["argv"] for command in verification["commands"]
         ]
+        assert verification["omitted_commands"] == [
+            {
+                "name": "mypy",
+                "reason": (
+                    "mypy is configured/installed but no project-owned target set was found; "
+                    "not advertising a bare command that can fail with Missing target module/package/files"
+                ),
+            }
+        ]
+
+    def test_info_uses_repo_owned_makefile_mypy_target(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        (tmp_path / "pyproject.toml").write_text(
+            """
+[project]
+name = "demo"
+[project.optional-dependencies]
+dev = ["pytest", "ruff", "mypy"]
+""".strip(),
+            encoding="utf-8",
+        )
+        (tmp_path / "Makefile").write_text(
+            "mypy:\n\tuv run mypy app scripts tests\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+
+        result = mod.info(None, "demo")
+
+        mypy_command = next(
+            command
+            for command in result["verification"]["commands"]
+            if command["name"] == "mypy"
+        )
+        assert mypy_command == {
+            "name": "mypy",
+            "argv": ["uv", "run", "--extra", "dev", "mypy", "app", "scripts", "tests"],
+            "contract_source": "Makefile:mypy",
+        }
+        assert "omitted_commands" not in result["verification"]
+
+    def test_info_rejects_complex_makefile_mypy_recipe(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        (tmp_path / "pyproject.toml").write_text(
+            """
+[project]
+name = "demo"
+[project.optional-dependencies]
+dev = ["mypy"]
+""".strip(),
+            encoding="utf-8",
+        )
+        (tmp_path / "Makefile").write_text(
+            "mypy:\n\tuv run mypy app && echo unsafe-shell-tail\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+
+        result = mod.info(None, "demo")
+
+        assert not any(
+            command["name"] == "mypy"
+            for command in result["verification"]["commands"]
+        )
+        assert result["verification"]["omitted_commands"][0]["name"] == "mypy"
+
+    def test_info_uses_pyproject_mypy_files_when_make_target_is_absent(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        (tmp_path / "pyproject.toml").write_text(
+            """
+[project]
+name = "demo"
+[project.optional-dependencies]
+dev = ["pytest", "ruff", "mypy"]
+[tool.mypy]
+files = ["app", "scripts", "tests"]
+""".strip(),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+
+        result = mod.info(None, "demo")
+
+        mypy_command = next(
+            command
+            for command in result["verification"]["commands"]
+            if command["name"] == "mypy"
+        )
+        assert mypy_command == {
+            "name": "mypy",
+            "argv": ["uv", "run", "--extra", "dev", "mypy"],
+            "contract_source": "pyproject.toml:[tool.mypy].files",
+        }
+        assert "omitted_commands" not in result["verification"]
+
+    def test_every_advertised_verification_command_executes_verbatim_from_project_root(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        (tmp_path / "pyproject.toml").write_text(
+            """
+[project]
+name = "demo"
+[project.optional-dependencies]
+dev = ["pytest", "ruff", "mypy"]
+""".strip(),
+            encoding="utf-8",
+        )
+        (tmp_path / "Makefile").write_text(
+            "mypy:\n\tuv run mypy app scripts tests\n",
+            encoding="utf-8",
+        )
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        fake_uv = fake_bin / "uv"
+        fake_uv.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake_uv.chmod(0o755)
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+
+        result = mod.info(None, "demo")
+        commands = result["verification"]["commands"]
+        assert {command["name"] for command in commands} == {"pytest", "ruff", "mypy"}
+
+        env = dict(os.environ)
+        env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
+        for command in commands:
+            assert str(tmp_path) not in " ".join(command["argv"])
+            completed = subprocess.run(
+                command["argv"],
+                cwd=tmp_path,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            assert completed.returncode == 0, (
+                command["name"],
+                command["argv"],
+                completed.stdout,
+                completed.stderr,
+            )
 
     def test_info_does_not_invent_dev_extra_from_unrelated_text(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
