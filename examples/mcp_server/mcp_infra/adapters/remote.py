@@ -15,6 +15,8 @@ instance.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 import uuid
 from pathlib import Path
@@ -451,6 +453,140 @@ _GITEA_ACTIONS_SECRET_DESCRIPTION_PREFIX = "mcp-source-sha256:"
 _GITEA_CI_PAGE_LIMIT = 50
 _GITEA_CI_MAX_RUNS = 1000
 _GITEA_CI_MAX_PAGES = 20
+_GITEA_BRANCH_PROTECTION_MAX_CONTEXTS = 64
+_GITEA_BRANCH_PROTECTION_MAX_CONTEXT_LEN = 200
+_GITEA_BRANCH_PROTECTION_MAX_APPROVALS = 100
+_GITEA_BRANCH_PROTECTION_FIELDS = (
+    "enable_status_check",
+    "status_check_contexts",
+    "required_approvals",
+    "block_on_outdated_branch",
+    "block_on_rejected_reviews",
+    "block_admin_merge_override",
+)
+
+
+def _branch_protection_contexts(value: Any) -> list[str]:
+    if not isinstance(value, list) or len(value) > _GITEA_BRANCH_PROTECTION_MAX_CONTEXTS:
+        raise ValueError(
+            f"status_check_contexts must be a list of at most {_GITEA_BRANCH_PROTECTION_MAX_CONTEXTS} strings"
+        )
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in value:
+        if not isinstance(raw, str):
+            raise ValueError("status_check_contexts entries must be strings")
+        item = raw.strip()
+        if (
+            not item
+            or len(item) > _GITEA_BRANCH_PROTECTION_MAX_CONTEXT_LEN
+            or _contains_ascii_control(item)
+        ):
+            raise ValueError(
+                "status_check_contexts entries must be non-empty, bounded strings without controls"
+            )
+        if item in seen:
+            raise ValueError("status_check_contexts must not contain duplicates")
+        seen.add(item)
+        normalized.append(item)
+    return sorted(normalized)
+
+
+def _branch_protection_snapshot(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("Gitea branch protection response must be an object")
+    for field in (
+        "enable_status_check",
+        "block_on_outdated_branch",
+        "block_on_rejected_reviews",
+        "block_admin_merge_override",
+    ):
+        if not isinstance(payload.get(field), bool):
+            raise ValueError(f"Gitea branch protection {field} must be boolean")
+    approvals = payload.get("required_approvals")
+    if (
+        isinstance(approvals, bool)
+        or not isinstance(approvals, int)
+        or approvals < 0
+        or approvals > _GITEA_BRANCH_PROTECTION_MAX_APPROVALS
+    ):
+        raise ValueError("Gitea branch protection required_approvals is invalid")
+    rule_name = payload.get("rule_name")
+    branch_name = payload.get("branch_name")
+    if rule_name is not None and not isinstance(rule_name, str):
+        raise ValueError("Gitea branch protection rule_name must be string or null")
+    if branch_name is not None and not isinstance(branch_name, str):
+        raise ValueError("Gitea branch protection branch_name must be string or null")
+    return {
+        "rule_name": rule_name,
+        "branch_name": branch_name,
+        "enable_status_check": payload["enable_status_check"],
+        "status_check_contexts": _branch_protection_contexts(
+            payload.get("status_check_contexts")
+        ),
+        "required_approvals": approvals,
+        "block_on_outdated_branch": payload["block_on_outdated_branch"],
+        "block_on_rejected_reviews": payload["block_on_rejected_reviews"],
+        "block_admin_merge_override": payload["block_admin_merge_override"],
+    }
+
+
+def _branch_protection_state(payload: Any | None) -> dict[str, Any]:
+    if payload is None:
+        return {"exists": False, "protection": None}
+    return {"exists": True, "protection": _branch_protection_snapshot(payload)}
+
+
+def _branch_protection_state_sha256(state: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        state,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _desired_branch_protection_state(
+    *,
+    enable_status_check: bool,
+    status_check_contexts: list[str],
+    required_approvals: int,
+    block_on_outdated_branch: bool,
+    block_on_rejected_reviews: bool,
+    block_admin_merge_override: bool,
+) -> dict[str, Any]:
+    for field_name, value in (
+        ("enable_status_check", enable_status_check),
+        ("block_on_outdated_branch", block_on_outdated_branch),
+        ("block_on_rejected_reviews", block_on_rejected_reviews),
+        ("block_admin_merge_override", block_admin_merge_override),
+    ):
+        if not isinstance(value, bool):
+            raise ValueError(f"{field_name} must be boolean")
+    if (
+        isinstance(required_approvals, bool)
+        or not isinstance(required_approvals, int)
+        or required_approvals < 0
+        or required_approvals > _GITEA_BRANCH_PROTECTION_MAX_APPROVALS
+    ):
+        raise ValueError(
+            f"required_approvals must be an integer from 0 to {_GITEA_BRANCH_PROTECTION_MAX_APPROVALS}"
+        )
+    return {
+        "enable_status_check": enable_status_check,
+        "status_check_contexts": _branch_protection_contexts(status_check_contexts),
+        "required_approvals": required_approvals,
+        "block_on_outdated_branch": block_on_outdated_branch,
+        "block_on_rejected_reviews": block_on_rejected_reviews,
+        "block_admin_merge_override": block_admin_merge_override,
+    }
+
+
+def _branch_protection_matches(
+    snapshot: dict[str, Any], desired: dict[str, Any]
+) -> bool:
+    return all(snapshot.get(field) == desired[field] for field in _GITEA_BRANCH_PROTECTION_FIELDS)
 
 
 def _configured_workflow_count(payload: Any) -> int | None:
@@ -2373,6 +2509,599 @@ async def _reconcile_gitea_default_branch(
     if last_read_error_class:
         details["last_read_error_class"] = last_read_error_class
     return None, details
+
+
+async def _reconcile_gitea_branch_protection(
+    client: Any,
+    owner: str,
+    repo: str,
+    name: str,
+    *,
+    desired: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Boundedly prove desired protection state (None means absence)."""
+    attempts = 0
+    last_state: dict[str, Any] | None = None
+    last_read_error_class: str | None = None
+    for attempt in range(_GITEA_GOVERNANCE_RECONCILE_ATTEMPTS):
+        attempts = attempt + 1
+        try:
+            raw = await client.get_branch_protection(owner, repo, name=name)
+            state = _branch_protection_state(raw)
+        except Exception as exc:
+            last_read_error_class = type(exc).__name__
+        else:
+            last_state = state
+            if desired is None:
+                if state["exists"] is False:
+                    return state, {
+                        "reconciliation_attempts": attempts,
+                        "observed_state_sha256": _branch_protection_state_sha256(state),
+                    }
+            else:
+                protection = state.get("protection")
+                if isinstance(protection, dict) and _branch_protection_matches(
+                    protection, desired
+                ):
+                    return state, {
+                        "reconciliation_attempts": attempts,
+                        "observed_state_sha256": _branch_protection_state_sha256(state),
+                    }
+        if attempt + 1 < _GITEA_GOVERNANCE_RECONCILE_ATTEMPTS:
+            await asyncio.sleep(_GITEA_GOVERNANCE_RECONCILE_DELAY_SECONDS)
+    details: dict[str, Any] = {
+        "reconciliation_attempts": attempts,
+        "observed_state_sha256": (
+            _branch_protection_state_sha256(last_state)
+            if last_state is not None
+            else None
+        ),
+    }
+    if last_read_error_class:
+        details["last_read_error_class"] = last_read_error_class
+    return None, details
+
+
+def _validate_branch_protection_reason(reason: str) -> str:
+    reason = str(reason or "").strip()
+    if not reason or len(reason) > 500 or _contains_ascii_control(reason):
+        raise ValueError(
+            "reason must be 1..500 characters and contain no control characters"
+        )
+    return reason
+
+
+def _valid_branch_protection_state_sha256(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if len(text) != 64 or any(ch not in "0123456789abcdef" for ch in text):
+        return None
+    return text
+
+
+async def gitea_get_branch_protection(
+    owner: str,
+    repo: str,
+    name: str,
+) -> dict[str, Any]:
+    """Read one exact branch-protection rule as an absence-aware CAS snapshot."""
+    tool = "gitea_get_branch_protection"
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return tool_error(
+            tool=tool,
+            code="DEPENDENCY_MISSING",
+            message="GITEA_TOKEN not configured",
+            source="gitea",
+        )
+    try:
+        async with _server_gitea_client()(token) as client:
+            raw = await client.get_branch_protection(owner, repo, name=name)
+            state = _branch_protection_state(raw)
+    except Exception as exc:
+        return _remote_api_error(tool, "gitea", exc)
+    return tool_success(
+        tool,
+        result={
+            "owner": owner,
+            "repo": repo,
+            "name": name,
+            "state_sha256": _branch_protection_state_sha256(state),
+            "state": state,
+        },
+        source="gitea",
+    )
+
+
+async def gitea_set_branch_protection(
+    owner: str,
+    repo: str,
+    name: str,
+    expected_state_sha256: str,
+    enable_status_check: bool,
+    status_check_contexts: list[str],
+    required_approvals: int,
+    block_on_outdated_branch: bool,
+    block_on_rejected_reviews: bool,
+    block_admin_merge_override: bool,
+    reason: str,
+) -> dict[str, Any]:
+    """Create or update one protection rule under an exact state fingerprint lease."""
+    tool = "gitea_set_branch_protection"
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return tool_error(
+            tool=tool,
+            code="DEPENDENCY_MISSING",
+            message="GITEA_TOKEN not configured",
+            source="gitea",
+        )
+    expected_state_sha256 = _valid_branch_protection_state_sha256(
+        expected_state_sha256
+    ) or ""
+    if not expected_state_sha256:
+        return tool_error(
+            tool=tool,
+            code="INVALID_INPUT",
+            message="expected_state_sha256 must be an exact lowercase 64-hex SHA-256",
+            source="gitea",
+        )
+    try:
+        desired = _desired_branch_protection_state(
+            enable_status_check=enable_status_check,
+            status_check_contexts=status_check_contexts,
+            required_approvals=required_approvals,
+            block_on_outdated_branch=block_on_outdated_branch,
+            block_on_rejected_reviews=block_on_rejected_reviews,
+            block_admin_merge_override=block_admin_merge_override,
+        )
+        reason = _validate_branch_protection_reason(reason)
+    except ValueError as exc:
+        return _remote_api_error(tool, "gitea", exc)
+
+    audit_metadata: dict[str, Any] | None = None
+    mutation_error: BaseException | None = None
+    try:
+        async with _server_gitea_client()(token) as client:
+            metadata = await client.get_repo(owner, repo)
+            if metadata.get("archived") is True:
+                return tool_error(
+                    tool=tool,
+                    code="POLICY_DENIED",
+                    message="changing branch protection in an archived repository is not allowed",
+                    details={"mutation_occurred": False},
+                    source="gitea",
+                )
+            permissions = metadata.get("permissions") or {}
+            if not permissions.get("admin"):
+                return tool_error(
+                    tool=tool,
+                    code="AUTH_ERROR",
+                    message="Configured Gitea identity requires repository admin access",
+                    details={"mutation_occurred": False},
+                    source="gitea",
+                )
+
+            current_raw = await client.get_branch_protection(owner, repo, name=name)
+            current_state = _branch_protection_state(current_raw)
+            current_sha256 = _branch_protection_state_sha256(current_state)
+            if current_sha256 != expected_state_sha256:
+                return tool_error(
+                    tool=tool,
+                    code="PROTECTION_STATE_MISMATCH",
+                    message="branch-protection state changed; re-read its snapshot before retrying",
+                    retryable=True,
+                    details={
+                        "expected_state_sha256": expected_state_sha256,
+                        "observed_state_sha256": current_sha256,
+                        "mutation_occurred": False,
+                    },
+                    source="gitea",
+                )
+            current_protection = current_state.get("protection")
+            if isinstance(current_protection, dict) and _branch_protection_matches(
+                current_protection, desired
+            ):
+                return tool_success(
+                    tool,
+                    result={
+                        "owner": owner,
+                        "repo": repo,
+                        "name": name,
+                        "changed": False,
+                        "created": False,
+                        "already_desired": True,
+                        "state_sha256": current_sha256,
+                        "state": current_state,
+                        "verified": True,
+                    },
+                    source="gitea",
+                )
+
+            identity = await _require_gitea_identity(client)
+            if identity is None:
+                return tool_error(
+                    tool=tool,
+                    code="AUTH_ERROR",
+                    message="Authenticated Gitea identity and caller fingerprint are required",
+                    details={"mutation_occurred": False},
+                    source="gitea",
+                )
+            username, fingerprint = identity
+
+            fresh_raw = await client.get_branch_protection(owner, repo, name=name)
+            fresh_state = _branch_protection_state(fresh_raw)
+            fresh_sha256 = _branch_protection_state_sha256(fresh_state)
+            if fresh_sha256 != expected_state_sha256:
+                return tool_error(
+                    tool=tool,
+                    code="ADMIN_LEASE_CHANGED",
+                    message="branch-protection state changed during preflight",
+                    retryable=True,
+                    details={
+                        "expected_state_sha256": expected_state_sha256,
+                        "observed_state_sha256": fresh_sha256,
+                        "mutation_occurred": False,
+                    },
+                    source="gitea",
+                )
+
+            creating = fresh_state["exists"] is False
+            correlation_id = uuid.uuid4().hex
+            audit_metadata = {
+                "owner": owner,
+                "repo": repo,
+                "name": name,
+                "expected_state_sha256": expected_state_sha256,
+                "desired": desired,
+                "creating": creating,
+                "gitea_username": username,
+                "caller_fingerprint": fingerprint,
+                "correlation_id": correlation_id,
+            }
+            audit_logger = _get_gitea_audit_logger()
+            try:
+                audit_logger.append_required(
+                    McpAuditEvent(
+                        event_type="mcp.gitea_admin_intent",
+                        tool=tool,
+                        action="set_branch_protection",
+                        decision="allow",
+                        reason=reason,
+                        metadata=audit_metadata,
+                    )
+                )
+            except AuditWriteError:
+                return tool_error(
+                    tool=tool,
+                    code="AUDIT_UNAVAILABLE",
+                    message="Audit log unavailable; admin operation refused",
+                    details={"mutation_occurred": False},
+                    source="gitea",
+                )
+
+            try:
+                if creating:
+                    await client.create_branch_protection(
+                        owner,
+                        repo,
+                        name=name,
+                        payload=desired,
+                    )
+                else:
+                    await client.update_branch_protection(
+                        owner,
+                        repo,
+                        name=name,
+                        payload=desired,
+                    )
+            except asyncio.CancelledError as exc:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    current_task.uncancel()
+                mutation_error = exc
+            except Exception as exc:
+                if not _gitea_governance_exception_is_ambiguous(exc):
+                    raise
+                mutation_error = exc
+
+            confirmed_state, reconciliation = await _reconcile_gitea_branch_protection(
+                client,
+                owner,
+                repo,
+                name,
+                desired=desired,
+            )
+            if confirmed_state is None:
+                details: dict[str, Any] = {
+                    "owner": owner,
+                    "repo": repo,
+                    "name": name,
+                    "expected_state_sha256": expected_state_sha256,
+                    "mutation_started": True,
+                    "creating": creating,
+                    **reconciliation,
+                }
+                if mutation_error is not None:
+                    details["mutation_error_class"] = type(mutation_error).__name__
+                    if isinstance(mutation_error, httpx.HTTPStatusError):
+                        details["mutation_http_status"] = mutation_error.response.status_code
+                return tool_error(
+                    tool=tool,
+                    code="MUTATION_OUTCOME_UNKNOWN",
+                    message="branch-protection mutation was attempted but its desired postcondition could not be proven",
+                    retryable=False,
+                    hint="Do not replay blindly. Re-read the protection snapshot and reconcile its fingerprint first.",
+                    details=details,
+                    source="gitea",
+                )
+
+            confirmed_sha256 = _branch_protection_state_sha256(confirmed_state)
+            if audit_metadata is not None:
+                try:
+                    _get_gitea_audit_logger().append(
+                        McpAuditEvent(
+                            event_type="mcp.gitea_admin_success",
+                            tool=tool,
+                            action="set_branch_protection",
+                            decision="allow",
+                            reason=reason,
+                            metadata={
+                                **audit_metadata,
+                                "state_sha256": confirmed_sha256,
+                            },
+                        )
+                    )
+                except Exception:
+                    pass
+            data = {
+                "owner": owner,
+                "repo": repo,
+                "name": name,
+                "changed": True,
+                "created": creating,
+                "already_desired": False,
+                "previous_state_sha256": expected_state_sha256,
+                "state_sha256": confirmed_sha256,
+                "state": confirmed_state,
+                "verified": True,
+                "outcome": (
+                    "changed_after_ambiguous_response"
+                    if mutation_error is not None
+                    else "changed"
+                ),
+                "reconciliation_attempts": reconciliation["reconciliation_attempts"],
+            }
+    except Exception as exc:
+        return _remote_api_error(tool, "gitea", exc)
+    return tool_success(tool, result=data, source="gitea")
+
+
+async def gitea_delete_branch_protection(
+    owner: str,
+    repo: str,
+    name: str,
+    expected_state_sha256: str,
+    reason: str,
+) -> dict[str, Any]:
+    """Delete one existing protection rule under an exact state fingerprint lease."""
+    tool = "gitea_delete_branch_protection"
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return tool_error(
+            tool=tool,
+            code="DEPENDENCY_MISSING",
+            message="GITEA_TOKEN not configured",
+            source="gitea",
+        )
+    expected_state_sha256 = _valid_branch_protection_state_sha256(
+        expected_state_sha256
+    ) or ""
+    if not expected_state_sha256:
+        return tool_error(
+            tool=tool,
+            code="INVALID_INPUT",
+            message="expected_state_sha256 must be an exact lowercase 64-hex SHA-256",
+            source="gitea",
+        )
+    try:
+        reason = _validate_branch_protection_reason(reason)
+    except ValueError as exc:
+        return _remote_api_error(tool, "gitea", exc)
+
+    audit_metadata: dict[str, Any] | None = None
+    mutation_error: BaseException | None = None
+    try:
+        async with _server_gitea_client()(token) as client:
+            metadata = await client.get_repo(owner, repo)
+            if metadata.get("archived") is True:
+                return tool_error(
+                    tool=tool,
+                    code="POLICY_DENIED",
+                    message="changing branch protection in an archived repository is not allowed",
+                    details={"mutation_occurred": False},
+                    source="gitea",
+                )
+            permissions = metadata.get("permissions") or {}
+            if not permissions.get("admin"):
+                return tool_error(
+                    tool=tool,
+                    code="AUTH_ERROR",
+                    message="Configured Gitea identity requires repository admin access",
+                    details={"mutation_occurred": False},
+                    source="gitea",
+                )
+
+            current_raw = await client.get_branch_protection(owner, repo, name=name)
+            current_state = _branch_protection_state(current_raw)
+            current_sha256 = _branch_protection_state_sha256(current_state)
+            if current_sha256 != expected_state_sha256:
+                return tool_error(
+                    tool=tool,
+                    code="PROTECTION_STATE_MISMATCH",
+                    message="branch-protection state changed; re-read its snapshot before deleting",
+                    retryable=True,
+                    details={
+                        "expected_state_sha256": expected_state_sha256,
+                        "observed_state_sha256": current_sha256,
+                        "mutation_occurred": False,
+                    },
+                    source="gitea",
+                )
+            if current_state["exists"] is False:
+                return tool_success(
+                    tool,
+                    result={
+                        "owner": owner,
+                        "repo": repo,
+                        "name": name,
+                        "deleted": False,
+                        "already_absent": True,
+                        "state_sha256": current_sha256,
+                        "state": current_state,
+                        "verified": True,
+                    },
+                    source="gitea",
+                )
+
+            identity = await _require_gitea_identity(client)
+            if identity is None:
+                return tool_error(
+                    tool=tool,
+                    code="AUTH_ERROR",
+                    message="Authenticated Gitea identity and caller fingerprint are required",
+                    details={"mutation_occurred": False},
+                    source="gitea",
+                )
+            username, fingerprint = identity
+
+            fresh_raw = await client.get_branch_protection(owner, repo, name=name)
+            fresh_state = _branch_protection_state(fresh_raw)
+            fresh_sha256 = _branch_protection_state_sha256(fresh_state)
+            if fresh_sha256 != expected_state_sha256 or fresh_state["exists"] is False:
+                return tool_error(
+                    tool=tool,
+                    code="ADMIN_LEASE_CHANGED",
+                    message="branch-protection state changed during delete preflight",
+                    retryable=True,
+                    details={
+                        "expected_state_sha256": expected_state_sha256,
+                        "observed_state_sha256": fresh_sha256,
+                        "mutation_occurred": False,
+                    },
+                    source="gitea",
+                )
+
+            correlation_id = uuid.uuid4().hex
+            audit_metadata = {
+                "owner": owner,
+                "repo": repo,
+                "name": name,
+                "expected_state_sha256": expected_state_sha256,
+                "gitea_username": username,
+                "caller_fingerprint": fingerprint,
+                "correlation_id": correlation_id,
+            }
+            audit_logger = _get_gitea_audit_logger()
+            try:
+                audit_logger.append_required(
+                    McpAuditEvent(
+                        event_type="mcp.gitea_destructive_intent",
+                        tool=tool,
+                        action="delete_branch_protection",
+                        decision="allow",
+                        reason=reason,
+                        metadata=audit_metadata,
+                    )
+                )
+            except AuditWriteError:
+                return tool_error(
+                    tool=tool,
+                    code="AUDIT_UNAVAILABLE",
+                    message="Audit log unavailable; destructive operation refused",
+                    details={"mutation_occurred": False},
+                    source="gitea",
+                )
+
+            try:
+                await client.delete_branch_protection(owner, repo, name=name)
+            except asyncio.CancelledError as exc:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    current_task.uncancel()
+                mutation_error = exc
+            except Exception as exc:
+                if not _gitea_governance_exception_is_ambiguous(exc):
+                    raise
+                mutation_error = exc
+
+            confirmed_state, reconciliation = await _reconcile_gitea_branch_protection(
+                client,
+                owner,
+                repo,
+                name,
+                desired=None,
+            )
+            if confirmed_state is None:
+                details: dict[str, Any] = {
+                    "owner": owner,
+                    "repo": repo,
+                    "name": name,
+                    "expected_state_sha256": expected_state_sha256,
+                    "mutation_started": True,
+                    **reconciliation,
+                }
+                if mutation_error is not None:
+                    details["mutation_error_class"] = type(mutation_error).__name__
+                    if isinstance(mutation_error, httpx.HTTPStatusError):
+                        details["mutation_http_status"] = mutation_error.response.status_code
+                return tool_error(
+                    tool=tool,
+                    code="MUTATION_OUTCOME_UNKNOWN",
+                    message="branch-protection deletion was attempted but absence could not be proven",
+                    retryable=False,
+                    hint="Do not replay blindly. Re-read the protection snapshot until absence is authoritative.",
+                    details=details,
+                    source="gitea",
+                )
+
+            confirmed_sha256 = _branch_protection_state_sha256(confirmed_state)
+            if audit_metadata is not None:
+                try:
+                    _get_gitea_audit_logger().append(
+                        McpAuditEvent(
+                            event_type="mcp.gitea_destructive_success",
+                            tool=tool,
+                            action="delete_branch_protection",
+                            decision="allow",
+                            reason=reason,
+                            metadata={
+                                **audit_metadata,
+                                "state_sha256": confirmed_sha256,
+                            },
+                        )
+                    )
+                except Exception:
+                    pass
+            data = {
+                "owner": owner,
+                "repo": repo,
+                "name": name,
+                "deleted": True,
+                "already_absent": False,
+                "previous_state_sha256": expected_state_sha256,
+                "state_sha256": confirmed_sha256,
+                "state": confirmed_state,
+                "verified": True,
+                "outcome": (
+                    "deleted_after_ambiguous_response"
+                    if mutation_error is not None
+                    else "deleted"
+                ),
+                "reconciliation_attempts": reconciliation["reconciliation_attempts"],
+            }
+    except Exception as exc:
+        return _remote_api_error(tool, "gitea", exc)
+    return tool_success(tool, result=data, source="gitea")
 
 
 async def gitea_create_branch_at_sha(
@@ -5468,6 +6197,9 @@ def register_all() -> None:
     register_tool("gitea_delete_branch")(gitea_delete_branch)
     register_tool("gitea_create_branch_at_sha")(gitea_create_branch_at_sha)
     register_tool("gitea_set_default_branch")(gitea_set_default_branch)
+    register_tool("gitea_get_branch_protection")(gitea_get_branch_protection)
+    register_tool("gitea_set_branch_protection")(gitea_set_branch_protection)
+    register_tool("gitea_delete_branch_protection")(gitea_delete_branch_protection)
     register_tool("gitea_actions_secret_source_status")(gitea_actions_secret_source_status)
     register_tool("gitea_provision_actions_secret")(gitea_provision_actions_secret)
     register_tool("gitea_materialize_task_candidate")(gitea_materialize_task_candidate)
