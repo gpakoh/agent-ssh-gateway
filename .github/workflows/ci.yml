@@ -803,32 +803,32 @@ jobs:
       # `merge-multiple` inputs do not exist in v3, so each shard artifact is
       # fetched explicitly by name into one flat directory.
       - name: Download coverage data (shard 0)
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v8
         with:
           name: coverage-${{ matrix.python-version }}-0
           path: covdata
       - name: Download coverage data (shard 1)
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v8
         with:
           name: coverage-${{ matrix.python-version }}-1
           path: covdata
       - name: Download coverage data (shard 2)
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v8
         with:
           name: coverage-${{ matrix.python-version }}-2
           path: covdata
       - name: Download coverage data (shard 3)
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v8
         with:
           name: coverage-${{ matrix.python-version }}-3
           path: covdata
       - name: Download coverage data (shard 4)
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v8
         with:
           name: coverage-${{ matrix.python-version }}-4
           path: covdata
       - name: Download coverage data (shard 5)
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v8
         with:
           name: coverage-${{ matrix.python-version }}-5
           path: covdata
