@@ -146,6 +146,13 @@ _SITE_AUDIT_PROTECTED_CONTAINERS: tuple[str, ...] = (
     "site-audit-crm-daemon",
 )
 
+_TELEGRAM_STORAGE_SOURCE_PROJECT = "infra-quart"
+_TELEGRAM_STORAGE_SCRIPT_PATH = "scripts/deploy-telegram-storage-service.sh"
+_TELEGRAM_STORAGE_COMPOSE_PATH = "docker-compose.yml"
+_TELEGRAM_STORAGE_CONTAINER = "telegram-storage-service"
+_TELEGRAM_STORAGE_STATE_VOLUME = "ssh-gateway-telegram-storage-deploy-state"
+_TELEGRAM_STORAGE_VERIFY_STABILITY_SECONDS = 5
+
 _CONTENT_HARVESTER_SOURCE_PROJECT = "content-harvester-service"
 _CONTENT_HARVESTER_SCRIPT_PATH = "deploy-content-harvester.sh"
 _CONTENT_HARVESTER_STATE_VOLUME = "ssh-gateway-content-harvester-deploy-state"
@@ -1313,6 +1320,517 @@ async def _accept_site_audit_payload(
     if first != second:
         raise RuntimeError("Site Audit deployment changed during Gateway stability verification")
     return {"state": state, "live": second}
+
+
+def _telegram_storage_resource_fingerprint(metadata: dict[str, Any]) -> str:
+    stable = {
+        key: metadata.get(key)
+        for key in ("Name", "Driver", "Scope", "Options", "Labels")
+    }
+    raw = json.dumps(stable, sort_keys=True, separators=(",", ":"), default=str).encode()
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _telegram_storage_snapshot_fingerprint(snapshot: dict[str, Any]) -> str:
+    raw = json.dumps(snapshot, sort_keys=True, separators=(",", ":"), default=str).encode()
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _telegram_storage_validate_operator_env(env_file: Path) -> None:
+    try:
+        values = dotenv_values(dotenv_path=env_file, interpolate=False)
+    except Exception as exc:
+        raise ValueError("Telegram Storage operator env file could not be parsed") from exc
+    missing: list[str] = []
+    for key in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_STORAGE_API_TOKEN"):
+        value = values.get(key)
+        if not isinstance(value, str) or not value.strip():
+            missing.append(key)
+    chat_id = values.get("TELEGRAM_STORAGE_CHAT_ID")
+    if not isinstance(chat_id, str) or not chat_id.strip() or chat_id.strip() == "0":
+        missing.append("TELEGRAM_STORAGE_CHAT_ID")
+    if missing:
+        raise ValueError(
+            "Telegram Storage operator env is missing required readiness keys: "
+            + ", ".join(missing)
+        )
+
+
+async def _telegram_storage_read_state(
+    client: Any,
+    *,
+    helper_image_id: str,
+    state_volume: str,
+) -> tuple[dict[str, Any], str]:
+    run = await client.read_telegram_storage_deploy_state(
+        helper_image_id=helper_image_id,
+        state_volume=state_volume,
+    )
+    if run.exit_code != 0:
+        raise RuntimeError("Telegram Storage deploy state could not be read safely")
+    try:
+        payload = json.loads((run.stdout or "").strip())
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Telegram Storage deploy-state reader returned invalid evidence") from exc
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        raise RuntimeError("Telegram Storage deploy-state reader schema is invalid")
+    state_exists = payload.get("state_exists")
+    state = payload.get("state")
+    if not isinstance(state_exists, bool) or not isinstance(state, dict):
+        raise RuntimeError("Telegram Storage deploy-state reader evidence is malformed")
+    normalized: dict[str, Any] = {"state_exists": state_exists, "state": {}}
+    if state_exists:
+        image = state.get("telegram_storage_service_image")
+        deployed_at = state.get("deployed_at")
+        if not isinstance(image, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}", image
+        ):
+            raise RuntimeError("Telegram Storage LKG image reference is malformed")
+        if not isinstance(deployed_at, str) or not deployed_at.strip():
+            raise RuntimeError("Telegram Storage LKG deployed_at evidence is malformed")
+        normalized["state"] = {
+            "telegram_storage_service_image": image,
+            "deployed_at": deployed_at,
+        }
+    elif state:
+        raise RuntimeError("Telegram Storage absent deploy state contains unexpected evidence")
+    return normalized, _telegram_storage_snapshot_fingerprint(normalized)
+
+
+async def _telegram_storage_runtime_snapshot(client: Any) -> tuple[str, dict[str, Any], str]:
+    if not await client.container_exists(_TELEGRAM_STORAGE_CONTAINER):
+        snapshot: dict[str, Any] = {"mode": "absent"}
+        return "absent", snapshot, _telegram_storage_snapshot_fingerprint(snapshot)
+    inspected = _single_inspect(await client.inspect(_TELEGRAM_STORAGE_CONTAINER, max_lines=10))
+    runtime = inspected.get("State")
+    config = inspected.get("Config")
+    if not isinstance(runtime, dict) or not isinstance(config, dict):
+        raise RuntimeError("Telegram Storage runtime metadata is incomplete")
+    if runtime.get("Running") is not True:
+        raise RuntimeError("Telegram Storage prior container is not running")
+    image_id = inspected.get("Image")
+    config_image = config.get("Image")
+    if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+        raise RuntimeError("Telegram Storage prior image ID is malformed")
+    if not isinstance(config_image, str) or not config_image:
+        raise RuntimeError("Telegram Storage prior image reference is unavailable")
+    labels = config.get("Labels")
+    if not isinstance(labels, dict):
+        raise RuntimeError("Telegram Storage Compose labels are unavailable")
+    if labels.get("com.docker.compose.project") != "infra-quart":
+        raise RuntimeError("Telegram Storage Compose project identity mismatch")
+    if labels.get("com.docker.compose.service") != "telegram-storage-service":
+        raise RuntimeError("Telegram Storage Compose service identity mismatch")
+    config_hash = labels.get("com.docker.compose.config-hash")
+    if not isinstance(config_hash, str) or not config_hash:
+        raise RuntimeError("Telegram Storage Compose config hash is unavailable")
+    health = runtime.get("Health")
+    health_status = health.get("Status") if isinstance(health, dict) else None
+    snapshot = {
+        "mode": "present",
+        "container_id": inspected.get("Id"),
+        "image_id": image_id,
+        "image": config_image,
+        "restart_count": inspected.get("RestartCount"),
+        "started_at": runtime.get("StartedAt"),
+        "health": health_status,
+        "compose_config_hash": config_hash,
+    }
+    return "present", snapshot, _telegram_storage_snapshot_fingerprint(snapshot)
+
+
+def _telegram_storage_target_repo(script_text: str) -> str:
+    match = re.search(
+        r'^REPO="\$\{TELEGRAM_STORAGE_SERVICE_REPO:-([^}]+)\}"$',
+        script_text,
+        re.MULTILINE,
+    )
+    if match is None:
+        raise ValueError("Telegram Storage deploy script repository contract is unavailable")
+    repo = match.group(1)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", repo):
+        raise ValueError("Telegram Storage deploy script repository contract is invalid")
+    return repo
+
+
+def _telegram_storage_bootstrap_state(
+    *,
+    repo: str,
+    state: dict[str, Any],
+    prior_mode: str,
+    prior_runtime: dict[str, Any],
+) -> dict[str, str] | None:
+    if prior_mode != "present":
+        raise RuntimeError(
+            "Telegram Storage guarded rollout requires one existing live generation to preserve rollback evidence"
+        )
+    prior_image = prior_runtime.get("image")
+    prior_started_at = prior_runtime.get("started_at")
+    if not isinstance(prior_image, str) or not re.fullmatch(
+        re.escape(repo) + r"@sha256:[0-9a-f]{64}", prior_image
+    ):
+        raise RuntimeError("Telegram Storage prior live image is not an immutable repository digest")
+    if prior_runtime.get("health") != "healthy":
+        raise RuntimeError("Telegram Storage prior live generation is not Docker-healthy")
+    if not isinstance(prior_started_at, str) or not prior_started_at.strip():
+        raise RuntimeError("Telegram Storage prior live StartedAt evidence is unavailable")
+    if state["state_exists"]:
+        if state["state"].get("telegram_storage_service_image") != prior_image:
+            raise RuntimeError("Telegram Storage durable LKG differs from the live rollback generation")
+        return None
+    return {
+        "telegram_storage_service_image": prior_image,
+        "deployed_at": prior_started_at,
+    }
+
+
+async def _prepare_telegram_storage_deploy(
+    *,
+    candidate_project: str,
+    expected_head_sha: str,
+    expected_script_blob_sha: str,
+    expected_script_sha256: str,
+    target_image: str,
+) -> dict[str, Any]:
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_head_sha):
+        raise ValueError("expected_head_sha must be a 40-character lowercase SHA")
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_script_blob_sha):
+        raise ValueError("expected_script_blob_sha must be a 40-character lowercase SHA")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_script_sha256):
+        raise ValueError("expected_script_sha256 must be a 64-character lowercase SHA-256")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}", target_image):
+        raise ValueError("target_image must be an immutable digest reference")
+
+    registry = server_attr("_get_workspace_registry")()
+    candidate_info = registry.project_info(candidate_project)
+    candidate_root = _safe_registered_root(candidate_info, expected_type="candidate-clone")
+    metadata = _read_candidate_metadata(candidate_root)
+    if metadata.get("project_id") != candidate_project:
+        raise ValueError("candidate metadata project identity mismatch")
+    if metadata.get("source_project") != _TELEGRAM_STORAGE_SOURCE_PROJECT:
+        raise ValueError("candidate source project is not authorized for Telegram Storage deployment")
+    if metadata.get("head") != expected_head_sha or metadata.get("base_sha") != expected_head_sha:
+        raise ValueError("candidate metadata is not pinned to the expected Telegram Storage head")
+    if _git_capture(candidate_root, "rev-parse", "HEAD").lower() != expected_head_sha:
+        raise ValueError("candidate HEAD changed")
+    if _git_capture(candidate_root, "status", "--porcelain=v1", "--untracked-files=all"):
+        raise ValueError("candidate workspace must be clean")
+
+    script = _safe_regular_under(
+        candidate_root,
+        _TELEGRAM_STORAGE_SCRIPT_PATH,
+        "Telegram Storage deploy script",
+    )
+    blob_sha = _git_capture(
+        candidate_root,
+        "rev-parse",
+        f"{expected_head_sha}:{_TELEGRAM_STORAGE_SCRIPT_PATH}",
+    )
+    if blob_sha != expected_script_blob_sha:
+        raise ValueError("Telegram Storage deploy script Git blob identity mismatch")
+    if hashlib.sha256(script.read_bytes()).hexdigest() != expected_script_sha256:
+        raise ValueError("Telegram Storage deploy script SHA-256 identity mismatch")
+    try:
+        script_text = script.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ValueError("Telegram Storage deploy script is unreadable") from exc
+    for marker in (
+        "TELEGRAM_STORAGE_SERVICE_TARGET_IMAGE",
+        "TELEGRAM_STORAGE_OPERATOR_ENV_FILE",
+        "TELEGRAM_STORAGE_DEPLOY_STATE_DIR",
+        "preflight_backup_readiness_config",
+    ):
+        if marker not in script_text:
+            raise ValueError("Telegram Storage guarded deploy seam is missing")
+    repo = _telegram_storage_target_repo(script_text)
+    if not re.fullmatch(re.escape(repo) + r"@sha256:[0-9a-f]{64}", target_image):
+        raise ValueError("target_image must pin the Telegram Storage deploy repository")
+
+    compose_file = _safe_regular_under(
+        candidate_root,
+        _TELEGRAM_STORAGE_COMPOSE_PATH,
+        "Telegram Storage Compose desired state",
+    )
+    try:
+        compose_text = compose_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ValueError("Telegram Storage Compose desired state is unreadable") from exc
+    for marker in (
+        "telegram-storage-service:",
+        "TELEGRAM_STORAGE_API_TOKEN",
+        "http://localhost:8060/ready",
+    ):
+        if marker not in compose_text:
+            raise ValueError("Telegram Storage Compose readiness contract is incomplete")
+
+    operator_info = registry.project_info(_TELEGRAM_STORAGE_SOURCE_PROJECT)
+    operator_root = _safe_registered_root(operator_info)
+    client = _docker_client()
+    client._validate_project_dir(str(operator_root))
+    env_file = _safe_regular_under(operator_root, ".env", "Telegram Storage operator env file")
+    _telegram_storage_validate_operator_env(env_file)
+
+    state_volume = _TELEGRAM_STORAGE_STATE_VOLUME
+    client._validate_volume_name(state_volume)
+    volume = await client.volume_metadata(state_volume)
+    if volume.get("Name") != state_volume:
+        raise RuntimeError("Telegram Storage deploy-state volume identity mismatch")
+    if volume.get("Driver") not in (None, "", "local") or volume.get("Options") not in (
+        None,
+        {},
+        [],
+    ):
+        raise RuntimeError("Telegram Storage deploy-state volume is not a plain local volume")
+    volume_fingerprint = _telegram_storage_resource_fingerprint(volume)
+
+    helper_container = os.environ.get("MCP_DEPLOY_HELPER_CONTAINER", _DEPLOY_HELPER_CONTAINER).strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", helper_container):
+        raise ValueError("MCP_DEPLOY_HELPER_CONTAINER is invalid")
+    helper_image_id = await client.container_image_id(helper_container)
+    state, state_fingerprint = await _telegram_storage_read_state(
+        client,
+        helper_image_id=helper_image_id,
+        state_volume=state_volume,
+    )
+    prior_mode, prior_runtime, runtime_fingerprint = await _telegram_storage_runtime_snapshot(client)
+    bootstrap_state = _telegram_storage_bootstrap_state(
+        repo=repo,
+        state=state,
+        prior_mode=prior_mode,
+        prior_runtime=prior_runtime,
+    )
+
+    return {
+        "candidate_root": str(candidate_root),
+        "operator_root": str(operator_root),
+        "script_path": str(script),
+        "env_file": str(env_file),
+        "state_volume": state_volume,
+        "state_volume_fingerprint": volume_fingerprint,
+        "state_fingerprint": state_fingerprint,
+        "state": state,
+        "helper_image_id": helper_image_id,
+        "target_image": target_image,
+        "prior_mode": prior_mode,
+        "prior_runtime": prior_runtime,
+        "runtime_fingerprint": runtime_fingerprint,
+        "bootstrap_state": bootstrap_state,
+    }
+
+
+async def _verify_telegram_storage_live(
+    client: Any,
+    *,
+    target_image: str,
+) -> dict[str, Any]:
+    target_image_id = await client.image_id(target_image)
+    inspected = _single_inspect(await client.inspect(_TELEGRAM_STORAGE_CONTAINER, max_lines=10))
+    runtime = inspected.get("State")
+    config = inspected.get("Config")
+    if not isinstance(runtime, dict) or not isinstance(config, dict):
+        raise RuntimeError("Telegram Storage deployed container metadata is incomplete")
+    if runtime.get("Running") is not True:
+        raise RuntimeError("Telegram Storage deployed container is not running")
+    if inspected.get("Image") != target_image_id:
+        raise RuntimeError("Telegram Storage deployed image ID differs from target")
+    if config.get("Image") != target_image:
+        raise RuntimeError("Telegram Storage deployed image reference differs from target")
+    if inspected.get("RestartCount") != 0:
+        raise RuntimeError("Telegram Storage deployed container restarted after rollout")
+    health = runtime.get("Health")
+    if not isinstance(health, dict) or health.get("Status") != "healthy":
+        raise RuntimeError("Telegram Storage deployed container is not Docker-healthy")
+    labels = config.get("Labels")
+    if not isinstance(labels, dict):
+        raise RuntimeError("Telegram Storage deployed Compose labels are unavailable")
+    if labels.get("com.docker.compose.project") != "infra-quart":
+        raise RuntimeError("Telegram Storage deployed Compose project identity mismatch")
+    if labels.get("com.docker.compose.service") != "telegram-storage-service":
+        raise RuntimeError("Telegram Storage deployed Compose service identity mismatch")
+    config_hash = labels.get("com.docker.compose.config-hash")
+    if not isinstance(config_hash, str) or not config_hash:
+        raise RuntimeError("Telegram Storage deployed Compose config hash is unavailable")
+    return {
+        "container_id": inspected.get("Id"),
+        "image_id": target_image_id,
+        "image": target_image,
+        "restart_count": inspected.get("RestartCount"),
+        "started_at": runtime.get("StartedAt"),
+        "health": "healthy",
+        "compose_config_hash": config_hash,
+    }
+
+
+def _telegram_storage_helper_payload(
+    client: Any,
+    run: RunResult,
+) -> tuple[dict[str, Any] | None, str]:
+    try:
+        parsed = json.loads((run.stdout or "").strip())
+    except json.JSONDecodeError:
+        return None, _sanitize_deploy_tail(
+            client, (run.stdout or "") + "\n" + (run.stderr or "")
+        )
+    payload = parsed if isinstance(parsed, dict) else None
+    if payload is None:
+        return None, _sanitize_deploy_tail(
+            client, (run.stdout or "") + "\n" + (run.stderr or "")
+        )
+    return payload, _sanitize_deploy_tail(client, str(payload.get("output_tail") or ""))
+
+
+async def _docker_deploy_telegram_storage_contract_impl(
+    candidate_project: str,
+    expected_head_sha: str,
+    expected_script_blob_sha: str,
+    expected_script_sha256: str,
+    target_image: str,
+    state_volume: str,
+    state_volume_fingerprint: str,
+    state_fingerprint: str,
+    prior_mode: str,
+    runtime_fingerprint: str,
+    timeout: int = 300,
+) -> dict[str, Any]:
+    try:
+        plan = await _prepare_telegram_storage_deploy(
+            candidate_project=candidate_project,
+            expected_head_sha=expected_head_sha,
+            expected_script_blob_sha=expected_script_blob_sha,
+            expected_script_sha256=expected_script_sha256,
+            target_image=target_image,
+        )
+        confirmed = {
+            "state_volume": state_volume,
+            "state_volume_fingerprint": state_volume_fingerprint,
+            "state_fingerprint": state_fingerprint,
+            "prior_mode": prior_mode,
+            "runtime_fingerprint": runtime_fingerprint,
+        }
+        if any(plan[key] != value for key, value in confirmed.items()):
+            raise RuntimeError("Telegram Storage confirmation identities changed before execution")
+    except (ValueError, RuntimeError) as exc:
+        return tool_error(
+            tool="docker_deploy_contract",
+            code="DEPLOY_CONTRACT_PRECONDITION_FAILED",
+            message=str(exc),
+            source="docker",
+            retryable=False,
+        )
+
+    client = _docker_client()
+    run = await client.run_telegram_storage_deploy_contract_helper(
+        helper_image_id=plan["helper_image_id"],
+        candidate_root=plan["candidate_root"],
+        operator_root=plan["operator_root"],
+        script_path=plan["script_path"],
+        env_file=plan["env_file"],
+        state_volume=state_volume,
+        target_image=target_image,
+        bootstrap_image=(plan["bootstrap_state"] or {}).get("telegram_storage_service_image"),
+        bootstrap_deployed_at=(plan["bootstrap_state"] or {}).get("deployed_at"),
+        timeout=timeout,
+    )
+    payload, output_tail = _telegram_storage_helper_payload(client, run)
+    helper_exit = payload.get("exit_code") if isinstance(payload, dict) else None
+    if run.exit_code == -1 or helper_exit == 124:
+        return tool_error(
+            tool="docker_deploy_contract",
+            code="DEPLOY_CONTRACT_OUTCOME_AMBIGUOUS",
+            message="Telegram Storage deploy outcome is unknown after an execution timeout",
+            result={
+                "target_image": target_image,
+                "state_volume": state_volume,
+                "output_tail": output_tail,
+            },
+            source="docker",
+            retryable=False,
+            redacted=True,
+            hint="Do not retry deploy. Reconcile the exact live container and deploy-state volume against the original confirmation first.",
+        )
+    if run.exit_code != 0 or payload is None or helper_exit != 0:
+        return tool_error(
+            tool="docker_deploy_contract",
+            code=("DEPLOY_CONTRACT_EVIDENCE_INVALID" if payload is None else "DEPLOY_CONTRACT_FAILED"),
+            message=(
+                "Telegram Storage deploy helper returned invalid evidence"
+                if payload is None
+                else str(payload.get("error") or "Telegram Storage deploy contract failed")
+            ),
+            result={"output_tail": output_tail},
+            source="docker",
+            retryable=False,
+            redacted=True,
+        )
+
+    state = payload.get("state")
+    if not isinstance(state, dict) or state.get("telegram_storage_service_image") != target_image:
+        return tool_error(
+            tool="docker_deploy_contract",
+            code="DEPLOY_CONTRACT_EVIDENCE_INVALID",
+            message="Telegram Storage deploy helper returned mismatched LKG image evidence",
+            result={"output_tail": output_tail},
+            source="docker",
+            retryable=False,
+            redacted=True,
+        )
+    deployed_at = state.get("deployed_at")
+    if not isinstance(deployed_at, str) or not deployed_at.strip():
+        return tool_error(
+            tool="docker_deploy_contract",
+            code="DEPLOY_CONTRACT_EVIDENCE_INVALID",
+            message="Telegram Storage deploy helper returned invalid deployment timestamp evidence",
+            source="docker",
+            retryable=False,
+        )
+    try:
+        volume = await client.volume_metadata(state_volume)
+        if _telegram_storage_resource_fingerprint(volume) != state_volume_fingerprint:
+            raise RuntimeError("Telegram Storage deploy-state volume changed during rollout")
+        durable_state, _durable_state_fingerprint = await _telegram_storage_read_state(
+            client,
+            helper_image_id=plan["helper_image_id"],
+            state_volume=state_volume,
+        )
+        if (
+            durable_state.get("state_exists") is not True
+            or durable_state.get("state", {}).get("telegram_storage_service_image") != target_image
+            or durable_state.get("state", {}).get("deployed_at") != deployed_at
+        ):
+            raise RuntimeError("Telegram Storage durable deploy state differs from helper evidence")
+        first = await _verify_telegram_storage_live(client, target_image=target_image)
+        await asyncio.sleep(_TELEGRAM_STORAGE_VERIFY_STABILITY_SECONDS)
+        second = await _verify_telegram_storage_live(client, target_image=target_image)
+        if first != second:
+            raise RuntimeError("Telegram Storage deployment changed during Gateway stability verification")
+    except RuntimeError as exc:
+        return tool_error(
+            tool="docker_deploy_contract",
+            code="DEPLOY_CONTRACT_VERIFICATION_FAILED",
+            message=str(exc),
+            result={"output_tail": output_tail},
+            source="docker",
+            retryable=False,
+            redacted=True,
+        )
+    return tool_success(
+        "docker_deploy_contract",
+        result={
+            "source_head_sha": expected_head_sha,
+            "script_blob_sha": expected_script_blob_sha,
+            "script_sha256": expected_script_sha256,
+            "target_image": target_image,
+            "target_image_id": second["image_id"],
+            "state_volume": state_volume,
+            "stability_seconds": _TELEGRAM_STORAGE_VERIFY_STABILITY_SECONDS,
+            "deployment": second,
+            "deployed_at": deployed_at,
+            "output_tail": output_tail,
+        },
+        source="docker",
+        dangerous=True,
+        redacted=True,
+    )
 
 
 def _content_harvester_target_image(image_namespace: str, source_revision: str) -> str:
@@ -2857,6 +3375,58 @@ async def docker_deploy_contract(
     Git blob, script SHA-256, immutable local image and operator volume.
     """
     timeout = max(120, min(timeout, 600))
+    if contract == "telegram-storage":
+        try:
+            plan = await _prepare_telegram_storage_deploy(
+                candidate_project=candidate_project,
+                expected_head_sha=expected_head_sha,
+                expected_script_blob_sha=expected_script_blob_sha,
+                expected_script_sha256=expected_script_sha256,
+                target_image=target_image,
+            )
+        except ValueError as exc:
+            return tool_error(
+                tool="docker_deploy_contract",
+                code="INVALID_INPUT",
+                message=str(exc),
+                source="docker",
+                retryable=False,
+            )
+        except RuntimeError as exc:
+            return tool_error(
+                tool="docker_deploy_contract",
+                code="DEPLOY_CONTRACT_PRECONDITION_FAILED",
+                message=str(exc),
+                source="docker",
+                retryable=False,
+            )
+        action = _confirm_store().create_action(
+            "docker_deploy_contract",
+            {
+                "contract": contract,
+                "candidate_project": candidate_project,
+                "expected_head_sha": expected_head_sha,
+                "expected_script_blob_sha": expected_script_blob_sha,
+                "expected_script_sha256": expected_script_sha256,
+                "target_image": target_image,
+                "telegram_storage_confirmation": {
+                    "state_volume": plan["state_volume"],
+                    "state_volume_fingerprint": plan["state_volume_fingerprint"],
+                    "state_fingerprint": plan["state_fingerprint"],
+                    "prior_mode": plan["prior_mode"],
+                    "runtime_fingerprint": plan["runtime_fingerprint"],
+                },
+                "timeout": timeout,
+            },
+            (
+                f"Deploy contract {contract} from {candidate_project}@"
+                f"{expected_head_sha[:12]} to an exact image digest"
+            ),
+            risk="high",
+            required_scope="mcp:docker:admin",
+        )
+        return _confirmation_response(action)
+
     try:
         await _prepare_deploy_contract(
             contract=contract,
@@ -2913,8 +3483,53 @@ async def _docker_deploy_contract_impl(
     expected_script_sha256: str,
     target_image: str,
     timeout: int = 480,
+    telegram_storage_confirmation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Execute one confirmed deploy plan and return verified evidence."""
+    if contract == "telegram-storage":
+        if not isinstance(telegram_storage_confirmation, dict):
+            return tool_error(
+                tool="docker_deploy_contract",
+                code="DEPLOY_CONTRACT_PRECONDITION_FAILED",
+                message="Telegram Storage confirmation evidence is missing",
+                source="docker",
+                retryable=False,
+            )
+        required = {
+            "state_volume",
+            "state_volume_fingerprint",
+            "state_fingerprint",
+            "prior_mode",
+            "runtime_fingerprint",
+        }
+        if set(telegram_storage_confirmation) != required or not all(
+            isinstance(telegram_storage_confirmation[key], str)
+            and telegram_storage_confirmation[key]
+            for key in required
+        ):
+            return tool_error(
+                tool="docker_deploy_contract",
+                code="DEPLOY_CONTRACT_PRECONDITION_FAILED",
+                message="Telegram Storage confirmation evidence is malformed",
+                source="docker",
+                retryable=False,
+            )
+        return await _docker_deploy_telegram_storage_contract_impl(
+            candidate_project=candidate_project,
+            expected_head_sha=expected_head_sha,
+            expected_script_blob_sha=expected_script_blob_sha,
+            expected_script_sha256=expected_script_sha256,
+            target_image=target_image,
+            state_volume=telegram_storage_confirmation["state_volume"],
+            state_volume_fingerprint=telegram_storage_confirmation[
+                "state_volume_fingerprint"
+            ],
+            state_fingerprint=telegram_storage_confirmation["state_fingerprint"],
+            prior_mode=telegram_storage_confirmation["prior_mode"],
+            runtime_fingerprint=telegram_storage_confirmation["runtime_fingerprint"],
+            timeout=timeout,
+        )
+
     try:
         plan = await _prepare_deploy_contract(
             contract=contract,
