@@ -103,6 +103,62 @@ def _plan(*, state_volume_fingerprint: str = "sha256:volume") -> dict[str, objec
     }
 
 
+def test_operator_env_validation_ignores_unrelated_shared_env_syntax(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "UNRELATED='unterminated\n"
+        "export TELEGRAM_BOT_TOKEN='bot-token'\n"
+        "TELEGRAM_STORAGE_API_TOKEN=storage-token\n"
+        "TELEGRAM_STORAGE_CHAT_ID=-1001234567890\n",
+        encoding="utf-8",
+    )
+
+    docker_adapter._telegram_storage_validate_operator_env(env_file)
+
+
+def test_operator_env_validation_rejects_duplicate_required_assignment(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "TELEGRAM_BOT_TOKEN=first\n"
+        "TELEGRAM_BOT_TOKEN=second\n"
+        "TELEGRAM_STORAGE_API_TOKEN=storage-token\n"
+        "TELEGRAM_STORAGE_CHAT_ID=-1001234567890\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="TELEGRAM_BOT_TOKEN exactly once"):
+        docker_adapter._telegram_storage_validate_operator_env(env_file)
+
+
+@pytest.mark.parametrize(
+    ("assignment", "match"),
+    [
+        ("TELEGRAM_STORAGE_API_TOKEN=   ", "invalid TELEGRAM_STORAGE_API_TOKEN"),
+        ("TELEGRAM_STORAGE_CHAT_ID=0", "invalid TELEGRAM_STORAGE_CHAT_ID"),
+    ],
+)
+def test_operator_env_validation_rejects_invalid_required_value(
+    tmp_path: Path,
+    assignment: str,
+    match: str,
+) -> None:
+    env_file = tmp_path / ".env"
+    values = {
+        "TELEGRAM_BOT_TOKEN": "bot-token",
+        "TELEGRAM_STORAGE_API_TOKEN": "storage-token",
+        "TELEGRAM_STORAGE_CHAT_ID": "-1001234567890",
+    }
+    key, value = assignment.split("=", 1)
+    values[key] = value
+    env_file.write_text(
+        "\n".join(f"{name}={item}" for name, item in values.items()) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=match):
+        docker_adapter._telegram_storage_validate_operator_env(env_file)
+
+
 @pytest.mark.asyncio
 async def test_preflight_confirmation_uses_fixed_state_volume_and_exposes_no_operator_env(
     monkeypatch: pytest.MonkeyPatch,

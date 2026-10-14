@@ -24,6 +24,7 @@ import stat
 import subprocess
 import time as _time
 from collections.abc import Callable
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -1337,23 +1338,46 @@ def _telegram_storage_snapshot_fingerprint(snapshot: dict[str, Any]) -> str:
 
 
 def _telegram_storage_validate_operator_env(env_file: Path) -> None:
+    required = (
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_STORAGE_API_TOKEN",
+        "TELEGRAM_STORAGE_CHAT_ID",
+    )
+    required_pattern = re.compile(
+        r"^\s*(?:export\s+)?(TELEGRAM_BOT_TOKEN|TELEGRAM_STORAGE_API_TOKEN|TELEGRAM_STORAGE_CHAT_ID)\s*="
+    )
     try:
-        values = dotenv_values(dotenv_path=env_file, interpolate=False)
-    except Exception as exc:
-        raise ValueError("Telegram Storage operator env file could not be parsed") from exc
-    missing: list[str] = []
-    for key in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_STORAGE_API_TOKEN"):
-        value = values.get(key)
+        lines = env_file.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise ValueError("Telegram Storage operator env file is unreadable") from exc
+
+    assignments: dict[str, list[str]] = {key: [] for key in required}
+    for line in lines:
+        match = required_pattern.match(line)
+        if match is not None:
+            assignments[match.group(1)].append(line)
+
+    for key in required:
+        matches = assignments[key]
+        if len(matches) != 1:
+            raise ValueError(
+                f"Telegram Storage operator env must define {key} exactly once"
+            )
+        try:
+            parsed = dotenv_values(stream=StringIO(matches[0]), interpolate=False)
+        except Exception as exc:
+            raise ValueError(
+                f"Telegram Storage operator env has an invalid {key} assignment"
+            ) from exc
+        value = parsed.get(key)
         if not isinstance(value, str) or not value.strip():
-            missing.append(key)
-    chat_id = values.get("TELEGRAM_STORAGE_CHAT_ID")
-    if not isinstance(chat_id, str) or not chat_id.strip() or chat_id.strip() == "0":
-        missing.append("TELEGRAM_STORAGE_CHAT_ID")
-    if missing:
-        raise ValueError(
-            "Telegram Storage operator env is missing required readiness keys: "
-            + ", ".join(missing)
-        )
+            raise ValueError(
+                f"Telegram Storage operator env has an invalid {key} assignment"
+            )
+        if key == "TELEGRAM_STORAGE_CHAT_ID" and value.strip() == "0":
+            raise ValueError(
+                "Telegram Storage operator env has an invalid TELEGRAM_STORAGE_CHAT_ID assignment"
+            )
 
 
 async def _telegram_storage_read_state(
