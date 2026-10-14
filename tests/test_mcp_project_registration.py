@@ -303,6 +303,103 @@ def test_register_rejects_unknown_root_selector(registry_layout):
     assert result["error"]["code"] == "INVALID_INPUT"
 
 
+def test_supervisor_unregister_preserves_workspace_bytes_and_audits(
+    registry_layout, monkeypatch: pytest.MonkeyPatch
+):
+    config_dir, workspace_root, _initial = registry_layout
+    target = workspace_root / "historical"
+    target.mkdir()
+    marker = target / "dirty-evidence.txt"
+    marker.write_text("preserve me\n", encoding="utf-8")
+    registered = supervisor.supervisor_register_project(
+        "historical",
+        "historical",
+        project_type="historical-worktree",
+    )
+    assert registered["ok"] is True
+
+    events = []
+
+    class AuditLogger:
+        def append_required(self, event):
+            events.append(event)
+
+        def append(self, event):
+            events.append(event)
+
+    audit = AuditLogger()
+    monkeypatch.setattr(
+        supervisor,
+        "server_attr",
+        lambda name: (lambda: audit) if name == "get_audit_logger" else None,
+    )
+
+    result = supervisor.supervisor_unregister_project(
+        "historical",
+        "historical",
+        "historical-worktree",
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["already_absent"] is False
+    assert result["result"]["workspace_bytes_mutated"] is False
+    assert result["result"]["storage"] == "runtime_overlay"
+    assert result["result"]["cache_reset"] is True
+    assert marker.read_text(encoding="utf-8") == "preserve me\n"
+    runtime_path = resolve_runtime_registry_path(config_dir / "projects.yaml")
+    assert runtime_path is not None
+    overlay = yaml.safe_load(runtime_path.read_text(encoding="utf-8"))
+    assert "historical" not in (overlay.get("projects") or {})
+    assert [event.event_type for event in events] == [
+        "mcp.project_unregistration_intent",
+        "mcp.project_unregistration_success",
+    ]
+
+
+def test_supervisor_unregister_identity_mismatch_fails_closed(
+    registry_layout, monkeypatch: pytest.MonkeyPatch
+):
+    config_dir, workspace_root, _initial = registry_layout
+    target = workspace_root / "historical"
+    target.mkdir()
+    marker = target / "dirty-evidence.txt"
+    marker.write_text("preserve me\n", encoding="utf-8")
+    registered = supervisor.supervisor_register_project(
+        "historical",
+        "historical",
+        project_type="historical-worktree",
+    )
+    assert registered["ok"] is True
+
+    class AuditLogger:
+        def append_required(self, event):
+            del event
+
+        def append(self, event):
+            del event
+
+    audit = AuditLogger()
+    monkeypatch.setattr(
+        supervisor,
+        "server_attr",
+        lambda name: (lambda: audit) if name == "get_audit_logger" else None,
+    )
+
+    result = supervisor.supervisor_unregister_project(
+        "historical",
+        "wrong-root",
+        "historical-worktree",
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "WORKSPACE_CONTENDED"
+    assert marker.read_text(encoding="utf-8") == "preserve me\n"
+    runtime_path = resolve_runtime_registry_path(config_dir / "projects.yaml")
+    assert runtime_path is not None
+    overlay = yaml.safe_load(runtime_path.read_text(encoding="utf-8"))
+    assert "historical" in overlay["projects"]
+
+
 def test_unregister_does_not_treat_other_selector_prefix_as_descendant(registry_layout):
     config_dir, workspace_root, _initial = registry_layout
     named_root = config_dir.parent / "external-root"

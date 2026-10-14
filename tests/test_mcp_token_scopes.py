@@ -77,6 +77,15 @@ def test_supervisor_register_project_requires_admin_scope():
     assert has_required_scope(["mcp:read", "mcp:admin"], "supervisor_register_project")
 
 
+def test_supervisor_unregister_project_requires_admin_scope():
+    from examples.mcp_server.tool_scopes import get_required_scopes, has_required_scope
+
+    assert get_required_scopes("supervisor_unregister_project") == ["mcp:admin"]
+    assert not has_required_scope(["mcp:read"], "supervisor_unregister_project")
+    assert not has_required_scope(["mcp:project"], "supervisor_unregister_project")
+    assert has_required_scope(["mcp:admin"], "supervisor_unregister_project")
+
+
 def test_supervisor_register_project_fail_closed_for_unknown_tool():
     from examples.mcp_server.tool_scopes import FAIL_CLOSED_SCOPE, get_required_scopes
 
