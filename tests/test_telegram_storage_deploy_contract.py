@@ -115,10 +115,11 @@ async def test_preflight_confirmation_uses_fixed_state_volume_and_exposes_no_ope
         AsyncMock(return_value=_plan()),
     )
 
-    signature = inspect.signature(docker_adapter.docker_deploy_telegram_storage)
+    signature = inspect.signature(docker_adapter.docker_deploy_contract)
     assert "state_volume" not in signature.parameters
 
-    result = await docker_adapter.docker_deploy_telegram_storage(
+    result = await docker_adapter.docker_deploy_contract(
+        contract="telegram-storage",
         candidate_project="candidate-infra",
         expected_head_sha=HEAD,
         expected_script_blob_sha=BLOB,
@@ -129,16 +130,65 @@ async def test_preflight_confirmation_uses_fixed_state_volume_and_exposes_no_ope
     assert result["ok"] is True
     assert result["result"]["status"] == "confirmation_required"
     assert store.created is not None
+    assert store.created["tool"] == "docker_deploy_contract"
     assert store.created["risk"] == "high"
     assert store.created["required_scope"] == "mcp:docker:admin"
     action_kwargs = store.created["kwargs"]
     assert isinstance(action_kwargs, dict)
-    assert action_kwargs["state_volume"] == STATE_VOLUME
+    assert action_kwargs["contract"] == "telegram-storage"
+    confirmation = action_kwargs["telegram_storage_confirmation"]
+    assert isinstance(confirmation, dict)
+    assert confirmation["state_volume"] == STATE_VOLUME
     assert action_kwargs["target_image"] == TARGET_IMAGE
     serialized = json.dumps(action_kwargs, sort_keys=True)
     assert ".env" not in serialized
     assert "TELEGRAM_BOT_TOKEN" not in serialized
     assert "TELEGRAM_STORAGE_API_TOKEN" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_generic_contract_dispatch_preserves_telegram_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delegated = AsyncMock(return_value={"ok": True, "result": {"status": "accepted"}})
+    monkeypatch.setattr(
+        docker_adapter,
+        "_docker_deploy_telegram_storage_contract_impl",
+        delegated,
+    )
+    confirmation = {
+        "state_volume": STATE_VOLUME,
+        "state_volume_fingerprint": "sha256:volume",
+        "state_fingerprint": "sha256:state-before",
+        "prior_mode": "present",
+        "runtime_fingerprint": "sha256:runtime-before",
+    }
+
+    result = await docker_adapter._docker_deploy_contract_impl(
+        contract="telegram-storage",
+        candidate_project="candidate-infra",
+        expected_head_sha=HEAD,
+        expected_script_blob_sha=BLOB,
+        expected_script_sha256=SCRIPT_SHA256,
+        target_image=TARGET_IMAGE,
+        timeout=300,
+        telegram_storage_confirmation=confirmation,
+    )
+
+    assert result["ok"] is True
+    delegated.assert_awaited_once_with(
+        candidate_project="candidate-infra",
+        expected_head_sha=HEAD,
+        expected_script_blob_sha=BLOB,
+        expected_script_sha256=SCRIPT_SHA256,
+        target_image=TARGET_IMAGE,
+        state_volume=STATE_VOLUME,
+        state_volume_fingerprint="sha256:volume",
+        state_fingerprint="sha256:state-before",
+        prior_mode="present",
+        runtime_fingerprint="sha256:runtime-before",
+        timeout=300,
+    )
 
 
 def test_rollback_bootstrap_requires_immutable_healthy_live_generation() -> None:
@@ -216,7 +266,7 @@ async def test_confirmation_revalidates_runtime_and_state_before_helper(
     docker_client = AsyncMock()
     monkeypatch.setattr(docker_adapter, "_docker_client", lambda: docker_client)
 
-    result = await docker_adapter._docker_deploy_telegram_storage_impl(
+    result = await docker_adapter._docker_deploy_telegram_storage_contract_impl(
         candidate_project="candidate-infra",
         expected_head_sha=HEAD,
         expected_script_blob_sha=BLOB,
@@ -300,7 +350,7 @@ async def test_first_rollout_bootstraps_lkg_then_verifies_durable_and_live_state
     sleep = AsyncMock()
     monkeypatch.setattr(docker_adapter.asyncio, "sleep", sleep)
 
-    result = await docker_adapter._docker_deploy_telegram_storage_impl(
+    result = await docker_adapter._docker_deploy_telegram_storage_contract_impl(
         candidate_project="candidate-infra",
         expected_head_sha=HEAD,
         expected_script_blob_sha=BLOB,
@@ -342,7 +392,7 @@ async def test_timeout_is_ambiguous_and_never_marked_retryable(
     )
     monkeypatch.setattr(docker_adapter, "_docker_client", lambda: client)
 
-    result = await docker_adapter._docker_deploy_telegram_storage_impl(
+    result = await docker_adapter._docker_deploy_telegram_storage_contract_impl(
         candidate_project="candidate-infra",
         expected_head_sha=HEAD,
         expected_script_blob_sha=BLOB,

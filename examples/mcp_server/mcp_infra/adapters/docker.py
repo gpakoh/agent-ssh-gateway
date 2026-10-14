@@ -1679,71 +1679,7 @@ def _telegram_storage_helper_payload(
     return payload, _sanitize_deploy_tail(client, str(payload.get("output_tail") or ""))
 
 
-async def docker_deploy_telegram_storage(
-    candidate_project: str,
-    expected_head_sha: str,
-    expected_script_blob_sha: str,
-    expected_script_sha256: str,
-    target_image: str,
-    timeout: int = 300,
-) -> dict[str, Any]:
-    """Prepare a guarded Telegram Storage desired-state rollout.
-
-    ADMIN + DANGEROUS: the read-only preflight binds exact infra source/script,
-    immutable image digest, approved deploy-state volume/LKG and current live
-    runtime before returning one confirmation action.
-    """
-    timeout = max(120, min(timeout, 600))
-    try:
-        plan = await _prepare_telegram_storage_deploy(
-            candidate_project=candidate_project,
-            expected_head_sha=expected_head_sha,
-            expected_script_blob_sha=expected_script_blob_sha,
-            expected_script_sha256=expected_script_sha256,
-            target_image=target_image,
-        )
-    except ValueError as exc:
-        return tool_error(
-            tool="docker_deploy_telegram_storage",
-            code="INVALID_INPUT",
-            message=str(exc),
-            source="docker",
-            retryable=False,
-        )
-    except RuntimeError as exc:
-        return tool_error(
-            tool="docker_deploy_telegram_storage",
-            code="DEPLOY_CONTRACT_PRECONDITION_FAILED",
-            message=str(exc),
-            source="docker",
-            retryable=False,
-        )
-    action = _confirm_store().create_action(
-        "docker_deploy_telegram_storage",
-        {
-            "candidate_project": candidate_project,
-            "expected_head_sha": expected_head_sha,
-            "expected_script_blob_sha": expected_script_blob_sha,
-            "expected_script_sha256": expected_script_sha256,
-            "target_image": target_image,
-            "state_volume": plan["state_volume"],
-            "state_volume_fingerprint": plan["state_volume_fingerprint"],
-            "state_fingerprint": plan["state_fingerprint"],
-            "prior_mode": plan["prior_mode"],
-            "runtime_fingerprint": plan["runtime_fingerprint"],
-            "timeout": timeout,
-        },
-        (
-            f"Deploy Telegram Storage desired state from {candidate_project}@"
-            f"{expected_head_sha[:12]} to an exact image digest"
-        ),
-        risk="high",
-        required_scope="mcp:docker:admin",
-    )
-    return _confirmation_response(action)
-
-
-async def _docker_deploy_telegram_storage_impl(
+async def _docker_deploy_telegram_storage_contract_impl(
     candidate_project: str,
     expected_head_sha: str,
     expected_script_blob_sha: str,
@@ -1775,7 +1711,7 @@ async def _docker_deploy_telegram_storage_impl(
             raise RuntimeError("Telegram Storage confirmation identities changed before execution")
     except (ValueError, RuntimeError) as exc:
         return tool_error(
-            tool="docker_deploy_telegram_storage",
+            tool="docker_deploy_contract",
             code="DEPLOY_CONTRACT_PRECONDITION_FAILED",
             message=str(exc),
             source="docker",
@@ -1799,7 +1735,7 @@ async def _docker_deploy_telegram_storage_impl(
     helper_exit = payload.get("exit_code") if isinstance(payload, dict) else None
     if run.exit_code == -1 or helper_exit == 124:
         return tool_error(
-            tool="docker_deploy_telegram_storage",
+            tool="docker_deploy_contract",
             code="DEPLOY_CONTRACT_OUTCOME_AMBIGUOUS",
             message="Telegram Storage deploy outcome is unknown after an execution timeout",
             result={
@@ -1814,7 +1750,7 @@ async def _docker_deploy_telegram_storage_impl(
         )
     if run.exit_code != 0 or payload is None or helper_exit != 0:
         return tool_error(
-            tool="docker_deploy_telegram_storage",
+            tool="docker_deploy_contract",
             code=("DEPLOY_CONTRACT_EVIDENCE_INVALID" if payload is None else "DEPLOY_CONTRACT_FAILED"),
             message=(
                 "Telegram Storage deploy helper returned invalid evidence"
@@ -1830,7 +1766,7 @@ async def _docker_deploy_telegram_storage_impl(
     state = payload.get("state")
     if not isinstance(state, dict) or state.get("telegram_storage_service_image") != target_image:
         return tool_error(
-            tool="docker_deploy_telegram_storage",
+            tool="docker_deploy_contract",
             code="DEPLOY_CONTRACT_EVIDENCE_INVALID",
             message="Telegram Storage deploy helper returned mismatched LKG image evidence",
             result={"output_tail": output_tail},
@@ -1841,7 +1777,7 @@ async def _docker_deploy_telegram_storage_impl(
     deployed_at = state.get("deployed_at")
     if not isinstance(deployed_at, str) or not deployed_at.strip():
         return tool_error(
-            tool="docker_deploy_telegram_storage",
+            tool="docker_deploy_contract",
             code="DEPLOY_CONTRACT_EVIDENCE_INVALID",
             message="Telegram Storage deploy helper returned invalid deployment timestamp evidence",
             source="docker",
@@ -1869,7 +1805,7 @@ async def _docker_deploy_telegram_storage_impl(
             raise RuntimeError("Telegram Storage deployment changed during Gateway stability verification")
     except RuntimeError as exc:
         return tool_error(
-            tool="docker_deploy_telegram_storage",
+            tool="docker_deploy_contract",
             code="DEPLOY_CONTRACT_VERIFICATION_FAILED",
             message=str(exc),
             result={"output_tail": output_tail},
@@ -1878,7 +1814,7 @@ async def _docker_deploy_telegram_storage_impl(
             redacted=True,
         )
     return tool_success(
-        "docker_deploy_telegram_storage",
+        "docker_deploy_contract",
         result={
             "source_head_sha": expected_head_sha,
             "script_blob_sha": expected_script_blob_sha,
@@ -3439,6 +3375,58 @@ async def docker_deploy_contract(
     Git blob, script SHA-256, immutable local image and operator volume.
     """
     timeout = max(120, min(timeout, 600))
+    if contract == "telegram-storage":
+        try:
+            plan = await _prepare_telegram_storage_deploy(
+                candidate_project=candidate_project,
+                expected_head_sha=expected_head_sha,
+                expected_script_blob_sha=expected_script_blob_sha,
+                expected_script_sha256=expected_script_sha256,
+                target_image=target_image,
+            )
+        except ValueError as exc:
+            return tool_error(
+                tool="docker_deploy_contract",
+                code="INVALID_INPUT",
+                message=str(exc),
+                source="docker",
+                retryable=False,
+            )
+        except RuntimeError as exc:
+            return tool_error(
+                tool="docker_deploy_contract",
+                code="DEPLOY_CONTRACT_PRECONDITION_FAILED",
+                message=str(exc),
+                source="docker",
+                retryable=False,
+            )
+        action = _confirm_store().create_action(
+            "docker_deploy_contract",
+            {
+                "contract": contract,
+                "candidate_project": candidate_project,
+                "expected_head_sha": expected_head_sha,
+                "expected_script_blob_sha": expected_script_blob_sha,
+                "expected_script_sha256": expected_script_sha256,
+                "target_image": target_image,
+                "telegram_storage_confirmation": {
+                    "state_volume": plan["state_volume"],
+                    "state_volume_fingerprint": plan["state_volume_fingerprint"],
+                    "state_fingerprint": plan["state_fingerprint"],
+                    "prior_mode": plan["prior_mode"],
+                    "runtime_fingerprint": plan["runtime_fingerprint"],
+                },
+                "timeout": timeout,
+            },
+            (
+                f"Deploy contract {contract} from {candidate_project}@"
+                f"{expected_head_sha[:12]} to an exact image digest"
+            ),
+            risk="high",
+            required_scope="mcp:docker:admin",
+        )
+        return _confirmation_response(action)
+
     try:
         await _prepare_deploy_contract(
             contract=contract,
@@ -3495,8 +3483,53 @@ async def _docker_deploy_contract_impl(
     expected_script_sha256: str,
     target_image: str,
     timeout: int = 480,
+    telegram_storage_confirmation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Execute one confirmed deploy plan and return verified evidence."""
+    if contract == "telegram-storage":
+        if not isinstance(telegram_storage_confirmation, dict):
+            return tool_error(
+                tool="docker_deploy_contract",
+                code="DEPLOY_CONTRACT_PRECONDITION_FAILED",
+                message="Telegram Storage confirmation evidence is missing",
+                source="docker",
+                retryable=False,
+            )
+        required = {
+            "state_volume",
+            "state_volume_fingerprint",
+            "state_fingerprint",
+            "prior_mode",
+            "runtime_fingerprint",
+        }
+        if set(telegram_storage_confirmation) != required or not all(
+            isinstance(telegram_storage_confirmation[key], str)
+            and telegram_storage_confirmation[key]
+            for key in required
+        ):
+            return tool_error(
+                tool="docker_deploy_contract",
+                code="DEPLOY_CONTRACT_PRECONDITION_FAILED",
+                message="Telegram Storage confirmation evidence is malformed",
+                source="docker",
+                retryable=False,
+            )
+        return await _docker_deploy_telegram_storage_contract_impl(
+            candidate_project=candidate_project,
+            expected_head_sha=expected_head_sha,
+            expected_script_blob_sha=expected_script_blob_sha,
+            expected_script_sha256=expected_script_sha256,
+            target_image=target_image,
+            state_volume=telegram_storage_confirmation["state_volume"],
+            state_volume_fingerprint=telegram_storage_confirmation[
+                "state_volume_fingerprint"
+            ],
+            state_fingerprint=telegram_storage_confirmation["state_fingerprint"],
+            prior_mode=telegram_storage_confirmation["prior_mode"],
+            runtime_fingerprint=telegram_storage_confirmation["runtime_fingerprint"],
+            timeout=timeout,
+        )
+
     try:
         plan = await _prepare_deploy_contract(
             contract=contract,
@@ -3679,7 +3712,6 @@ _CONFIRM_HANDLERS: dict[str, Callable[..., Any]] = {
     "docker_volume_rm": _docker_volume_rm_impl,
     "docker_deploy_contract": _docker_deploy_contract_impl,
     "docker_deploy_site_audit": _docker_deploy_site_audit_impl,
-    "docker_deploy_telegram_storage": _docker_deploy_telegram_storage_impl,
     "docker_deploy_content_harvester": _docker_deploy_content_harvester_impl,
     "docker_migrate_content_harvester": _docker_migrate_content_harvester_impl,
 }
@@ -4364,7 +4396,6 @@ def register_all() -> None:
         "docker_deploy_contract",
         "docker_site_audit_deploy_status",
         "docker_deploy_site_audit",
-        "docker_deploy_telegram_storage",
         "docker_deploy_content_harvester",
         "docker_migrate_content_harvester",
         "confirm_operation",
