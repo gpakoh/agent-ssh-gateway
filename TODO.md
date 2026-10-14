@@ -1,6 +1,6 @@
 # Agent SSH Gateway — TODO
 
-Last reconciled: 2026-10-13.
+Last reconciled: 2026-10-14.
 
 This file is the active backlog only. Completed audit notes, fixed CI blockers,
 merged PR evidence, and superseded diagnostics should live in PR history,
@@ -236,25 +236,38 @@ Open backlog count after cleanup: **34**
    and not independently verified. Keep #6 open for complete schema parity,
    including optional arguments and a proven long-lived refresh/rebind path.
 
-   **2026-10-14 Site Audit launch reproducer:** authoritative live Gateway
-   `mcp_client_write` reports 151 tools and includes
-   `docker_site_audit_deploy_status`, `gitea_get_branch_protection`,
-   `gitea_set_branch_protection` and `gitea_delete_branch_protection`, while the
-   attached ChatGPT `api_tool` catalog remains pinned to the older 147-tool
-   snapshot and omits exactly those four callable schemas. Repeated
-   `notifications/tools/list_changed` plus immediate rediscovery do not update
-   this attached catalog. This now blocks Site Audit's final durable accepted-LKG
-   proof for exact release `b5f3ecbac2b36a6510ac5f12b4b7f5fb106bfa07` and
-   therefore intentionally blocks canonical `main` creation/default-branch
-   cutover despite healthy exact-b5 runtime evidence. Closure for #6 must prove a
-   fresh/rebound external catalog exposes all 151 current schemas and directly
-   invokes `docker_site_audit_deploy_status`; do not add a Gateway call-by-name,
-   generic Docker/Git/state-volume bypass, or duplicate reader registration.
-   Related evidence: Site Audit PR #143 head `e324f310b04aa2ef4dfb56289b00564dd601c2ec`
-   with green exact-head CI; Gateway live toolset hash
-   `sha256:f9ee11f3310547f8f54f192364f55d6b819eb4405178608086444128e2b85f79`
-   at 151 tools; previously qualified live build
-   `2ba0ee654bcab1b84135ee364d4ea7d665c0e603`.
+   **2026-10-14 Site Audit launch reproducer, refreshed after qualified Gateway redeploy:**
+   the previous 151-tool observation is superseded by qualified
+   `master@be682cbd257f2b503fd26832bc346061f283302b`; post-merge push run
+   #16785 completed successfully. The authoritative live `mcp_client_write`
+   manifest now reports **152** registered tools with toolset hash
+   `sha256:0f5ea0615d562bad9520a41fe8062a8fb7ed9db7b80a54b7576430f62369521f`.
+   It includes `docker_site_audit_deploy_status`,
+   `gitea_get_branch_protection`, `gitea_set_branch_protection` and
+   `gitea_delete_branch_protection` as enabled/available, and a fresh
+   `notifications/tools/list_changed` signal was emitted for that current hash.
+   Immediately afterward the attached ChatGPT external resource catalog still
+   returned no callable definition for exact path
+   `SSH_Gateway/docker_site_audit_deploy_status`. This reproduces the parity
+   failure after a new qualified Gateway build and a fresh standard refresh
+   signal, narrowing the remaining blocker to the external ChatGPT/App catalog
+   snapshot rather than Gateway registration, deployment or FastMCP lifecycle.
+
+   The missing reader still blocks Site Audit's final durable accepted-LKG proof
+   for exact release `b5f3ecbac2b36a6510ac5f12b4b7f5fb106bfa07` and therefore
+   intentionally blocks canonical `main` creation/default-branch cutover despite
+   healthy exact-b5 runtime/CI evidence. Closure for #6 must prove a fresh or
+   correctly invalidated external catalog exposes the current callable schema and
+   directly invokes `docker_site_audit_deploy_status` successfully; obtain a
+   complete external catalog report as part of parity acceptance. Do not add a
+   Gateway call-by-name proxy, generic Docker/Git/state-volume bypass, duplicate
+   reader registration, or plugin-version cache-bust workaround.
+
+   Related evidence: Site Audit PR #143 head
+   `e324f310b04aa2ef4dfb56289b00564dd601c2ec` with green exact-head CI;
+   Gateway qualified run #16785 on
+   `be682cbd257f2b503fd26832bc346061f283302b`; current live toolset hash
+   `sha256:0f5ea0615d562bad9520a41fe8062a8fb7ed9db7b80a54b7576430f62369521f`.
 
 7. ⬜ **Reconcile Gitea Actions lifecycle, stranded jobs and cancellable runs.**
    CI runs/jobs can remain `waiting` / `in_progress` after all useful work is
