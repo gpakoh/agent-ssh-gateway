@@ -400,6 +400,67 @@ class RemoteRefProbe:
     sha: str | None = None
 
 
+@dataclass(frozen=True)
+class RemoteDefaultHeadProbe:
+    status: RemoteRefStatus
+    branch: str | None = None
+    sha: str | None = None
+
+
+def _probe_remote_default_head(source_root: Path) -> RemoteDefaultHeadProbe:
+    """Resolve the trusted remote's symbolic default branch and exact HEAD."""
+    try:
+        username, clone_url, token = _resolve_trusted_remote(source_root)
+    except ManagedSourceBundleError:
+        return RemoteDefaultHeadProbe(RemoteRefStatus.UNKNOWN)
+    env = _minimal_git_env(username, token)
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", "--symref", "--exit-code", clone_url, "HEAD"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=60,
+            env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return RemoteDefaultHeadProbe(RemoteRefStatus.UNKNOWN)
+    if result.returncode == 2:
+        return RemoteDefaultHeadProbe(RemoteRefStatus.ABSENT)
+    if result.returncode != 0:
+        return RemoteDefaultHeadProbe(RemoteRefStatus.UNKNOWN)
+
+    branches: set[str] = set()
+    heads: set[str] = set()
+    for line in result.stdout.splitlines():
+        parts = line.strip().split(maxsplit=2)
+        if len(parts) == 3 and parts[0] == "ref:" and parts[2] == "HEAD":
+            refname = parts[1]
+            prefix = "refs/heads/"
+            if not refname.startswith(prefix):
+                return RemoteDefaultHeadProbe(RemoteRefStatus.UNKNOWN)
+            branch = refname[len(prefix) :]
+            try:
+                validated = _validate_ref(branch)
+            except CandidateCloneError:
+                return RemoteDefaultHeadProbe(RemoteRefStatus.UNKNOWN)
+            if validated is not None:
+                branches.add(validated)
+            continue
+        if len(parts) == 2 and parts[1] == "HEAD":
+            sha = parts[0].lower()
+            if re.fullmatch(r"[0-9a-f]{40}", sha):
+                heads.add(sha)
+
+    if len(branches) != 1 or len(heads) != 1:
+        return RemoteDefaultHeadProbe(RemoteRefStatus.UNKNOWN)
+    return RemoteDefaultHeadProbe(
+        RemoteRefStatus.FOUND,
+        branch=next(iter(branches)),
+        sha=next(iter(heads)),
+    )
+
+
 def _probe_remote_ref(source_root: Path, ref: str) -> RemoteRefProbe:
     """Resolve one ref through the trusted remote with strict outcomes.
 
@@ -1577,8 +1638,32 @@ def prepare_candidate_clone(
         raise _fail("POLICY_DENIED", "source project root is outside configured registry roots")
 
     requested_ref = base_ref or "HEAD"
+    resolved_base_ref = base_ref
+    remote_probe: RemoteRefProbe | None = None
+    if base_ref is None and _source_has_configured_remote(source_root):
+        default_probe = _probe_remote_default_head(source_root)
+        if (
+            default_probe.status is not RemoteRefStatus.FOUND
+            or default_probe.branch is None
+            or default_probe.sha is None
+        ):
+            raise _fail(
+                "SOURCE_REMOTE_STATE_UNKNOWN",
+                "trusted remote default branch state is unknown; refusing local HEAD fallback",
+                retryable=True,
+                details={
+                    "base_ref": "HEAD",
+                    "remote_status": default_probe.status.value,
+                    "recovery_action": "refresh_or_restore_trusted_remote_access",
+                },
+            )
+        resolved_base_ref = default_probe.branch
+        requested_ref = default_probe.branch
+        remote_probe = RemoteRefProbe(RemoteRefStatus.FOUND, default_probe.sha)
+    elif base_ref is not None:
+        remote_probe = _probe_remote_ref(source_root, requested_ref)
+
     local_sha = _local_commit_or_none(source_root, requested_ref)
-    remote_probe = _probe_remote_ref(source_root, requested_ref) if base_ref else None
     remote_sha = (
         remote_probe.sha
         if remote_probe is not None and remote_probe.status is RemoteRefStatus.FOUND
@@ -1653,7 +1738,7 @@ def prepare_candidate_clone(
             source_root=source_root,
             project=project,
             branch=branch,
-            base_ref=base_ref,
+            base_ref=resolved_base_ref,
             requested_ref=requested_ref,
             base_sha=base_sha,
             local_has_base=local_has_base,
