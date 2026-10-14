@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import json
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -389,6 +390,57 @@ async def test_docker_client_helper_uses_fixed_runner_and_bounded_mounts() -> No
     assert argv[argv.index("--bootstrap-image") + 1] == PRIOR_IMAGE
     assert argv[argv.index("--bootstrap-deployed-at") + 1] == PRIOR_STARTED_AT
     assert "TELEGRAM_STORAGE_API_TOKEN" not in " ".join(argv)
+
+
+def test_runner_strips_inherited_telegram_contract_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    script = source_root / "deploy.sh"
+    script.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+    env_file = tmp_path / "operator.env"
+    env_file.write_text("TELEGRAM_BOT_TOKEN=operator\n", encoding="utf-8")
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    captured: dict[str, object] = {}
+
+    def fake_run(*args: object, **kwargs: object) -> object:
+        captured["env"] = kwargs["env"]
+        return runner.subprocess.CompletedProcess(args[0], 1, stdout="failed", stderr=None)
+
+    monkeypatch.setenv("TELEGRAM_STORAGE_API_TOKEN", "inherited-storage-token")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "inherited-bot-token")
+    monkeypatch.setenv("TELEGRAM_BOT_ENABLED", "true")
+    monkeypatch.setattr(runner.shutil, "which", lambda command: f"/usr/bin/{command}")
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "telegram_storage_deploy_contract_runner.py",
+            "--script",
+            str(script),
+            "--source-root",
+            str(source_root),
+            "--env-file",
+            str(env_file),
+            "--state-dir",
+            str(state_dir),
+            "--target-image",
+            TARGET_IMAGE,
+            "--timeout",
+            "30",
+        ],
+    )
+
+    assert runner.main() == 1
+    child_env = captured["env"]
+    assert isinstance(child_env, dict)
+    assert "TELEGRAM_STORAGE_API_TOKEN" not in child_env
+    assert "TELEGRAM_BOT_TOKEN" not in child_env
+    assert "TELEGRAM_BOT_ENABLED" not in child_env
+    assert child_env["TELEGRAM_STORAGE_SERVICE_TARGET_IMAGE"] == TARGET_IMAGE
+    assert child_env["TELEGRAM_STORAGE_OPERATOR_ENV_FILE"] == str(env_file)
+    assert child_env["TELEGRAM_STORAGE_DEPLOY_STATE_DIR"] == str(state_dir)
 
 
 def test_runner_bootstrap_is_exclusive_and_records_only_lkg_identity(tmp_path: Path) -> None:

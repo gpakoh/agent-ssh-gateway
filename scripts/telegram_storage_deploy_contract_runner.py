@@ -162,7 +162,7 @@ def main() -> int:
 
     env = os.environ.copy()
     for key in list(env):
-        if key.startswith("TELEGRAM_STORAGE_"):
+        if key.startswith(("TELEGRAM_STORAGE_", "TELEGRAM_BOT_")):
             env.pop(key, None)
     env.update(
         {
