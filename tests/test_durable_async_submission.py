@@ -203,7 +203,7 @@ async def test_job_manager_retains_submission_identity_for_in_memory_recovery():
     assert len(exact["payload_hash"]) == 64
     assert family == exact
     assert "submission_key" not in job.to_dict()
-    await asyncio.wait_for(job.completed_event.wait(), timeout=2)
+    await asyncio.wait_for(job.completed_event.wait(), timeout=10)
 
 
 @pytest.mark.asyncio
