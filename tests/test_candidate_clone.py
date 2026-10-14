@@ -253,18 +253,24 @@ def test_prepare_candidate_clone_source_ownership_failure_returns_typed_redacted
     assert "cwd" not in details
     assert "args" not in details
 
-    assert captured_commands == [
-        [
-            "git",
-            "-c",
-            f"safe.directory={source.resolve()}",
-            "rev-parse",
-            "--verify",
-            f"{base}^{{commit}}",
-        ]
+    expected_rev_parse = [
+        "git",
+        "-c",
+        f"safe.directory={source.resolve()}",
+        "rev-parse",
+        "--verify",
+        f"{base}^{{commit}}",
     ]
-    assert "safe.directory=*" not in " ".join(captured_commands[0])
-    assert "--global" not in captured_commands[0]
+    expected_remote_probe = [
+        "git",
+        "-c",
+        f"safe.directory={source.resolve()}",
+        "remote",
+    ]
+    assert captured_commands[-1] == expected_rev_parse
+    assert captured_commands[:-1] in ([], [expected_remote_probe])
+    assert all("safe.directory=*" not in " ".join(command) for command in captured_commands)
+    assert all("--global" not in command for command in captured_commands)
     assert not (workspace / ".mcp-candidate-clones").exists()
     assert "candidate/diagnostic-flow" not in (config_dir / "projects.yaml").read_text(
         encoding="utf-8"
@@ -488,6 +494,164 @@ def test_prepare_candidate_clone_rejects_exact_git_symlink_before_status(
     assert exc_info.value.code == "WORKSPACE_CONTENDED"
     assert exc_info.value.retryable is False
     assert sentinel.read_text(encoding="utf-8") == "untouched\n"
+
+
+def test_prepare_candidate_clone_implicit_base_uses_trusted_remote_default_when_local_is_stale(
+    registry_fixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as candidate_clone_module
+
+    workspace, source, config_dir, journal_root, _base = registry_fixture
+    remote_source = tmp_path / "remote-default-source"
+    _git(tmp_path, "clone", "-q", str(source), str(remote_source))
+    _git(remote_source, "config", "user.name", "Test")
+    _git(remote_source, "config", "user.email", "test@example.invalid")
+    (remote_source / "README.md").write_text("remote-default-newer\n", encoding="utf-8")
+    _git(remote_source, "add", "README.md")
+    _git(remote_source, "commit", "-q", "-m", "remote default newer")
+    remote_sha = _git(remote_source, "rev-parse", "HEAD")
+    _git(source, "remote", "add", "gitea", "ssh://git@example.invalid/source-project.git")
+
+    bundle = tmp_path / "remote-default.bundle"
+    _git(remote_source, "bundle", "create", str(bundle), "HEAD")
+    monkeypatch.setattr(
+        candidate_clone_module,
+        "_probe_remote_default_head",
+        lambda _source: candidate_clone_module.RemoteDefaultHeadProbe(
+            candidate_clone_module.RemoteRefStatus.FOUND,
+            branch="main",
+            sha=remote_sha,
+        ),
+    )
+    monkeypatch.setattr(
+        candidate_clone_module,
+        "ensure_managed_source_bundle",
+        lambda _project, sha: ManagedSourcePublication(str(bundle), "a" * 64)
+        if sha == remote_sha
+        else None,
+    )
+
+    receipt = candidate_clone_module.prepare_candidate_clone(
+        "source-project",
+        "candidate/implicit-remote-default",
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    assert receipt.base_ref == "main"
+    assert receipt.base_sha == remote_sha
+    assert receipt.head == remote_sha
+    assert _git(clone_root, "show", "HEAD:README.md") == "remote-default-newer"
+
+
+def test_prepare_candidate_clone_implicit_base_fails_closed_when_remote_default_unknown(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as candidate_clone_module
+
+    workspace, source, config_dir, journal_root, _base = registry_fixture
+    _git(source, "remote", "add", "gitea", "ssh://git@example.invalid/source-project.git")
+    monkeypatch.setattr(
+        candidate_clone_module,
+        "_probe_remote_default_head",
+        lambda _source: candidate_clone_module.RemoteDefaultHeadProbe(
+            candidate_clone_module.RemoteRefStatus.UNKNOWN
+        ),
+    )
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_clone_module.prepare_candidate_clone(
+            "source-project",
+            "candidate/implicit-remote-unknown",
+            config_dir=config_dir,
+            journal_root=journal_root,
+        )
+
+    assert exc_info.value.code == "SOURCE_REMOTE_STATE_UNKNOWN"
+    assert exc_info.value.retryable is True
+    assert exc_info.value.details == {
+        "base_ref": "HEAD",
+        "remote_status": "unknown",
+        "recovery_action": "refresh_or_restore_trusted_remote_access",
+    }
+    candidate_root = workspace / ".mcp-candidate-clones"
+    assert not candidate_root.exists() or not any(candidate_root.iterdir())
+
+
+def test_prepare_candidate_clone_implicit_base_keeps_local_head_for_local_only_source(
+    registry_fixture,
+) -> None:
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+
+    receipt = prepare_candidate_clone(
+        "source-project",
+        "candidate/implicit-local-head",
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    assert receipt.base_ref == "HEAD"
+    assert receipt.base_sha == base
+    assert receipt.head == base
+    assert _git(clone_root, "rev-parse", "HEAD") == base
+
+
+def test_probe_remote_default_head_uses_resolved_username_for_basic_auth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    captured: dict[str, object] = {}
+    sha = "a" * 40
+    monkeypatch.setattr(
+        module,
+        "_resolve_trusted_remote",
+        lambda _root: (
+            "resolved-user",
+            "https://git.example.test/gpakoh/test-repo.git",
+            "fixture-token",
+        ),
+    )
+
+    def fake_env(username: str, token: str) -> dict[str, str]:
+        captured["auth"] = (username, token)
+        return {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = list(argv)
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=f"ref: refs/heads/main\tHEAD\n{sha}\tHEAD\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(module, "_minimal_git_env", fake_env)
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    probe = module._probe_remote_default_head(tmp_path)
+
+    assert probe.status is module.RemoteRefStatus.FOUND
+    assert probe.branch == "main"
+    assert probe.sha == sha
+    assert captured["auth"] == ("resolved-user", "fixture-token")
+    argv = captured["argv"]
+    assert isinstance(argv, list)
+    assert argv == [
+        "git",
+        "ls-remote",
+        "--symref",
+        "--exit-code",
+        "https://git.example.test/gpakoh/test-repo.git",
+        "HEAD",
+    ]
+    assert "fixture-token" not in " ".join(str(part) for part in argv)
 
 
 def test_prepare_candidate_clone_resolves_symbolic_base_ref(registry_fixture) -> None:
