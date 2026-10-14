@@ -185,6 +185,7 @@ class TestChatGPTSafeMode:
             "supervisor_integrate_file",
             "supervisor_recover_integrations",
             "supervisor_register_project",
+            "supervisor_unregister_project",
         }
         assert supervisor_tools <= TOOL_NAMES_BY_MODE["mcp_client_write"]
         for mode, names in TOOL_NAMES_BY_MODE.items():
@@ -198,6 +199,7 @@ class TestChatGPTSafeMode:
             "supervisor_integrate_file",
             "supervisor_recover_integrations",
             "supervisor_register_project",
+            "supervisor_unregister_project",
         ):
             assert get_required_scopes(name) == ["mcp:admin"]
 

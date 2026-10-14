@@ -673,7 +673,7 @@ async def test_candidate_cleanup_audit_failure_blocks_before_core_mutation(
     assert audit.success == []
 
 
-def test_register_all_registers_exactly_five_tools(monkeypatch):
+def test_register_all_registers_exactly_six_tools(monkeypatch):
     registered: list[str] = []
 
     def _register(name):
@@ -692,6 +692,7 @@ def test_register_all_registers_exactly_five_tools(monkeypatch):
         "supervisor_integrate_file",
         "supervisor_recover_integrations",
         "supervisor_register_project",
+        "supervisor_unregister_project",
         "prepare_candidate_clone",
         "candidate_cleanup",
     ]

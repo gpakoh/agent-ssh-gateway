@@ -38,6 +38,7 @@ from examples.mcp_server.mcp_infra.tool_registry import (
 from examples.mcp_server.project_registry_control import (
     ProjectRegistrationError,
     register_project,
+    unregister_project_exact,
 )
 from examples.mcp_server.supervisor_integration import (
     HashMismatchError,
@@ -331,6 +332,124 @@ def supervisor_register_project(
             root_selector,
         ),
         success_text="Project registration completed.",
+    )
+
+
+def _unregister_project_impl(
+    project_id: str,
+    expected_root: str,
+    expected_type: str,
+    expected_root_selector: str,
+) -> dict[str, Any]:
+    tool = "supervisor_unregister_project"
+    try:
+        config_dir = _resolve_registry_config_dir()
+        journal_root = _journal_root_for_project("workspace-registry", config_dir)
+    except ValueError:
+        return tool_error(
+            tool=tool,
+            code="INVALID_INPUT",
+            message="Workspace registry control plane is misconfigured.",
+            retryable=False,
+        )
+
+    correlation_id = uuid.uuid4().hex
+    try:
+        server_attr("get_audit_logger")().append_required(
+            McpAuditEvent(
+                event_type="mcp.project_unregistration_intent",
+                tool=tool,
+                action="unregister_project",
+                decision="allow",
+                reason="guarded metadata-only project unregistration",
+                metadata={
+                    "project_id": project_id,
+                    "expected_root": expected_root,
+                    "expected_type": expected_type,
+                    "expected_root_selector": expected_root_selector,
+                    "correlation_id": correlation_id,
+                    "workspace_bytes_mutated": False,
+                },
+            )
+        )
+    except AuditWriteError:
+        return tool_error(
+            tool=tool,
+            code="AUDIT_UNAVAILABLE",
+            message="Audit log unavailable; project unregistration refused.",
+            retryable=True,
+        )
+
+    try:
+        result = unregister_project_exact(
+            config_dir=config_dir,
+            journal_root=journal_root,
+            project_id=project_id,
+            expected_root=expected_root,
+            expected_type=expected_type,
+            expected_root_selector=expected_root_selector,
+        )
+    except ProjectRegistrationError as exc:
+        return tool_error(
+            tool=tool,
+            code=exc.code,
+            message=exc.message,
+            retryable=False,
+        )
+    except SupervisorIntegrationError as exc:
+        return _integration_error(tool, exc)
+    except (OSError, UnicodeError) as exc:
+        return _supervisor_io_error(
+            tool,
+            exc,
+            "Project unregistration could not be persisted.",
+        )
+
+    cache_reset = _reset_project_registry_caches()
+    payload = {
+        "project_id": result.project_id,
+        "root": result.root,
+        "type": result.project_type,
+        "registry_hash": result.registry_hash,
+        "storage": result.storage,
+        "already_absent": result.already_absent,
+        "workspace_bytes_mutated": False,
+        "cache_reset": cache_reset,
+        "correlation_id": correlation_id,
+    }
+    try:
+        server_attr("get_audit_logger")().append(
+            McpAuditEvent(
+                event_type="mcp.project_unregistration_success",
+                tool=tool,
+                action="unregister_project",
+                decision="allow",
+                reason="metadata-only project unregistration completed",
+                metadata=payload,
+            )
+        )
+    except Exception:
+        pass
+    return tool_success(tool=tool, result=payload)
+
+
+def supervisor_unregister_project(
+    project_id: str,
+    expected_root: str,
+    expected_type: str,
+    expected_root_selector: str = "default",
+) -> dict[str, Any]:
+    """CAS-unregister one exact project entry without deleting workspace bytes."""
+    return run_tool(
+        tool="supervisor_unregister_project",
+        title="Supervisor unregister project",
+        fn=lambda: _unregister_project_impl(
+            project_id,
+            expected_root,
+            expected_type,
+            expected_root_selector,
+        ),
+        success_text="Project unregistration completed.",
     )
 
 
@@ -767,6 +886,9 @@ def register_all() -> None:
     register_tool("supervisor_register_project")(
         instrumented("supervisor_register_project")(supervisor_register_project)
     )
+    register_tool("supervisor_unregister_project")(
+        instrumented("supervisor_unregister_project")(supervisor_unregister_project)
+    )
     register_tool("prepare_candidate_clone")(
         instrumented("prepare_candidate_clone")(prepare_candidate_clone)
     )
@@ -780,6 +902,7 @@ __all__ = [
     "supervisor_integrate_file",
     "supervisor_recover_integrations",
     "supervisor_register_project",
+    "supervisor_unregister_project",
     "prepare_candidate_clone",
     "candidate_cleanup",
 ]
