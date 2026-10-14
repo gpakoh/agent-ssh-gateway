@@ -1245,6 +1245,145 @@ class DockerClient:
             argv.append("--recover")
         return await self._run_with_result(argv, timeout=float(timeout))
 
+    async def read_telegram_storage_deploy_state(
+        self,
+        *,
+        helper_image_id: str,
+        state_volume: str,
+    ) -> RunResult:
+        """Read the fixed Telegram Storage deploy-state file from one named volume."""
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", helper_image_id):
+            raise ValueError("helper_image_id must be an immutable sha256 image ID")
+        self._validate_volume_name(state_volume)
+
+        state_root = "/var/lib/telegram-storage-deploy-state"
+        reader = (
+            "import json, stat; "
+            "from pathlib import Path; "
+            f"root=Path({state_root!r}); "
+            "path=root/'telegram-storage-service-deploy.json'; "
+            "payload={'version':1,'state_exists':False,'state':{}}; "
+            "info=path.lstat() if path.exists() else None; "
+            "safe=info is not None and stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode); "
+            "payload['state_exists']=bool(safe); "
+            "raw=json.loads(path.read_text(encoding='utf-8')) if safe else {}; "
+            "payload['state']={k:raw.get(k) for k in ('telegram_storage_service_image','deployed_at') if k in raw}; "
+            "print(json.dumps(payload, sort_keys=True))"
+        )
+        argv = [
+            DOCKER_BIN,
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--user",
+            "0:0",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--read-only",
+            "--mount",
+            f"type=volume,src={state_volume},dst={state_root},readonly",
+            helper_image_id,
+            "python3",
+            "-c",
+            reader,
+        ]
+        return await self._run_with_result(argv, timeout=30.0)
+
+    async def run_telegram_storage_deploy_contract_helper(
+        self,
+        *,
+        helper_image_id: str,
+        candidate_root: str,
+        operator_root: str,
+        script_path: str,
+        env_file: str,
+        state_volume: str,
+        target_image: str,
+        bootstrap_image: str | None = None,
+        bootstrap_deployed_at: str | None = None,
+        timeout: int = 300,
+    ) -> RunResult:
+        """Run the fixed Telegram Storage repo-owned deploy helper."""
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", helper_image_id):
+            raise ValueError("helper_image_id must be an immutable sha256 image ID")
+        candidate_root = self._validate_deploy_mount_path(candidate_root, "candidate_root")
+        operator_root = self._validate_deploy_mount_path(operator_root, "operator_root")
+        script_path = self._validate_deploy_mount_path(script_path, "script_path")
+        env_file = self._validate_deploy_mount_path(env_file, "env_file")
+        self._validate_volume_name(state_volume)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}", target_image):
+            raise ValueError("target_image must be an immutable digest reference")
+        if (bootstrap_image is None) != (bootstrap_deployed_at is None):
+            raise ValueError("Telegram Storage rollback bootstrap requires image and deployed_at together")
+        if bootstrap_image is not None:
+            if not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}", bootstrap_image
+            ):
+                raise ValueError("bootstrap_image must be an immutable digest reference")
+            if (
+                not isinstance(bootstrap_deployed_at, str)
+                or not bootstrap_deployed_at.strip()
+                or any(ch in bootstrap_deployed_at for ch in ("\x00", "\n", "\r"))
+            ):
+                raise ValueError("bootstrap_deployed_at must be one non-empty line")
+        timeout = max(60, min(timeout, 600))
+
+        state_root = "/var/lib/telegram-storage-deploy-state"
+        argv = [
+            DOCKER_BIN,
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--user",
+            "0:0",
+            "--cap-drop",
+            "ALL",
+            "--cap-add",
+            "DAC_OVERRIDE",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--read-only",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,nodev,size=64m",
+            "--mount",
+            "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock",
+            "--mount",
+            f"type=bind,src={candidate_root},dst={candidate_root},readonly",
+            "--mount",
+            f"type=bind,src={operator_root},dst={operator_root},readonly",
+            "--mount",
+            f"type=volume,src={state_volume},dst={state_root}",
+            helper_image_id,
+            "python3",
+            "/app/scripts/telegram_storage_deploy_contract_runner.py",
+            "--script",
+            script_path,
+            "--source-root",
+            candidate_root,
+            "--env-file",
+            env_file,
+            "--state-dir",
+            state_root,
+            "--target-image",
+            target_image,
+            "--timeout",
+            str(max(30, timeout - 30)),
+        ]
+        if bootstrap_image is not None and bootstrap_deployed_at is not None:
+            argv.extend(
+                [
+                    "--bootstrap-image",
+                    bootstrap_image,
+                    "--bootstrap-deployed-at",
+                    bootstrap_deployed_at,
+                ]
+            )
+        return await self._run_with_result(argv, timeout=float(timeout))
+
     async def run_content_harvester_deploy_contract_helper(
         self,
         *,
