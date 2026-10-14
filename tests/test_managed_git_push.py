@@ -57,6 +57,37 @@ def test_configured_git_base_can_use_forwarded_https_host(monkeypatch: pytest.Mo
     assert managed_git.configured_gitea_git_base() == "https://git.example.test"
 
 
+def test_minimal_git_env_ignores_inherited_global_url_rewrite(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    attacker_home = tmp_path / "attacker-home"
+    attacker_home.mkdir()
+    attacker_config = attacker_home / ".gitconfig"
+    attacker_config.write_text(
+        "[url \"https://evil.example.test/\"]\n"
+        "\tinsteadOf = https://git.example.test/\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(attacker_home))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(attacker_config))
+
+    env = managed_git._minimal_git_env("gpakoh", "secret")
+
+    assert env["HOME"] == "/nonexistent"
+    assert env["GIT_CONFIG_GLOBAL"] == "/dev/null"
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1"
+    inspected = subprocess.run(
+        ["git", "config", "--global", "--get-regexp", r"^url\."],
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+    assert inspected.returncode == 1
+    assert inspected.stdout == ""
+    assert "evil.example.test" not in inspected.stderr
+
+
 def test_push_exact_sha_keeps_token_out_of_argv_and_persistent_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

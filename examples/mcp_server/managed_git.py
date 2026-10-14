@@ -90,18 +90,19 @@ def configured_gitea_git_base() -> str:
 
 
 def _minimal_git_env(username: str, token: str) -> dict[str, str]:
-    """Build the one-shot environment used by ``git push``.
+    """Build the one-shot environment used by authenticated Git transport.
 
-    The Basic-auth header exists only in the child environment.  It is never
-    written to .git/config, a credential helper, a URL, or argv.  Redirects
-    are disabled so Git cannot forward that header to a different host.
+    The Basic-auth header exists only in the child environment. It is never
+    written to .git/config, a credential helper, a URL, or argv. System and
+    global Git config are disabled so ``url.*.insteadOf`` cannot rewrite the
+    trusted HTTPS destination while that header is attached. Redirects are
+    disabled for the same reason.
     """
 
     encoded = base64.b64encode(f"{username}:{token}".encode()).decode("ascii")
     env: dict[str, str] = {}
     for key in (
         "PATH",
-        "HOME",
         "LANG",
         "LC_ALL",
         "SSL_CERT_FILE",
@@ -116,6 +117,8 @@ def _minimal_git_env(username: str, token: str) -> dict[str, str]:
             env[key] = value
     env.update(
         {
+            "HOME": "/nonexistent",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_TERMINAL_PROMPT": "0",
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_COUNT": "3",
