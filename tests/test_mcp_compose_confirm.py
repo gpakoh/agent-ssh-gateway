@@ -81,6 +81,28 @@ def clean_confirm_store():
     _confirm_store._actions.clear()
 
 
+class _AliasRegistry:
+    def __init__(self, root: str) -> None:
+        self.root = root
+
+    def project_info(self, project_id: str) -> dict[str, str]:
+        from app.workspace.policy import WorkspacePolicyError
+
+        if project_id != "infra-quart":
+            raise WorkspacePolicyError(f"Unknown project: {project_id}")
+        return {"project_id": project_id, "root": self.root}
+
+
+class _AliasDockerClient:
+    def __init__(self, *, reject_root: bool = False) -> None:
+        self.reject_root = reject_root
+        self.compose_up = AsyncMock(return_value="started")
+
+    def _validate_project_dir(self, project_dir: str | None) -> None:
+        if self.reject_root:
+            raise ValueError(f"outside allowed roots: {project_dir}")
+
+
 class TestComposeHandlersExist:
     """Verify compose handlers are registered in _CONFIRM_HANDLERS."""
 
@@ -151,6 +173,68 @@ class TestComposeImplFunctions:
 
 class TestComposeConfirmFlow:
     """Test the full create → confirm → execute flow."""
+
+    @pytest.mark.asyncio
+    async def test_registered_alias_is_bound_before_confirmation(self, clean_confirm_store):
+        import examples.mcp_server.server as srv
+
+        root_a = "/srv/projects/infra-quart-a"
+        root_b = "/srv/projects/infra-quart-b"
+        client = _AliasDockerClient()
+        with patch.object(srv, "DockerClient", lambda: client), patch.object(
+            srv, "_get_workspace_registry", return_value=_AliasRegistry(root_a)
+        ):
+            action = await srv.docker_compose_up(project_dir="infra-quart")
+
+        assert action["ok"] is True
+        assert root_a not in action["result"]["summary"]
+        assert "infra-quart" in action["result"]["summary"]
+
+        with patch.object(srv, "DockerClient", lambda: client), patch.object(
+            srv, "_get_workspace_registry", return_value=_AliasRegistry(root_b)
+        ):
+            confirmed = await srv.confirm_operation(token=action["result"]["confirm_token"])
+
+        assert confirmed["ok"] is True
+        client.compose_up.assert_awaited_once()
+        assert client.compose_up.call_args.kwargs["project_dir"] == root_a
+        assert client.compose_up.call_args.kwargs["project_dir"] != root_b
+
+    @pytest.mark.asyncio
+    async def test_registered_alias_rejected_before_confirmation_when_root_is_disallowed(
+        self, clean_confirm_store
+    ):
+        import examples.mcp_server.server as srv
+
+        root = "/srv/projects/infra-quart"
+        client = _AliasDockerClient(reject_root=True)
+        with patch.object(srv, "DockerClient", lambda: client), patch.object(
+            srv, "_get_workspace_registry", return_value=_AliasRegistry(root)
+        ):
+            result = await srv.docker_compose_up(project_dir="infra-quart")
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "INVALID_INPUT"
+        assert root not in str(result)
+        assert not srv._confirm_store._actions
+
+    @pytest.mark.asyncio
+    async def test_bound_alias_redacts_root_from_confirmation_error(self, clean_confirm_store):
+        import examples.mcp_server.server as srv
+
+        root = "/srv/projects/infra-quart"
+        client = _AliasDockerClient()
+        client.compose_up = AsyncMock(side_effect=RuntimeError(f"compose failed in {root}"))
+        with patch.object(srv, "DockerClient", lambda: client), patch.object(
+            srv, "_get_workspace_registry", return_value=_AliasRegistry(root)
+        ):
+            action = await srv.docker_compose_up(project_dir="infra-quart")
+            result = await srv.confirm_operation(token=action["result"]["confirm_token"])
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "DOCKER_COMMAND_FAILED"
+        assert root not in result["error"]["message"]
+        assert "infra-quart" in result["error"]["message"]
 
     @pytest.mark.asyncio
     async def test_compose_up_confirm_flow(self, clean_confirm_store):

@@ -194,18 +194,25 @@ async def test_confirmed_compose_impls_resolve_registered_project_id(
 @pytest.mark.asyncio
 async def test_compose_confirmation_keeps_logical_project_id() -> None:
     srv._confirm_store._actions.clear()
+    registry = _registered_project()
+    client = _docker_client()
     try:
-        action = await srv.docker_compose_up(
-            project_dir=PROJECT_ID,
-            services=["audit-api"],
-            detach=True,
-            build=False,
-            timeout=60,
-        )
+        with (
+            patch.object(srv, "_get_workspace_registry", return_value=registry),
+            patch.object(srv, "DockerClient", return_value=client),
+        ):
+            action = await srv.docker_compose_up(
+                project_dir=PROJECT_ID,
+                services=["audit-api"],
+                detach=True,
+                build=False,
+                timeout=60,
+            )
         assert action["ok"] is True
         result = action["result"]
         pending = srv._confirm_store._actions[result["action_id"]]
         assert pending.kwargs["project_dir"] == PROJECT_ID
+        assert pending.kwargs["_resolved_project_dir"] == RESOLVED_ROOT
         assert PROJECT_ID in result["summary"]
         assert RESOLVED_ROOT not in result["summary"]
     finally:
