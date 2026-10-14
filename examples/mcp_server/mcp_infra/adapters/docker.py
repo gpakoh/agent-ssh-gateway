@@ -82,6 +82,31 @@ def _resolve_compose_project_dir(project_dir: str | None, client: Any) -> str | 
     return resolved
 
 
+def _resolve_compose_confirmation_target(
+    project_dir: str | None,
+    client: Any,
+) -> tuple[str | None, str | None]:
+    """Resolve a Compose target once before creating a dangerous action.
+
+    Registered project ids are converted to their exact allowed root now so a
+    later registry remap cannot retarget an already-issued confirmation.  The
+    logical id is retained only as a safe display label for summaries/errors.
+    """
+    resolved = _resolve_compose_project_dir(project_dir, client)
+    label = project_dir if project_dir is not None and resolved != project_dir else None
+    return resolved, label
+
+
+def _redact_bound_compose_path(
+    message: str | None,
+    resolved_dir: str | None,
+    label: str | None,
+) -> str | None:
+    if not message or not resolved_dir or not label:
+        return message
+    return message.replace(resolved_dir, label)
+
+
 _DEPLOY_STABILITY_SECONDS = 90
 _DEPLOY_HELPER_CONTAINER = "mcp-oauth"
 _DEPLOY_CONTRACTS: dict[str, dict[str, str]] = {
@@ -585,11 +610,31 @@ async def docker_compose_up(
     timeout: int = 120,
 ) -> dict[str, Any]:
     """Start services in a Docker Compose project. DANGEROUS: requires confirmation via confirm_operation(token)."""
+    client = _docker_client()
+    try:
+        resolved_dir, label = _resolve_compose_confirmation_target(project_dir, client)
+    except ValueError as exc:
+        return tool_error(
+            tool="docker_compose_up",
+            code="INVALID_INPUT",
+            message=str(exc),
+            source="docker",
+        )
     svc_list = ", ".join(services) if services else "all services"
-    summary = f"Compose up ({svc_list}) in {project_dir or 'default dir'}"
+    summary = f"Compose up ({svc_list}) in {label or resolved_dir or 'default dir'}"
+    kwargs = {
+        "project_dir": project_dir,
+        "services": services,
+        "detach": detach,
+        "build": build,
+        "timeout": timeout,
+    }
+    if label:
+        kwargs["_resolved_project_dir"] = resolved_dir
+        kwargs["_project_label"] = label
     action = _confirm_store().create_action(
         "docker_compose_up",
-        {"project_dir": project_dir, "services": services, "detach": detach, "build": build, "timeout": timeout},
+        kwargs,
         summary,
         risk="medium",
     )
@@ -601,11 +646,25 @@ async def docker_compose_restart(
     timeout: int = 30,
 ) -> dict[str, Any]:
     """Restart services in a Docker Compose project. DANGEROUS: requires confirmation via confirm_operation(token)."""
+    client = _docker_client()
+    try:
+        resolved_dir, label = _resolve_compose_confirmation_target(project_dir, client)
+    except ValueError as exc:
+        return tool_error(
+            tool="docker_compose_restart",
+            code="INVALID_INPUT",
+            message=str(exc),
+            source="docker",
+        )
     svc_list = ", ".join(services) if services else "all services"
-    summary = f"Compose restart ({svc_list}) in {project_dir or 'default dir'}"
+    summary = f"Compose restart ({svc_list}) in {label or resolved_dir or 'default dir'}"
+    kwargs = {"project_dir": project_dir, "services": services, "timeout": timeout}
+    if label:
+        kwargs["_resolved_project_dir"] = resolved_dir
+        kwargs["_project_label"] = label
     action = _confirm_store().create_action(
         "docker_compose_restart",
-        {"project_dir": project_dir, "services": services, "timeout": timeout},
+        kwargs,
         summary,
         risk="medium",
     )
@@ -618,11 +677,30 @@ async def docker_compose_build(
     timeout: int = 300,
 ) -> dict[str, Any]:
     """Build (or rebuild) services in a Docker Compose project. DANGEROUS: requires confirmation via confirm_operation(token)."""
+    client = _docker_client()
+    try:
+        resolved_dir, label = _resolve_compose_confirmation_target(project_dir, client)
+    except ValueError as exc:
+        return tool_error(
+            tool="docker_compose_build",
+            code="INVALID_INPUT",
+            message=str(exc),
+            source="docker",
+        )
     svc_list = ", ".join(services) if services else "all services"
-    summary = f"Compose build ({svc_list}) in {project_dir or 'default dir'}"
+    summary = f"Compose build ({svc_list}) in {label or resolved_dir or 'default dir'}"
+    kwargs = {
+        "project_dir": project_dir,
+        "services": services,
+        "no_cache": no_cache,
+        "timeout": timeout,
+    }
+    if label:
+        kwargs["_resolved_project_dir"] = resolved_dir
+        kwargs["_project_label"] = label
     action = _confirm_store().create_action(
         "docker_compose_build",
-        {"project_dir": project_dir, "services": services, "no_cache": no_cache, "timeout": timeout},
+        kwargs,
         summary,
         risk="medium",
     )
@@ -3132,21 +3210,33 @@ async def docker_compose_down(
                 source="docker",
             )
     dc = _docker_client()
-    _resolve_compose_project_dir(project_dir, dc)
+    try:
+        resolved_dir, label = _resolve_compose_confirmation_target(project_dir, dc)
+    except ValueError as exc:
+        return tool_error(
+            tool="docker_compose_down",
+            code="INVALID_INPUT",
+            message=str(exc),
+            source="docker",
+        )
     parts = []
     if project_dir:
-        parts.append(f"project={project_dir}")
+        parts.append(f"project={label or resolved_dir}")
     if volumes:
         parts.append("--volumes")
     summary = f"Compose down {' '.join(parts)}"
+    kwargs = {
+        "project_dir": project_dir,
+        "remove_orphans": remove_orphans,
+        "timeout": timeout,
+        "volumes": volumes,
+    }
+    if label:
+        kwargs["_resolved_project_dir"] = resolved_dir
+        kwargs["_project_label"] = label
     action = _confirm_store().create_action(
         "docker_compose_down",
-        {
-            "project_dir": project_dir,
-            "remove_orphans": remove_orphans,
-            "timeout": timeout,
-            "volumes": volumes,
-        },
+        kwargs,
         summary,
     )
     return _confirmation_response(action)
@@ -3597,13 +3687,23 @@ async def confirm_operation(
             source="docker",
         )
 
+    label = action.kwargs.get("_project_label")
+    resolved_dir = action.kwargs.get("_resolved_project_dir")
+    dispatch_kwargs = {
+        key: value
+        for key, value in action.kwargs.items()
+        if key not in {"_project_label", "_resolved_project_dir"}
+    }
+    if "_resolved_project_dir" in action.kwargs:
+        dispatch_kwargs["project_dir"] = resolved_dir
+
     try:
-        result = await handler(**action.kwargs)
+        result = await handler(**dispatch_kwargs)
     except Exception as exc:
         return tool_error(
             tool=action.tool,
             code="DOCKER_COMMAND_FAILED",
-            message=str(exc),
+            message=_redact_bound_compose_path(str(exc), resolved_dir, label),
             source="docker",
             retryable=False,
         )
@@ -3614,14 +3714,14 @@ async def confirm_operation(
     if isinstance(result, str):
         return tool_success(
             tool=action.tool,
-            result={"output": result},
+            result={"output": _redact_bound_compose_path(result, resolved_dir, label)},
             source="docker",
         )
 
     if isinstance(result, RunResult):
         payload = {
-            "stdout": result.stdout,
-            "stderr": result.stderr,
+            "stdout": _redact_bound_compose_path(result.stdout, resolved_dir, label),
+            "stderr": _redact_bound_compose_path(result.stderr, resolved_dir, label),
             "exit_code": result.exit_code,
         }
         if result.exit_code != 0:
