@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from control_plane_git import git_fetch_ref_control_plane, git_push_control_plane
-from gateway_client import GatewayClient, GatewayClientError
+from gateway_client import GatewayClient, GatewayClientError, _script_stdin_wrapper
 from git_write_capabilities import probe_git_write_capabilities
 from tool_results import build_command_result, tool_error, tool_success
 
@@ -1250,7 +1250,8 @@ def _run_uv_tool(
                 )
 
     result = client.execute_raw(
-        "sh -c " + shlex.quote(script),
+        "sh",
+        stdin=_script_stdin_wrapper(script),
         redact_path_prefix=str(project_dir),
         timeout_s=client.async_job_timeout if async_submit else None,
     )

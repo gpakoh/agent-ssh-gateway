@@ -375,7 +375,7 @@ class TestReadOnlyFallbackMypyPackageBase:
 
         class FakeClient:
             def execute_raw(self, cmd, **kw):
-                call_log.append(cmd)
+                call_log.append((cmd, kw))
                 return {"job_id": "j1"}
 
             def wait_job(self, job_id, **kw):
