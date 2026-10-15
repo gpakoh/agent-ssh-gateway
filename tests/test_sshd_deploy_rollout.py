@@ -365,9 +365,15 @@ def _run_entrypoint_with_fake_keygen(tmp_path: Path, key_dir: Path, gen_log: Pat
     fake_keygen = fake_bin / "ssh-keygen"
     fake_keygen.write_text(_ENTRYPOINT_FAKE_KEYGEN, encoding="utf-8")
     fake_keygen.chmod(0o755)
+    fake_chown = fake_bin / "chown"
+    fake_chown.write_text("#!/usr/bin/env sh\nexit 0\n", encoding="utf-8")
+    fake_chown.chmod(0o755)
+    runtime_dir = tmp_path / "mcp-agent"
     harness = tmp_path / "entrypoint.sh"
     harness.write_text(
-        entrypoint.replace("HOSTKEY_DIR=/etc/ssh/hostkeys", f"HOSTKEY_DIR={key_dir}"),
+        entrypoint.replace("HOSTKEY_DIR=/etc/ssh/hostkeys", f"HOSTKEY_DIR={key_dir}").replace(
+            "AGENT_RUNTIME_DIR=/var/lib/mcp-agent", f"AGENT_RUNTIME_DIR={runtime_dir}"
+        ),
         encoding="utf-8",
     )
     harness.chmod(0o755)

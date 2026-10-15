@@ -388,7 +388,9 @@ class TestMcpProjectRunPytest:
         uv_check_call = mock_exec.call_args_list[0]
         assert "command -v uv" in uv_check_call[0][0]
         pytest_call = mock_exec.call_args_list[1]
-        assert "pytest" in pytest_call[0][0]
+        assert pytest_call[0][0] == "sh"
+        assert "pytest" in pytest_call.kwargs.get("stdin", "")
+        assert "VERIFIER_ROOT_UNSAFE" in pytest_call.kwargs.get("stdin", "")
 
 
 # ---------------------------------------------------------------------------

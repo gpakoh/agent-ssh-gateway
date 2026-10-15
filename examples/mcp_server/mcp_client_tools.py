@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from control_plane_git import git_fetch_ref_control_plane, git_push_control_plane
-from gateway_client import GatewayClient, GatewayClientError
+from gateway_client import GatewayClient, GatewayClientError, _script_stdin_wrapper
 from git_write_capabilities import probe_git_write_capabilities
 from tool_results import build_command_result, tool_error, tool_success
 
@@ -279,8 +279,146 @@ def _validate_targets(project_dir: str, targets: list[str]) -> list[str]:
     return validated
 
 
-def _build_uv_argv(tool: str, project_dir: str, targets: list[str]) -> list[str]:
-    """Build argv list for ``uv run <tool>``. Validates targets first."""
+_VERIFIER_ROOT_ENV = "MCP_VERIFIER_ROOT"
+_VERIFIER_ROOT_DEFAULT = "/var/lib/mcp-agent/verifier"
+
+
+def _verifier_project_cache_root(project_dir: str) -> str:
+    """Return the server-owned cache root for one project."""
+    return _verifier_project_root(project_dir) + "/cache"
+
+
+def _verifier_root_config() -> str:
+    """Return the configured absolute server-owned verifier root."""
+    raw = os.environ.get(_VERIFIER_ROOT_ENV, "").strip()
+    value = raw or _VERIFIER_ROOT_DEFAULT
+    if "\x00" in value:
+        raise ValueError(f"{_VERIFIER_ROOT_ENV} contains a NUL byte")
+    path = Path(value)
+    if not path.is_absolute():
+        raise ValueError(f"{_VERIFIER_ROOT_ENV} must be an absolute executor path")
+    if str(path) == "/":
+        raise ValueError(f"{_VERIFIER_ROOT_ENV} must not be filesystem root")
+    return str(path).rstrip("/")
+
+
+def _verifier_project_root(project_dir: str) -> str:
+    """Return the stable per-project verifier root."""
+    proj = str(Path(project_dir).resolve())
+    ident = hashlib.sha1(proj.encode("utf-8")).hexdigest()[:12]
+    slug = re.sub(r"[^A-Za-z0-9_.-]", "_", Path(proj).name) or "project"
+    return f"{_verifier_root_config()}/{slug}-{ident}"
+
+
+def _verifier_root_bootstrap(root_abs: str) -> list[str]:
+    """Validate the deployment-provisioned verifier root fail-closed."""
+    q = shlex.quote(root_abs)
+    return [
+        f"VR={q}",
+        'CUR="$(dirname "$VR")"',
+        'while [ "$CUR" != "/" ] && [ "$CUR" != "." ]; do',
+        '  if [ -L "$CUR" ]; then',
+        '    echo "VERIFIER_ROOT_UNSAFE: symlink in trusted path: $CUR" >&2',
+        '    exit 90',
+        '  fi',
+        '  if [ -d "$CUR" ]; then',
+        '    _p000=000',
+        '    _p000="$(stat -c %a "$CUR" 2>/dev/null || echo 000)"',
+        '    if [ $(( 0$_p000 & 18 )) -ne 0 ]; then',
+        '      echo "VERIFIER_ROOT_UNSAFE: writable directory in trusted path: $CUR" >&2',
+        '      exit 90',
+        '    fi',
+        '  fi',
+        '  CUR="$(dirname "$CUR")"',
+        'done',
+        'if [ ! -d "$VR" ] || [ -L "$VR" ]; then',
+        '  echo "VERIFIER_ROOT_UNSAFE: not a real directory: $VR" >&2',
+        '  exit 90',
+        'fi',
+        'if [ "$(stat -c %U "$VR" 2>/dev/null)" != "$(id -un)" ]; then',
+        '  echo "VERIFIER_ROOT_UNSAFE: wrong owner for $VR" >&2',
+        '  exit 90',
+        'fi',
+        'perms=000',
+        'perms="$(stat -c %a "$VR" 2>/dev/null || echo 000)"',
+        'if [ $(( 0$perms & 18 )) -ne 0 ]; then',
+        '  echo "VERIFIER_ROOT_UNSAFE: unsafe permissions on $VR" >&2',
+        '  exit 90',
+        'fi',
+    ]
+
+
+def _verifier_project_prologue(proj_root_abs: str) -> list[str]:
+    """Create and lock one per-project verifier subroot safely."""
+    q = shlex.quote(proj_root_abs)
+    return [
+        f"PPROJ={q}",
+        'if [ -L "$PPROJ" ]; then',
+        '  echo "VERIFIER_ROOT_UNSAFE: per-project root is a symlink: $PPROJ" >&2',
+        '  exit 90',
+        'fi',
+        'if [ ! -e "$PPROJ" ]; then',
+        '  mkdir -p "$PPROJ"',
+        'fi',
+        'if [ ! -d "$PPROJ" ]; then',
+        '  echo "VERIFIER_ROOT_UNSAFE: per-project root is not a directory: $PPROJ" >&2',
+        '  exit 90',
+        'fi',
+        'LOCK="$PPROJ/.sync.lock"',
+        'exec 9>"$LOCK"',
+        'flock 9',
+    ]
+
+
+def _verifier_isolation_env(project_dir: str, tool_key: str) -> list[str]:
+    """Build the env prefix that keeps verifier state outside source."""
+    _ = tool_key
+    venv_dir = f"{_verifier_project_root(project_dir)}/.venv"
+    return [
+        "env",
+        f"UV_PROJECT_ENVIRONMENT={venv_dir}",
+        "PYTHONPYCACHEPREFIX=" + _verifier_project_cache_root(project_dir) + "/pycache",
+    ]
+
+
+def _tool_cache_args(tool: str, project_dir: str) -> list[str]:
+    """Redirect tool caches into the per-project verifier root."""
+    cache_root = _verifier_project_cache_root(project_dir)
+    if tool == "pytest":
+        return ["-o", "cache_dir=" + cache_root + "/pytest"]
+    if tool == "ruff":
+        return ["--cache-dir", cache_root + "/ruff"]
+    if tool == "mypy":
+        return ["--cache-dir", cache_root + "/mypy"]
+    return []
+
+
+_ENV_FAIL_EXIT_CODES = frozenset({2, 3, 6, 90, 127})
+
+
+def _classify_env_failure(stderr: str | None, exit_code: int | None) -> str | None:
+    """Classify only bootstrap failures, never a real check failure."""
+    if not stderr or exit_code is None or exit_code not in _ENV_FAIL_EXIT_CODES:
+        return None
+    low = stderr.lower()
+    env_markers = (
+        ".venv/.lock",
+        "failed to create virtualenv",
+        "failed to remove virtualenv",
+        "cannot create virtualenv",
+        "error: virtualenv",
+        "failed to remove directory",
+        "read-only file system",
+        "uv: error",
+        "verifier_root_unsafe",
+    )
+    if "verifier_root_unsafe" in low:
+        return "VERIFIER_BOOTSTRAP_FAILED"
+    return "VERIFIER_ENV_UNAVAILABLE" if any(marker in low for marker in env_markers) else None
+
+
+def _uv_run_args(tool: str, project_dir: str, targets: list[str]) -> list[str]:
+    """Build the uv command arguments for a verifier run."""
     if tool not in _UV_TOOL_MAP and tool != "compileall":
         raise ValueError(f"INVALID_INPUT: unknown tool '{tool}'")
     if not targets:
@@ -289,11 +427,59 @@ def _build_uv_argv(tool: str, project_dir: str, targets: list[str]) -> list[str]
     cmd = _compileall_command() if tool == "compileall" else _UV_TOOL_MAP[tool]
     uv_args = ["uv", "run", "--frozen"]
     if tool != "compileall":
-        # Project-backed tooling commonly lives in optional extras. Request
-        # all declared extras without assuming a project-specific extra name,
-        # matching the read-only fallback's dependency provisioning.
+        uv_args.append("--all-extras")
+    return uv_args + ["--directory", project_dir, "--"] + cmd + _tool_cache_args(tool, project_dir) + ["--"] + validated
+
+
+def _build_uv_argv(tool: str, project_dir: str, targets: list[str]) -> list[str]:
+    """Build the legacy direct argv shape used by compatibility callers/tests.
+
+    Live verifier execution uses ``_build_primary_script`` so trust-boundary
+    bootstrap/locking is never represented as a bare argv-only contract.
+    """
+    if tool not in _UV_TOOL_MAP and tool != "compileall":
+        raise ValueError(f"INVALID_INPUT: unknown tool '{tool}'")
+    if not targets:
+        raise ValueError("INVALID_INPUT: at least one target required")
+    validated = _validate_targets(project_dir, targets)
+    cmd = _compileall_command() if tool == "compileall" else _UV_TOOL_MAP[tool]
+    uv_args = ["uv", "run", "--frozen"]
+    if tool != "compileall":
         uv_args.append("--all-extras")
     return uv_args + ["--directory", project_dir, "--"] + cmd + ["--"] + validated
+
+
+def _build_primary_script(tool: str, project_dir: str, targets: list[str]) -> str:
+    """Build a primary verifier script with trusted-root validation and locking."""
+    validated = _validate_targets(project_dir, targets)
+    proj = str(Path(project_dir))
+    base = _verifier_root_config()
+    proj_root = _verifier_project_root(project_dir)
+    venv = f"{proj_root}/.venv"
+    target_args = " ".join(shlex.quote(t) for t in validated)
+    lines = ["set -eu"]
+    lines += _verifier_root_bootstrap(base)
+    lines += _verifier_project_prologue(proj_root)
+    lines += [
+        f"export UV_PROJECT_ENVIRONMENT={shlex.quote(venv)}",
+        f"export PYTHONPYCACHEPREFIX={shlex.quote(_verifier_project_cache_root(project_dir) + '/pycache')}",
+    ]
+    if tool == "compileall":
+        walk = _build_compileall_walk_code()
+        run = (
+            f"uv run --frozen --directory {shlex.quote(proj)} -- "
+            f"python -c {shlex.quote(walk)} -- {target_args}"
+        )
+    else:
+        cmd_s = " ".join(shlex.quote(a) for a in _UV_TOOL_MAP[tool])
+        cache_s = " ".join(shlex.quote(a) for a in _tool_cache_args(tool, project_dir))
+        run = (
+            f"uv run --frozen --all-extras --directory {shlex.quote(proj)} -- "
+            f"{cmd_s} {cache_s} -- {target_args}"
+        )
+    lines.append(run + " 2>&1")
+    lines.append("flock -u 9")
+    return "\n".join(lines)
 
 
 def _build_uvx_argv(tool: str, targets: list[str]) -> list[str]:
@@ -760,7 +946,8 @@ def _build_readonly_fallback_script(
     A read-only source checkout must stay the authoritative project root: test
     discovery, config lookup, package-base inference, and relative imports all
     depend on running checks from the real checkout.  Only the uv environment,
-    tool caches, and dependency-resolution state live under ``/tmp/.mcp-test``.
+    tool caches, and dependency-resolution state live under the server-owned
+    verifier root.
 
     When ``uv.lock`` exists, uv syncs the *real* project with ``--frozen`` and
     ``UV_PROJECT_ENVIRONMENT`` pointing at the external venv.  This preserves
@@ -771,8 +958,9 @@ def _build_readonly_fallback_script(
     """
     project_hash = hashlib.sha1(project_dir.encode("utf-8")).hexdigest()[:8]
     project_name = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(project_dir).name) or "project"
+    root_base = _verifier_root_config()
     tmp_root = (
-        f"/tmp/.mcp-test/{project_name}-{project_hash}"
+        f"{root_base}/{project_name}-{project_hash}"
         f"-u${{_MCP_UID}}-${{_MCP_USER}}"
     )
     project_q = shlex.quote(project_dir)
@@ -790,9 +978,25 @@ def _build_readonly_fallback_script(
         '_MCP_USER="$(id -un)"',
         f"PROJECT_DIR={project_q}",
         f"TMP_ROOT={tmp_root}",
+        f"VR={shlex.quote(root_base)}",
+        'CUR="$(dirname "$VR")"',
+        'while [ "$CUR" != "/" ] && [ "$CUR" != "." ]; do',
+        '  if [ -L "$CUR" ]; then echo "VERIFIER_ROOT_UNSAFE: symlink in trusted path: $CUR" >&2; exit 90; fi',
+        '  if [ -d "$CUR" ]; then _p000="$(stat -c %a "$CUR" 2>/dev/null || echo 000)"; if [ $(( 0$_p000 & 18 )) -ne 0 ]; then echo "VERIFIER_ROOT_UNSAFE: writable directory in trusted path: $CUR" >&2; exit 90; fi; fi',
+        '  CUR="$(dirname "$CUR")"',
+        'done',
+        'if [ ! -d "$VR" ] || [ -L "$VR" ]; then echo "VERIFIER_ROOT_UNSAFE: not a real directory: $VR" >&2; exit 90; fi',
+        'if [ "$(stat -c %U "$VR" 2>/dev/null)" != "$(id -un)" ]; then echo "VERIFIER_ROOT_UNSAFE: wrong owner for $VR" >&2; exit 90; fi',
+        'perms="$(stat -c %a "$VR" 2>/dev/null || echo 000)"',
+        'if [ $(( 0$perms & 18 )) -ne 0 ]; then echo "VERIFIER_ROOT_UNSAFE: unsafe permissions on $VR" >&2; exit 90; fi',
         'export WORKSPACE_REGISTRY_ROOT="$PROJECT_DIR"',
         'export UV_PROJECT_ENVIRONMENT="$TMP_ROOT/.venv"',
-        'mkdir -p "$TMP_ROOT"',
+        'if [ -L "$TMP_ROOT" ]; then echo "VERIFIER_ROOT_UNSAFE: per-project root is a symlink: $TMP_ROOT" >&2; exit 90; fi',
+        'if [ ! -e "$TMP_ROOT" ]; then mkdir -p "$TMP_ROOT"; fi',
+        'if [ ! -d "$TMP_ROOT" ]; then echo "VERIFIER_ROOT_UNSAFE: per-project root is not a directory: $TMP_ROOT" >&2; exit 90; fi',
+        'LOCK="$TMP_ROOT/.sync.lock"',
+        'exec 9>"$LOCK"',
+        'flock 9',
         'SOURCE_META="$TMP_ROOT/.source-pyproject.toml"',
         'SOURCE_META_NEW="$TMP_ROOT/.source-pyproject.toml.new"',
         'SOURCE_LOCK="$TMP_ROOT/.source-uv.lock"',
@@ -856,6 +1060,7 @@ def _build_readonly_fallback_script(
         "else",
         '  if [ $HAS_LOCK -eq 1 ]; then SYNC_PROJECT="$PROJECT_DIR"; else SYNC_PROJECT="$TMP_ROOT"; fi',
         "fi",
+        'flock -u 9',
         'rm -f "$SOURCE_META_NEW"',
         'cd "$PROJECT_DIR"',
     ]
@@ -864,17 +1069,18 @@ def _build_readonly_fallback_script(
     # dependency synchronization was completed above and a subsequent uv run
     # must not decide to mutate project metadata or recreate a source-local env.
     run_prefix = 'uv run --project "$SYNC_PROJECT" --no-sync'
+    cache_root = _verifier_project_cache_root(project_dir)
     if tool_key == "pytest":
         lines.append(
-            f'{run_prefix} pytest -o cache_dir=/tmp/.mcp-pytest-cache {target_args} 2>&1'
+            f'{run_prefix} pytest -o cache_dir={cache_root}/pytest {target_args} 2>&1'
         )
     elif tool_key == "ruff":
         lines.append(
-            f'RUFF_CACHE_DIR=/tmp/.mcp-ruff-cache {run_prefix} ruff check {target_args} 2>&1'
+            f'{run_prefix} ruff check --cache-dir {cache_root}/ruff {target_args} 2>&1'
         )
     elif tool_key == "mypy":
         lines.append(
-            f'{run_prefix} mypy --cache-dir /tmp/.mcp-mypy-cache {target_args} 2>&1'
+            f'{run_prefix} mypy --cache-dir {cache_root}/mypy {target_args} 2>&1'
         )
 
     return "\n".join(lines)
@@ -922,6 +1128,22 @@ def _fallback_result(
     tool_key: str, tool_name: str, r2: dict[str, Any], project_dir: str = ""
 ) -> dict[str, Any]:
     """Build the tool_error/tool_success envelope for a fallback command's raw job result."""
+    env_failure = _classify_env_failure(r2.get("stderr", ""), r2.get("exit_code"))
+    if env_failure:
+        return tool_error(
+            code=env_failure,
+            message=f"{tool_key} could not run in an isolated environment (exit code {r2.get('exit_code', -1)})",
+            result=build_command_result(
+                outcome="error",
+                exit_code=r2.get("exit_code", -1),
+                stdout=_redact_project_root(r2.get("stdout") or r2.get("output", ""), project_dir),
+                stderr=_redact_project_root(r2.get("stderr", ""), project_dir),
+                execution_duration_ms=_execution_duration_ms(r2),
+                job_id=r2.get("job_id"),
+                cwd=".",
+            ),
+            tool_name=tool_name,
+        )
     outcome2, error_code2 = _map_uv_exit_code(tool_key, r2.get("exit_code", -1))
     if error_code2 or outcome2 == "failed":
         return tool_error(
@@ -978,7 +1200,7 @@ def _run_uv_tool(
     except ValueError as e:
         code, msg = str(e).split(":", 1) if ":" in str(e) else ("INVALID_INPUT", str(e))
         return tool_error(code=code.strip(), message=msg.strip(), tool_name=tool_name)
-    argv = _build_uv_argv(tool_key, str(project_dir), targets)
+    script = _build_primary_script(tool_key, str(project_dir), targets)
 
     check_result = client.execute_raw("command -v uv")
     check_job = client.wait_job(check_result["job_id"])
@@ -991,8 +1213,6 @@ def _run_uv_tool(
             details={"required_binary": "uv"},
             tool_name=tool_name,
         )
-
-    command = " ".join(shlex.quote(a) for a in argv)
 
     if async_submit:
         # Audit: run_tests over a full suite must not block on a sync wait
@@ -1024,13 +1244,14 @@ def _run_uv_tool(
                     source="gateway",
                     warnings=[
                         f"{fallback_reason}: tests run in the writable "
-                        "temp project (/tmp/.mcp-test); poll with "
+                        "server-owned verifier root; poll with "
                         "gateway_job_status then gateway_job_result"
                     ],
                 )
 
     result = client.execute_raw(
-        command,
+        "sh",
+        stdin=_script_stdin_wrapper(script),
         redact_path_prefix=str(project_dir),
         timeout_s=client.async_job_timeout if async_submit else None,
     )
@@ -1051,6 +1272,23 @@ def _run_uv_tool(
         )
 
     raw = client.wait_job(result["job_id"])
+
+    env_failure = _classify_env_failure(raw.get("stderr", ""), raw.get("exit_code"))
+    if env_failure:
+        return tool_error(
+            code=env_failure,
+            message=f"{tool_key} could not run in an isolated environment (exit code {raw.get('exit_code', -1)})",
+            result=build_command_result(
+                outcome="error",
+                exit_code=raw.get("exit_code", -1),
+                stdout=_redact_project_root(raw.get("stdout") or raw.get("output", ""), str(project_dir)),
+                stderr=_redact_project_root(raw.get("stderr", ""), str(project_dir)),
+                execution_duration_ms=_execution_duration_ms(raw),
+                job_id=raw.get("job_id"),
+                cwd=".",
+            ),
+            tool_name=tool_name,
+        )
 
     needs_external_fallback = _uv_run_needs_external_fallback(raw)
 
@@ -1080,7 +1318,7 @@ def _run_uv_tool(
             r2 = client.execute_argv(
                 [
                     "env",
-                    "PYTHONPYCACHEPREFIX=/tmp/.mcp-pycache",
+                    "PYTHONPYCACHEPREFIX=" + _verifier_project_cache_root(str(project_dir)) + "/pycache",
                     "uv",
                     "run",
                     "--no-project",
@@ -1101,7 +1339,7 @@ def _run_uv_tool(
             uvx_argv = None
         if uvx_argv:
             r2 = client.execute_argv(
-                ["env", "RUFF_CACHE_DIR=/tmp/.mcp-ruff-cache"] + uvx_argv,
+                ["env", "RUFF_CACHE_DIR=" + _verifier_project_cache_root(str(project_dir)) + "/ruff"] + uvx_argv,
                 cwd=str(project_dir),
             )
             return _fallback_result(tool_key, tool_name, r2, str(project_dir))

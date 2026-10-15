@@ -2,8 +2,18 @@
 set -eu
 
 HOSTKEY_DIR=/etc/ssh/hostkeys
+AGENT_RUNTIME_DIR=/var/lib/mcp-agent
+VERIFIER_ROOT="$AGENT_RUNTIME_DIR/verifier"
+
 mkdir -p "$HOSTKEY_DIR"
 chmod 700 "$HOSTKEY_DIR"
+
+# agent_runtime is a persistent named volume, so image-layer ownership/modes
+# do not survive the first populated volume forever. Re-establish the verifier
+# trust boundary on every container start before sshd accepts any session.
+mkdir -p "$AGENT_RUNTIME_DIR" "$VERIFIER_ROOT"
+chown mcpuser:mcpuser "$AGENT_RUNTIME_DIR" "$VERIFIER_ROOT"
+chmod 700 "$AGENT_RUNTIME_DIR" "$VERIFIER_ROOT"
 
 key_is_loadable() {
   # A valid private host key must round-trip through `ssh-keygen -y` (which
