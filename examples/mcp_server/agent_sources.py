@@ -26,6 +26,9 @@ import shutil
 import stat
 import subprocess
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,6 +45,28 @@ _GIT_TIMEOUT_SECONDS = 120
 _BAD_OBJECT_RE = re.compile(
     r"fatal:\s*(?:bad object|not a valid object name)\s+(\S+)", re.IGNORECASE
 )
+
+_RemoteTargetCache = dict[tuple[str, str, str, str], tuple[str, str]]
+_CLEANUP_REMOTE_TARGETS: ContextVar[_RemoteTargetCache | None] = ContextVar(
+    "cleanup_remote_targets", default=None
+)
+
+
+@contextmanager
+def cleanup_remote_resolution_scope() -> Iterator[None]:
+    """Reuse API target metadata within one guarded cleanup operation.
+
+    Resolver calls still inspect and validate the current Git remote URLs.
+    Only authenticated username/clone-URL metadata is shared, bound to the
+    registered root, repository identity and credential digest. Ref probes
+    remain live. The scope propagates through asyncio.to_thread and is reset
+    on every exit, so other requests cannot borrow its resolved targets.
+    """
+    context_token = _CLEANUP_REMOTE_TARGETS.set({})
+    try:
+        yield
+    finally:
+        _CLEANUP_REMOTE_TARGETS.reset(context_token)
 
 
 class ManagedSourceBundleError(RuntimeError):
@@ -444,8 +469,9 @@ def _resolve_trusted_remote(project_root: Path) -> tuple[str, str, str]:
     and require every accepted remote to resolve to the same ``owner/repo``.
     This supports deployments where the trusted remote is named ``gitea`` or
     ``mcp-gitea`` instead of ``origin`` while still failing closed on ambiguous
-    repository identity.  The actual fetch target is always re-resolved via
-    the authenticated Gitea API; checkout remote URLs are never used for auth.
+    repository identity. The actual target comes from the authenticated
+    Gitea API, never checkout credentials. Cleanup may reuse that API metadata
+    within its operation scope after validating the current remote identities.
 
     Raises ``ManagedSourceBundleError`` on any failure (fail closed).
     """
@@ -502,7 +528,22 @@ def _resolve_trusted_remote(project_root: Path) -> tuple[str, str, str]:
             )
 
         owner, repo = next(iter(identities))
-        username, clone_url = _repo_https_target(owner, repo, token=token)
+        cache = _CLEANUP_REMOTE_TARGETS.get()
+        cache_key: tuple[str, str, str, str] | None = None
+        target: tuple[str, str] | None = None
+        if cache is not None:
+            cache_key = (
+                str(project_root.resolve()),
+                owner,
+                repo,
+                hashlib.sha256(token.encode()).hexdigest(),
+            )
+            target = cache.get(cache_key)
+        if target is None:
+            target = _repo_https_target(owner, repo, token=token)
+            if cache is not None and cache_key is not None:
+                cache[cache_key] = target
+        username, clone_url = target
     except ManagedSourceBundleError:
         raise
     except Exception as exc:
