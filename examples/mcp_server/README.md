@@ -19,7 +19,8 @@ Errors use `isError: true` with an `Error:` prefix in the text.
 - `minimal` — health, session health, restricted execute, job status/result. Suitable for limited-scope automation.
 - `standard` — default read/audit workflow. Includes file reading, repo status, session listing, job waiting, and all workspace tools (write, edit, patch, preview ×3, verify).
 - `full` — reserved for diagnostics, handoff, and workspace tools. Adds `gateway_self_test` plus all standard workspace tools.
-- `mcp_client` — designed for ChatGPT remote MCP. Replaces `gateway_execute_restricted` with high-level read-only tools. **No workspace tools** — write, preview, and verify are intentionally excluded.
+- `mcp_client` — ChatGPT-oriented surface. It includes project, repository, Docker, agent, and workspace capabilities, but the effective surface is reduced to a non-mutating first-attach set when `MCP_CLIENT_SAFE_MODE=true`.
+- `mcp_client_write` — explicit full-control ChatGPT mode. It starts from the broad `mcp_client` surface and additionally exposes guarded Git/Gitea and supervisor write/admin tools. Runtime scopes, policy, confirmation, and audit checks still apply.
 
 Tool mode controls visibility only. Write permissions are orthogonal — see [Handoff mode](#handoff-mode) below.
 
@@ -49,13 +50,20 @@ Tool mode controls visibility only. Write permissions are orthogonal — see [Ha
 
 ## ChatGPT-safe mode
 
-For ChatGPT remote MCP, use:
+For ChatGPT remote MCP first attach, use:
 
 ```bash
 export MCP_GATEWAY_TOOL_MODE=mcp_client
+export MCP_CLIENT_SAFE_MODE=true
 ```
 
-This mode hides the generic `gateway_execute_restricted` tool and exposes high-level read-only / verification tools instead:
+`mcp_client` by itself is not the safety boundary. `MCP_CLIENT_SAFE_MODE=true`
+removes mutation, agent-launch, privileged Docker/deploy, confirmation, and
+workspace write/preview/verify tools from the ChatGPT-visible surface. The
+remaining surface is intended for read/audit-first inspection and bounded
+verification, while token scopes and command policy remain authoritative.
+
+Representative safe tools include:
 
 - `gateway_working_directory` — print working directory
 - `gateway_git_status` — git status --short
@@ -66,7 +74,10 @@ This mode hides the generic `gateway_execute_restricted` tool and exposes high-l
 - `gateway_run_lint` — ruff check
 - `gateway_run_compileall` — python -m compileall
 
-This is intended to reduce platform-level blocking and avoid exposing a generic SSH command surface.
+This is intended to reduce platform-level blocking and avoid exposing a generic
+SSH command surface or first-attach mutation authority. Use
+`MCP_GATEWAY_TOOL_MODE=mcp_client_write` only when the caller is intentionally
+granted the broader write/admin surface.
 
 ## Command policy
 
@@ -251,18 +262,21 @@ All require the `mcp:project` scope.
 
 ### Available by mode
 
-| Tool | standard | full | chatgpt |
-|------|----------|------|---------|
-| `workspace_file_write` | yes | yes | — |
-| `workspace_file_edit` | yes | yes | — |
-| `workspace_apply_patch` | yes | yes | — |
-| `workspace_preview_write` | yes | yes | yes |
-| `workspace_preview_edit` | yes | yes | yes |
-| `workspace_preview_patch` | yes | yes | yes |
-| `workspace_verify` | yes | yes | yes |
+| Tool | standard | full | `mcp_client` safe | `mcp_client` without safe mode | `mcp_client_write` |
+|------|----------|------|-------------------|--------------------------------|--------------------|
+| `workspace_file_write` | yes | yes | — | yes | yes |
+| `workspace_file_edit` | yes | yes | — | yes | yes |
+| `workspace_apply_patch` | yes | yes | — | yes | yes |
+| `workspace_preview_write` | yes | yes | — | yes | yes |
+| `workspace_preview_edit` | yes | yes | — | yes | yes |
+| `workspace_preview_patch` | yes | yes | — | yes | yes |
+| `workspace_verify` | yes | yes | — | yes | yes |
 
-**mcp_client mode** intentionally excludes workspace write tools. It remains
-read-only: preview and verify tools are available, while write/edit/patch are hidden.
+For ChatGPT first attach, use `mcp_client` with `MCP_CLIENT_SAFE_MODE=true`.
+Plain `mcp_client` retains the broad historical tool surface, while
+`mcp_client_write` additionally exposes the explicit Git/Gitea and supervisor
+write/admin controls. Visibility never bypasses runtime scope, policy,
+confirmation, or audit enforcement.
 
 ### Safe flag
 
@@ -283,10 +297,12 @@ and `file_exists`. No file content is returned.
 **Rollback is NOT available** via MCP tools, REST endpoints, or SDK.
 Rollback is a separate lifecycle managed by SnapshotStore (Python API only).
 
-## Excluded by design
+## Excluded from ChatGPT safe mode
 
 - unrestricted command execution
-- deployment or destructive operations
+- workspace and repository mutation
+- deployment, privileged Docker, and destructive operations
+- agent launch and task mutation
 - WebSocket/PTTY streaming
 
 ## Quick start
