@@ -195,6 +195,11 @@ class DockerClient:
         # least one returned row actually had a host path redacted. The
         # tool wrappers read it back into meta.redacted.
         self.last_redacted: bool = False
+        # `_run()` applies a fixed output cap after subprocess completion.
+        # Structured list methods must carry that truncation into
+        # `last_truncated`; otherwise a partial JSONL inventory can be
+        # misreported as complete when the row limit itself was not reached.
+        self.last_output_truncated: bool = False
 
     async def _run(
         self,
@@ -221,7 +226,8 @@ class DockerClient:
             raise RuntimeError(f"docker exited {proc.returncode}: {err}")
 
         result = stdout.decode("utf-8", errors="replace")
-        if len(result) > MAX_OUTPUT_BYTES:
+        self.last_output_truncated = len(result) > MAX_OUTPUT_BYTES
+        if self.last_output_truncated:
             result = result[:MAX_OUTPUT_BYTES] + "\n[output truncated]"
         return result
 
@@ -396,8 +402,9 @@ class DockerClient:
             argv.append("--all")
         argv.extend(["--format", "json"])
         result = await self._run(argv)
+        output_truncated = self.last_output_truncated
         rows, total = self._truncate_rows(self._parse_json_lines(result), limit)
-        self.last_truncated = total > len(rows)
+        self.last_truncated = output_truncated or total > len(rows)
         redacted = [self._redact_ps_row(r) for r in rows]
         self.last_redacted = redacted != rows
         return [self._annotate_ps_health(r) for r in redacted]
@@ -409,8 +416,9 @@ class DockerClient:
         argv = [DOCKER_BIN, "images"]
         argv.extend(["--format", "json"])
         result = await self._run(argv)
+        output_truncated = self.last_output_truncated
         rows, total = self._truncate_rows(self._parse_json_lines(result), limit)
-        self.last_truncated = total > len(rows)
+        self.last_truncated = output_truncated or total > len(rows)
         return rows
 
     async def inspect(
@@ -703,8 +711,9 @@ class DockerClient:
         # the other "enumerate everything" read.
         argv.extend(["--format", "json"])
         result = await self._run(argv, timeout=60.0)
+        output_truncated = self.last_output_truncated
         rows, total = self._truncate_rows(self._parse_json_lines(result), limit)
-        self.last_truncated = total > len(rows)
+        self.last_truncated = output_truncated or total > len(rows)
         return rows
 
     async def compose_ps(
@@ -717,8 +726,9 @@ class DockerClient:
         argv.append("ps")
         argv.extend(["--format", "json"])
         result = await self._run(argv, timeout=60.0)
+        output_truncated = self.last_output_truncated
         rows, total = self._truncate_rows(self._parse_json_lines(result), limit)
-        self.last_truncated = total > len(rows)
+        self.last_truncated = output_truncated or total > len(rows)
         redacted = [self._redact_ps_row(r) for r in rows]
         self.last_redacted = redacted != rows
         return [self._annotate_ps_health(r) for r in redacted]
