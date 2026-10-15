@@ -102,7 +102,72 @@ def _plan() -> dict:
         "source_revision": HEAD,
         "image_namespace": NAMESPACE,
         "target_images": _targets(),
+        "crm_config": {
+            "crm_url_configured": True,
+            "crm_api_key_configured": True,
+            "crm_projection_ready": True,
+        },
     }
+
+
+@pytest.mark.parametrize(
+    ("contents", "expected"),
+    [
+        (
+            "",
+            {
+                "crm_url_configured": False,
+                "crm_api_key_configured": False,
+                "crm_projection_ready": False,
+            },
+        ),
+        (
+            "AUDIT_CRM_URL=http://crm-web\n"
+            "AUDIT_CRM_API_KEY=REPLACE_WITH_ESPO_API_USER_KEY\n",
+            {
+                "crm_url_configured": True,
+                "crm_api_key_configured": False,
+                "crm_projection_ready": False,
+            },
+        ),
+        (
+            "AUDIT_CRM_URL=${CRM_URL}\nAUDIT_CRM_API_KEY=real-api-key\n",
+            {
+                "crm_url_configured": False,
+                "crm_api_key_configured": True,
+                "crm_projection_ready": False,
+            },
+        ),
+        (
+            "AUDIT_CRM_URL=http://crm-web\n"
+            "AUDIT_CRM_URL=http://duplicate\n"
+            "AUDIT_CRM_API_KEY=real-api-key\n",
+            {
+                "crm_url_configured": False,
+                "crm_api_key_configured": True,
+                "crm_projection_ready": False,
+            },
+        ),
+        (
+            "AUDIT_CRM_URL=http://crm-web\nAUDIT_CRM_API_KEY=real-api-key\n",
+            {
+                "crm_url_configured": True,
+                "crm_api_key_configured": True,
+                "crm_projection_ready": True,
+            },
+        ),
+    ],
+)
+def test_site_audit_crm_config_status_is_non_secret(tmp_path, contents, expected):
+    env_file = tmp_path / ".env"
+    env_file.write_text(contents, encoding="utf-8")
+
+    status = docker_adapter._site_audit_crm_config_status(env_file)
+
+    assert status == expected
+    serialized = json.dumps(status)
+    assert "real-api-key" not in serialized
+    assert "http://crm-web" not in serialized
 
 
 def _inspect_map(state: dict | None = None) -> dict[str, dict]:
@@ -216,6 +281,11 @@ async def test_site_audit_confirmation_pins_complete_five_image_set(monkeypatch)
     pending = result["result"]
     assert pending["status"] == "confirmation_required"
     assert pending["risk"] == "high"
+    assert pending["crm_config"] == {
+        "crm_url_configured": True,
+        "crm_api_key_configured": True,
+        "crm_projection_ready": True,
+    }
     import examples.mcp_server.server as srv
 
     action, _ = srv._confirm_store.peek_action_id(pending["action_id"])

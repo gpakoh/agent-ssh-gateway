@@ -901,6 +901,57 @@ def _safe_regular_under(root: Path, relative_path: str, label: str) -> Path:
     return resolved
 
 
+def _site_audit_crm_config_status(env_file: Path) -> dict[str, bool]:
+    """Return non-secret CRM readiness evidence from the operator env file.
+
+    CRM projection is intentionally optional for a Site Audit rollout, so an
+    absent, duplicate, interpolated, or placeholder value does not invalidate
+    the deployment contract. It must remain observable to release operators
+    without exposing the configured URL or API key.
+    """
+    keys = ("AUDIT_CRM_URL", "AUDIT_CRM_API_KEY")
+    pattern = re.compile(
+        r"^\s*(?:export\s+)?(AUDIT_CRM_URL|AUDIT_CRM_API_KEY)\s*="
+    )
+    try:
+        lines = env_file.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise ValueError("Site Audit operator env file is unreadable") from exc
+
+    assignments: dict[str, list[str]] = {key: [] for key in keys}
+    for line in lines:
+        match = pattern.match(line)
+        if match is not None:
+            assignments[match.group(1)].append(line)
+
+    configured: dict[str, bool] = {}
+    for key in keys:
+        matches = assignments[key]
+        value: object = None
+        if len(matches) == 1:
+            try:
+                parsed = dotenv_values(stream=StringIO(matches[0]), interpolate=False)
+            except Exception:
+                parsed = {}
+            value = parsed.get(key)
+        valid = (
+            isinstance(value, str)
+            and bool(value.strip())
+            and "${" not in value
+            and not any(ch in value for ch in ("\x00", "\n", "\r"))
+        )
+        if key == "AUDIT_CRM_API_KEY" and value == "REPLACE_WITH_ESPO_API_USER_KEY":
+            valid = False
+        configured[key] = valid
+
+    return {
+        "crm_url_configured": configured["AUDIT_CRM_URL"],
+        "crm_api_key_configured": configured["AUDIT_CRM_API_KEY"],
+        "crm_projection_ready": configured["AUDIT_CRM_URL"]
+        and configured["AUDIT_CRM_API_KEY"],
+    }
+
+
 def _xloud_target_images(
     image_namespace: str,
     source_revision: str,
@@ -1337,6 +1388,7 @@ async def _prepare_site_audit_deploy(
     client = _docker_client()
     client._validate_project_dir(str(operator_root))
     env_file = _safe_regular_under(operator_root, ".env", "Site Audit operator env file")
+    crm_config = _site_audit_crm_config_status(env_file)
 
     state_volume = await client.volume_metadata(_SITE_AUDIT_STATE_VOLUME)
     if state_volume.get("Name") != _SITE_AUDIT_STATE_VOLUME:
@@ -1361,6 +1413,7 @@ async def _prepare_site_audit_deploy(
         "source_revision": source_revision,
         "image_namespace": image_namespace.strip().rstrip("/"),
         "target_images": target_images,
+        "crm_config": crm_config,
     }
 
 
@@ -3927,7 +3980,9 @@ async def docker_deploy_site_audit(
         risk="high",
         required_scope="mcp:docker:admin",
     )
-    return _confirmation_response(action)
+    response = _confirmation_response(action)
+    response["result"]["crm_config"] = plan["crm_config"]
+    return response
 
 
 async def _docker_deploy_site_audit_impl(
