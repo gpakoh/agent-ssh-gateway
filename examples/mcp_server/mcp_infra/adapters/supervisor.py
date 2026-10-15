@@ -13,6 +13,7 @@ import errno
 import hashlib
 import logging
 import os
+import re
 import uuid
 from pathlib import Path
 from typing import Any
@@ -20,7 +21,8 @@ from typing import Any
 from tool_results import tool_error, tool_success
 
 from examples.mcp_server.agent_sources import ManagedSourceBundleError, _resolve_trusted_remote
-from examples.mcp_server.candidate_clone import CandidateCloneError
+from examples.mcp_server.candidate_clone import CandidateCloneError, ProtectedBranchEvidence
+from examples.mcp_server.candidate_clone import adopt_candidate_lineage as _adopt_candidate_lineage
 from examples.mcp_server.candidate_clone import candidate_cleanup as _candidate_cleanup
 from examples.mcp_server.candidate_clone import (
     prepare_candidate_clone as _prepare_candidate_clone,
@@ -492,6 +494,45 @@ def prepare_candidate_clone(
     )
 
 
+async def _read_protected_branch_evidence(
+    *,
+    token: str,
+    owner: str,
+    repo: str,
+    branch: str,
+) -> ProtectedBranchEvidence:
+    """Read one exact branch from Gitea and require explicit protection + full SHA."""
+    try:
+        from examples.mcp_server.mcp_infra.adapters.remote import _server_gitea_client
+
+        async with _server_gitea_client()(token) as client:
+            info = await client.get_branch(owner, repo, branch)
+    except Exception as exc:
+        raise CandidateCloneError(
+            "CHECK_FAILED",
+            "protected branch state could not be verified",
+            retryable=True,
+            details={"reference_check": "gitea_protected_branch"},
+        ) from exc
+    if not isinstance(info, dict) or info.get("protected") is not True:
+        raise CandidateCloneError(
+            "CHECK_FAILED",
+            "requested preservation branch is not protected",
+            retryable=True,
+            details={"reference_check": "gitea_protected_branch", "branch": branch},
+        )
+    commit = info.get("commit") or {}
+    sha = str(commit.get("id") or commit.get("sha") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise CandidateCloneError(
+            "CHECK_FAILED",
+            "protected branch head is malformed or unavailable",
+            retryable=True,
+            details={"reference_check": "gitea_protected_branch", "branch": branch},
+        )
+    return ProtectedBranchEvidence(branch=branch, protected=True, sha=sha)
+
+
 async def _assert_no_open_candidate_pr_reference(
     *,
     token: str,
@@ -592,12 +633,82 @@ async def _assert_no_open_candidate_pr_reference(
         ) from exc
 
 
+async def candidate_adopt(
+    project_id: str,
+    expected_head_sha: str,
+    expected_branch: str,
+    expected_source_project: str,
+) -> dict[str, Any]:
+    """Adopt one proven same-repository legacy candidate into managed lineage metadata."""
+
+    async def _run() -> dict[str, Any]:
+        try:
+            source_project, _source_root = _resolve_project(expected_source_project)
+            config_dir = _resolve_registry_config_dir()
+            journal_root = _journal_root_for_project("workspace-registry", config_dir)
+        except _ProjectResolutionError:
+            return tool_error(
+                tool="candidate_adopt",
+                code="PROJECT_NOT_FOUND",
+                message="Source project is not registered or its root is unavailable.",
+                retryable=False,
+            )
+        except ValueError:
+            return tool_error(
+                tool="candidate_adopt",
+                code="INVALID_INPUT",
+                message="Workspace registry control plane is misconfigured.",
+                retryable=False,
+            )
+
+        def _reference_guard() -> None:
+            # Adoption is metadata-only: an open feature PR is valid preservation
+            # evidence, not a destructive-reference blocker. Core adoption still
+            # rejects dirty worktrees, active local task evidence, identity drift,
+            # and any existing cleanup tombstone before writing metadata.
+            return None
+
+        try:
+            receipt = await asyncio.to_thread(
+                _adopt_candidate_lineage,
+                project_id,
+                expected_head_sha,
+                expected_branch,
+                source_project,
+                config_dir=config_dir,
+                journal_root=journal_root,
+                reference_guard=_reference_guard,
+            )
+        except CandidateCloneError as exc:
+            return tool_error(
+                tool="candidate_adopt",
+                code=exc.code,
+                message=exc.message,
+                retryable=exc.retryable,
+                details=exc.details,
+            )
+
+        return tool_success(
+            tool="candidate_adopt",
+            result=receipt.as_dict(),
+            success_text="Adopted candidate lineage.",
+        )
+
+    return await run_tool_async(
+        tool="candidate_adopt",
+        title="Candidate adopt",
+        fn=_run,
+        success_text="Adopted candidate lineage.",
+    )
+
+
 async def candidate_cleanup(
     project_id: str,
     expected_head_sha: str,
     expected_branch: str,
     expected_source_project: str,
-    preserved_ref: str,
+    preserved_ref: str | None = None,
+    protected_branch: str | None = None,
 ) -> dict[str, Any]:
     """Guarded cleanup of one preserved candidate clone."""
 
@@ -623,14 +734,63 @@ async def candidate_cleanup(
 
         audit_written = False
         correlation_id = uuid.uuid4().hex
+        if (preserved_ref is None) == (protected_branch is None):
+            return tool_error(
+                tool="candidate_cleanup",
+                code="INVALID_INPUT",
+                message="Exactly one preservation method is required.",
+                retryable=False,
+            )
+
         audit_metadata = {
             "project_id": project_id,
             "expected_head_sha": expected_head_sha,
             "expected_branch": expected_branch,
             "expected_source_project": source_project,
             "preserved_ref": preserved_ref,
+            "protected_branch": protected_branch,
             "correlation_id": correlation_id,
         }
+
+        protected_evidence: ProtectedBranchEvidence | None = None
+        protected_refresher = None
+        if protected_branch is not None:
+            try:
+                _username, clone_url, token = _resolve_trusted_remote(source_root)
+                _host, owner, repo = _parse_gitea_remote(clone_url)
+                protected_evidence = await _read_protected_branch_evidence(
+                    token=token,
+                    owner=owner,
+                    repo=repo,
+                    branch=protected_branch,
+                )
+            except CandidateCloneError as exc:
+                return tool_error(
+                    tool="candidate_cleanup",
+                    code=exc.code,
+                    message=exc.message,
+                    retryable=exc.retryable,
+                    details=exc.details,
+                )
+            except (ManagedSourceBundleError, RuntimeError, ValueError):
+                return tool_error(
+                    tool="candidate_cleanup",
+                    code="CHECK_FAILED",
+                    message="Trusted candidate source remote identity could not be verified.",
+                    retryable=True,
+                )
+
+            def _refresh_protected_branch(branch: str) -> ProtectedBranchEvidence:
+                return asyncio.run(
+                    _read_protected_branch_evidence(
+                        token=token,
+                        owner=owner,
+                        repo=repo,
+                        branch=branch,
+                    )
+                )
+
+            protected_refresher = _refresh_protected_branch
 
         def _reference_guard() -> None:
             nonlocal audit_written
@@ -683,6 +843,8 @@ async def candidate_cleanup(
                 expected_branch,
                 source_project,
                 preserved_ref,
+                protected_branch_evidence=protected_evidence,
+                protected_branch_refresher=protected_refresher,
                 config_dir=config_dir,
                 journal_root=journal_root,
                 reference_guard=_reference_guard,
@@ -892,6 +1054,9 @@ def register_all() -> None:
     register_tool("prepare_candidate_clone")(
         instrumented("prepare_candidate_clone")(prepare_candidate_clone)
     )
+    register_tool("candidate_adopt")(
+        instrumented("candidate_adopt")(candidate_adopt)
+    )
     register_tool("candidate_cleanup")(
         instrumented("candidate_cleanup")(candidate_cleanup)
     )
@@ -904,5 +1069,6 @@ __all__ = [
     "supervisor_register_project",
     "supervisor_unregister_project",
     "prepare_candidate_clone",
+    "candidate_adopt",
     "candidate_cleanup",
 ]

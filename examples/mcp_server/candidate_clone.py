@@ -17,7 +17,7 @@ import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
@@ -116,12 +116,63 @@ class CandidateCloneReceipt:
 
 
 @dataclass(frozen=True)
+class IdentityProof:
+    source_project: str
+    branch: str
+    head_sha: str
+    candidate_dir_name: str
+
+
+@dataclass(frozen=True)
+class CandidateAdoptionReceipt:
+    project_id: str
+    source_project: str
+    branch: str
+    head: str
+    already_adopted: bool
+    lineage_reconstructed: bool
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "project_id": self.project_id,
+            "source_project": self.source_project,
+            "branch": self.branch,
+            "head": self.head,
+            "already_adopted": self.already_adopted,
+            "lineage_reconstructed": self.lineage_reconstructed,
+        }
+
+
+@dataclass(frozen=True)
+class ProtectedBranchEvidence:
+    branch: str
+    protected: bool
+    sha: str
+
+
+@dataclass(frozen=True)
+class PreservationProof:
+    kind: Literal["archive_ref", "protected_branch_reachability"]
+    preserved_ref: str | None = None
+    protected_branch: str | None = None
+    protected_sha: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "preserved_ref": self.preserved_ref,
+            "protected_branch": self.protected_branch,
+            "protected_sha": self.protected_sha,
+        }
+
+
+@dataclass(frozen=True)
 class CandidateCleanupReceipt:
     project_id: str
     source_project: str
     branch: str
     head: str
-    preserved_ref: str
+    preserved_ref: str | None
     registry_removed: bool
     directory_removed: bool
     already_cleaned: bool
@@ -1360,9 +1411,31 @@ def _find_lineage_claimant(
                 try:
                     metadata = _read_candidate_metadata(Path(entry.path))
                 except CandidateCloneError as exc:
+                    candidate_dir = Path(entry.path)
+                    try:
+                        git_stat = (candidate_dir / ".git").lstat()
+                    except OSError:
+                        git_stat = None
+                    if git_stat is None or stat.S_ISLNK(git_stat.st_mode) or not stat.S_ISDIR(git_stat.st_mode):
+                        exc.details = {
+                            "candidate_project_id": entry.name,
+                            "repair_action": "Adopt this candidate only after its Git metadata is restored to a safe directory.",
+                        }
+                        raise
+                    try:
+                        actual_branch = _run_git(
+                            candidate_dir,
+                            ["rev-parse", "--abbrev-ref", "HEAD"],
+                            operation="inspect legacy candidate lineage branch",
+                        )
+                    except CandidateCloneError:
+                        actual_branch = None
+                    if actual_branch not in {None, "HEAD", branch}:
+                        continue
                     exc.details = {
                         "candidate_project_id": entry.name,
-                        "repair_action": "Reconcile this candidate through the guarded cleanup workflow; do not delete or rewrite lineage metadata blindly.",
+                        "observed_branch": actual_branch,
+                        "repair_action": "Adopt this candidate with candidate_adopt before preparing or cleaning the same lineage.",
                     }
                     raise
                 if metadata.get("source_project") == source_project and metadata.get("branch") == branch:
@@ -1947,49 +2020,383 @@ def _require_no_inbound_candidate_dependencies(
         )
 
 
+def _validate_full_sha(value: str, *, field: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", value.strip()):
+        raise _fail("INVALID_INPUT", f"{field} must be a full commit SHA")
+    return value.strip().lower()
+
+
+def _validate_preservation_branch(branch: str) -> str:
+    if not isinstance(branch, str):
+        raise _fail("INVALID_INPUT", "protected branch must be a string")
+    branch = branch.strip()
+    invalid = (
+        not branch
+        or not _BRANCH_RE.fullmatch(branch)
+        or branch.startswith("-")
+        or branch.endswith("/")
+        or branch.endswith(".lock")
+        or ".." in branch
+        or "//" in branch
+        or ":" in branch
+        or "\\" in branch
+        or "@{" in branch
+    )
+    if invalid:
+        raise _fail("INVALID_INPUT", "protected branch name is not a safe git branch")
+    return branch
+
+
+def _archive_preservation_proof(preserved_ref: str) -> PreservationProof:
+    validated = _validate_ref(preserved_ref)
+    if validated is None or not validated.startswith("archive/candidate-"):
+        raise _fail(
+            "INVALID_INPUT",
+            "preserved_ref must be an explicit archive/candidate-* remote branch",
+        )
+    return PreservationProof(kind="archive_ref", preserved_ref=validated)
+
+
+def _protected_preservation_proof(evidence: ProtectedBranchEvidence) -> PreservationProof:
+    if not isinstance(evidence, ProtectedBranchEvidence):
+        raise _fail("INVALID_INPUT", "trusted protected branch evidence is required")
+    branch = _validate_preservation_branch(evidence.branch)
+    if evidence.protected is not True:
+        raise _fail("CHECK_FAILED", "requested preservation branch is not protected", retryable=True)
+    sha = _validate_full_sha(evidence.sha, field="protected branch SHA")
+    return PreservationProof(
+        kind="protected_branch_reachability",
+        protected_branch=branch,
+        protected_sha=sha,
+    )
+
+
+def _normalize_cleanup_tombstone(data: dict[str, Any]) -> dict[str, Any]:
+    version = data.get("version")
+    if version == 1:
+        preserved_ref = data.get("preserved_ref")
+        if not isinstance(preserved_ref, str):
+            raise _fail("WORKSPACE_CONTENDED", "legacy candidate cleanup tombstone preservation is invalid")
+        preservation = _archive_preservation_proof(preserved_ref).as_dict()
+    elif version == 2:
+        raw = data.get("preservation")
+        if not isinstance(raw, dict):
+            raise _fail("WORKSPACE_CONTENDED", "candidate cleanup tombstone preservation is invalid")
+        kind = raw.get("kind")
+        if kind == "archive_ref":
+            preserved_ref = raw.get("preserved_ref")
+            if not isinstance(preserved_ref, str):
+                raise _fail("WORKSPACE_CONTENDED", "candidate cleanup tombstone archive proof is invalid")
+            preservation = _archive_preservation_proof(preserved_ref).as_dict()
+        elif kind == "protected_branch_reachability":
+            branch = raw.get("protected_branch")
+            sha = raw.get("protected_sha")
+            if not isinstance(branch, str) or not isinstance(sha, str):
+                raise _fail("WORKSPACE_CONTENDED", "candidate cleanup tombstone protected proof is invalid")
+            preservation = PreservationProof(
+                kind="protected_branch_reachability",
+                protected_branch=_validate_preservation_branch(branch),
+                protected_sha=_validate_full_sha(sha, field="protected branch SHA"),
+            ).as_dict()
+        else:
+            raise _fail("WORKSPACE_CONTENDED", "candidate cleanup tombstone preservation kind is invalid")
+    else:
+        raise _fail("WORKSPACE_CONTENDED", "candidate cleanup tombstone version is unsupported")
+    normalized = dict(data)
+    normalized["preservation"] = preservation
+    return normalized
+
+
+def _new_cleanup_tombstone(
+    identity: dict[str, Any],
+    preservation: PreservationProof,
+    *,
+    phase: str,
+    root_dev: int | None = None,
+    root_ino: int | None = None,
+) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "version": 2,
+        **identity,
+        "preservation": preservation.as_dict(),
+        "phase": phase,
+    }
+    if root_dev is not None:
+        data["root_dev"] = root_dev
+    if root_ino is not None:
+        data["root_ino"] = root_ino
+    return data
+
+
+def _tombstone_with_phase(tombstone: dict[str, Any], phase: str) -> dict[str, Any]:
+    updated = dict(tombstone)
+    updated["phase"] = phase
+    return updated
+
+
+def _require_protected_reachability(
+    candidate_root: Path | None,
+    expected_head_sha: str,
+    proof: PreservationProof,
+    *,
+    refresher: Callable[[str], ProtectedBranchEvidence] | None,
+    refresh: bool,
+    context: str,
+) -> None:
+    branch = proof.protected_branch
+    protected_sha = proof.protected_sha
+    if branch is None or protected_sha is None:
+        raise _fail("CHECK_FAILED", "protected-branch preservation proof is incomplete", retryable=True)
+    if refresh:
+        if not callable(refresher):
+            raise _fail("INVALID_INPUT", "protected branch preservation requires a trusted refresher")
+        try:
+            fresh = refresher(branch)
+        except CandidateCloneError:
+            raise
+        except Exception as exc:
+            raise _fail(
+                "CHECK_FAILED",
+                f"protected branch state could not be refreshed ({context})",
+                retryable=True,
+            ) from exc
+        if (
+            not isinstance(fresh, ProtectedBranchEvidence)
+            or fresh.protected is not True
+            or fresh.branch != branch
+            or fresh.sha.strip().lower() != protected_sha
+        ):
+            raise _fail(
+                "CHECK_FAILED",
+                f"protected branch preservation changed ({context})",
+                retryable=True,
+            )
+    if candidate_root is None:
+        return
+    try:
+        _run_git(
+            candidate_root,
+            ["cat-file", "-e", f"{protected_sha}^{{commit}}"],
+            operation="verify protected preservation object",
+        )
+        _run_git(
+            candidate_root,
+            ["merge-base", "--is-ancestor", expected_head_sha, protected_sha],
+            operation="verify protected preservation reachability",
+        )
+    except CandidateCloneError as exc:
+        raise _fail(
+            "CHECK_FAILED",
+            f"candidate head is not proven reachable from protected branch ({context})",
+            retryable=True,
+            details={"protected_branch": branch, "protected_sha": protected_sha},
+        ) from exc
+
+
+def _require_preservation(
+    source_root: Path,
+    candidate_root: Path | None,
+    expected_head_sha: str,
+    proof: PreservationProof,
+    *,
+    protected_branch_refresher: Callable[[str], ProtectedBranchEvidence] | None,
+    refresh: bool,
+    context: str,
+) -> None:
+    if proof.kind == "archive_ref":
+        if proof.preserved_ref is None:
+            raise _fail("CHECK_FAILED", "archive preservation proof is incomplete", retryable=True)
+        _require_preserved_head(source_root, proof.preserved_ref, expected_head_sha, context=context)
+        return
+    if proof.kind == "protected_branch_reachability":
+        _require_protected_reachability(
+            candidate_root,
+            expected_head_sha,
+            proof,
+            refresher=protected_branch_refresher,
+            refresh=refresh,
+            context=context,
+        )
+        return
+    raise _fail("CHECK_FAILED", "candidate preservation proof is unsupported", retryable=True)
+
+
+def _prove_candidate_identity_locked(
+    *,
+    project_id: str,
+    expected_head_sha: str,
+    expected_branch: str,
+    expected_source_project: str,
+    workspace_root: Path,
+    source_root: Path,
+    reference_guard: Callable[[], None],
+) -> IdentityProof:
+    candidates_root = _candidate_clones_root(workspace_root)
+    candidate_root = candidates_root / project_id
+    _validate_candidate_root(candidate_root, candidates_root)
+    _reject_symlinked_git_dir(candidate_root)
+    try:
+        _source_username, source_url, _source_token = _resolve_trusted_remote(source_root)
+    except ManagedSourceBundleError as exc:
+        raise _fail("CHECK_FAILED", "trusted source repository identity could not be resolved", retryable=True) from exc
+    candidate_url = _legacy_trusted_remote(candidate_root)
+    if not candidate_url or candidate_url != source_url:
+        raise _fail(
+            "POLICY_DENIED",
+            "legacy candidate repository identity does not match the requested source project",
+            retryable=False,
+        )
+    dirty, _status_sha, _status_entries = _status_state(candidate_root)
+    current_branch = _run_git(
+        candidate_root,
+        ["rev-parse", "--abbrev-ref", "HEAD"],
+        operation="read legacy candidate branch",
+    )
+    current_head = _run_git(
+        candidate_root,
+        ["rev-parse", "HEAD"],
+        operation="read legacy candidate head",
+    ).lower()
+    if current_branch == "HEAD":
+        raise _fail("WORKSPACE_CONTENDED", "legacy candidate is detached; adoption requires an exact branch")
+    if dirty or current_branch != expected_branch or current_head != expected_head_sha:
+        raise _fail(
+            "WORKSPACE_CONTENDED",
+            "legacy candidate git state does not match adoption expectations",
+            details={"branch": current_branch, "head": current_head, "dirty": dirty},
+        )
+    if _candidate_has_active_evidence(candidate_root):
+        raise _fail("WORKSPACE_CONTENDED", "legacy candidate still has active task or delivery evidence")
+    metadata_path = _metadata_path(candidate_root)
+    if metadata_path.exists() or metadata_path.is_symlink():
+        metadata = _read_metadata(candidate_root)
+        expected_registry_root = f".mcp-candidate-clones/{project_id}"
+        for key, value in {
+            "project_id": project_id,
+            "source_project": expected_source_project,
+            "branch": expected_branch,
+            "head": expected_head_sha,
+            "root": expected_registry_root,
+        }.items():
+            if metadata.get(key) != value:
+                raise _fail("WORKSPACE_CONTENDED", "candidate clone metadata conflicts with proven identity")
+    _enforce_reference_guard(reference_guard)
+    return IdentityProof(
+        source_project=expected_source_project,
+        branch=expected_branch,
+        head_sha=expected_head_sha,
+        candidate_dir_name=project_id,
+    )
+
+
+def adopt_candidate_lineage(
+    project_id: str,
+    expected_head_sha: str,
+    expected_branch: str,
+    expected_source_project: str,
+    *,
+    config_dir: Path,
+    journal_root: Path,
+    reference_guard: Callable[[], None],
+) -> CandidateAdoptionReceipt:
+    """Adopt one proven same-repository legacy candidate without deleting or registering it."""
+    if not isinstance(project_id, str) or not _PROJECT_ID_RE.fullmatch(project_id):
+        raise _fail("INVALID_INPUT", "project_id has an invalid format")
+    expected_head_sha = _validate_full_sha(expected_head_sha, field="expected_head_sha")
+    expected_branch = _validate_branch(expected_branch)
+    if not isinstance(expected_source_project, str) or not expected_source_project.strip():
+        raise _fail("INVALID_INPUT", "expected_source_project must be non-empty")
+    expected_source_project = expected_source_project.strip()
+    if not callable(reference_guard):
+        raise _fail("INVALID_INPUT", "reference_guard must be callable and is required")
+    config_dir = config_dir.resolve()
+    journal_root = journal_root.resolve()
+    workspace_root = _workspace_root(config_dir)
+    source_root = _source_root(config_dir, expected_source_project, workspace_root=workspace_root)
+    candidate_root = _candidate_clones_root(workspace_root) / project_id
+    expected_registry_root = f".mcp-candidate-clones/{project_id}"
+    tombstone_path, _tombstone_id = _cleanup_tombstone_path(journal_root, project_id)
+    if _read_cleanup_tombstone(tombstone_path) is not None:
+        raise _fail(
+            "WORKSPACE_CONTENDED",
+            "candidate cleanup transaction already exists; adoption is not allowed",
+            retryable=False,
+            details={"project_id": project_id, "recovery_action": "resume_candidate_cleanup"},
+        )
+    with _lineage_lock(workspace_root, expected_source_project, expected_branch):
+        proof = _prove_candidate_identity_locked(
+            project_id=project_id,
+            expected_head_sha=expected_head_sha,
+            expected_branch=expected_branch,
+            expected_source_project=expected_source_project,
+            workspace_root=workspace_root,
+            source_root=source_root,
+            reference_guard=reference_guard,
+        )
+        metadata_path = _metadata_path(candidate_root)
+        if metadata_path.exists() or metadata_path.is_symlink():
+            return CandidateAdoptionReceipt(
+                project_id=project_id,
+                source_project=proof.source_project,
+                branch=proof.branch,
+                head=proof.head_sha,
+                already_adopted=True,
+                lineage_reconstructed=bool(_read_metadata(candidate_root).get("lineage_reconstructed")),
+            )
+        metadata = {
+            "version": 2,
+            "project_id": project_id,
+            "source_project": expected_source_project,
+            "branch": expected_branch,
+            "head": expected_head_sha,
+            "root": expected_registry_root,
+            "lineage_reconstructed": True,
+            "historical_provenance": {"kind": "unknown", "base_ref": None, "base_sha": None},
+        }
+        _write_metadata(metadata_path, metadata)
+        return CandidateAdoptionReceipt(
+            project_id=project_id,
+            source_project=proof.source_project,
+            branch=proof.branch,
+            head=proof.head_sha,
+            already_adopted=False,
+            lineage_reconstructed=True,
+        )
+
+
 def candidate_cleanup(
     project_id: str,
     expected_head_sha: str,
     expected_branch: str,
     expected_source_project: str,
-    preserved_ref: str,
+    preserved_ref: str | None = None,
     *,
+    protected_branch_evidence: ProtectedBranchEvidence | None = None,
+    protected_branch_refresher: Callable[[str], ProtectedBranchEvidence] | None = None,
     config_dir: Path,
     journal_root: Path,
     reference_guard: Callable[[], None],
 ) -> CandidateCleanupReceipt:
-    """Remove one exactly identified, remotely preserved candidate clone.
-
-    The injected ``reference_guard`` is REQUIRED and fail-closed: there is no
-    permissive default, so this core cannot be called unguarded. It is invoked
-    before the registry unregister and again immediately before the destructive
-    filesystem removal; it must raise whenever an active/open reference (open
-    PR, external task-job-delivery refs, etc.) still needs the clone.
-
-    Cleanup holds the same source-project+branch lineage lock used by
-    ``prepare_candidate_clone`` across remote identity checks, the registry CAS
-    unregister, and the filesystem delete.
-    """
+    """Remove one exactly identified candidate only after an independent preservation proof."""
     if not isinstance(project_id, str) or not _PROJECT_ID_RE.fullmatch(project_id):
         raise _fail("INVALID_INPUT", "project_id has an invalid format")
-    if not isinstance(expected_head_sha, str) or not re.fullmatch(
-        r"[0-9a-fA-F]{40}", expected_head_sha.strip()
-    ):
-        raise _fail("INVALID_INPUT", "expected_head_sha must be a full commit SHA")
-    expected_head_sha = expected_head_sha.strip().lower()
+    expected_head_sha = _validate_full_sha(expected_head_sha, field="expected_head_sha")
     expected_branch = _validate_branch(expected_branch)
     if not isinstance(expected_source_project, str) or not expected_source_project.strip():
         raise _fail("INVALID_INPUT", "expected_source_project must be non-empty")
     expected_source_project = expected_source_project.strip()
-    validated_preserved_ref = _validate_ref(preserved_ref)
-    if validated_preserved_ref is None or not validated_preserved_ref.startswith(
-        "archive/candidate-"
-    ):
+    if (preserved_ref is None) == (protected_branch_evidence is None):
         raise _fail(
             "INVALID_INPUT",
-            "preserved_ref must be an explicit archive/candidate-* remote branch",
+            "exactly one preservation method is required: archive ref or trusted protected branch evidence",
         )
-    preserved_ref = validated_preserved_ref
+    if preserved_ref is not None:
+        preservation = _archive_preservation_proof(preserved_ref)
+    else:
+        assert protected_branch_evidence is not None
+        preservation = _protected_preservation_proof(protected_branch_evidence)
+        if not callable(protected_branch_refresher):
+            raise _fail("INVALID_INPUT", "protected branch preservation requires a trusted refresher")
     if not callable(reference_guard):
         raise _fail("INVALID_INPUT", "reference_guard must be callable and is required")
 
@@ -2002,12 +2409,10 @@ def candidate_cleanup(
     expected_registry_root = f".mcp-candidate-clones/{project_id}"
     tombstone_path, tombstone_id = _cleanup_tombstone_path(journal_root, project_id)
     expected_identity = {
-        "version": 1,
         "project_id": project_id,
         "source_project": expected_source_project,
         "branch": expected_branch,
         "head": expected_head_sha,
-        "preserved_ref": preserved_ref,
         "registry_root": expected_registry_root,
     }
 
@@ -2018,7 +2423,8 @@ def candidate_cleanup(
                 expected_head_sha=expected_head_sha,
                 expected_branch=expected_branch,
                 expected_source_project=expected_source_project,
-                preserved_ref=preserved_ref,
+                preservation=preservation,
+                protected_branch_refresher=protected_branch_refresher,
                 config_dir=config_dir,
                 journal_root=journal_root,
                 source_root=source_root,
@@ -2038,7 +2444,8 @@ def _cleanup_candidate_locked(
     expected_head_sha: str,
     expected_branch: str,
     expected_source_project: str,
-    preserved_ref: str,
+    preservation: PreservationProof,
+    protected_branch_refresher: Callable[[str], ProtectedBranchEvidence] | None,
     config_dir: Path,
     journal_root: Path,
     source_root: Path,
@@ -2051,18 +2458,26 @@ def _cleanup_candidate_locked(
     reference_guard: Callable[[], None],
 ) -> CandidateCleanupReceipt:
     tombstone = _read_cleanup_tombstone(tombstone_path)
-    if tombstone is not None:
+    normalized_tombstone = _normalize_cleanup_tombstone(tombstone) if tombstone is not None else None
+    if normalized_tombstone is not None:
         for key, value in expected_identity.items():
-            if tombstone.get(key) != value:
+            if normalized_tombstone.get(key) != value:
                 raise _fail("WORKSPACE_CONTENDED", "candidate cleanup tombstone identity mismatch")
-        phase_value = tombstone.get("phase")
+        if normalized_tombstone.get("preservation") != preservation.as_dict():
+            raise _fail("WORKSPACE_CONTENDED", "candidate cleanup tombstone preservation mismatch")
+        phase_value = normalized_tombstone.get("phase")
         if phase_value not in {"prepared", "registry_removed", "complete"}:
             raise _fail("WORKSPACE_CONTENDED", "candidate cleanup tombstone phase is invalid")
 
-    _require_preserved_head(
+    candidate_exists = candidate_root.exists() or candidate_root.is_symlink()
+    phase = str(normalized_tombstone.get("phase")) if normalized_tombstone is not None else None
+    _require_preservation(
         source_root,
-        preserved_ref,
+        candidate_root if candidate_exists else None,
         expected_head_sha,
+        preservation,
+        protected_branch_refresher=protected_branch_refresher,
+        refresh=False,
         context="before existence check",
     )
     _require_delivery_branch_absent(
@@ -2070,9 +2485,6 @@ def _cleanup_candidate_locked(
         expected_branch,
         context="before existence check",
     )
-
-    candidate_exists = candidate_root.exists() or candidate_root.is_symlink()
-    phase = str(tombstone.get("phase")) if tombstone is not None else None
     if not candidate_exists:
         registry_present = _registry_has_candidate(config_dir, project_id)
         if phase == "complete" and not registry_present:
@@ -2081,7 +2493,7 @@ def _cleanup_candidate_locked(
                 source_project=expected_source_project,
                 branch=expected_branch,
                 head=expected_head_sha,
-                preserved_ref=preserved_ref,
+                preserved_ref=preservation.preserved_ref,
                 registry_removed=False,
                 directory_removed=False,
                 already_cleaned=True,
@@ -2091,10 +2503,7 @@ def _cleanup_candidate_locked(
             raise _fail("PROJECT_NOT_FOUND", "candidate clone does not exist")
         _enforce_reference_guard(reference_guard)
         if tombstone is None:
-            tombstone = {
-                **expected_identity,
-                "phase": "prepared",
-            }
+            tombstone = _new_cleanup_tombstone(expected_identity, preservation, phase="prepared")
             _write_cleanup_tombstone(tombstone_path, tombstone)
         unregister_result = _unregister_candidate(
             config_dir=config_dir,
@@ -2103,15 +2512,14 @@ def _cleanup_candidate_locked(
             root=expected_registry_root,
         )
         reset_registry()
-        completed = dict(expected_identity)
-        completed["phase"] = "complete"
-        _write_cleanup_tombstone(tombstone_path, completed)
+        tombstone = _tombstone_with_phase(tombstone, "complete")
+        _write_cleanup_tombstone(tombstone_path, tombstone)
         return CandidateCleanupReceipt(
             project_id=project_id,
             source_project=expected_source_project,
             branch=expected_branch,
             head=expected_head_sha,
-            preserved_ref=preserved_ref,
+            preserved_ref=preservation.preserved_ref,
             registry_removed=not unregister_result.already_absent,
             directory_removed=False,
             already_cleaned=unregister_result.already_absent,
@@ -2135,12 +2543,13 @@ def _cleanup_candidate_locked(
 
     _enforce_reference_guard(reference_guard)
     if tombstone is None:
-        tombstone = {
-            **expected_identity,
-            "phase": "prepared",
-            "root_dev": root_dev,
-            "root_ino": root_ino,
-        }
+        tombstone = _new_cleanup_tombstone(
+            expected_identity,
+            preservation,
+            phase="prepared",
+            root_dev=root_dev,
+            root_ino=root_ino,
+        )
         _write_cleanup_tombstone(tombstone_path, tombstone)
 
     unregister_result = _unregister_candidate(
@@ -2150,18 +2559,20 @@ def _cleanup_candidate_locked(
         root=expected_registry_root,
     )
     reset_registry()
-    tombstone = dict(tombstone)
-    tombstone["phase"] = "registry_removed"
+    tombstone = _tombstone_with_phase(tombstone, "registry_removed")
     _write_cleanup_tombstone(tombstone_path, tombstone)
 
     if candidate_root.exists() or candidate_root.is_symlink():
         current_dev, current_ino = _validate_candidate_root(candidate_root, candidates_root)
         if current_dev != root_dev or current_ino != root_ino:
             raise _fail("WORKSPACE_CONTENDED", "candidate directory identity changed during cleanup")
-        _require_preserved_head(
+        _require_preservation(
             source_root,
-            preserved_ref,
+            candidate_root,
             expected_head_sha,
+            preservation,
+            protected_branch_refresher=protected_branch_refresher,
+            refresh=True,
             context="before filesystem removal",
         )
         _require_delivery_branch_absent(
@@ -2197,14 +2608,14 @@ def _cleanup_candidate_locked(
     else:
         directory_removed = False
 
-    tombstone["phase"] = "complete"
+    tombstone = _tombstone_with_phase(tombstone, "complete")
     _write_cleanup_tombstone(tombstone_path, tombstone)
     return CandidateCleanupReceipt(
         project_id=project_id,
         source_project=expected_source_project,
         branch=expected_branch,
         head=expected_head_sha,
-        preserved_ref=preserved_ref,
+        preserved_ref=preservation.preserved_ref,
         registry_removed=not unregister_result.already_absent,
         directory_removed=directory_removed,
         already_cleaned=False,
@@ -2213,9 +2624,14 @@ def _cleanup_candidate_locked(
 
 
 __all__ = [
+    "CandidateAdoptionReceipt",
     "CandidateCleanupReceipt",
     "CandidateCloneError",
     "CandidateCloneReceipt",
+    "IdentityProof",
+    "PreservationProof",
+    "ProtectedBranchEvidence",
+    "adopt_candidate_lineage",
     "candidate_cleanup",
     "prepare_candidate_clone",
 ]

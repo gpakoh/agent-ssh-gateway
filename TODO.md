@@ -141,6 +141,19 @@ Open backlog count after cleanup: **34**
    requiring candidate reconstruction. The response-lost/timeout ambiguity of
    the same incident is tracked under existing #51.
 
+   **2026-10-15 lineage-adoption / garbage-cleanup progress:** the candidate
+   core now isolates legacy metadata failures by the requested branch, exposes
+   guarded `candidate_adopt` to reconstruct only identity facts proven from the
+   exact same trusted repository/branch/HEAD, and lets `candidate_cleanup` use
+   either the existing exact `archive/candidate-*` proof or server-read
+   protected-branch reachability. The protected-branch path refreshes the exact
+   branch protection+SHA immediately before filesystem removal; unprotected,
+   moved, malformed or unreachable preservation evidence fails closed. Legacy
+   v1 cleanup tombstones remain resumable through all recorded phases. Focused
+   recovery/adaptor/mode/scope regression coverage is green. Keep #2 open for
+   the broader canonical write-plane, dirty/active ambiguous-record recovery and
+   dependant self-containment/recreation contract described above.
+
 6. ⬜ **Keep ChatGPT-visible tool schemas in parity with server manifests.**
    Tools can appear available in `tools_manifest` while missing or having a
    different callable schema in the ChatGPT resource catalog. PR-A measurement
