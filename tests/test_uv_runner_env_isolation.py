@@ -174,8 +174,8 @@ def test_run_uv_tool_surfaces_primary_bootstrap_failure(mcp_tools, monkeypatch):
         def execute_raw(self, command, **kwargs):
             if command == "command -v uv":
                 return {"job_id": "which-uv"}
-            assert command == "sh"
-            assert "VERIFIER_ROOT_UNSAFE" in kwargs.get("stdin", "")
+            assert command.startswith("sh -c ")
+            assert "VERIFIER_ROOT_UNSAFE" in command
             return {"job_id": "run"}
 
         def wait_job(self, job_id, **kwargs):

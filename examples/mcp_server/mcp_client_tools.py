@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from control_plane_git import git_fetch_ref_control_plane, git_push_control_plane
-from gateway_client import GatewayClient, GatewayClientError, _script_stdin_wrapper
+from gateway_client import GatewayClient, GatewayClientError
 from git_write_capabilities import probe_git_write_capabilities
 from tool_results import build_command_result, tool_error, tool_success
 
@@ -946,7 +946,8 @@ def _build_readonly_fallback_script(
     A read-only source checkout must stay the authoritative project root: test
     discovery, config lookup, package-base inference, and relative imports all
     depend on running checks from the real checkout.  Only the uv environment,
-    tool caches, and dependency-resolution state live under ``/tmp/.mcp-test``.
+    tool caches, and dependency-resolution state live under the server-owned
+    verifier root.
 
     When ``uv.lock`` exists, uv syncs the *real* project with ``--frozen`` and
     ``UV_PROJECT_ENVIRONMENT`` pointing at the external venv.  This preserves
@@ -1249,8 +1250,7 @@ def _run_uv_tool(
                 )
 
     result = client.execute_raw(
-        "sh",
-        stdin=_script_stdin_wrapper(script),
+        "sh -c " + shlex.quote(script),
         redact_path_prefix=str(project_dir),
         timeout_s=client.async_job_timeout if async_submit else None,
     )
