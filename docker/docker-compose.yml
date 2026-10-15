@@ -411,6 +411,7 @@ services:
       - mcp_supervisor_journal:/var/lib/mcp-supervisor
       - mcp_candidate_store:/var/lib/mcp-candidates
       - site_audit_deploy_state:/var/lib/site-audit-deploy-state
+      - xloud_deploy_state:/var/lib/xloud-deploy-state
       - telegram_storage_deploy_state:/var/lib/telegram-storage-deploy-state
       - content_harvester_deploy_state:/var/lib/content-harvester-deploy-state
       # Operator-provisioned secret sources are exposed read-only and only to
@@ -648,6 +649,9 @@ volumes:
     driver: local
   site_audit_deploy_state:
     name: ssh-gateway-site-audit-deploy-state
+    driver: local
+  xloud_deploy_state:
+    name: ssh-gateway-xloud-deploy-state
     driver: local
   telegram_storage_deploy_state:
     name: ssh-gateway-telegram-storage-deploy-state

@@ -970,6 +970,41 @@ class DockerClient:
             raise RuntimeError("docker returned invalid network metadata")
         return payload
 
+    async def container_network_snapshot(self, container: str) -> dict[str, str]:
+        """Return internal network-name -> IP evidence for one fixed container.
+
+        Public ``inspect`` deliberately strips container network topology. Guarded
+        deploy verification sometimes needs that topology internally, so this
+        primitive queries only ``NetworkSettings.Networks`` and reduces each
+        entry to its IP address. It is not registered as an MCP tool.
+        """
+        self._validate_container_name(container)
+        raw = await self._run(
+            [
+                DOCKER_BIN,
+                "inspect",
+                "--format",
+                "{{json .NetworkSettings.Networks}}",
+                container,
+            ],
+            timeout=30.0,
+        )
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("docker returned invalid container network metadata") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("docker returned invalid container network metadata")
+        result: dict[str, str] = {}
+        for name, metadata in payload.items():
+            if not isinstance(name, str) or not isinstance(metadata, dict):
+                raise RuntimeError("docker returned invalid container network metadata")
+            address = metadata.get("IPAddress")
+            if not isinstance(address, str):
+                raise RuntimeError("docker returned invalid container network IP evidence")
+            result[name] = address
+        return result
+
     async def image_revision(self, image: str) -> str:
         """Return the exact OCI source revision label for a local image."""
         if not isinstance(image, str) or not image or not image.isascii():
@@ -1243,6 +1278,121 @@ class DockerClient:
         ]
         if recover:
             argv.append("--recover")
+        return await self._run_with_result(argv, timeout=float(timeout))
+
+    async def run_xloud_deploy_contract_helper(
+        self,
+        *,
+        helper_image_id: str,
+        candidate_root: str,
+        operator_root: str,
+        script_path: str,
+        env_file: str,
+        state_volume: str,
+        site_image: str,
+        intake_image: str,
+        site_image_id: str,
+        intake_image_id: str,
+        source_revision: str,
+        secret_fingerprint: str,
+        mode: str,
+        stability_seconds: int = 90,
+        timeout: int = 720,
+    ) -> RunResult:
+        """Run the fixed XLOUD rollout helper without exposing its audit secret.
+
+        The operator env is mounted read-only and parsed only inside the helper;
+        secret plaintext never appears in Docker argv/environment or the result.
+        """
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", helper_image_id):
+            raise ValueError("helper_image_id must be an immutable sha256 image ID")
+        candidate_root = self._validate_deploy_mount_path(candidate_root, "candidate_root")
+        operator_root = self._validate_deploy_mount_path(operator_root, "operator_root")
+        script_path = self._validate_deploy_mount_path(script_path, "script_path")
+        env_file = self._validate_deploy_mount_path(env_file, "env_file")
+        self._validate_volume_name(state_volume)
+        for label, image in (("site_image", site_image), ("intake_image", intake_image)):
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", image):
+                raise ValueError(f"{label} is invalid")
+        for label, image_id in (("site_image_id", site_image_id), ("intake_image_id", intake_image_id)):
+            if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+                raise ValueError(f"{label} must be an exact sha256 image ID")
+        if site_image_id == intake_image_id:
+            raise ValueError("site and intake image IDs must differ")
+        if not re.fullmatch(r"[0-9a-f]{40}", source_revision):
+            raise ValueError("source_revision must be an exact lowercase 40-hex SHA")
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", secret_fingerprint):
+            raise ValueError("secret_fingerprint must be sha256:64hex")
+        if mode not in {"preflight", "deploy", "recover"}:
+            raise ValueError("mode must be preflight, deploy or recover")
+        if stability_seconds < 90 or stability_seconds > 900:
+            raise ValueError("stability_seconds must be between 90 and 900")
+        timeout = max(120, min(timeout, 900))
+
+        state_root = "/var/lib/xloud-deploy-state"
+        argv = [
+            DOCKER_BIN,
+            "run",
+            "--rm",
+            "--network",
+            "host",
+            "--user",
+            "0:0",
+            "--cap-drop",
+            "ALL",
+            "--cap-add",
+            "DAC_OVERRIDE",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--read-only",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,nodev,size=64m",
+            "--mount",
+            "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock",
+            "--mount",
+            f"type=bind,src={candidate_root},dst={candidate_root},readonly",
+            "--mount",
+            f"type=bind,src={operator_root},dst={operator_root},readonly",
+            "--mount",
+            f"type=volume,src={state_volume},dst={state_root}",
+            "--env",
+            "GIT_CONFIG_COUNT=1",
+            "--env",
+            "GIT_CONFIG_KEY_0=safe.directory",
+            "--env",
+            f"GIT_CONFIG_VALUE_0={candidate_root}",
+            helper_image_id,
+            "python3",
+            "/app/scripts/xloud_deploy_contract_runner.py",
+            "--mode",
+            mode,
+            "--script",
+            script_path,
+            "--source-root",
+            candidate_root,
+            "--operator-root",
+            operator_root,
+            "--env-file",
+            env_file,
+            "--state-dir",
+            state_root,
+            "--site-image",
+            site_image,
+            "--intake-image",
+            intake_image,
+            "--site-image-id",
+            site_image_id,
+            "--intake-image-id",
+            intake_image_id,
+            "--source-revision",
+            source_revision,
+            "--secret-fingerprint",
+            secret_fingerprint,
+            "--stability-seconds",
+            str(stability_seconds),
+            "--timeout",
+            str(max(60, timeout - 30)),
+        ]
         return await self._run_with_result(argv, timeout=float(timeout))
 
     async def read_telegram_storage_deploy_state(

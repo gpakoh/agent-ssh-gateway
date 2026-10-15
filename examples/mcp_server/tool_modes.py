@@ -166,6 +166,7 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "docker_volume_rm",
         "docker_deploy_contract",
         "docker_deploy_site_audit",
+        "docker_deploy_xloud",
         "docker_deploy_content_harvester",
         "docker_migrate_content_harvester",
         "postgres_health",
@@ -242,6 +243,7 @@ MCP_CLIENT_BLOCKED_TOOLS: frozenset[str] = frozenset({
     "docker_volume_rm",
     "docker_deploy_contract",
     "docker_deploy_site_audit",
+    "docker_deploy_xloud",
     "docker_deploy_content_harvester",
     "docker_migrate_content_harvester",
     # Agent task write
