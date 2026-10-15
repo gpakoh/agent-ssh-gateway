@@ -15,6 +15,7 @@ import stat
 import subprocess
 import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -58,6 +59,7 @@ _CANDIDATE_CLONES_DIRNAME = ".mcp-candidate-clones"
 _LINEAGE_LOCKS_DIRNAME = ".locks"
 _LINEAGE_LOCK_TIMEOUT_S = 30.0
 _LINEAGE_LOCK_POLL_S = 0.05
+_CANDIDATE_DEPENDENCY_SCAN_WORKERS = 8
 _CLEANUP_TOMBSTONE_MAX_BYTES = 64 * 1024
 _DEFAULT_GIT_NAME = "MCP Control Plane"
 _DEFAULT_GIT_EMAIL = "control-plane@gateway.invalid"
@@ -1768,6 +1770,33 @@ def _inbound_candidate_dependencies(
     candidates_root: Path,
     candidate_root: Path,
 ) -> list[dict[str, Any]]:
+    """Check inbound Git dependencies with bounded parallel origin reads.
+
+    Git still resolves every origin with its full configuration semantics.
+    Only independent reads overlap; all results are joined before returning,
+    and cleanup retains its existing locks and repeated dependency scans.
+    """
+    try:
+        with ThreadPoolExecutor(
+            max_workers=_CANDIDATE_DEPENDENCY_SCAN_WORKERS,
+            thread_name_prefix="candidate-origin",
+        ) as origin_pool:
+            return _scan_inbound_candidate_dependencies(candidates_root, candidate_root, origin_pool)
+    except CandidateCloneError:
+        raise
+    except Exception as exc:
+        raise _fail(
+            "WORKSPACE_CONTENDED",
+            "candidate dependency scan could not complete",
+            retryable=True,
+        ) from exc
+
+
+def _scan_inbound_candidate_dependencies(
+    candidates_root: Path,
+    candidate_root: Path,
+    origin_pool: ThreadPoolExecutor,
+) -> list[dict[str, Any]]:
     """Return sibling candidate clones that still depend on ``candidate_root``.
 
     Historical candidates may have been cloned with ``--shared`` or directly
@@ -1786,7 +1815,8 @@ def _inbound_candidate_dependencies(
             retryable=True,
         ) from exc
 
-    found: list[dict[str, Any]] = []
+    dependency_sets: dict[str, set[str]] = {}
+    origin_checks: list[tuple[set[str], Future[Path | None]]] = []
     try:
         entries = list(os.scandir(candidates_root))
     except OSError as exc:
@@ -1904,13 +1934,12 @@ def _inbound_candidate_dependencies(
                         dependency_types.add("alternates")
                         break
 
-            local_origin = _legacy_local_origin(dependant)
-            if local_origin is not None:
-                try:
-                    if local_origin.resolve(strict=True) == target_root:
-                        dependency_types.add("local_origin")
-                except OSError:
-                    pass
+            origin_checks.append(
+                (
+                    dependency_types,
+                    origin_pool.submit(_legacy_local_origin, dependant),
+                )
+            )
         else:
             raise _fail(
                 "WORKSPACE_CONTENDED",
@@ -1919,15 +1948,28 @@ def _inbound_candidate_dependencies(
                 details={"dependent_project_id": entry.name},
             )
 
-        if dependency_types:
-            found.append(
-                {
-                    "dependent_project_id": entry.name,
-                    "dependency_types": sorted(dependency_types),
-                }
-            )
+        dependency_sets[entry.name] = dependency_types
 
-    return sorted(found, key=lambda item: str(item["dependent_project_id"]))
+    # Do not permit removal until every scheduled Git lookup has completed.
+    # The caller's executor context also joins outstanding work if a lookup
+    # raises, so an incomplete dependency scan never becomes an empty result.
+    for dependency_types, check in origin_checks:
+        local_origin = check.result()
+        if local_origin is not None:
+            try:
+                if local_origin.resolve(strict=True) == target_root:
+                    dependency_types.add("local_origin")
+            except OSError:
+                pass
+
+    return [
+        {
+            "dependent_project_id": project_id,
+            "dependency_types": sorted(dependency_types),
+        }
+        for project_id, dependency_types in sorted(dependency_sets.items())
+        if dependency_types
+    ]
 
 
 def _require_no_inbound_candidate_dependencies(
