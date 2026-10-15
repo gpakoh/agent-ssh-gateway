@@ -1198,6 +1198,70 @@ class DockerClient:
         ]
         return await self._run_with_result(argv, timeout=30.0)
 
+    async def run_site_audit_crm_provisioner(
+        self,
+        *,
+        helper_image_id: str,
+        operator_root: str,
+        mode: str,
+        expected_env_sha256: str = "",
+        timeout: int = 90,
+    ) -> RunResult:
+        """Run the fixed Site Audit CRM identity/env provisioner.
+
+        The helper gets no Docker socket and can reach only the fixed Site Audit
+        control network.  Inspect mode mounts the operator project read-only;
+        provision mode makes the same mount writable solely so the fixed helper
+        can atomically replace ``/operator/.env`` after its exact SHA lease is
+        revalidated.  No caller-controlled endpoint, identity or secret enters
+        this surface.
+        """
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", helper_image_id):
+            raise ValueError("helper_image_id must be an immutable sha256 image ID")
+        operator_root = self._validate_deploy_mount_path(operator_root, "operator_root")
+        if mode not in {"inspect", "provision"}:
+            raise ValueError("mode must be inspect or provision")
+        if mode == "provision":
+            if not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_env_sha256):
+                raise ValueError("expected_env_sha256 must be sha256:64hex in provision mode")
+        elif expected_env_sha256:
+            raise ValueError("expected_env_sha256 is only valid in provision mode")
+        timeout = max(30, min(timeout, 180))
+
+        mount_mode = "" if mode == "provision" else ",readonly"
+        argv = [
+            DOCKER_BIN,
+            "run",
+            "--rm",
+            "--network",
+            "site-audit-control",
+            "--user",
+            "0:0",
+            "--cap-drop",
+            "ALL",
+        ]
+        if mode == "provision":
+            argv.extend(["--cap-add", "DAC_OVERRIDE"])
+        argv.extend(
+            [
+                "--security-opt",
+                "no-new-privileges:true",
+                "--read-only",
+                "--tmpfs",
+                "/tmp:rw,noexec,nosuid,nodev,size=16m",
+                "--mount",
+                f"type=bind,src={operator_root},dst=/operator{mount_mode}",
+                helper_image_id,
+                "python3",
+                "/app/scripts/site_audit_crm_provisioner.py",
+                "--mode",
+                mode,
+            ]
+        )
+        if mode == "provision":
+            argv.extend(["--expected-env-sha256", expected_env_sha256])
+        return await self._run_with_result(argv, timeout=float(timeout))
+
     async def run_site_audit_deploy_contract_helper(
         self,
         *,
