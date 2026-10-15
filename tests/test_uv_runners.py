@@ -1,5 +1,6 @@
 """Tests for uv runner argv builder and target validation."""
 
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -14,7 +15,8 @@ from mcp_client_tools import _build_uv_argv, _validate_targets  # noqa: E402
 
 @pytest.fixture
 def trusted_verifier_root(monkeypatch, tmp_path):
-    root = Path.home() / f".mcp-verifier-test-{tmp_path.name}"
+    parent = Path("/root") if os.geteuid() == 0 and Path("/root").is_dir() else Path.home()
+    root = parent / f".mcp-verifier-test-{tmp_path.name}"
     root.mkdir(mode=0o700, exist_ok=False)
     monkeypatch.setenv("MCP_VERIFIER_ROOT", str(root))
     try:
