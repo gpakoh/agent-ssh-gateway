@@ -1,7 +1,9 @@
 """Tests for uv runner argv builder and target validation."""
 
 import os
+import pwd
 import shutil
+import stat
 import sys
 from pathlib import Path
 
@@ -15,7 +17,29 @@ from mcp_client_tools import _build_uv_argv, _validate_targets  # noqa: E402
 
 @pytest.fixture
 def trusted_verifier_root(monkeypatch, tmp_path):
-    parent = Path("/root") if os.geteuid() == 0 and Path("/root").is_dir() else Path.home()
+    def safe_writable_parent(path: Path) -> bool:
+        try:
+            if not path.is_dir() or not os.access(path, os.W_OK):
+                return False
+            current = path
+            while True:
+                mode = current.lstat().st_mode
+                if stat.S_ISLNK(mode) or mode & (stat.S_IWGRP | stat.S_IWOTH):
+                    return False
+                if current == current.parent:
+                    return True
+                current = current.parent
+        except OSError:
+            return False
+
+    passwd_home = Path(pwd.getpwuid(os.geteuid()).pw_dir)
+    candidates = [passwd_home, Path.home()]
+    if os.geteuid() == 0:
+        candidates.insert(0, Path("/root"))
+    parent = next((path for path in candidates if safe_writable_parent(path)), None)
+    if parent is None:
+        pytest.skip("no writable parent with trusted ancestry for verifier integration fixture")
+
     root = parent / f".mcp-verifier-test-{tmp_path.name}"
     root.mkdir(mode=0o700, exist_ok=False)
     monkeypatch.setenv("MCP_VERIFIER_ROOT", str(root))
