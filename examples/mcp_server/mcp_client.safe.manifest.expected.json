@@ -2,7 +2,7 @@
   "mode": "mcp_client",
   "safe_mode": true,
   "expected_safe_count": 84,
-  "expected_blocked_count": 35,
+  "expected_blocked_count": 36,
   "expected_mcp_client_full_count": 115,
   "must_include": [
     "docker_site_audit_deploy_status",
