@@ -154,6 +154,14 @@ _TELEGRAM_STORAGE_CONTAINER = "telegram-storage-service"
 _TELEGRAM_STORAGE_STATE_VOLUME = "ssh-gateway-telegram-storage-deploy-state"
 _TELEGRAM_STORAGE_VERIFY_STABILITY_SECONDS = 5
 
+_JS_CHAT_ENGINE_SOURCE_PROJECT = "infra-quart"
+_JS_CHAT_ENGINE_SCRIPT_PATH = "scripts/deploy-js-chat-engine.sh"
+_JS_CHAT_ENGINE_RELEASE_PATH = "deploy/js-chat-engine.release.env"
+_JS_CHAT_ENGINE_CONTAINER = "js-chat-engine"
+_JS_CHAT_ENGINE_STATE_RELATIVE_PATH = ".state/js-chat-engine-deploy.json"
+_JS_CHAT_ENGINE_VERIFY_STABILITY_SECONDS = 5
+_JS_CHAT_ENGINE_MEMORY_BYTES = 512 * 1024 * 1024
+
 _CONTENT_HARVESTER_SOURCE_PROJECT = "content-harvester-service"
 _CONTENT_HARVESTER_SCRIPT_PATH = "deploy-content-harvester.sh"
 _CONTENT_HARVESTER_STATE_VOLUME = "ssh-gateway-content-harvester-deploy-state"
@@ -1321,6 +1329,474 @@ async def _accept_site_audit_payload(
     if first != second:
         raise RuntimeError("Site Audit deployment changed during Gateway stability verification")
     return {"state": state, "live": second}
+
+
+def _js_chat_engine_safe_directory(path: Path, label: str) -> Path:
+    try:
+        info = path.lstat()
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"{label} is unavailable") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise ValueError(f"{label} is not a safe directory")
+    return resolved
+
+
+def _js_chat_engine_release_pin(candidate_root: Path) -> dict[str, str]:
+    release_path = _safe_regular_under(
+        candidate_root,
+        _JS_CHAT_ENGINE_RELEASE_PATH,
+        "JS Chat Engine release pin",
+    )
+    try:
+        lines = release_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise ValueError("JS Chat Engine release pin is unreadable") from exc
+
+    wanted = {
+        "JS_CHAT_ENGINE_IMAGE_REPOSITORY",
+        "JS_CHAT_ENGINE_IMAGE_DIGEST",
+        "JS_CHAT_ENGINE_RELEASE_GIT_SHA",
+    }
+    values: dict[str, str] = {}
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key not in wanted:
+            continue
+        if key in values:
+            raise ValueError(f"JS Chat Engine release pin defines {key} more than once")
+        values[key] = value.strip()
+
+    missing = sorted(wanted - values.keys())
+    if missing:
+        raise ValueError("JS Chat Engine release pin is missing required image identity")
+    repository = values["JS_CHAT_ENGINE_IMAGE_REPOSITORY"]
+    digest = values["JS_CHAT_ENGINE_IMAGE_DIGEST"]
+    revision = values["JS_CHAT_ENGINE_RELEASE_GIT_SHA"]
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", repository):
+        raise ValueError("JS Chat Engine release repository is invalid")
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("JS Chat Engine release digest is invalid")
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError("JS Chat Engine release revision is invalid")
+    return {
+        "repository": repository,
+        "digest": digest,
+        "revision": revision,
+        "image": f"{repository}@sha256:{digest}",
+    }
+
+
+def _js_chat_engine_state_file(operator_root: Path) -> Path:
+    state_path = operator_root / _JS_CHAT_ENGINE_STATE_RELATIVE_PATH
+    try:
+        state_path.resolve(strict=False).relative_to(operator_root.resolve(strict=True))
+    except (OSError, ValueError) as exc:
+        raise ValueError("JS Chat Engine deploy state escapes operator root") from exc
+    return state_path
+
+
+def _js_chat_engine_read_state(operator_root: Path) -> dict[str, Any]:
+    path = _js_chat_engine_state_file(operator_root)
+    if not path.exists():
+        return {"exists": False, "state": {}}
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise RuntimeError("JS Chat Engine deploy state is unavailable") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise RuntimeError("JS Chat Engine deploy state is unsafe")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("JS Chat Engine deploy state is unreadable") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("JS Chat Engine deploy state is malformed")
+    image = payload.get("image")
+    revision = payload.get("git_sha")
+    deployed_at = payload.get("deployed_at")
+    if image is not None and (
+        not isinstance(image, str)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}", image)
+    ):
+        raise RuntimeError("JS Chat Engine deploy state image is malformed")
+    if revision is not None and (
+        not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision)
+    ):
+        raise RuntimeError("JS Chat Engine deploy state revision is malformed")
+    if deployed_at is not None and (
+        not isinstance(deployed_at, str)
+        or not deployed_at.strip()
+        or any(ch in deployed_at for ch in ("\x00", "\n", "\r"))
+    ):
+        raise RuntimeError("JS Chat Engine deploy state timestamp is malformed")
+    return {
+        "exists": True,
+        "state": {
+            key: value
+            for key, value in (
+                ("image", image),
+                ("git_sha", revision),
+                ("deployed_at", deployed_at),
+            )
+            if value is not None
+        },
+    }
+
+
+def _js_chat_engine_snapshot_fingerprint(snapshot: dict[str, Any]) -> str:
+    raw = json.dumps(snapshot, sort_keys=True, separators=(",", ":"), default=str).encode()
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+async def _js_chat_engine_runtime_snapshot(client: Any) -> tuple[dict[str, Any], str]:
+    if not await client.container_exists(_JS_CHAT_ENGINE_CONTAINER):
+        snapshot: dict[str, Any] = {"mode": "absent"}
+        return snapshot, _js_chat_engine_snapshot_fingerprint(snapshot)
+    inspected = _single_inspect(await client.inspect(_JS_CHAT_ENGINE_CONTAINER, max_lines=10))
+    runtime = inspected.get("State")
+    config = inspected.get("Config")
+    host = inspected.get("HostConfig")
+    if not isinstance(runtime, dict) or not isinstance(config, dict) or not isinstance(host, dict):
+        raise RuntimeError("JS Chat Engine prior runtime metadata is incomplete")
+    health = runtime.get("Health")
+    if runtime.get("Running") is not True or not isinstance(health, dict) or health.get("Status") != "healthy":
+        raise RuntimeError("JS Chat Engine prior runtime is not healthy")
+    image = config.get("Image")
+    image_id = inspected.get("Image")
+    if not isinstance(image, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}", image
+    ):
+        raise RuntimeError("JS Chat Engine prior image is not immutable")
+    if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+        raise RuntimeError("JS Chat Engine prior image ID is malformed")
+    snapshot = {
+        "mode": "present",
+        "container_id": inspected.get("Id"),
+        "image_id": image_id,
+        "image": image,
+        "restart_count": inspected.get("RestartCount"),
+        "started_at": runtime.get("StartedAt"),
+        "memory": host.get("Memory"),
+        "memory_swap": host.get("MemorySwap"),
+    }
+    return snapshot, _js_chat_engine_snapshot_fingerprint(snapshot)
+
+
+async def _prepare_js_chat_engine_deploy(
+    *,
+    candidate_project: str,
+    expected_head_sha: str,
+    expected_script_blob_sha: str,
+    expected_script_sha256: str,
+    target_image: str,
+) -> dict[str, Any]:
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_head_sha):
+        raise ValueError("expected_head_sha must be a 40-character lowercase SHA")
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_script_blob_sha):
+        raise ValueError("expected_script_blob_sha must be a 40-character lowercase SHA")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_script_sha256):
+        raise ValueError("expected_script_sha256 must be a 64-character lowercase SHA-256")
+
+    registry = server_attr("_get_workspace_registry")()
+    candidate_info = registry.project_info(candidate_project)
+    candidate_root = _safe_registered_root(candidate_info, expected_type="candidate-clone")
+    metadata = _read_candidate_metadata(candidate_root)
+    if metadata.get("project_id") != candidate_project:
+        raise ValueError("candidate metadata project identity mismatch")
+    if metadata.get("source_project") != _JS_CHAT_ENGINE_SOURCE_PROJECT:
+        raise ValueError("candidate source project is not authorized for JS Chat Engine deployment")
+    if metadata.get("head") != expected_head_sha or metadata.get("base_sha") != expected_head_sha:
+        raise ValueError("candidate metadata is not pinned to the expected JS Chat Engine deploy head")
+    if _git_capture(candidate_root, "rev-parse", "HEAD").lower() != expected_head_sha:
+        raise ValueError("candidate HEAD changed")
+    if _git_capture(candidate_root, "status", "--porcelain=v1", "--untracked-files=all"):
+        raise ValueError("candidate workspace must be clean")
+
+    script = _safe_regular_under(candidate_root, _JS_CHAT_ENGINE_SCRIPT_PATH, "JS Chat Engine deploy script")
+    blob_sha = _git_capture(
+        candidate_root,
+        "rev-parse",
+        f"{expected_head_sha}:{_JS_CHAT_ENGINE_SCRIPT_PATH}",
+    )
+    if blob_sha != expected_script_blob_sha:
+        raise ValueError("JS Chat Engine deploy script Git blob identity mismatch")
+    if hashlib.sha256(script.read_bytes()).hexdigest() != expected_script_sha256:
+        raise ValueError("JS Chat Engine deploy script SHA-256 identity mismatch")
+
+    release = _js_chat_engine_release_pin(candidate_root)
+    if target_image != release["image"]:
+        raise ValueError("target_image must exactly match the repo-owned JS Chat Engine release pin")
+
+    operator_info = registry.project_info(_JS_CHAT_ENGINE_SOURCE_PROJECT)
+    operator_root = _safe_registered_root(operator_info)
+    client = _docker_client()
+    client._validate_project_dir(str(operator_root))
+    env_file = _safe_regular_under(operator_root, ".env", "JS Chat Engine operator env file")
+    state_dir = _js_chat_engine_safe_directory(operator_root / ".state", "JS Chat Engine state directory")
+    core_databases_root = _js_chat_engine_safe_directory(
+        operator_root.parent / "quart-core-databases",
+        "Quart Core databases root",
+    )
+    client._validate_project_dir(str(core_databases_root))
+
+    target_image_id = await client.image_id(target_image)
+    if await client.image_revision(target_image_id) != release["revision"]:
+        raise RuntimeError("JS Chat Engine target image OCI revision differs from release pin")
+    state = _js_chat_engine_read_state(operator_root)
+    runtime, runtime_fingerprint = await _js_chat_engine_runtime_snapshot(client)
+
+    helper_container = os.environ.get("MCP_DEPLOY_HELPER_CONTAINER", _DEPLOY_HELPER_CONTAINER).strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", helper_container):
+        raise ValueError("MCP_DEPLOY_HELPER_CONTAINER is invalid")
+    helper_image_id = await client.container_image_id(helper_container)
+    return {
+        "candidate_root": str(candidate_root),
+        "operator_root": str(operator_root),
+        "script_path": str(script),
+        "env_file": str(env_file),
+        "state_dir": str(state_dir),
+        "core_databases_root": str(core_databases_root),
+        "target_image": target_image,
+        "target_image_id": target_image_id,
+        "release_revision": release["revision"],
+        "state_fingerprint": _js_chat_engine_snapshot_fingerprint(state),
+        "runtime_fingerprint": runtime_fingerprint,
+        "prior_runtime": runtime,
+        "helper_image_id": helper_image_id,
+    }
+
+
+async def _verify_js_chat_engine_live(
+    client: Any,
+    *,
+    target_image: str,
+    target_image_id: str,
+    release_revision: str,
+) -> dict[str, Any]:
+    inspected = _single_inspect(await client.inspect(_JS_CHAT_ENGINE_CONTAINER, max_lines=10))
+    runtime = inspected.get("State")
+    config = inspected.get("Config")
+    host = inspected.get("HostConfig")
+    if not isinstance(runtime, dict) or not isinstance(config, dict) or not isinstance(host, dict):
+        raise RuntimeError("JS Chat Engine deployed container metadata is incomplete")
+    health = runtime.get("Health")
+    labels = config.get("Labels")
+    if runtime.get("Running") is not True or not isinstance(health, dict) or health.get("Status") != "healthy":
+        raise RuntimeError("JS Chat Engine deployed container is not Docker-healthy")
+    if inspected.get("Image") != target_image_id or config.get("Image") != target_image:
+        raise RuntimeError("JS Chat Engine deployed image identity differs from target")
+    if inspected.get("RestartCount") != 0:
+        raise RuntimeError("JS Chat Engine deployed container restarted after rollout")
+    if not isinstance(labels, dict) or labels.get("org.opencontainers.image.revision") != release_revision:
+        raise RuntimeError("JS Chat Engine deployed OCI revision differs from release pin")
+    if config.get("User") != "nobody":
+        raise RuntimeError("JS Chat Engine deployed runtime user differs from hardened contract")
+    if host.get("ReadonlyRootfs") is not True:
+        raise RuntimeError("JS Chat Engine deployed root filesystem is not read-only")
+    cap_drop = host.get("CapDrop")
+    if not isinstance(cap_drop, list) or "ALL" not in cap_drop:
+        raise RuntimeError("JS Chat Engine deployed capability drop contract is missing")
+    if host.get("Memory") != _JS_CHAT_ENGINE_MEMORY_BYTES or host.get("MemorySwap") != _JS_CHAT_ENGINE_MEMORY_BYTES:
+        raise RuntimeError("JS Chat Engine deployed memory limits differ from release contract")
+    return {
+        "container_id": inspected.get("Id"),
+        "image_id": target_image_id,
+        "image": target_image,
+        "revision": release_revision,
+        "health": "healthy",
+        "restart_count": 0,
+        "started_at": runtime.get("StartedAt"),
+        "memory": host.get("Memory"),
+        "memory_swap": host.get("MemorySwap"),
+        "read_only": True,
+        "user": "nobody",
+    }
+
+
+async def _accept_js_chat_engine_live(
+    client: Any,
+    *,
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    state = _js_chat_engine_read_state(Path(plan["operator_root"]))
+    payload = state.get("state") if state.get("exists") else None
+    if not isinstance(payload, dict):
+        raise RuntimeError("JS Chat Engine durable qualified deploy state is missing")
+    if payload.get("image") != plan["target_image"] or payload.get("git_sha") != plan["release_revision"]:
+        raise RuntimeError("JS Chat Engine durable deploy state differs from target release")
+    first = await _verify_js_chat_engine_live(
+        client,
+        target_image=plan["target_image"],
+        target_image_id=plan["target_image_id"],
+        release_revision=plan["release_revision"],
+    )
+    await asyncio.sleep(_JS_CHAT_ENGINE_VERIFY_STABILITY_SECONDS)
+    second = await _verify_js_chat_engine_live(
+        client,
+        target_image=plan["target_image"],
+        target_image_id=plan["target_image_id"],
+        release_revision=plan["release_revision"],
+    )
+    if first != second:
+        raise RuntimeError("JS Chat Engine deployment changed during Gateway stability verification")
+    return {"state": payload, "live": second}
+
+
+async def _docker_deploy_js_chat_engine_contract_impl(
+    *,
+    candidate_project: str,
+    expected_head_sha: str,
+    expected_script_blob_sha: str,
+    expected_script_sha256: str,
+    target_image: str,
+    state_fingerprint: str,
+    runtime_fingerprint: str,
+    release_revision: str,
+    timeout: int = 480,
+) -> dict[str, Any]:
+    try:
+        plan = await _prepare_js_chat_engine_deploy(
+            candidate_project=candidate_project,
+            expected_head_sha=expected_head_sha,
+            expected_script_blob_sha=expected_script_blob_sha,
+            expected_script_sha256=expected_script_sha256,
+            target_image=target_image,
+        )
+        confirmed = {
+            "state_fingerprint": state_fingerprint,
+            "runtime_fingerprint": runtime_fingerprint,
+            "release_revision": release_revision,
+        }
+        if any(plan[key] != value for key, value in confirmed.items()):
+            raise RuntimeError("JS Chat Engine confirmation identities changed before execution")
+    except (ValueError, RuntimeError) as exc:
+        return tool_error(
+            tool="docker_deploy_contract",
+            code="DEPLOY_CONTRACT_PRECONDITION_FAILED",
+            message=str(exc),
+            source="docker",
+            retryable=False,
+        )
+
+    client = _docker_client()
+    run = await client.run_js_chat_engine_deploy_contract_helper(
+        helper_image_id=plan["helper_image_id"],
+        candidate_root=plan["candidate_root"],
+        operator_root=plan["operator_root"],
+        script_path=plan["script_path"],
+        env_file=plan["env_file"],
+        state_dir=plan["state_dir"],
+        core_databases_root=plan["core_databases_root"],
+        target_image=plan["target_image"],
+        release_revision=plan["release_revision"],
+        timeout=timeout,
+    )
+    try:
+        parsed = json.loads((run.stdout or "").strip())
+    except json.JSONDecodeError:
+        parsed = None
+    helper_payload = parsed if isinstance(parsed, dict) else None
+    output_tail = _sanitize_deploy_tail(
+        client,
+        str(helper_payload.get("output_tail") or "")
+        if helper_payload is not None
+        else (run.stdout or "") + "\n" + (run.stderr or ""),
+    )
+    helper_exit = helper_payload.get("exit_code") if helper_payload is not None else None
+    ambiguous = run.exit_code == -1 or helper_exit == 124
+
+    if ambiguous:
+        try:
+            accepted = await _accept_js_chat_engine_live(client, plan=plan)
+        except RuntimeError:
+            accepted = None
+        if accepted is not None:
+            return tool_success(
+                "docker_deploy_contract",
+                result={
+                    "contract": "js-chat-engine",
+                    "source_head_sha": expected_head_sha,
+                    "script_blob_sha": expected_script_blob_sha,
+                    "script_sha256": expected_script_sha256,
+                    "target_image": target_image,
+                    "release_revision": release_revision,
+                    "reconciled_after_unknown": True,
+                    "deployment": accepted,
+                    "output_tail": output_tail,
+                },
+                source="docker",
+                dangerous=True,
+                redacted=True,
+            )
+        return tool_error(
+            tool="docker_deploy_contract",
+            code="DEPLOY_CONTRACT_OUTCOME_AMBIGUOUS",
+            message="JS Chat Engine deploy outcome is unknown after helper timeout",
+            result={"target_image": target_image, "output_tail": output_tail},
+            source="docker",
+            retryable=False,
+            redacted=True,
+            hint="Do not retry deploy until live runtime and qualified state are reconciled.",
+        )
+
+    if run.exit_code != 0 or helper_payload is None or helper_exit != 0:
+        return tool_error(
+            tool="docker_deploy_contract",
+            code=("DEPLOY_CONTRACT_EVIDENCE_INVALID" if helper_payload is None else "DEPLOY_CONTRACT_FAILED"),
+            message=(
+                "JS Chat Engine deploy helper returned invalid evidence"
+                if helper_payload is None
+                else str(helper_payload.get("error") or "JS Chat Engine deploy contract failed")
+            ),
+            result={"output_tail": output_tail},
+            source="docker",
+            retryable=False,
+            redacted=True,
+        )
+    helper_state = helper_payload.get("state")
+    if not isinstance(helper_state, dict) or helper_state.get("image") != target_image or helper_state.get("git_sha") != release_revision:
+        return tool_error(
+            tool="docker_deploy_contract",
+            code="DEPLOY_CONTRACT_EVIDENCE_INVALID",
+            message="JS Chat Engine deploy helper returned mismatched qualified state",
+            source="docker",
+            retryable=False,
+        )
+    try:
+        accepted = await _accept_js_chat_engine_live(client, plan=plan)
+    except RuntimeError as exc:
+        return tool_error(
+            tool="docker_deploy_contract",
+            code="DEPLOY_CONTRACT_VERIFICATION_FAILED",
+            message=str(exc),
+            result={"output_tail": output_tail},
+            source="docker",
+            retryable=False,
+            redacted=True,
+        )
+    return tool_success(
+        "docker_deploy_contract",
+        result={
+            "contract": "js-chat-engine",
+            "source_head_sha": expected_head_sha,
+            "script_blob_sha": expected_script_blob_sha,
+            "script_sha256": expected_script_sha256,
+            "target_image": target_image,
+            "release_revision": release_revision,
+            "reconciled_after_unknown": False,
+            "stability_seconds": _JS_CHAT_ENGINE_VERIFY_STABILITY_SECONDS,
+            "deployment": accepted,
+            "output_tail": output_tail,
+        },
+        source="docker",
+        dangerous=True,
+        redacted=True,
+    )
 
 
 def _telegram_storage_resource_fingerprint(metadata: dict[str, Any]) -> str:
@@ -3399,6 +3875,54 @@ async def docker_deploy_contract(
     Git blob, script SHA-256, immutable local image and operator volume.
     """
     timeout = max(120, min(timeout, 600))
+    if contract == "js-chat-engine":
+        plan = await _prepare_js_chat_engine_deploy(
+            candidate_project=candidate_project,
+            expected_head_sha=expected_head_sha,
+            expected_script_blob_sha=expected_script_blob_sha,
+            expected_script_sha256=expected_script_sha256,
+            target_image=target_image,
+        )
+        action = _confirm_store().create_action(
+            tool="docker_deploy_contract",
+            kwargs={
+                "contract": contract,
+                "candidate_project": candidate_project,
+                "expected_head_sha": expected_head_sha,
+                "expected_script_blob_sha": expected_script_blob_sha,
+                "expected_script_sha256": expected_script_sha256,
+                "target_image": target_image,
+                "timeout": timeout,
+                "js_chat_engine_confirmation": {
+                    "state_fingerprint": plan["state_fingerprint"],
+                    "runtime_fingerprint": plan["runtime_fingerprint"],
+                    "release_revision": plan["release_revision"],
+                },
+            },
+            summary=(
+                "Deploy exact JS Chat Engine release "
+                f"{target_image} from infra-quart {expected_head_sha[:12]}"
+            ),
+            risk="high",
+            required_scope="mcp:docker:admin",
+        )
+        return tool_success(
+            "docker_deploy_contract",
+            result={
+                "status": "confirmation_required",
+                "action_id": action.action_id,
+                "risk": action.risk,
+                "required_scope": action.required_scope,
+                "summary": action.summary,
+                "contract": contract,
+                "source_head_sha": expected_head_sha,
+                "target_image": target_image,
+                "release_revision": plan["release_revision"],
+            },
+            source="docker",
+            dangerous=True,
+        )
+
     if contract == "telegram-storage":
         try:
             plan = await _prepare_telegram_storage_deploy(
@@ -3508,8 +4032,43 @@ async def _docker_deploy_contract_impl(
     target_image: str,
     timeout: int = 480,
     telegram_storage_confirmation: dict[str, Any] | None = None,
+    js_chat_engine_confirmation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Execute one confirmed deploy plan and return verified evidence."""
+    if contract == "js-chat-engine":
+        if not isinstance(js_chat_engine_confirmation, dict):
+            return tool_error(
+                tool="docker_deploy_contract",
+                code="DEPLOY_CONTRACT_PRECONDITION_FAILED",
+                message="JS Chat Engine confirmation evidence is missing",
+                source="docker",
+                retryable=False,
+            )
+        required = {"state_fingerprint", "runtime_fingerprint", "release_revision"}
+        if set(js_chat_engine_confirmation) != required or not all(
+            isinstance(js_chat_engine_confirmation[key], str)
+            and js_chat_engine_confirmation[key]
+            for key in required
+        ):
+            return tool_error(
+                tool="docker_deploy_contract",
+                code="DEPLOY_CONTRACT_PRECONDITION_FAILED",
+                message="JS Chat Engine confirmation evidence is malformed",
+                source="docker",
+                retryable=False,
+            )
+        return await _docker_deploy_js_chat_engine_contract_impl(
+            candidate_project=candidate_project,
+            expected_head_sha=expected_head_sha,
+            expected_script_blob_sha=expected_script_blob_sha,
+            expected_script_sha256=expected_script_sha256,
+            target_image=target_image,
+            state_fingerprint=js_chat_engine_confirmation["state_fingerprint"],
+            runtime_fingerprint=js_chat_engine_confirmation["runtime_fingerprint"],
+            release_revision=js_chat_engine_confirmation["release_revision"],
+            timeout=timeout,
+        )
+
     if contract == "telegram-storage":
         if not isinstance(telegram_storage_confirmation, dict):
             return tool_error(
