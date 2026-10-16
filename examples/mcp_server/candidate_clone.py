@@ -2320,13 +2320,43 @@ def _cleanup_candidate_locked(
     delivery_guard: Callable[[], None] | None,
 ) -> CandidateCleanupReceipt:
     tombstone = _read_cleanup_tombstone(tombstone_path)
+    previous_completed: dict[str, Any] | None = None
     if tombstone is not None:
-        for key, value in expected_identity.items():
-            if tombstone.get(key) != value:
-                raise _fail("WORKSPACE_CONTENDED", "candidate cleanup tombstone identity mismatch")
         phase_value = tombstone.get("phase")
         if phase_value not in {"prepared", "registry_removed", "complete"}:
             raise _fail("WORKSPACE_CONTENDED", "candidate cleanup tombstone phase is invalid")
+        if phase_value == "complete" and (candidate_root.exists() or candidate_root.is_symlink()):
+            current_directory = _validate_candidate_root(candidate_root, candidates_root)
+            old_directory = (tombstone.get("root_dev"), tombstone.get("root_ino"))
+            if current_directory != old_directory:
+                # A completed lease belongs to the deleted directory, not a
+                # subsequently restored clone at the same registered path.
+                for key in ("version", "project_id", "source_project", "branch", "registry_root"):
+                    if tombstone.get(key) != expected_identity[key]:
+                        raise _fail("WORKSPACE_CONTENDED", "candidate cleanup tombstone identity mismatch")
+                if (
+                    type(old_directory[0]) is not int
+                    or type(old_directory[1]) is not int
+                    or old_directory[0] < 0
+                    or old_directory[1] <= 0
+                ):
+                    raise _fail("WORKSPACE_CONTENDED", "completed cleanup directory identity is invalid")
+                try:
+                    registered = get_registry(config_dir / "projects.yaml").project_info(project_id)
+                    registered_root = Path(registered["root"]).resolve(strict=True)
+                    if registered.get("type") != "candidate-clone" or registered_root != candidate_root.resolve():
+                        raise ValueError("candidate registry identity mismatch")
+                except Exception as exc:
+                    raise _fail(
+                        "WORKSPACE_CONTENDED",
+                        "recreated candidate must have an exact current registry identity",
+                    ) from exc
+                previous_completed = tombstone
+                tombstone = None
+        if tombstone is not None:
+            for key, value in expected_identity.items():
+                if tombstone.get(key) != value:
+                    raise _fail("WORKSPACE_CONTENDED", "candidate cleanup tombstone identity mismatch")
 
     if preserved_ref is not None:
         _require_preserved_head(
@@ -2414,6 +2444,19 @@ def _cleanup_candidate_locked(
             "root_dev": root_dev,
             "root_ino": root_ino,
         }
+        if previous_completed is not None:
+            # Preserve the completed transaction before publishing a new lease.
+            # Both writes are durable; interruption between them is retry-safe.
+            digest = hashlib.sha256(
+                json.dumps(previous_completed, sort_keys=True).encode("utf-8")
+            ).hexdigest()
+            history = tombstone_path.with_name(f"{tombstone_path.stem}.completed-{digest}.json")
+            existing_history = _read_cleanup_tombstone(history)
+            if existing_history is None:
+                _write_cleanup_tombstone(history, previous_completed)
+            elif existing_history != previous_completed:
+                raise _fail("WORKSPACE_CONTENDED", "completed cleanup history identity mismatch")
+            tombstone["previous_completed_tombstone"] = history.name
         _write_cleanup_tombstone(tombstone_path, tombstone)
 
     unregister_result = _unregister_candidate(
