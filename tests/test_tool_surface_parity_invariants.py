@@ -124,6 +124,14 @@ class TestLiveServerToolSurface:
             "source_revision",
             "image_namespace",
         ],
+        "docker_deploy_xloud": [
+            "candidate_project",
+            "expected_head_sha",
+            "expected_script_blob_sha",
+            "expected_script_sha256",
+            "source_revision",
+            "image_namespace",
+        ],
         "docker_deploy_content_harvester": [
             "candidate_project",
             "expected_head_sha",
@@ -197,6 +205,7 @@ class TestLiveServerToolSurface:
             # proves availability separately.
             if name not in {
                 "docker_deploy_site_audit",
+                "docker_deploy_xloud",
                 "docker_deploy_content_harvester",
                 "docker_migrate_content_harvester",
             }:

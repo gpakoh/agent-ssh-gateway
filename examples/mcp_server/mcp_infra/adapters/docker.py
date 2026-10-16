@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -146,6 +147,18 @@ _SITE_AUDIT_PROTECTED_CONTAINERS: tuple[str, ...] = (
     "site-audit-crm-ingress",
     "site-audit-crm-daemon",
 )
+
+_XLOUD_SOURCE_PROJECT = "xloud"
+_XLOUD_OPERATOR_PROJECT = "site-audit-platform"
+_XLOUD_SCRIPT_PATH = "deploy-xloud.sh"
+_XLOUD_STATE_VOLUME = "ssh-gateway-xloud-deploy-state"
+_XLOUD_VERIFY_STABILITY_SECONDS = 5
+_XLOUD_TARGETS: tuple[tuple[str, str, str], ...] = (
+    ("site", "xloud-site", "xloud-site"),
+    ("intake", "xloud-intake", "xloud-intake"),
+)
+_XLOUD_REQUIRED_NETWORKS = ("proxmox_macvlan", "site-audit-control")
+_XLOUD_AUDIT_API_CONTAINER = "site-audit-api"
 
 _TELEGRAM_STORAGE_SOURCE_PROJECT = "infra-quart"
 _TELEGRAM_STORAGE_SCRIPT_PATH = "scripts/deploy-telegram-storage-service.sh"
@@ -896,6 +909,447 @@ def _safe_regular_under(root: Path, relative_path: str, label: str) -> Path:
     return resolved
 
 
+def _site_audit_crm_config_status(env_file: Path) -> dict[str, bool]:
+    """Return non-secret CRM readiness evidence from the operator env file.
+
+    CRM projection is intentionally optional for a Site Audit rollout, so an
+    absent, duplicate, interpolated, or placeholder value does not invalidate
+    the deployment contract. It must remain observable to release operators
+    without exposing the configured URL or API key.
+    """
+    keys = ("AUDIT_CRM_URL", "AUDIT_CRM_API_KEY")
+    pattern = re.compile(
+        r"^\s*(?:export\s+)?(AUDIT_CRM_URL|AUDIT_CRM_API_KEY)\s*="
+    )
+    try:
+        lines = env_file.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise ValueError("Site Audit operator env file is unreadable") from exc
+
+    assignments: dict[str, list[str]] = {key: [] for key in keys}
+    for line in lines:
+        match = pattern.match(line)
+        if match is not None:
+            assignments[match.group(1)].append(line)
+
+    configured: dict[str, bool] = {}
+    for key in keys:
+        matches = assignments[key]
+        value: object = None
+        if len(matches) == 1:
+            try:
+                parsed = dotenv_values(stream=StringIO(matches[0]), interpolate=False)
+            except Exception:
+                parsed = {}
+            value = parsed.get(key)
+        valid = (
+            isinstance(value, str)
+            and bool(value.strip())
+            and "${" not in value
+            and not any(ch in value for ch in ("\x00", "\n", "\r"))
+        )
+        if key == "AUDIT_CRM_API_KEY" and value == "REPLACE_WITH_ESPO_API_USER_KEY":
+            valid = False
+        configured[key] = valid
+
+    return {
+        "crm_url_configured": configured["AUDIT_CRM_URL"],
+        "crm_api_key_configured": configured["AUDIT_CRM_API_KEY"],
+        "crm_projection_ready": configured["AUDIT_CRM_URL"]
+        and configured["AUDIT_CRM_API_KEY"],
+    }
+
+
+def _xloud_target_images(
+    image_namespace: str,
+    source_revision: str,
+) -> dict[str, dict[str, str]]:
+    namespace = image_namespace.strip().rstrip("/") if isinstance(image_namespace, str) else ""
+    if (
+        not namespace
+        or "@" in namespace
+        or "//" in namespace
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", namespace)
+    ):
+        raise ValueError("image_namespace must be a safe registry/repository namespace")
+    if not re.fullmatch(r"[0-9a-f]{40}", source_revision):
+        raise ValueError("source_revision must be an exact lowercase 40-hex SHA")
+    return {
+        role: {
+            "container": container,
+            "image": f"{namespace}/{image_name}:{source_revision}",
+        }
+        for role, container, image_name in _XLOUD_TARGETS
+    }
+
+
+def _xloud_secret_fingerprint(env_file: Path) -> str:
+    pattern = re.compile(r"^\s*(?:export\s+)?AUDIT_CONTROL_API_KEY\s*=")
+    try:
+        text = env_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ValueError("Site Audit operator env file is unreadable") from exc
+    assignments = [line for line in text.splitlines() if pattern.match(line)]
+    if len(assignments) != 1:
+        raise ValueError("Site Audit operator env must define AUDIT_CONTROL_API_KEY exactly once")
+    try:
+        parsed = dotenv_values(stream=StringIO(assignments[0]), interpolate=False)
+    except Exception as exc:
+        raise ValueError("Site Audit operator env has an invalid AUDIT_CONTROL_API_KEY assignment") from exc
+    value = parsed.get("AUDIT_CONTROL_API_KEY")
+    if (
+        not isinstance(value, str)
+        or not value
+        or "${" in value
+        or any(ch in value for ch in ("\x00", "\n", "\r"))
+    ):
+        raise ValueError("Site Audit operator env has an invalid AUDIT_CONTROL_API_KEY assignment")
+    return "sha256:" + hashlib.sha256(value.encode()).hexdigest()
+
+
+def _xloud_resource_fingerprint(metadata: dict[str, Any]) -> str:
+    stable = {
+        key: metadata.get(key)
+        for key in (
+            "Name",
+            "Id",
+            "Driver",
+            "Scope",
+            "Internal",
+            "Attachable",
+            "Ingress",
+            "Options",
+            "Labels",
+        )
+    }
+    raw = json.dumps(stable, sort_keys=True, separators=(",", ":"), default=str).encode()
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+async def _xloud_topology_fingerprint(client: Any) -> tuple[str, str]:
+    existing: list[str] = []
+    for _role, container, _image_name in _XLOUD_TARGETS:
+        if await client.container_exists(container):
+            existing.append(container)
+    if not existing:
+        return "absent", "sha256:" + hashlib.sha256(b"absent").hexdigest()
+    if len(existing) != len(_XLOUD_TARGETS):
+        raise RuntimeError("partial prior XLOUD topology is ambiguous; both guarded roles or none are required")
+
+    evidence: list[dict[str, Any]] = []
+    for _role, container, _image_name in _XLOUD_TARGETS:
+        inspected = _single_inspect(await client.inspect(container, max_lines=10))
+        runtime = inspected.get("State")
+        config = inspected.get("Config")
+        if not isinstance(runtime, dict) or not isinstance(config, dict):
+            raise RuntimeError("prior XLOUD target metadata is incomplete")
+        if runtime.get("Running") is not True:
+            raise RuntimeError("prior XLOUD target is not running")
+        image_id = inspected.get("Image")
+        config_image = config.get("Image")
+        if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+            raise RuntimeError("prior XLOUD image ID is malformed")
+        if not isinstance(config_image, str) or not config_image:
+            raise RuntimeError("prior XLOUD image reference is unavailable")
+        evidence.append(
+            {
+                "container": container,
+                "container_id": inspected.get("Id"),
+                "image_id": image_id,
+                "image": config_image,
+                "restart_count": inspected.get("RestartCount"),
+                "started_at": runtime.get("StartedAt"),
+            }
+        )
+    raw = json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
+    return "present", "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _xloud_helper_payload(client: Any, run: RunResult) -> tuple[dict[str, Any] | None, str]:
+    output_tail = _sanitize_deploy_tail(client, (run.stdout or "") + "\n" + (run.stderr or ""))
+    try:
+        parsed = json.loads((run.stdout or "").strip())
+    except json.JSONDecodeError:
+        return None, output_tail
+    if not isinstance(parsed, dict) or parsed.get("version") != 1:
+        return None, output_tail
+    safe_tail = parsed.get("stderr_tail") or parsed.get("stdout_tail") or []
+    if isinstance(safe_tail, list):
+        output_tail = _sanitize_deploy_tail(client, "\n".join(str(item) for item in safe_tail))
+    return parsed, output_tail
+
+
+def _xloud_validate_lkg(
+    state: dict[str, Any],
+    *,
+    source_revision: str,
+    target_images: dict[str, dict[str, str]],
+) -> dict[str, Any]:
+    if state.get("STATE_VERSION") != "1":
+        raise RuntimeError("XLOUD LKG state version is invalid")
+    if state.get("SOURCE_REVISION") != source_revision:
+        raise RuntimeError("XLOUD LKG source revision mismatch")
+    if state.get("SITE_IMAGE") != target_images["site"]["image"]:
+        raise RuntimeError("XLOUD LKG site image reference mismatch")
+    if state.get("INTAKE_IMAGE") != target_images["intake"]["image"]:
+        raise RuntimeError("XLOUD LKG intake image reference mismatch")
+    for role, prefix in (("site", "SITE"), ("intake", "INTAKE")):
+        image_id = state.get(f"{prefix}_IMAGE_ID")
+        container_id = state.get(f"{prefix}_CONTAINER_ID")
+        if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+            raise RuntimeError(f"XLOUD LKG {role} image ID is malformed")
+        if not isinstance(container_id, str) or not re.fullmatch(r"[0-9a-f]{12,64}", container_id):
+            raise RuntimeError(f"XLOUD LKG {role} container ID is malformed")
+    site_ipv4 = state.get("SITE_IPV4")
+    try:
+        ipaddress.IPv4Address(site_ipv4 or "")
+    except ipaddress.AddressValueError as exc:
+        raise RuntimeError("XLOUD LKG site IPv4 is invalid") from exc
+    try:
+        stability = int(str(state.get("STABILITY_SECONDS") or ""))
+    except ValueError as exc:
+        raise RuntimeError("XLOUD LKG stability evidence is malformed") from exc
+    if stability < 90:
+        raise RuntimeError("XLOUD LKG stability evidence is below 90 seconds")
+    return state
+
+
+async def _verify_xloud_live(
+    client: Any,
+    *,
+    state: dict[str, Any],
+    source_revision: str,
+    target_images: dict[str, dict[str, str]],
+    image_ids: dict[str, str],
+) -> dict[str, Any]:
+    state = _xloud_validate_lkg(
+        state,
+        source_revision=source_revision,
+        target_images=target_images,
+    )
+    if state.get("SITE_IMAGE_ID") != image_ids.get("site"):
+        raise RuntimeError("XLOUD LKG site image ID differs from confirmed image")
+    if state.get("INTAKE_IMAGE_ID") != image_ids.get("intake"):
+        raise RuntimeError("XLOUD LKG intake image ID differs from confirmed image")
+    live: dict[str, dict[str, Any]] = {}
+    for role, container, _image_name in _XLOUD_TARGETS:
+        prefix = role.upper()
+        inspected = _single_inspect(await client.inspect(container, max_lines=10))
+        runtime = inspected.get("State")
+        config = inspected.get("Config")
+        if not isinstance(runtime, dict) or not isinstance(config, dict):
+            raise RuntimeError("XLOUD target metadata is incomplete")
+        networks = await client.container_network_snapshot(container)
+        health = runtime.get("Health")
+        labels = config.get("Labels")
+        if inspected.get("Id") != state[f"{prefix}_CONTAINER_ID"]:
+            raise RuntimeError("XLOUD target container identity differs from LKG")
+        if inspected.get("Image") != state[f"{prefix}_IMAGE_ID"]:
+            raise RuntimeError("XLOUD target image ID differs from LKG")
+        if config.get("Image") != target_images[role]["image"]:
+            raise RuntimeError("XLOUD target image reference differs from guarded set")
+        if inspected.get("RestartCount") != 0:
+            raise RuntimeError("XLOUD target restarted after rollout")
+        if not isinstance(health, dict) or health.get("Status") != "healthy":
+            raise RuntimeError("XLOUD target is not Docker-healthy")
+        if not isinstance(labels, dict):
+            raise RuntimeError("XLOUD target labels are unavailable")
+        if labels.get("org.opencontainers.image.revision") != source_revision:
+            raise RuntimeError("XLOUD target OCI revision differs from source revision")
+        if labels.get("io.xloud.role") != role:
+            raise RuntimeError("XLOUD target role label mismatch")
+        if "xloud_default" not in networks:
+            raise RuntimeError("XLOUD target is not attached to the default network")
+        if role == "site":
+            if networks.get("proxmox_macvlan") != state.get("SITE_IPV4"):
+                raise RuntimeError("XLOUD site macvlan identity differs from pinned LKG")
+        elif "site-audit-control" not in networks:
+            raise RuntimeError("XLOUD intake is not attached to the Site Audit control network")
+        live[container] = {
+            "container_id": inspected.get("Id"),
+            "image_id": inspected.get("Image"),
+            "image": config.get("Image"),
+            "restart_count": inspected.get("RestartCount"),
+            "started_at": runtime.get("StartedAt"),
+            "health": health.get("Status"),
+            "revision": labels.get("org.opencontainers.image.revision"),
+            "role": labels.get("io.xloud.role"),
+        }
+    return live
+
+
+async def _prepare_xloud_deploy(
+    *,
+    candidate_project: str,
+    expected_head_sha: str,
+    expected_script_blob_sha: str,
+    expected_script_sha256: str,
+    source_revision: str,
+    image_namespace: str,
+    require_stable_topology: bool = True,
+) -> dict[str, Any]:
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_head_sha):
+        raise ValueError("expected_head_sha must be a 40-character lowercase SHA")
+    if source_revision != expected_head_sha:
+        raise ValueError("source_revision must exactly match expected_head_sha")
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_script_blob_sha):
+        raise ValueError("expected_script_blob_sha must be a 40-character lowercase SHA")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_script_sha256):
+        raise ValueError("expected_script_sha256 must be a 64-character lowercase SHA-256")
+    target_images = _xloud_target_images(image_namespace, source_revision)
+
+    registry = server_attr("_get_workspace_registry")()
+    candidate_info = registry.project_info(candidate_project)
+    candidate_root = _safe_registered_root(candidate_info, expected_type="candidate-clone")
+    metadata = _read_candidate_metadata(candidate_root)
+    if metadata.get("project_id") != candidate_project:
+        raise ValueError("candidate metadata project identity mismatch")
+    if metadata.get("source_project") != _XLOUD_SOURCE_PROJECT:
+        raise ValueError("candidate source project is not authorized for XLOUD deployment")
+    if metadata.get("head") != expected_head_sha or metadata.get("base_sha") != expected_head_sha:
+        raise ValueError("candidate metadata is not pinned to the expected XLOUD head")
+    if _git_capture(candidate_root, "rev-parse", "HEAD").lower() != expected_head_sha:
+        raise ValueError("candidate HEAD changed")
+    if _git_capture(candidate_root, "status", "--porcelain=v1", "--untracked-files=all"):
+        raise ValueError("candidate workspace must be clean")
+
+    script = _safe_regular_under(candidate_root, _XLOUD_SCRIPT_PATH, "XLOUD deploy script")
+    blob_sha = _git_capture(candidate_root, "rev-parse", f"{expected_head_sha}:{_XLOUD_SCRIPT_PATH}")
+    if blob_sha != expected_script_blob_sha:
+        raise ValueError("XLOUD deploy script Git blob identity mismatch")
+    if hashlib.sha256(script.read_bytes()).hexdigest() != expected_script_sha256:
+        raise ValueError("XLOUD deploy script SHA-256 identity mismatch")
+
+    operator_info = registry.project_info(_XLOUD_OPERATOR_PROJECT)
+    operator_root = _safe_registered_root(operator_info)
+    client = _docker_client()
+    client._validate_project_dir(str(operator_root))
+    env_file = _safe_regular_under(operator_root, ".env", "Site Audit operator env file")
+    secret_fingerprint = _xloud_secret_fingerprint(env_file)
+
+    state_volume = await client.volume_metadata(_XLOUD_STATE_VOLUME)
+    if state_volume.get("Name") != _XLOUD_STATE_VOLUME:
+        raise RuntimeError("XLOUD deploy-state volume identity mismatch")
+    if state_volume.get("Driver") not in (None, "", "local") or state_volume.get("Options") not in (
+        None,
+        {},
+        [],
+    ):
+        raise RuntimeError("XLOUD deploy-state volume is not a plain local volume")
+    state_volume_fingerprint = _xloud_resource_fingerprint(state_volume)
+
+    network_fingerprints: dict[str, str] = {}
+    for network_name in _XLOUD_REQUIRED_NETWORKS:
+        network = await client.network_metadata(network_name)
+        if network.get("Name") != network_name:
+            raise RuntimeError(f"required XLOUD network {network_name} identity mismatch")
+        network_fingerprints[network_name] = _xloud_resource_fingerprint(network)
+
+    audit = _single_inspect(await client.inspect(_XLOUD_AUDIT_API_CONTAINER, max_lines=10))
+    audit_runtime = audit.get("State")
+    if not isinstance(audit_runtime, dict):
+        raise RuntimeError("Site Audit API runtime metadata is incomplete")
+    audit_health = audit_runtime.get("Health")
+    if not isinstance(audit_health, dict) or audit_health.get("Status") != "healthy":
+        raise RuntimeError("Site Audit API is not Docker-healthy")
+    audit_snapshot = {
+        "container_id": audit.get("Id"),
+        "started_at": audit_runtime.get("StartedAt"),
+        "image_id": audit.get("Image"),
+    }
+    if not all(isinstance(value, str) and value for value in audit_snapshot.values()):
+        raise RuntimeError("Site Audit API identity evidence is incomplete")
+
+    image_ids: dict[str, str] = {}
+    for role in ("site", "intake"):
+        image = target_images[role]["image"]
+        image_id = await client.image_id(image)
+        if await client.image_revision(image_id) != source_revision:
+            raise RuntimeError(f"XLOUD {role} image OCI revision differs from source revision")
+        image_ids[role] = image_id
+    if image_ids["site"] == image_ids["intake"]:
+        raise RuntimeError("XLOUD site and intake image IDs must differ")
+
+    helper_container = os.environ.get("MCP_DEPLOY_HELPER_CONTAINER", _DEPLOY_HELPER_CONTAINER).strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", helper_container):
+        raise ValueError("MCP_DEPLOY_HELPER_CONTAINER is invalid")
+    helper_image_id = await client.container_image_id(helper_container)
+    if require_stable_topology:
+        prior_mode, topology_fingerprint = await _xloud_topology_fingerprint(client)
+    else:
+        prior_mode, topology_fingerprint = "recovery", ""
+
+    plan = {
+        "candidate_root": str(candidate_root),
+        "operator_root": str(operator_root),
+        "script_path": str(script),
+        "env_file": str(env_file),
+        "state_volume": _XLOUD_STATE_VOLUME,
+        "state_volume_fingerprint": state_volume_fingerprint,
+        "network_fingerprints": network_fingerprints,
+        "audit_snapshot": audit_snapshot,
+        "secret_fingerprint": secret_fingerprint,
+        "helper_image_id": helper_image_id,
+        "source_revision": source_revision,
+        "image_namespace": image_namespace.strip().rstrip("/"),
+        "target_images": target_images,
+        "image_ids": image_ids,
+        "prior_mode": prior_mode,
+        "topology_fingerprint": topology_fingerprint,
+    }
+    if require_stable_topology:
+        preflight = await client.run_xloud_deploy_contract_helper(
+            helper_image_id=helper_image_id,
+            candidate_root=str(candidate_root),
+            operator_root=str(operator_root),
+            script_path=str(script),
+            env_file=str(env_file),
+            state_volume=_XLOUD_STATE_VOLUME,
+            site_image=target_images["site"]["image"],
+            intake_image=target_images["intake"]["image"],
+            site_image_id=image_ids["site"],
+            intake_image_id=image_ids["intake"],
+            source_revision=source_revision,
+            secret_fingerprint=secret_fingerprint,
+            mode="preflight",
+            stability_seconds=90,
+            timeout=180,
+        )
+        payload, output_tail = _xloud_helper_payload(client, preflight)
+        if (
+            preflight.exit_code != 0
+            or payload is None
+            or payload.get("exit_code") != 0
+            or payload.get("pending_exists") is not False
+        ):
+            raise RuntimeError(f"XLOUD repo-owned preflight failed: {output_tail}")
+    return plan
+
+
+async def _verify_xloud_guard_resources(client: Any, plan: dict[str, Any]) -> None:
+    state_volume = await client.volume_metadata(plan["state_volume"])
+    if _xloud_resource_fingerprint(state_volume) != plan["state_volume_fingerprint"]:
+        raise RuntimeError("XLOUD deploy-state volume changed during rollout")
+    for network_name, fingerprint in plan["network_fingerprints"].items():
+        network = await client.network_metadata(network_name)
+        if _xloud_resource_fingerprint(network) != fingerprint:
+            raise RuntimeError(f"XLOUD required network {network_name} changed during rollout")
+    audit = _single_inspect(await client.inspect(_XLOUD_AUDIT_API_CONTAINER, max_lines=10))
+    runtime = audit.get("State")
+    if not isinstance(runtime, dict):
+        raise RuntimeError("Site Audit API runtime metadata is incomplete")
+    health = runtime.get("Health")
+    if not isinstance(health, dict) or health.get("Status") != "healthy":
+        raise RuntimeError("Site Audit API is not Docker-healthy")
+    current = {
+        "container_id": audit.get("Id"),
+        "started_at": runtime.get("StartedAt"),
+        "image_id": audit.get("Image"),
+    }
+    if current != plan["audit_snapshot"]:
+        raise RuntimeError("Site Audit API identity changed during XLOUD rollout")
+
+
 async def _prepare_site_audit_deploy(
     *,
     candidate_project: str,
@@ -942,6 +1396,7 @@ async def _prepare_site_audit_deploy(
     client = _docker_client()
     client._validate_project_dir(str(operator_root))
     env_file = _safe_regular_under(operator_root, ".env", "Site Audit operator env file")
+    crm_config = _site_audit_crm_config_status(env_file)
 
     state_volume = await client.volume_metadata(_SITE_AUDIT_STATE_VOLUME)
     if state_volume.get("Name") != _SITE_AUDIT_STATE_VOLUME:
@@ -966,6 +1421,7 @@ async def _prepare_site_audit_deploy(
         "source_revision": source_revision,
         "image_namespace": image_namespace.strip().rstrip("/"),
         "target_images": target_images,
+        "crm_config": crm_config,
     }
 
 
@@ -3492,6 +3948,817 @@ async def _docker_deploy_content_harvester_impl(
     )
 
 
+async def _accept_xloud_payload(
+    client: Any,
+    *,
+    payload: dict[str, Any],
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    if payload.get("pending_exists") is not False or payload.get("lkg_exists") is not True:
+        raise RuntimeError("XLOUD durable deployment evidence is incomplete")
+    state = payload.get("lkg")
+    if not isinstance(state, dict) or not state:
+        raise RuntimeError("XLOUD helper returned malformed LKG state")
+    await _verify_xloud_guard_resources(client, plan)
+    first = await _verify_xloud_live(
+        client,
+        state=state,
+        source_revision=plan["source_revision"],
+        target_images=plan["target_images"],
+        image_ids=plan["image_ids"],
+    )
+    await asyncio.sleep(_XLOUD_VERIFY_STABILITY_SECONDS)
+    await _verify_xloud_guard_resources(client, plan)
+    second = await _verify_xloud_live(
+        client,
+        state=state,
+        source_revision=plan["source_revision"],
+        target_images=plan["target_images"],
+        image_ids=plan["image_ids"],
+    )
+    if first != second:
+        raise RuntimeError("XLOUD deployment changed during Gateway stability verification")
+    return {"state": state, "live": second}
+
+
+async def _verify_xloud_recovery(
+    client: Any,
+    *,
+    failed: dict[str, Any],
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    if failed.get("STATE_VERSION") != "1" or failed.get("SOURCE_REVISION") != plan["source_revision"]:
+        raise RuntimeError("XLOUD recovery evidence does not match the confirmed rollout")
+    previous_cids = {
+        "site": failed.get("PREVIOUS_SITE_CID"),
+        "intake": failed.get("PREVIOUS_INTAKE_CID"),
+    }
+    if previous_cids == {"site": "absent", "intake": "absent"}:
+        for _role, container, _image_name in _XLOUD_TARGETS:
+            if await client.container_exists(container):
+                raise RuntimeError("XLOUD bootstrap recovery left a target container")
+        await _verify_xloud_guard_resources(client, plan)
+        return {"outcome": "bootstrap_absent_restored"}
+    if "absent" in previous_cids.values() or not all(
+        isinstance(value, str) and value for value in previous_cids.values()
+    ):
+        raise RuntimeError("XLOUD recovery evidence describes a partial prior topology")
+
+    live: dict[str, dict[str, Any]] = {}
+    for role, container, _image_name in _XLOUD_TARGETS:
+        prefix = role.upper()
+        expected_id = failed.get(f"PREVIOUS_{prefix}_IMAGE_ID")
+        expected_ref = failed.get(f"PREVIOUS_{prefix}_REF")
+        if not isinstance(expected_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_id):
+            raise RuntimeError("XLOUD recovery previous image ID is malformed")
+        if not isinstance(expected_ref, str) or not expected_ref or any(
+            ch in expected_ref for ch in ("\x00", "\n", "\r", "\t")
+        ):
+            raise RuntimeError("XLOUD recovery previous image reference is malformed")
+        inspected = _single_inspect(await client.inspect(container, max_lines=10))
+        runtime = inspected.get("State")
+        config = inspected.get("Config")
+        if not isinstance(runtime, dict) or not isinstance(config, dict):
+            raise RuntimeError("XLOUD recovered target metadata is incomplete")
+        health = runtime.get("Health")
+        if inspected.get("Image") != expected_id or config.get("Image") != expected_ref:
+            raise RuntimeError("XLOUD recovery did not restore the previous image generation")
+        if inspected.get("RestartCount") != 0:
+            raise RuntimeError("XLOUD recovered target has non-zero restart evidence")
+        if not isinstance(health, dict) or health.get("Status") != "healthy":
+            raise RuntimeError("XLOUD recovered target is not Docker-healthy")
+        live[container] = {
+            "container_id": inspected.get("Id"),
+            "image_id": inspected.get("Image"),
+            "image": config.get("Image"),
+            "restart_count": inspected.get("RestartCount"),
+            "started_at": runtime.get("StartedAt"),
+            "health": health.get("Status"),
+        }
+    await _verify_xloud_guard_resources(client, plan)
+    return {"outcome": "previous_generation_restored", "targets": live}
+
+
+async def docker_deploy_xloud(
+    candidate_project: str,
+    expected_head_sha: str,
+    expected_script_blob_sha: str,
+    expected_script_sha256: str,
+    source_revision: str,
+    image_namespace: str,
+    timeout: int = 720,
+) -> dict[str, Any]:
+    """Prepare a guarded two-image XLOUD rollout using deploy-xloud.sh."""
+    timeout = max(180, min(timeout, 900))
+    try:
+        plan = await _prepare_xloud_deploy(
+            candidate_project=candidate_project,
+            expected_head_sha=expected_head_sha,
+            expected_script_blob_sha=expected_script_blob_sha,
+            expected_script_sha256=expected_script_sha256,
+            source_revision=source_revision,
+            image_namespace=image_namespace,
+        )
+    except ValueError as exc:
+        return tool_error(
+            tool="docker_deploy_xloud",
+            code="INVALID_INPUT",
+            message=str(exc),
+            source="docker",
+            retryable=False,
+        )
+    except RuntimeError as exc:
+        return tool_error(
+            tool="docker_deploy_xloud",
+            code="DEPLOY_CONTRACT_PRECONDITION_FAILED",
+            message=str(exc),
+            source="docker",
+            retryable=False,
+        )
+    action = _confirm_store().create_action(
+        "docker_deploy_xloud",
+        {
+            "candidate_project": candidate_project,
+            "expected_head_sha": expected_head_sha,
+            "expected_script_blob_sha": expected_script_blob_sha,
+            "expected_script_sha256": expected_script_sha256,
+            "source_revision": source_revision,
+            "image_namespace": plan["image_namespace"],
+            "target_images": plan["target_images"],
+            "image_ids": plan["image_ids"],
+            "state_volume_fingerprint": plan["state_volume_fingerprint"],
+            "network_fingerprints": plan["network_fingerprints"],
+            "audit_snapshot": plan["audit_snapshot"],
+            "secret_fingerprint": plan["secret_fingerprint"],
+            "prior_mode": plan["prior_mode"],
+            "topology_fingerprint": plan["topology_fingerprint"],
+            "timeout": timeout,
+        },
+        f"Deploy XLOUD two-image contract from {candidate_project}@{expected_head_sha[:12]}",
+        risk="high",
+        required_scope="mcp:docker:admin",
+    )
+    return _confirmation_response(action)
+
+
+async def _docker_deploy_xloud_impl(
+    candidate_project: str,
+    expected_head_sha: str,
+    expected_script_blob_sha: str,
+    expected_script_sha256: str,
+    source_revision: str,
+    image_namespace: str,
+    target_images: dict[str, dict[str, str]],
+    image_ids: dict[str, str],
+    state_volume_fingerprint: str,
+    network_fingerprints: dict[str, str],
+    audit_snapshot: dict[str, str],
+    secret_fingerprint: str,
+    prior_mode: str,
+    topology_fingerprint: str,
+    timeout: int = 720,
+) -> dict[str, Any]:
+    try:
+        plan = await _prepare_xloud_deploy(
+            candidate_project=candidate_project,
+            expected_head_sha=expected_head_sha,
+            expected_script_blob_sha=expected_script_blob_sha,
+            expected_script_sha256=expected_script_sha256,
+            source_revision=source_revision,
+            image_namespace=image_namespace,
+        )
+        confirmed = {
+            "target_images": target_images,
+            "image_ids": image_ids,
+            "state_volume_fingerprint": state_volume_fingerprint,
+            "network_fingerprints": network_fingerprints,
+            "audit_snapshot": audit_snapshot,
+            "secret_fingerprint": secret_fingerprint,
+            "prior_mode": prior_mode,
+            "topology_fingerprint": topology_fingerprint,
+        }
+        if any(plan[key] != value for key, value in confirmed.items()):
+            raise RuntimeError("XLOUD confirmation identities changed before execution")
+    except (ValueError, RuntimeError) as exc:
+        return tool_error(
+            tool="docker_deploy_xloud",
+            code="DEPLOY_CONTRACT_PRECONDITION_FAILED",
+            message=str(exc),
+            source="docker",
+            retryable=False,
+        )
+
+    client = _docker_client()
+    helper_kwargs = {
+        "helper_image_id": plan["helper_image_id"],
+        "candidate_root": plan["candidate_root"],
+        "operator_root": plan["operator_root"],
+        "script_path": plan["script_path"],
+        "env_file": plan["env_file"],
+        "state_volume": plan["state_volume"],
+        "site_image": plan["target_images"]["site"]["image"],
+        "intake_image": plan["target_images"]["intake"]["image"],
+        "site_image_id": plan["image_ids"]["site"],
+        "intake_image_id": plan["image_ids"]["intake"],
+        "source_revision": source_revision,
+        "secret_fingerprint": plan["secret_fingerprint"],
+        "stability_seconds": 90,
+        "timeout": timeout,
+    }
+    run = await client.run_xloud_deploy_contract_helper(**helper_kwargs, mode="deploy")
+    payload, output_tail = _xloud_helper_payload(client, run)
+    ambiguous = run.exit_code == -1 or (
+        isinstance(payload, dict) and (payload.get("timed_out") is True or payload.get("exit_code") == 124)
+    )
+
+    if ambiguous:
+        try:
+            recovery_plan = await _prepare_xloud_deploy(
+                candidate_project=candidate_project,
+                expected_head_sha=expected_head_sha,
+                expected_script_blob_sha=expected_script_blob_sha,
+                expected_script_sha256=expected_script_sha256,
+                source_revision=source_revision,
+                image_namespace=image_namespace,
+                require_stable_topology=False,
+            )
+            for key in (
+                "target_images",
+                "image_ids",
+                "state_volume_fingerprint",
+                "network_fingerprints",
+                "audit_snapshot",
+                "secret_fingerprint",
+            ):
+                if recovery_plan[key] != plan[key]:
+                    raise RuntimeError(f"XLOUD {key} changed before recovery")
+        except (ValueError, RuntimeError) as exc:
+            return tool_error(
+                tool="docker_deploy_xloud",
+                code="DEPLOY_CONTRACT_OUTCOME_AMBIGUOUS",
+                message=f"XLOUD deploy outcome is unknown and recovery preflight changed: {exc}",
+                result={"source_revision": source_revision, "output_tail": output_tail},
+                source="docker",
+                retryable=False,
+                redacted=True,
+                hint="Do not retry deploy. Reconcile the durable pending/LKG evidence first.",
+            )
+        recovery_kwargs = {**helper_kwargs}
+        for key in ("helper_image_id", "candidate_root", "operator_root", "script_path", "env_file", "state_volume"):
+            recovery_kwargs[key] = recovery_plan[key]
+        recovery = await client.run_xloud_deploy_contract_helper(**recovery_kwargs, mode="recover")
+        recovery_payload, recovery_tail = _xloud_helper_payload(client, recovery)
+        if (
+            recovery.exit_code == 0
+            and isinstance(recovery_payload, dict)
+            and recovery_payload.get("exit_code") == 0
+            and recovery_payload.get("pending_exists") is False
+        ):
+            lkg = recovery_payload.get("lkg")
+            if isinstance(lkg, dict) and lkg.get("SOURCE_REVISION") == source_revision:
+                try:
+                    accepted = await _accept_xloud_payload(
+                        client,
+                        payload=recovery_payload,
+                        plan=plan,
+                    )
+                except RuntimeError:
+                    accepted = None
+                if accepted is not None:
+                    return tool_success(
+                        "docker_deploy_xloud",
+                        result={
+                            "source_revision": source_revision,
+                            "target_images": plan["target_images"],
+                            "image_ids": plan["image_ids"],
+                            "reconciled_after_unknown": True,
+                            "recovery_result": "target_accepted",
+                            "deployment": accepted,
+                            "output_tail": recovery_tail,
+                        },
+                        source="docker",
+                        dangerous=True,
+                        redacted=True,
+                    )
+            failed = recovery_payload.get("failed")
+            if recovery_payload.get("failed_exists") is True and isinstance(failed, dict):
+                try:
+                    recovered = await _verify_xloud_recovery(client, failed=failed, plan=plan)
+                except RuntimeError:
+                    recovered = None
+                if recovered is not None:
+                    return tool_error(
+                        tool="docker_deploy_xloud",
+                        code="DEPLOY_CONTRACT_RECOVERED_NOT_DEPLOYED",
+                        message="XLOUD unknown outcome was safely reconciled without accepting the target generation",
+                        result={
+                            "source_revision": source_revision,
+                            "reconciled_after_unknown": True,
+                            "recovery": recovered,
+                            "output_tail": recovery_tail,
+                        },
+                        source="docker",
+                        retryable=True,
+                        redacted=True,
+                        hint="Create a fresh preflight/confirmation before any later deploy attempt.",
+                    )
+        return tool_error(
+            tool="docker_deploy_xloud",
+            code="DEPLOY_CONTRACT_OUTCOME_AMBIGUOUS",
+            message="XLOUD deploy outcome could not be proven after repo-owned recovery",
+            result={"source_revision": source_revision, "output_tail": recovery_tail},
+            source="docker",
+            retryable=False,
+            redacted=True,
+            hint="Reconcile durable pending/LKG state before creating a new deploy confirmation.",
+        )
+
+    if run.exit_code != 0 or not isinstance(payload, dict) or payload.get("exit_code") != 0:
+        return tool_error(
+            tool="docker_deploy_xloud",
+            code=("DEPLOY_CONTRACT_EVIDENCE_INVALID" if payload is None else "DEPLOY_CONTRACT_FAILED"),
+            message=(
+                "XLOUD deploy helper returned invalid evidence"
+                if payload is None
+                else "XLOUD deploy contract failed"
+            ),
+            result={"output_tail": output_tail},
+            source="docker",
+            retryable=False,
+            redacted=True,
+        )
+    try:
+        accepted = await _accept_xloud_payload(client, payload=payload, plan=plan)
+    except RuntimeError as exc:
+        return tool_error(
+            tool="docker_deploy_xloud",
+            code="DEPLOY_CONTRACT_VERIFICATION_FAILED",
+            message=str(exc),
+            result={"output_tail": output_tail},
+            source="docker",
+            retryable=False,
+            redacted=True,
+        )
+    return tool_success(
+        "docker_deploy_xloud",
+        result={
+            "source_revision": source_revision,
+            "script_blob_sha": expected_script_blob_sha,
+            "script_sha256": expected_script_sha256,
+            "target_images": plan["target_images"],
+            "image_ids": plan["image_ids"],
+            "stability_seconds": int(accepted["state"]["STABILITY_SECONDS"]),
+            "reconciled_after_unknown": False,
+            "deployment": accepted,
+            "output_tail": output_tail,
+        },
+        source="docker",
+        dangerous=True,
+        redacted=True,
+    )
+
+
+def _site_audit_crm_helper_payload(run: RunResult) -> dict[str, Any]:
+    """Parse the fixed CRM helper response without surfacing raw output."""
+    try:
+        payload = json.loads((run.stdout or "").strip())
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Site Audit CRM helper returned invalid evidence") from exc
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        raise RuntimeError("Site Audit CRM helper response schema is invalid")
+    return payload
+
+
+def _site_audit_crm_runtime_snapshot(
+    inspected: dict[str, Any],
+    *,
+    label: str,
+    require_revision: str | None = None,
+) -> dict[str, Any]:
+    runtime = inspected.get("State")
+    config = inspected.get("Config")
+    if not isinstance(runtime, dict) or not isinstance(config, dict):
+        raise RuntimeError(f"{label} runtime metadata is incomplete")
+    health = runtime.get("Health")
+    if runtime.get("Running") is not True:
+        raise RuntimeError(f"{label} is not running")
+    if not isinstance(health, dict) or health.get("Status") != "healthy":
+        raise RuntimeError(f"{label} is not Docker-healthy")
+    restart_count = inspected.get("RestartCount")
+    if not isinstance(restart_count, int) or isinstance(restart_count, bool) or restart_count != 0:
+        raise RuntimeError(f"{label} has non-zero restart evidence")
+    container_id = inspected.get("Id")
+    image_id = inspected.get("Image")
+    started_at = runtime.get("StartedAt")
+    if not isinstance(container_id, str) or not container_id:
+        raise RuntimeError(f"{label} container identity is unavailable")
+    if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+        raise RuntimeError(f"{label} image identity is invalid")
+    if not isinstance(started_at, str) or not started_at:
+        raise RuntimeError(f"{label} StartedAt evidence is unavailable")
+    revision: str | None = None
+    if require_revision is not None:
+        labels = config.get("Labels")
+        if not isinstance(labels, dict):
+            raise RuntimeError(f"{label} OCI labels are unavailable")
+        revision = labels.get("org.opencontainers.image.revision")
+        if revision != require_revision:
+            raise RuntimeError(f"{label} OCI revision differs from expected source")
+    return {
+        "container_id": container_id,
+        "image_id": image_id,
+        "started_at": started_at,
+        "restart_count": restart_count,
+        "revision": revision,
+    }
+
+
+def _site_audit_crm_inspect_evidence(payload: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("version") != 1:
+        raise RuntimeError("Site Audit CRM inspect schema is invalid")
+    env_sha = payload.get("env_sha256")
+    if not isinstance(env_sha, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", env_sha):
+        raise RuntimeError("Site Audit CRM inspect env fingerprint is invalid")
+    env_state = payload.get("crm_env_state")
+    role_state = payload.get("role_state")
+    user_state = payload.get("api_user_state")
+    if env_state not in {"absent", "partial", "conflict", "ready"}:
+        raise RuntimeError("Site Audit CRM inspect env state is invalid")
+    if role_state not in {"absent", "matching", "conflict"}:
+        raise RuntimeError("Site Audit CRM inspect role state is invalid")
+    if user_state not in {"absent", "matching", "conflict"}:
+        raise RuntimeError("Site Audit CRM inspect API-user state is invalid")
+    for key in (
+        "admin_user_configured",
+        "admin_password_configured",
+        "admin_auth_ok",
+    ):
+        if payload.get(key) is not True:
+            raise RuntimeError(f"Site Audit CRM inspect {key} is not ready")
+    evidence: dict[str, Any] = {
+        "env_sha256": env_sha,
+        "crm_env_state": env_state,
+        "role_state": role_state,
+        "api_user_state": user_state,
+    }
+    for key in ("role_id", "api_user_id", "role_conflict", "api_user_conflict"):
+        value = payload.get(key)
+        if value is not None:
+            if not isinstance(value, str) or not value or len(value) > 255:
+                raise RuntimeError(f"Site Audit CRM inspect {key} is malformed")
+            evidence[key] = value
+    return evidence
+
+
+def _site_audit_crm_evidence_fingerprint(evidence: dict[str, Any]) -> str:
+    raw = json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+async def _prepare_site_audit_crm_provision(
+    *,
+    expected_api_revision: str,
+) -> dict[str, Any]:
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_api_revision):
+        raise ValueError("expected_api_revision must be an exact lowercase 40-hex SHA")
+
+    registry = server_attr("_get_workspace_registry")()
+    operator_info = registry.project_info(_SITE_AUDIT_SOURCE_PROJECT)
+    operator_root = _safe_registered_root(operator_info)
+    client = _docker_client()
+    client._validate_project_dir(str(operator_root))
+    env_file = _safe_regular_under(operator_root, ".env", "Site Audit operator env file")
+    env_sha256 = "sha256:" + hashlib.sha256(env_file.read_bytes()).hexdigest()
+
+    helper_container = os.environ.get(
+        "MCP_DEPLOY_HELPER_CONTAINER", _DEPLOY_HELPER_CONTAINER
+    ).strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", helper_container):
+        raise ValueError("MCP_DEPLOY_HELPER_CONTAINER is invalid")
+    helper_image_id = await client.container_image_id(helper_container)
+
+    api = _single_inspect(await client.inspect("site-audit-api", max_lines=10))
+    api_snapshot = _site_audit_crm_runtime_snapshot(
+        api,
+        label="Site Audit API",
+        require_revision=expected_api_revision,
+    )
+    crm = _single_inspect(await client.inspect("site-audit-crm-web", max_lines=10))
+    crm_snapshot = _site_audit_crm_runtime_snapshot(crm, label="Site Audit CRM web")
+    crm_networks = await client.container_network_snapshot("site-audit-crm-web")
+    if "site-audit-control" not in crm_networks:
+        raise RuntimeError("Site Audit CRM web is not attached to the control network")
+
+    run = await client.run_site_audit_crm_provisioner(
+        helper_image_id=helper_image_id,
+        operator_root=str(operator_root),
+        mode="inspect",
+        timeout=60,
+    )
+    if run.exit_code != 0:
+        payload = _site_audit_crm_helper_payload(run)
+        raise RuntimeError(str(payload.get("error") or "Site Audit CRM inspect failed"))
+    evidence = _site_audit_crm_inspect_evidence(_site_audit_crm_helper_payload(run))
+    if evidence["env_sha256"] != env_sha256:
+        raise RuntimeError("Site Audit operator env changed during CRM preflight")
+    if evidence["crm_env_state"] in {"partial", "conflict"}:
+        raise RuntimeError("Site Audit CRM operator env is partially or incompatibly configured")
+    if evidence["role_state"] == "conflict" or evidence["api_user_state"] == "conflict":
+        raise RuntimeError("Site Audit CRM role/API-user identity conflicts with guarded policy")
+    if evidence["crm_env_state"] == "ready":
+        if evidence["role_state"] != "matching" or evidence["api_user_state"] != "matching":
+            raise RuntimeError("Site Audit CRM env is ready but guarded role/API-user identity is missing")
+    elif evidence["api_user_state"] == "matching":
+        # EspoCRM does not promise that an existing API user's secret can be
+        # read back.  Re-creating/rotating it implicitly would destroy the
+        # idempotency boundary, so require operator reconciliation instead.
+        raise RuntimeError("Site Audit CRM API user exists but its durable key is not configured")
+
+    return {
+        "operator_root": str(operator_root),
+        "env_file": str(env_file),
+        "env_sha256": env_sha256,
+        "helper_image_id": helper_image_id,
+        "expected_api_revision": expected_api_revision,
+        "api_snapshot": api_snapshot,
+        "crm_snapshot": crm_snapshot,
+        "inspect_evidence": evidence,
+        "inspect_fingerprint": _site_audit_crm_evidence_fingerprint(evidence),
+    }
+
+
+async def docker_provision_site_audit_crm(
+    expected_api_revision: str,
+    timeout: int = 120,
+) -> dict[str, Any]:
+    """Prepare least-privilege Site Audit EspoCRM API-user provisioning.
+
+    The preflight is read-only. It authenticates with the operator-provisioned
+    EspoCRM admin credential without returning it, verifies the exact live Site
+    Audit API revision and fixed CRM topology, and either reports an already
+    ready state or returns one high-risk confirmation action. The generated API
+    key never crosses the helper boundary.
+    """
+    timeout = max(60, min(timeout, 180))
+    try:
+        plan = await _prepare_site_audit_crm_provision(
+            expected_api_revision=expected_api_revision,
+        )
+    except ValueError as exc:
+        return tool_error(
+            tool="docker_provision_site_audit_crm",
+            code="INVALID_INPUT",
+            message=str(exc),
+            source="docker",
+            retryable=False,
+        )
+    except RuntimeError as exc:
+        return tool_error(
+            tool="docker_provision_site_audit_crm",
+            code="CRM_PROVISION_PRECONDITION_FAILED",
+            message=str(exc),
+            source="docker",
+            retryable=False,
+            redacted=True,
+        )
+
+    evidence = plan["inspect_evidence"]
+    if (
+        evidence["crm_env_state"] == "ready"
+        and evidence["role_state"] == "matching"
+        and evidence["api_user_state"] == "matching"
+    ):
+        return tool_success(
+            "docker_provision_site_audit_crm",
+            result={
+                "status": "ready",
+                "mutation_required": False,
+                "expected_api_revision": expected_api_revision,
+                "env_sha256": plan["env_sha256"],
+                "role_id": evidence.get("role_id"),
+                "api_user_id": evidence.get("api_user_id"),
+                "crm_projection_ready": True,
+                "api_redeploy_required": True,
+            },
+            source="docker",
+            redacted=True,
+        )
+
+    action = _confirm_store().create_action(
+        "docker_provision_site_audit_crm",
+        {
+            "expected_api_revision": expected_api_revision,
+            "env_sha256": plan["env_sha256"],
+            "helper_image_id": plan["helper_image_id"],
+            "api_snapshot": plan["api_snapshot"],
+            "crm_snapshot": plan["crm_snapshot"],
+            "inspect_fingerprint": plan["inspect_fingerprint"],
+            "timeout": timeout,
+        },
+        (
+            "Provision the fixed least-privilege Site Audit EspoCRM API identity "
+            f"for live API revision {expected_api_revision[:12]}"
+        ),
+        risk="high",
+        required_scope="mcp:docker:admin",
+    )
+    response = _confirmation_response(action)
+    response["result"]["crm_preflight"] = {
+        "crm_env_state": evidence["crm_env_state"],
+        "role_state": evidence["role_state"],
+        "api_user_state": evidence["api_user_state"],
+        "crm_projection_ready": False,
+    }
+    return response
+
+
+async def _docker_provision_site_audit_crm_impl(
+    expected_api_revision: str,
+    env_sha256: str,
+    helper_image_id: str,
+    api_snapshot: dict[str, Any],
+    crm_snapshot: dict[str, Any],
+    inspect_fingerprint: str,
+    timeout: int = 120,
+) -> dict[str, Any]:
+    try:
+        plan = await _prepare_site_audit_crm_provision(
+            expected_api_revision=expected_api_revision,
+        )
+        confirmed = {
+            "env_sha256": env_sha256,
+            "helper_image_id": helper_image_id,
+            "api_snapshot": api_snapshot,
+            "crm_snapshot": crm_snapshot,
+            "inspect_fingerprint": inspect_fingerprint,
+        }
+        if any(plan[key] != value for key, value in confirmed.items()):
+            raise RuntimeError("Site Audit CRM confirmation identities changed before execution")
+        evidence = plan["inspect_evidence"]
+        if evidence["crm_env_state"] != "absent":
+            raise RuntimeError("Site Audit CRM env no longer requires first-time provisioning")
+        if evidence["api_user_state"] != "absent":
+            raise RuntimeError("Site Audit CRM API-user state changed before execution")
+    except (ValueError, RuntimeError) as exc:
+        return tool_error(
+            tool="docker_provision_site_audit_crm",
+            code="CRM_PROVISION_PRECONDITION_FAILED",
+            message=str(exc),
+            source="docker",
+            retryable=False,
+            redacted=True,
+        )
+
+    client = _docker_client()
+    run = await client.run_site_audit_crm_provisioner(
+        helper_image_id=plan["helper_image_id"],
+        operator_root=plan["operator_root"],
+        mode="provision",
+        expected_env_sha256=plan["env_sha256"],
+        timeout=timeout,
+    )
+
+    if run.exit_code == -1:
+        try:
+            reconciled = await _prepare_site_audit_crm_provision(
+                expected_api_revision=expected_api_revision,
+            )
+            after = reconciled["inspect_evidence"]
+            if (
+                after["crm_env_state"] == "ready"
+                and after["role_state"] == "matching"
+                and after["api_user_state"] == "matching"
+            ):
+                return tool_success(
+                    "docker_provision_site_audit_crm",
+                    result={
+                        "status": "ready",
+                        "mutation_required": True,
+                        "reconciled_after_unknown": True,
+                        "expected_api_revision": expected_api_revision,
+                        "env_sha256": reconciled["env_sha256"],
+                        "role_id": after.get("role_id"),
+                        "api_user_id": after.get("api_user_id"),
+                        "crm_projection_ready": True,
+                        "api_redeploy_required": True,
+                    },
+                    source="docker",
+                    dangerous=True,
+                    redacted=True,
+                )
+        except (ValueError, RuntimeError):
+            pass
+        return tool_error(
+            tool="docker_provision_site_audit_crm",
+            code="CRM_PROVISION_OUTCOME_AMBIGUOUS",
+            message="Site Audit CRM provisioning timed out and readiness could not be proven",
+            source="docker",
+            retryable=False,
+            redacted=True,
+            hint="Do not retry blindly. Run a fresh read-only provisioning preflight to reconcile role, API-user and operator-env state.",
+        )
+
+    try:
+        payload = _site_audit_crm_helper_payload(run)
+    except RuntimeError as exc:
+        return tool_error(
+            tool="docker_provision_site_audit_crm",
+            code="CRM_PROVISION_EVIDENCE_INVALID",
+            message=str(exc),
+            source="docker",
+            retryable=False,
+            redacted=True,
+        )
+    if run.exit_code != 0 or payload.get("outcome") != "ready":
+        return tool_error(
+            tool="docker_provision_site_audit_crm",
+            code="CRM_PROVISION_FAILED",
+            message=str(payload.get("error") or "Site Audit CRM provisioning failed"),
+            source="docker",
+            retryable=False,
+            redacted=True,
+        )
+
+    for field in ("env_sha256", "api_key_fingerprint"):
+        value = payload.get(field)
+        if not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+            return tool_error(
+                tool="docker_provision_site_audit_crm",
+                code="CRM_PROVISION_EVIDENCE_INVALID",
+                message=f"Site Audit CRM helper returned invalid {field} evidence",
+                source="docker",
+                retryable=False,
+                redacted=True,
+            )
+    role_id = payload.get("role_id")
+    api_user_id = payload.get("api_user_id")
+    if not isinstance(role_id, str) or not role_id or not isinstance(api_user_id, str) or not api_user_id:
+        return tool_error(
+            tool="docker_provision_site_audit_crm",
+            code="CRM_PROVISION_EVIDENCE_INVALID",
+            message="Site Audit CRM helper returned invalid identity evidence",
+            source="docker",
+            retryable=False,
+            redacted=True,
+        )
+    if payload.get("crm_projection_ready") is not True:
+        return tool_error(
+            tool="docker_provision_site_audit_crm",
+            code="CRM_PROVISION_EVIDENCE_INVALID",
+            message="Site Audit CRM helper did not prove projection readiness",
+            source="docker",
+            retryable=False,
+            redacted=True,
+        )
+
+    try:
+        verified = await _prepare_site_audit_crm_provision(
+            expected_api_revision=expected_api_revision,
+        )
+        after = verified["inspect_evidence"]
+        if verified["env_sha256"] != payload["env_sha256"]:
+            raise RuntimeError("Site Audit CRM operator env changed after provisioning")
+        if (
+            after["crm_env_state"] != "ready"
+            or after["role_state"] != "matching"
+            or after["api_user_state"] != "matching"
+            or after.get("role_id") != role_id
+            or after.get("api_user_id") != api_user_id
+        ):
+            raise RuntimeError("Site Audit CRM post-provision readiness verification failed")
+    except (ValueError, RuntimeError) as exc:
+        return tool_error(
+            tool="docker_provision_site_audit_crm",
+            code="CRM_PROVISION_VERIFICATION_FAILED",
+            message=str(exc),
+            source="docker",
+            retryable=False,
+            redacted=True,
+        )
+
+    return tool_success(
+        "docker_provision_site_audit_crm",
+        result={
+            "status": "ready",
+            "mutation_required": True,
+            "reconciled_after_unknown": False,
+            "expected_api_revision": expected_api_revision,
+            "env_sha256": payload["env_sha256"],
+            "api_key_fingerprint": payload["api_key_fingerprint"],
+            "role_id": role_id,
+            "api_user_id": api_user_id,
+            "role_created": payload.get("role_created") is True,
+            "api_user_created": payload.get("api_user_created") is True,
+            "env_updated": payload.get("env_updated") is True,
+            "crm_projection_ready": True,
+            "api_redeploy_required": True,
+        },
+        source="docker",
+        dangerous=True,
+        redacted=True,
+    )
+
+
 async def docker_site_audit_deploy_status() -> dict[str, Any]:
     """Read and verify the durable Site Audit LKG against the live stack.
 
@@ -3630,7 +4897,9 @@ async def docker_deploy_site_audit(
         risk="high",
         required_scope="mcp:docker:admin",
     )
-    return _confirmation_response(action)
+    response = _confirmation_response(action)
+    response["result"]["crm_config"] = plan["crm_config"]
+    return response
 
 
 async def _docker_deploy_site_audit_impl(
@@ -4295,6 +5564,8 @@ _CONFIRM_HANDLERS: dict[str, Callable[..., Any]] = {
     "docker_volume_rm": _docker_volume_rm_impl,
     "docker_deploy_contract": _docker_deploy_contract_impl,
     "docker_deploy_site_audit": _docker_deploy_site_audit_impl,
+    "docker_provision_site_audit_crm": _docker_provision_site_audit_crm_impl,
+    "docker_deploy_xloud": _docker_deploy_xloud_impl,
     "docker_deploy_content_harvester": _docker_deploy_content_harvester_impl,
     "docker_migrate_content_harvester": _docker_migrate_content_harvester_impl,
 }
@@ -4979,6 +6250,8 @@ def register_all() -> None:
         "docker_deploy_contract",
         "docker_site_audit_deploy_status",
         "docker_deploy_site_audit",
+        "docker_provision_site_audit_crm",
+        "docker_deploy_xloud",
         "docker_deploy_content_harvester",
         "docker_migrate_content_harvester",
         "confirm_operation",

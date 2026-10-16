@@ -133,6 +133,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "supervisor_register_project": ["mcp:admin"],
     "supervisor_unregister_project": ["mcp:admin"],
     "prepare_candidate_clone": ["mcp:repo", "mcp:admin"],
+    "candidate_adopt": ["mcp:repo", "mcp:admin"],
     "candidate_cleanup": ["mcp:repo", "mcp:admin"],
     "fleet_status": ["mcp:agent-run", "mcp:admin"],
     "fleet_reconcile_unbound": ["mcp:agent-run", "mcp:admin"],
@@ -210,6 +211,8 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "docker_volume_rm": ["mcp:docker:admin"],
     "docker_deploy_contract": ["mcp:docker:admin"],
     "docker_deploy_site_audit": ["mcp:docker:admin"],
+    "docker_provision_site_audit_crm": ["mcp:docker:admin"],
+    "docker_deploy_xloud": ["mcp:docker:admin"],
     "docker_deploy_content_harvester": ["mcp:docker:admin"],
     "docker_migrate_content_harvester": ["mcp:docker:admin"],
     # postgres — mcp:postgres

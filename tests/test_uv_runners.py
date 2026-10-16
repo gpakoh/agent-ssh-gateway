@@ -1,5 +1,9 @@
 """Tests for uv runner argv builder and target validation."""
 
+import os
+import pwd
+import shutil
+import stat
 import sys
 from pathlib import Path
 
@@ -9,6 +13,40 @@ EXAMPLE_DIR = Path(__file__).resolve().parents[1] / "examples" / "mcp_server"
 
 sys.path.insert(0, str(EXAMPLE_DIR))
 from mcp_client_tools import _build_uv_argv, _validate_targets  # noqa: E402
+
+
+@pytest.fixture
+def trusted_verifier_root(monkeypatch, tmp_path):
+    def safe_writable_parent(path: Path) -> bool:
+        try:
+            if not path.is_dir() or not os.access(path, os.W_OK):
+                return False
+            current = path
+            while True:
+                mode = current.lstat().st_mode
+                if stat.S_ISLNK(mode) or mode & (stat.S_IWGRP | stat.S_IWOTH):
+                    return False
+                if current == current.parent:
+                    return True
+                current = current.parent
+        except OSError:
+            return False
+
+    passwd_home = Path(pwd.getpwuid(os.geteuid()).pw_dir)
+    candidates = [passwd_home, Path.home()]
+    if os.geteuid() == 0:
+        candidates.insert(0, Path("/root"))
+    parent = next((path for path in candidates if safe_writable_parent(path)), None)
+    if parent is None:
+        pytest.skip("no writable parent with trusted ancestry for verifier integration fixture")
+
+    root = parent / f".mcp-verifier-test-{tmp_path.name}"
+    root.mkdir(mode=0o700, exist_ok=False)
+    monkeypatch.setenv("MCP_VERIFIER_ROOT", str(root))
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_build_ruff_argv():
@@ -210,7 +248,7 @@ class TestReadOnlyFallbackMypyPackageBase:
         assert "${_MCP_UID}" in script
         assert "${_MCP_USER}" in script
         assert 'export UV_PROJECT_ENVIRONMENT="$TMP_ROOT/.venv"' in script
-        assert 'TMP_ROOT=/tmp/.mcp-test/project-' in script
+        assert 'TMP_ROOT=/var/lib/mcp-agent/verifier/project-' in script
 
     def test_mypy_uses_cache_dir_since_project_dir_is_read_only(self):
         """mypy's own .mypy_cache write must not land on the read-only
@@ -219,7 +257,8 @@ class TestReadOnlyFallbackMypyPackageBase:
 
         script = _build_readonly_fallback_script("mypy", "/project", ["."])
         mypy_line = [ln for ln in script.splitlines() if "mypy" in ln and "uv run" in ln][-1]
-        assert "--cache-dir /tmp/.mcp-mypy-cache" in mypy_line
+        assert "--cache-dir /var/lib/mcp-agent/verifier/" in mypy_line
+        assert "/cache/mypy" in mypy_line
 
     def test_pytest_and_ruff_use_external_env_without_syncing_again(self):
         from mcp_client_tools import _build_readonly_fallback_script
@@ -231,12 +270,12 @@ class TestReadOnlyFallbackMypyPackageBase:
             ][-1]
             assert '--project "$SYNC_PROJECT"' in run_line
             assert "--no-sync" in run_line
-        assert "/tmp/.mcp-pytest-cache" in _build_readonly_fallback_script(
-            "pytest", "/project", ["."]
-        )
-        assert "RUFF_CACHE_DIR=/tmp/.mcp-ruff-cache" in _build_readonly_fallback_script(
-            "ruff", "/project", ["."]
-        )
+        pytest_script = _build_readonly_fallback_script("pytest", "/project", ["."])
+        ruff_script = _build_readonly_fallback_script("ruff", "/project", ["."])
+        assert "cache_dir=/var/lib/mcp-agent/verifier/" in pytest_script
+        assert "/cache/pytest" in pytest_script
+        assert "--cache-dir /var/lib/mcp-agent/verifier/" in ruff_script
+        assert "/cache/ruff" in ruff_script
 
     def test_readonly_fallback_uses_locked_real_project_without_dev_extra_assumption(self):
         """A locked read-only project must sync from its real metadata into
@@ -291,7 +330,7 @@ class TestReadOnlyFallbackMypyPackageBase:
 
         def tmp_root(script):
             for ln in script.splitlines():
-                if ln.startswith("TMP_ROOT=/tmp/.mcp-test/"):
+                if ln.startswith("TMP_ROOT=/var/lib/mcp-agent/verifier/"):
                     return ln.split("=", 1)[1]
             raise AssertionError("no TMP_ROOT assignment in script")
 
@@ -301,7 +340,7 @@ class TestReadOnlyFallbackMypyPackageBase:
         assert root_a1 == root_a2, "same project path must map to a stable tmp_root"
         assert root_a1 != root_b, "same basename from different parents must not collide"
         assert "proj" in root_a1, "tmp_root should stay human-readable"
-        assert root_a1.startswith("/tmp/.mcp-test/")
+        assert root_a1.startswith("/var/lib/mcp-agent/verifier/")
 
     def test_readonly_fallback_tmp_root_scoped_by_remote_identity(self):
         """Regression (audit P0-3): the cache key must include the remote
@@ -318,7 +357,8 @@ class TestReadOnlyFallbackMypyPackageBase:
         assert '_MCP_UID="$(id -u)"' in script
         assert '_MCP_USER="$(id -un)"' in script
         root_lines = [
-            ln for ln in script.splitlines() if ln.startswith("TMP_ROOT=/tmp/.mcp-test/")
+            ln for ln in script.splitlines()
+            if ln.startswith("TMP_ROOT=/var/lib/mcp-agent/verifier/")
         ]
         assert root_lines, "expected external TMP_ROOT assignment"
         root = root_lines[0].split("=", 1)[1]
@@ -361,7 +401,7 @@ class TestReadOnlyFallbackMypyPackageBase:
 
         class FakeClient:
             def execute_raw(self, cmd, **kw):
-                call_log.append(cmd)
+                call_log.append((cmd, kw))
                 return {"job_id": "j1"}
 
             def wait_job(self, job_id, **kw):
@@ -379,7 +419,9 @@ class TestReadOnlyFallbackMypyPackageBase:
         assert "/etc/passwd" not in str(call_log)
 
 
-def test_readonly_fallback_locked_project_executes_from_source_with_external_venv(tmp_path):
+def test_readonly_fallback_locked_project_executes_from_source_with_external_venv(
+    tmp_path, trusted_verifier_root
+):
     """Execute the generated shell against a fake uv binary.
 
     This catches shell/CWD/environment regressions that string assertions miss:
@@ -444,7 +486,7 @@ def test_readonly_fallback_locked_project_executes_from_source_with_external_ven
     run_call = next(line for line in calls if "args=run " in line)
     assert f"cwd={project}|" in sync_call
     assert "--all-extras --frozen" in sync_call
-    assert "/tmp/.mcp-test/" in sync_call and "|args=" in sync_call
+    assert str(trusted_verifier_root) in sync_call and "|args=" in sync_call
     assert f"cwd={project}|" in run_call
     assert "--no-sync pytest" in run_call
 
@@ -457,7 +499,9 @@ def test_readonly_fallback_locked_project_executes_from_source_with_external_ven
     assert not (project / ".venv").exists()
 
 
-def test_readonly_fallback_legacy_requirements_execute_without_source_mutation(tmp_path):
+def test_readonly_fallback_legacy_requirements_execute_without_source_mutation(
+    tmp_path, trusted_verifier_root
+):
     """KOJO-shaped regression: no uv.lock/dependency extras, requirements.txt only."""
     import os
     import subprocess
@@ -822,12 +866,12 @@ class TestRunUvToolContract:
         result = _run_uv_tool(client, "proj", "ruff", "run_ruff", target=["app"])
 
         assert len(client.argv_calls) == 1
-        assert client.argv_calls[0][:4] == [
-            "env",
-            "RUFF_CACHE_DIR=/tmp/.mcp-ruff-cache",
-            "uvx",
-            "--from",
-        ]
+        assert client.argv_calls[0][0] == "env"
+        assert client.argv_calls[0][1].startswith(
+            "RUFF_CACHE_DIR=/var/lib/mcp-agent/verifier/"
+        )
+        assert client.argv_calls[0][1].endswith("/cache/ruff")
+        assert client.argv_calls[0][2:4] == ["uvx", "--from"]
         assert result["ok"] is True
         assert result["result"]["stdout"] == "All checks passed!\n"
 
@@ -1429,7 +1473,8 @@ class TestAsyncRunTestsReadonlyFallback:
         assert result["result"]["job_id"] == "j-fallback"
         assert "pytest" in captured["script"] and "uv run" in captured["script"]
         assert '--project "$SYNC_PROJECT" --no-sync' in captured["script"]
-        assert "/tmp/.mcp-test" in captured["script"]
+        assert "/var/lib/mcp-agent/verifier/" in captured["script"]
+        assert "/tmp/.mcp-test" not in captured["script"]
 
     def test_healthy_venv_still_returns_plain_job_id(self, monkeypatch):
         from mcp_client_tools import _run_uv_tool

@@ -14,6 +14,7 @@ import pytest
 from fleet.docker_client import (
     COMPOSE_FILE_RE,
     CONTAINER_NAME_RE,
+    MAX_OUTPUT_BYTES,
     REDACTED,
     SERVICE_NAME_RE,
     DockerClient,
@@ -756,6 +757,42 @@ async def test_ps_sets_last_truncated_when_limited():
     result = await c.ps(limit=5)
     assert len(result) == 5
     assert c.last_truncated is True
+
+
+@pytest.mark.asyncio
+async def test_ps_propagates_raw_output_truncation_even_with_spare_row_limit():
+    c = _client()
+
+    async def _fake_run(argv, timeout=None, **kw):
+        c.last_output_truncated = True
+        return _jsonl([{"Names": "visible-prefix"}]) + "\n[output truncated]"
+
+    c._run = _fake_run
+    result = await c.ps(limit=50)
+    assert result == [{"Names": "visible-prefix"}]
+    assert c.last_truncated is True
+
+
+@pytest.mark.asyncio
+async def test_run_records_fixed_output_cap_truncation(monkeypatch):
+    c = _client()
+
+    class _Process:
+        returncode = 0
+
+        async def communicate(self):
+            return (b"x" * (MAX_OUTPUT_BYTES + 1), b"")
+
+    async def _fake_create_subprocess_exec(*args, **kwargs):
+        return _Process()
+
+    monkeypatch.setattr(
+        "fleet.docker_client.asyncio.create_subprocess_exec",
+        _fake_create_subprocess_exec,
+    )
+    output = await c._run(["/usr/bin/docker", "ps"])
+    assert output.endswith("[output truncated]")
+    assert c.last_output_truncated is True
 
 
 @pytest.mark.asyncio

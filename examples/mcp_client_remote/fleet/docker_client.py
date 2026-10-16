@@ -195,6 +195,11 @@ class DockerClient:
         # least one returned row actually had a host path redacted. The
         # tool wrappers read it back into meta.redacted.
         self.last_redacted: bool = False
+        # `_run()` applies a fixed output cap after subprocess completion.
+        # Structured list methods must carry that truncation into
+        # `last_truncated`; otherwise a partial JSONL inventory can be
+        # misreported as complete when the row limit itself was not reached.
+        self.last_output_truncated: bool = False
 
     async def _run(
         self,
@@ -221,7 +226,8 @@ class DockerClient:
             raise RuntimeError(f"docker exited {proc.returncode}: {err}")
 
         result = stdout.decode("utf-8", errors="replace")
-        if len(result) > MAX_OUTPUT_BYTES:
+        self.last_output_truncated = len(result) > MAX_OUTPUT_BYTES
+        if self.last_output_truncated:
             result = result[:MAX_OUTPUT_BYTES] + "\n[output truncated]"
         return result
 
@@ -396,8 +402,9 @@ class DockerClient:
             argv.append("--all")
         argv.extend(["--format", "json"])
         result = await self._run(argv)
+        output_truncated = self.last_output_truncated
         rows, total = self._truncate_rows(self._parse_json_lines(result), limit)
-        self.last_truncated = total > len(rows)
+        self.last_truncated = output_truncated or total > len(rows)
         redacted = [self._redact_ps_row(r) for r in rows]
         self.last_redacted = redacted != rows
         return [self._annotate_ps_health(r) for r in redacted]
@@ -409,8 +416,9 @@ class DockerClient:
         argv = [DOCKER_BIN, "images"]
         argv.extend(["--format", "json"])
         result = await self._run(argv)
+        output_truncated = self.last_output_truncated
         rows, total = self._truncate_rows(self._parse_json_lines(result), limit)
-        self.last_truncated = total > len(rows)
+        self.last_truncated = output_truncated or total > len(rows)
         return rows
 
     async def inspect(
@@ -703,8 +711,9 @@ class DockerClient:
         # the other "enumerate everything" read.
         argv.extend(["--format", "json"])
         result = await self._run(argv, timeout=60.0)
+        output_truncated = self.last_output_truncated
         rows, total = self._truncate_rows(self._parse_json_lines(result), limit)
-        self.last_truncated = total > len(rows)
+        self.last_truncated = output_truncated or total > len(rows)
         return rows
 
     async def compose_ps(
@@ -717,8 +726,9 @@ class DockerClient:
         argv.append("ps")
         argv.extend(["--format", "json"])
         result = await self._run(argv, timeout=60.0)
+        output_truncated = self.last_output_truncated
         rows, total = self._truncate_rows(self._parse_json_lines(result), limit)
-        self.last_truncated = total > len(rows)
+        self.last_truncated = output_truncated or total > len(rows)
         redacted = [self._redact_ps_row(r) for r in rows]
         self.last_redacted = redacted != rows
         return [self._annotate_ps_health(r) for r in redacted]
@@ -970,6 +980,41 @@ class DockerClient:
             raise RuntimeError("docker returned invalid network metadata")
         return payload
 
+    async def container_network_snapshot(self, container: str) -> dict[str, str]:
+        """Return internal network-name -> IP evidence for one fixed container.
+
+        Public ``inspect`` deliberately strips container network topology. Guarded
+        deploy verification sometimes needs that topology internally, so this
+        primitive queries only ``NetworkSettings.Networks`` and reduces each
+        entry to its IP address. It is not registered as an MCP tool.
+        """
+        self._validate_container_name(container)
+        raw = await self._run(
+            [
+                DOCKER_BIN,
+                "inspect",
+                "--format",
+                "{{json .NetworkSettings.Networks}}",
+                container,
+            ],
+            timeout=30.0,
+        )
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("docker returned invalid container network metadata") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("docker returned invalid container network metadata")
+        result: dict[str, str] = {}
+        for name, metadata in payload.items():
+            if not isinstance(name, str) or not isinstance(metadata, dict):
+                raise RuntimeError("docker returned invalid container network metadata")
+            address = metadata.get("IPAddress")
+            if not isinstance(address, str):
+                raise RuntimeError("docker returned invalid container network IP evidence")
+            result[name] = address
+        return result
+
     async def image_revision(self, image: str) -> str:
         """Return the exact OCI source revision label for a local image."""
         if not isinstance(image, str) or not image or not image.isascii():
@@ -1153,6 +1198,70 @@ class DockerClient:
         ]
         return await self._run_with_result(argv, timeout=30.0)
 
+    async def run_site_audit_crm_provisioner(
+        self,
+        *,
+        helper_image_id: str,
+        operator_root: str,
+        mode: str,
+        expected_env_sha256: str = "",
+        timeout: int = 90,
+    ) -> RunResult:
+        """Run the fixed Site Audit CRM identity/env provisioner.
+
+        The helper gets no Docker socket and can reach only the fixed Site Audit
+        control network.  Inspect mode mounts the operator project read-only;
+        provision mode makes the same mount writable solely so the fixed helper
+        can atomically replace ``/operator/.env`` after its exact SHA lease is
+        revalidated.  No caller-controlled endpoint, identity or secret enters
+        this surface.
+        """
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", helper_image_id):
+            raise ValueError("helper_image_id must be an immutable sha256 image ID")
+        operator_root = self._validate_deploy_mount_path(operator_root, "operator_root")
+        if mode not in {"inspect", "provision"}:
+            raise ValueError("mode must be inspect or provision")
+        if mode == "provision":
+            if not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_env_sha256):
+                raise ValueError("expected_env_sha256 must be sha256:64hex in provision mode")
+        elif expected_env_sha256:
+            raise ValueError("expected_env_sha256 is only valid in provision mode")
+        timeout = max(30, min(timeout, 180))
+
+        mount_mode = "" if mode == "provision" else ",readonly"
+        argv = [
+            DOCKER_BIN,
+            "run",
+            "--rm",
+            "--network",
+            "site-audit-control",
+            "--user",
+            "0:0",
+            "--cap-drop",
+            "ALL",
+        ]
+        if mode == "provision":
+            argv.extend(["--cap-add", "DAC_OVERRIDE"])
+        argv.extend(
+            [
+                "--security-opt",
+                "no-new-privileges:true",
+                "--read-only",
+                "--tmpfs",
+                "/tmp:rw,noexec,nosuid,nodev,size=16m",
+                "--mount",
+                f"type=bind,src={operator_root},dst=/operator{mount_mode}",
+                helper_image_id,
+                "python3",
+                "/app/scripts/site_audit_crm_provisioner.py",
+                "--mode",
+                mode,
+            ]
+        )
+        if mode == "provision":
+            argv.extend(["--expected-env-sha256", expected_env_sha256])
+        return await self._run_with_result(argv, timeout=float(timeout))
+
     async def run_site_audit_deploy_contract_helper(
         self,
         *,
@@ -1243,6 +1352,121 @@ class DockerClient:
         ]
         if recover:
             argv.append("--recover")
+        return await self._run_with_result(argv, timeout=float(timeout))
+
+    async def run_xloud_deploy_contract_helper(
+        self,
+        *,
+        helper_image_id: str,
+        candidate_root: str,
+        operator_root: str,
+        script_path: str,
+        env_file: str,
+        state_volume: str,
+        site_image: str,
+        intake_image: str,
+        site_image_id: str,
+        intake_image_id: str,
+        source_revision: str,
+        secret_fingerprint: str,
+        mode: str,
+        stability_seconds: int = 90,
+        timeout: int = 720,
+    ) -> RunResult:
+        """Run the fixed XLOUD rollout helper without exposing its audit secret.
+
+        The operator env is mounted read-only and parsed only inside the helper;
+        secret plaintext never appears in Docker argv/environment or the result.
+        """
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", helper_image_id):
+            raise ValueError("helper_image_id must be an immutable sha256 image ID")
+        candidate_root = self._validate_deploy_mount_path(candidate_root, "candidate_root")
+        operator_root = self._validate_deploy_mount_path(operator_root, "operator_root")
+        script_path = self._validate_deploy_mount_path(script_path, "script_path")
+        env_file = self._validate_deploy_mount_path(env_file, "env_file")
+        self._validate_volume_name(state_volume)
+        for label, image in (("site_image", site_image), ("intake_image", intake_image)):
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", image):
+                raise ValueError(f"{label} is invalid")
+        for label, image_id in (("site_image_id", site_image_id), ("intake_image_id", intake_image_id)):
+            if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+                raise ValueError(f"{label} must be an exact sha256 image ID")
+        if site_image_id == intake_image_id:
+            raise ValueError("site and intake image IDs must differ")
+        if not re.fullmatch(r"[0-9a-f]{40}", source_revision):
+            raise ValueError("source_revision must be an exact lowercase 40-hex SHA")
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", secret_fingerprint):
+            raise ValueError("secret_fingerprint must be sha256:64hex")
+        if mode not in {"preflight", "deploy", "recover"}:
+            raise ValueError("mode must be preflight, deploy or recover")
+        if stability_seconds < 90 or stability_seconds > 900:
+            raise ValueError("stability_seconds must be between 90 and 900")
+        timeout = max(120, min(timeout, 900))
+
+        state_root = "/var/lib/xloud-deploy-state"
+        argv = [
+            DOCKER_BIN,
+            "run",
+            "--rm",
+            "--network",
+            "host",
+            "--user",
+            "0:0",
+            "--cap-drop",
+            "ALL",
+            "--cap-add",
+            "DAC_OVERRIDE",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--read-only",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,nodev,size=64m",
+            "--mount",
+            "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock",
+            "--mount",
+            f"type=bind,src={candidate_root},dst={candidate_root},readonly",
+            "--mount",
+            f"type=bind,src={operator_root},dst={operator_root},readonly",
+            "--mount",
+            f"type=volume,src={state_volume},dst={state_root}",
+            "--env",
+            "GIT_CONFIG_COUNT=1",
+            "--env",
+            "GIT_CONFIG_KEY_0=safe.directory",
+            "--env",
+            f"GIT_CONFIG_VALUE_0={candidate_root}",
+            helper_image_id,
+            "python3",
+            "/app/scripts/xloud_deploy_contract_runner.py",
+            "--mode",
+            mode,
+            "--script",
+            script_path,
+            "--source-root",
+            candidate_root,
+            "--operator-root",
+            operator_root,
+            "--env-file",
+            env_file,
+            "--state-dir",
+            state_root,
+            "--site-image",
+            site_image,
+            "--intake-image",
+            intake_image,
+            "--site-image-id",
+            site_image_id,
+            "--intake-image-id",
+            intake_image_id,
+            "--source-revision",
+            source_revision,
+            "--secret-fingerprint",
+            secret_fingerprint,
+            "--stability-seconds",
+            str(stability_seconds),
+            "--timeout",
+            str(max(60, timeout - 30)),
+        ]
         return await self._run_with_result(argv, timeout=float(timeout))
 
     async def read_telegram_storage_deploy_state(
