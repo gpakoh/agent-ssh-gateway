@@ -331,18 +331,6 @@ class _CleanupReceipt:
         }
 
 
-class _AdoptReceipt:
-    def as_dict(self) -> dict[str, object]:
-        return {
-            "project_id": "candidate-demo",
-            "source_project": "demo",
-            "branch": "candidate/demo",
-            "head": "a" * 40,
-            "already_adopted": False,
-            "lineage_reconstructed": True,
-        }
-
-
 class _AuditLogger:
     def __init__(self, *, fail_required: bool = False) -> None:
         self.fail_required = fail_required
@@ -359,20 +347,10 @@ class _AuditLogger:
 
 
 class _PullClient:
-    def __init__(
-        self,
-        pages=None,
-        error: Exception | None = None,
-        *,
-        branches: dict[str, dict[str, object]] | None = None,
-        branch_error: Exception | None = None,
-    ) -> None:
+    def __init__(self, pages=None, error: Exception | None = None) -> None:
         self.pages = pages or {1: []}
         self.error = error
-        self.branches = branches or {}
-        self.branch_error = branch_error
         self.calls: list[int] = []
-        self.branch_calls: list[str] = []
 
     async def __aenter__(self):
         return self
@@ -387,12 +365,6 @@ class _PullClient:
         if self.error is not None:
             raise self.error
         return self.pages.get(page, [])
-
-    async def get_branch(self, _owner, _repo, branch):
-        self.branch_calls.append(branch)
-        if self.branch_error is not None:
-            raise self.branch_error
-        return self.branches.get(branch)
 
 
 def _same_repo_pr(number: int, *, ref: str, sha: str) -> dict[str, object]:
@@ -471,15 +443,12 @@ def _configure_cleanup_adapter(
         expected_source_project,
         preserved_ref,
         *,
-        protected_branch_evidence=None,
-        protected_branch_refresher=None,
         config_dir,
         journal_root,
         reference_guard,
     ):
         del project_id, expected_head_sha, expected_branch, expected_source_project
-        del preserved_ref, protected_branch_evidence, protected_branch_refresher
-        del config_dir, journal_root
+        del preserved_ref, config_dir, journal_root
         guard_calls.append("first")
         reference_guard()
         guard_calls.append("second")
@@ -704,122 +673,16 @@ async def test_candidate_cleanup_audit_failure_blocks_before_core_mutation(
     assert audit.success == []
 
 
-async def test_candidate_cleanup_protected_branch_evidence_is_server_verified_and_refreshed(
-    tmp_path, immediate_run_tool_async, monkeypatch
-):
-    head = "a" * 40
-    protected_sha = "b" * 40
-    client = _PullClient(
-        branches={
-            "master": {
-                "protected": True,
-                "commit": {"id": protected_sha},
-            }
+class _AdoptReceipt:
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "project_id": "candidate-demo",
+            "source_project": "demo",
+            "branch": "candidate/demo",
+            "head": "a" * 40,
+            "already_adopted": False,
+            "lineage_reconstructed": True,
         }
-    )
-    audit = _AuditLogger()
-    guard_calls: list[str] = []
-    _configure_cleanup_adapter(
-        tmp_path,
-        monkeypatch,
-        client=client,
-        audit=audit,
-        guard_calls=guard_calls,
-    )
-    captured: dict[str, object] = {}
-
-    def _cleanup(
-        project_id,
-        expected_head_sha,
-        expected_branch,
-        expected_source_project,
-        preserved_ref,
-        *,
-        protected_branch_evidence,
-        protected_branch_refresher,
-        config_dir,
-        journal_root,
-        reference_guard,
-    ):
-        del project_id, expected_head_sha, expected_branch, expected_source_project
-        del preserved_ref, config_dir, journal_root
-        captured["evidence"] = protected_branch_evidence
-        refreshed = protected_branch_refresher("master")
-        captured["refreshed"] = refreshed
-        reference_guard()
-        return _CleanupReceipt()
-
-    monkeypatch.setattr(supervisor, "_candidate_cleanup", _cleanup)
-
-    result = await supervisor.candidate_cleanup(
-        "candidate-demo",
-        head,
-        "candidate/demo",
-        "demo",
-        protected_branch="master",
-    )
-
-    assert result["ok"] is True
-    evidence = captured["evidence"]
-    assert isinstance(evidence, supervisor.ProtectedBranchEvidence)
-    assert evidence.branch == "master"
-    assert evidence.protected is True
-    assert evidence.sha == protected_sha
-    refreshed = captured["refreshed"]
-    assert isinstance(refreshed, supervisor.ProtectedBranchEvidence)
-    assert refreshed.sha == protected_sha
-    assert client.branch_calls == ["master", "master"]
-    assert client.calls == [1]
-    assert len(audit.required) == 1
-
-
-async def test_candidate_cleanup_rejects_unprotected_branch_before_core_mutation(
-    tmp_path, immediate_run_tool_async, monkeypatch
-):
-    client = _PullClient(
-        branches={
-            "master": {
-                "protected": False,
-                "commit": {"id": "b" * 40},
-            }
-        }
-    )
-    audit = _AuditLogger()
-    guard_calls: list[str] = []
-    _configure_cleanup_adapter(
-        tmp_path,
-        monkeypatch,
-        client=client,
-        audit=audit,
-        guard_calls=guard_calls,
-    )
-    core_called = False
-
-    def _unexpected_cleanup(*_args, **_kwargs):
-        nonlocal core_called
-        core_called = True
-        raise AssertionError("cleanup core must not run for an unprotected branch")
-
-    monkeypatch.setattr(supervisor, "_candidate_cleanup", _unexpected_cleanup)
-
-    result = await supervisor.candidate_cleanup(
-        "candidate-demo",
-        "a" * 40,
-        "candidate/demo",
-        "demo",
-        protected_branch="master",
-    )
-
-    assert result["ok"] is False
-    assert result["error"]["code"] == "CHECK_FAILED"
-    assert result["error"]["details"] == {
-        "reference_check": "gitea_protected_branch",
-        "branch": "master",
-    }
-    assert core_called is False
-    assert client.branch_calls == ["master"]
-    assert guard_calls == []
-    assert audit.required == []
 
 
 async def test_candidate_adopt_allows_live_open_pr_because_adoption_is_nondestructive(
@@ -902,6 +765,7 @@ def test_register_all_registers_exactly_seven_tools(monkeypatch):
         "candidate_adopt",
         "candidate_cleanup",
     ]
+
 
 
 def test_register_project_readonly_filesystem_is_canonical_and_path_safe(

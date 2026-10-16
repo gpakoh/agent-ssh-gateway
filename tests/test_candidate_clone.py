@@ -3716,3 +3716,178 @@ def test_legacy_candidate_git_symlink_cannot_use_remote_exclusion(
             config_dir=config_dir, journal_root=journal_root,
         )
     assert caught.value.code == "CANDIDATE_LINEAGE_SCAN_FAILED"
+
+
+def test_dependency_origin_scan_is_parallel_bounded_and_waits_for_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    root = tmp_path / "candidates"
+    target = root / "candidate-target"
+    _init_repo(target)
+    siblings = [root / f"candidate-{number:03}" for number in range(17)]
+    for sibling in siblings:
+        _init_repo(sibling)
+
+    overlap = threading.Event()
+    release = threading.Event()
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+    seen: set[str] = set()
+    matches = {"candidate-003", "candidate-014"}
+
+    def origin(candidate: Path) -> Path | None:
+        nonlocal active, peak
+        with lock:
+            seen.add(candidate.name)
+            active += 1
+            peak = max(peak, active)
+            if active >= 2:
+                overlap.set()
+        try:
+            assert release.wait(THREAD_SYNC_TIMEOUT_SECONDS)
+            return target if candidate.name in matches else None
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(module, "_legacy_local_origin", origin)
+    with ThreadPoolExecutor(max_workers=1) as caller:
+        scan = caller.submit(module._inbound_candidate_dependencies, root, target)
+        try:
+            assert overlap.wait(THREAD_SYNC_TIMEOUT_SECONDS)
+            assert not scan.done()
+        finally:
+            release.set()
+        found = scan.result(timeout=THREAD_SYNC_TIMEOUT_SECONDS)
+
+    assert seen == {sibling.name for sibling in siblings}
+    assert 2 <= peak <= module._CANDIDATE_DEPENDENCY_SCAN_WORKERS
+    assert found == [
+        {"dependent_project_id": name, "dependency_types": ["local_origin"]}
+        for name in sorted(matches)
+    ]
+
+
+def test_dependency_scan_joins_outstanding_reads_before_propagating_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    root = tmp_path / "candidates"
+    target = root / "candidate-target"
+    failing = root / "candidate-failing"
+    slow = root / "candidate-slow"
+    for repo in (target, failing, slow):
+        _init_repo(repo)
+    slow_started = threading.Event()
+    failure_raised = threading.Event()
+    release = threading.Event()
+    slow_finished = threading.Event()
+
+    def origin(candidate: Path) -> Path | None:
+        if candidate == failing:
+            assert slow_started.wait(THREAD_SYNC_TIMEOUT_SECONDS)
+            failure_raised.set()
+            raise RuntimeError("origin lookup failed")
+        slow_started.set()
+        try:
+            assert release.wait(THREAD_SYNC_TIMEOUT_SECONDS)
+        finally:
+            slow_finished.set()
+        return None
+
+    monkeypatch.setattr(module, "_legacy_local_origin", origin)
+    with ThreadPoolExecutor(max_workers=1) as caller:
+        scan = caller.submit(module._inbound_candidate_dependencies, root, target)
+        try:
+            assert failure_raised.wait(THREAD_SYNC_TIMEOUT_SECONDS)
+            assert not scan.done()
+        finally:
+            release.set()
+        with pytest.raises(CandidateCloneError, match="dependency scan could not complete") as error:
+            scan.result(timeout=THREAD_SYNC_TIMEOUT_SECONDS)
+        assert error.value.code == "WORKSPACE_CONTENDED"
+        assert error.value.retryable is True
+
+    assert slow_finished.is_set()
+    assert all(repo.is_dir() for repo in (target, failing, slow))
+
+
+def test_parallel_dependency_scan_retains_git_push_url_rewrite_semantics(tmp_path: Path) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    root = tmp_path / "candidates"
+    target = root / "candidate-target"
+    rewritten = root / "candidate-rewritten"
+    explicit_push = root / "candidate-explicit-push"
+    for repo in (target, rewritten, explicit_push):
+        _init_repo(repo)
+
+    alias = "https://legacy.example.invalid/source"
+    _git(rewritten, "remote", "add", "origin", alias)
+    _git(rewritten, "config", f"url.{target}.pushInsteadOf", alias)
+    _git(explicit_push, "remote", "add", "origin", str(target))
+    _git(explicit_push, "remote", "set-url", "--push", "origin", alias)
+
+    assert module._inbound_candidate_dependencies(root, target) == [
+        {
+            "dependent_project_id": rewritten.name,
+            "dependency_types": ["local_origin"],
+        }
+    ]
+
+
+def test_dependency_worker_failure_after_unregistration_preserves_resumable_cleanup(
+    registry_fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-origin-worker-recovery"
+    preserved_ref = "archive/candidate-cleanup-origin-worker-recovery"
+    receipt = prepare_candidate_clone(
+        "source-project", branch, base, config_dir=config_dir, journal_root=journal_root
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    sibling = clone_root.parent / "candidate-independent-worker"
+    _init_repo(sibling)
+    _mock_cleanup_remote_probe(
+        monkeypatch, module, preserved_ref=preserved_ref, head=base,
+        delivery_branch=branch, delivery="absent",
+    )
+    fail_scan = False
+
+    def origin(_candidate: Path) -> Path | None:
+        if fail_scan:
+            raise RuntimeError("origin worker unavailable")
+        return None
+
+    def fail_after_preflight() -> None:
+        nonlocal fail_scan
+        fail_scan = True
+
+    monkeypatch.setattr(module, "_legacy_local_origin", origin)
+    with pytest.raises(CandidateCloneError, match="dependency scan could not complete") as error:
+        candidate_cleanup(
+            receipt.project_id, base, branch, "source-project", preserved_ref,
+            config_dir=config_dir, journal_root=journal_root,
+            reference_guard=fail_after_preflight,
+        )
+    assert error.value.code == "WORKSPACE_CONTENDED"
+    assert error.value.retryable is True
+    assert clone_root.is_dir()
+    assert sibling.is_dir()
+    assert receipt.project_id not in (config_dir / "projects.yaml").read_text(encoding="utf-8")
+
+    fail_scan = False
+    recovered = candidate_cleanup(
+        receipt.project_id, base, branch, "source-project", preserved_ref,
+        config_dir=config_dir, journal_root=journal_root, reference_guard=_idle_guard,
+    )
+    assert recovered.directory_removed is True
+    assert recovered.registry_removed is False
+    assert not clone_root.exists()
+    assert sibling.is_dir()
