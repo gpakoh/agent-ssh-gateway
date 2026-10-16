@@ -130,6 +130,10 @@ def setup() -> tuple[Any, Any, Any]:
                 resource_server_url=AnyHttpUrl(
                     os.environ.get("MCP_RESOURCE_URL", "https://gateway.example.com/mcp")
                 ),
+                # The custom provider validates opaque tokens and scopes; its
+                # legacy tokens have no SDK resource binding. Keep that policy
+                # explicit for SDK 1.30 instead of its deprecated None default.
+                validate_token_resource=False,
                 service_documentation_url=AnyHttpUrl("https://github.com/gpakoh/agent-ssh-gateway"),
                 client_registration_options=ClientRegistrationOptions(
                     enabled=True,

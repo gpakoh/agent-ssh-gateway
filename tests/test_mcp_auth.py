@@ -211,6 +211,7 @@ def oauth_registration(monkeypatch, tmp_path):
     from examples.mcp_server.mcp_infra import auth_setup
 
     settings, provider, _ = auth_setup.setup()
+    assert settings.validate_token_resource is False
     options = settings.client_registration_options
     routes = create_auth_routes(
         provider=provider,
