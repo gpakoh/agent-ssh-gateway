@@ -19,7 +19,11 @@ from typing import Any
 
 from tool_results import tool_error, tool_success
 
-from examples.mcp_server.agent_sources import ManagedSourceBundleError, _resolve_trusted_remote
+from examples.mcp_server.agent_sources import (
+    ManagedSourceBundleError,
+    _resolve_trusted_remote,
+    cleanup_remote_resolution_scope,
+)
 from examples.mcp_server.candidate_clone import CandidateCloneError
 from examples.mcp_server.candidate_clone import candidate_cleanup as _candidate_cleanup
 from examples.mcp_server.candidate_clone import (
@@ -676,17 +680,18 @@ async def candidate_cleanup(
                 audit_written = True
 
         try:
-            receipt = await asyncio.to_thread(
-                _candidate_cleanup,
-                project_id,
-                expected_head_sha,
-                expected_branch,
-                source_project,
-                preserved_ref,
-                config_dir=config_dir,
-                journal_root=journal_root,
-                reference_guard=_reference_guard,
-            )
+            with cleanup_remote_resolution_scope():
+                receipt = await asyncio.to_thread(
+                    _candidate_cleanup,
+                    project_id,
+                    expected_head_sha,
+                    expected_branch,
+                    source_project,
+                    preserved_ref,
+                    config_dir=config_dir,
+                    journal_root=journal_root,
+                    reference_guard=_reference_guard,
+                )
         except CandidateCloneError as exc:
             return tool_error(
                 tool="candidate_cleanup",
