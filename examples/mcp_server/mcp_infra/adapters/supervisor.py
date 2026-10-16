@@ -597,6 +597,92 @@ async def _assert_no_open_candidate_pr_reference(
         ) from exc
 
 
+async def _require_merged_candidate_pr_delivery(
+    *,
+    token: str,
+    owner: str,
+    repo: str,
+    expected_branch: str,
+    expected_head_sha: str,
+) -> dict[str, Any]:
+    """Require one closed merged same-repository PR for the exact candidate head."""
+    try:
+        from examples.mcp_server.mcp_infra.adapters.remote import (
+            _same_gitea_repo_from_pr_head,
+            _server_gitea_client,
+        )
+
+        matching_unmerged: list[int] = []
+        async with _server_gitea_client()(token) as client:
+            for page in range(1, 21):
+                raw = await client.list_pull_requests(
+                    owner,
+                    repo,
+                    state="closed",
+                    limit=50,
+                    page=page,
+                )
+                if not isinstance(raw, list) or any(not isinstance(pr, dict) for pr in raw):
+                    raise CandidateCloneError(
+                        "CHECK_FAILED",
+                        "closed pull request delivery state is malformed",
+                        retryable=True,
+                        details={"reference_check": "gitea_merged_pull_request"},
+                    )
+                for pr in raw:
+                    head = pr.get("head")
+                    if not isinstance(head, dict):
+                        continue
+                    head_ref = str(head.get("ref") or "").strip()
+                    head_sha = str(head.get("sha") or "").strip().lower()
+                    if head_ref != expected_branch or head_sha != expected_head_sha:
+                        continue
+                    same_repo = _same_gitea_repo_from_pr_head(head, owner=owner, repo=repo)
+                    if same_repo is False:
+                        continue
+                    if same_repo is None:
+                        raise CandidateCloneError(
+                            "CHECK_FAILED",
+                            "matching merged pull request repository identity is unproven",
+                            retryable=True,
+                            details={
+                                "reference_check": "gitea_merged_pull_request",
+                                "pull_number": pr.get("number"),
+                            },
+                        )
+                    if pr.get("merged") is True:
+                        return {
+                            "pull_number": pr.get("number"),
+                            "merge_commit_sha": pr.get("merge_commit_sha"),
+                        }
+                    number = pr.get("number")
+                    if isinstance(number, int):
+                        matching_unmerged.append(number)
+                if len(raw) < 50:
+                    break
+            details: dict[str, Any] = {"reference_check": "gitea_merged_pull_request"}
+            if matching_unmerged:
+                details["closed_unmerged_pull_numbers"] = matching_unmerged[:20]
+            raise CandidateCloneError(
+                "CHECK_FAILED",
+                "candidate head is not proven delivered by a merged same-repository pull request",
+                retryable=False,
+                details=details,
+            )
+    except CandidateCloneError:
+        raise
+    except Exception as exc:
+        raise CandidateCloneError(
+            "CHECK_FAILED",
+            "merged pull request delivery state could not be verified",
+            retryable=True,
+            details={
+                "reference_check": "gitea_merged_pull_request",
+                "error_class": type(exc).__name__,
+            },
+        ) from exc
+
+
 async def candidate_adopt(
     project_id: str,
     expected_head_sha: str,
@@ -671,9 +757,9 @@ async def candidate_cleanup(
     expected_head_sha: str,
     expected_branch: str,
     expected_source_project: str,
-    preserved_ref: str,
+    preserved_ref: str | None = None,
 ) -> dict[str, Any]:
-    """Guarded cleanup of one preserved candidate clone."""
+    """Guarded cleanup of one archived or already-merged candidate clone."""
 
     async def _run() -> dict[str, Any]:
         try:
@@ -703,8 +789,40 @@ async def candidate_cleanup(
             "expected_branch": expected_branch,
             "expected_source_project": source_project,
             "preserved_ref": preserved_ref,
+            "preservation_mode": "archive_ref" if preserved_ref is not None else "merged_pull_request",
             "correlation_id": correlation_id,
         }
+
+        delivery_guard = None
+        if preserved_ref is None:
+
+            def _delivery_guard() -> None:
+                try:
+                    _username, clone_url, token = _resolve_trusted_remote(source_root)
+                    _host, owner, repo = _parse_gitea_remote(clone_url)
+                except (ManagedSourceBundleError, RuntimeError, ValueError) as exc:
+                    raise CandidateCloneError(
+                        "CHECK_FAILED",
+                        "trusted candidate source remote identity could not be verified",
+                        retryable=True,
+                        details={"reference_check": "trusted_gitea_remote"},
+                    ) from exc
+
+                evidence = asyncio.run(
+                    _require_merged_candidate_pr_delivery(
+                        token=token,
+                        owner=owner,
+                        repo=repo,
+                        expected_branch=expected_branch,
+                        expected_head_sha=expected_head_sha,
+                    )
+                )
+                audit_metadata["delivery_pull_number"] = evidence.get("pull_number")
+                merge_commit_sha = evidence.get("merge_commit_sha")
+                if merge_commit_sha:
+                    audit_metadata["delivery_merge_commit_sha"] = merge_commit_sha
+
+            delivery_guard = _delivery_guard
 
         def _reference_guard() -> None:
             nonlocal audit_written
@@ -761,6 +879,7 @@ async def candidate_cleanup(
                     config_dir=config_dir,
                     journal_root=journal_root,
                     reference_guard=_reference_guard,
+                    delivery_guard=delivery_guard,
                 )
         except CandidateCloneError as exc:
             return tool_error(

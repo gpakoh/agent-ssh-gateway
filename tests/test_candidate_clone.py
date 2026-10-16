@@ -1431,6 +1431,50 @@ def test_candidate_cleanup_removes_preserved_candidate_and_is_idempotent(
     assert repeated.directory_removed is False
 
 
+def test_candidate_cleanup_removes_delivered_candidate_without_archive_ref(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-merged"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref="archive/unused-delivery-proof",
+        head=base,
+        delivery_branch=branch,
+        delivery="published",
+    )
+    delivery_checks: list[str] = []
+
+    cleaned = candidate_cleanup(
+        receipt.project_id,
+        base,
+        branch,
+        "source-project",
+        None,
+        config_dir=config_dir,
+        journal_root=journal_root,
+        reference_guard=_idle_guard,
+        delivery_guard=lambda: delivery_checks.append("checked"),
+    )
+
+    assert cleaned.preserved_ref is None
+    assert cleaned.directory_removed is True
+    assert delivery_checks == ["checked", "checked"]
+    assert not clone_root.exists()
+
+
 def test_candidate_cleanup_ignores_independent_sibling_candidate(
     registry_fixture,
     monkeypatch: pytest.MonkeyPatch,
