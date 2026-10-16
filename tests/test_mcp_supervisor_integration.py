@@ -673,7 +673,75 @@ async def test_candidate_cleanup_audit_failure_blocks_before_core_mutation(
     assert audit.success == []
 
 
-def test_register_all_registers_exactly_six_tools(monkeypatch):
+class _AdoptReceipt:
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "project_id": "candidate-demo",
+            "source_project": "demo",
+            "branch": "candidate/demo",
+            "head": "a" * 40,
+            "already_adopted": False,
+            "lineage_reconstructed": True,
+        }
+
+
+async def test_candidate_adopt_allows_live_open_pr_because_adoption_is_nondestructive(
+    tmp_path, immediate_run_tool_async, monkeypatch
+):
+    client = _PullClient(
+        {1: [_same_repo_pr(91, ref="candidate/demo", sha="a" * 40)]}
+    )
+    audit = _AuditLogger()
+    guard_calls: list[str] = []
+    _configure_cleanup_adapter(
+        tmp_path,
+        monkeypatch,
+        client=client,
+        audit=audit,
+        guard_calls=guard_calls,
+    )
+    captured: dict[str, object] = {}
+
+    def _adopt(
+        project_id,
+        expected_head_sha,
+        expected_branch,
+        expected_source_project,
+        *,
+        config_dir,
+        journal_root,
+        reference_guard,
+    ):
+        captured.update(
+            project_id=project_id,
+            head=expected_head_sha,
+            branch=expected_branch,
+            source=expected_source_project,
+            config_dir=config_dir,
+            journal_root=journal_root,
+        )
+        reference_guard()
+        return _AdoptReceipt()
+
+    monkeypatch.setattr(supervisor, "_adopt_candidate_lineage", _adopt)
+
+    result = await supervisor.candidate_adopt(
+        "candidate-demo",
+        "a" * 40,
+        "candidate/demo",
+        "demo",
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["lineage_reconstructed"] is True
+    assert captured["project_id"] == "candidate-demo"
+    assert captured["head"] == "a" * 40
+    assert captured["branch"] == "candidate/demo"
+    assert captured["source"] == "demo"
+    assert client.calls == []
+
+
+def test_register_all_registers_exactly_seven_tools(monkeypatch):
     registered: list[str] = []
 
     def _register(name):
@@ -694,8 +762,10 @@ def test_register_all_registers_exactly_six_tools(monkeypatch):
         "supervisor_register_project",
         "supervisor_unregister_project",
         "prepare_candidate_clone",
+        "candidate_adopt",
         "candidate_cleanup",
     ]
+
 
 
 def test_register_project_readonly_filesystem_is_canonical_and_path_safe(

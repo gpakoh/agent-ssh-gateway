@@ -25,6 +25,7 @@ from examples.mcp_server.agent_sources import (
     cleanup_remote_resolution_scope,
 )
 from examples.mcp_server.candidate_clone import CandidateCloneError
+from examples.mcp_server.candidate_clone import adopt_candidate_lineage as _adopt_candidate_lineage
 from examples.mcp_server.candidate_clone import candidate_cleanup as _candidate_cleanup
 from examples.mcp_server.candidate_clone import (
     prepare_candidate_clone as _prepare_candidate_clone,
@@ -596,6 +597,75 @@ async def _assert_no_open_candidate_pr_reference(
         ) from exc
 
 
+async def candidate_adopt(
+    project_id: str,
+    expected_head_sha: str,
+    expected_branch: str,
+    expected_source_project: str,
+) -> dict[str, Any]:
+    """Adopt one proven same-repository legacy candidate into managed lineage metadata."""
+
+    async def _run() -> dict[str, Any]:
+        try:
+            source_project, _source_root = _resolve_project(expected_source_project)
+            config_dir = _resolve_registry_config_dir()
+            journal_root = _journal_root_for_project("workspace-registry", config_dir)
+        except _ProjectResolutionError:
+            return tool_error(
+                tool="candidate_adopt",
+                code="PROJECT_NOT_FOUND",
+                message="Source project is not registered or its root is unavailable.",
+                retryable=False,
+            )
+        except ValueError:
+            return tool_error(
+                tool="candidate_adopt",
+                code="INVALID_INPUT",
+                message="Workspace registry control plane is misconfigured.",
+                retryable=False,
+            )
+
+        def _reference_guard() -> None:
+            # Adoption is metadata-only: an open feature PR is valid preservation
+            # evidence, not a destructive-reference blocker. Core adoption still
+            # rejects dirty worktrees, active local task evidence, identity drift,
+            # and any existing cleanup tombstone before writing metadata.
+            return None
+
+        try:
+            receipt = await asyncio.to_thread(
+                _adopt_candidate_lineage,
+                project_id,
+                expected_head_sha,
+                expected_branch,
+                source_project,
+                config_dir=config_dir,
+                journal_root=journal_root,
+                reference_guard=_reference_guard,
+            )
+        except CandidateCloneError as exc:
+            return tool_error(
+                tool="candidate_adopt",
+                code=exc.code,
+                message=exc.message,
+                retryable=exc.retryable,
+                details=exc.details,
+            )
+
+        return tool_success(
+            tool="candidate_adopt",
+            result=receipt.as_dict(),
+            success_text="Adopted candidate lineage.",
+        )
+
+    return await run_tool_async(
+        tool="candidate_adopt",
+        title="Candidate adopt",
+        fn=_run,
+        success_text="Adopted candidate lineage.",
+    )
+
+
 async def candidate_cleanup(
     project_id: str,
     expected_head_sha: str,
@@ -897,6 +967,9 @@ def register_all() -> None:
     register_tool("prepare_candidate_clone")(
         instrumented("prepare_candidate_clone")(prepare_candidate_clone)
     )
+    register_tool("candidate_adopt")(
+        instrumented("candidate_adopt")(candidate_adopt)
+    )
     register_tool("candidate_cleanup")(
         instrumented("candidate_cleanup")(candidate_cleanup)
     )
@@ -909,5 +982,6 @@ __all__ = [
     "supervisor_register_project",
     "supervisor_unregister_project",
     "prepare_candidate_clone",
+    "candidate_adopt",
     "candidate_cleanup",
 ]

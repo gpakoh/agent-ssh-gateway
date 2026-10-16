@@ -1362,9 +1362,31 @@ def _find_lineage_claimant(
                 try:
                     metadata = _read_candidate_metadata(Path(entry.path))
                 except CandidateCloneError as exc:
+                    candidate_dir = Path(entry.path)
+                    try:
+                        git_stat = (candidate_dir / ".git").lstat()
+                    except OSError:
+                        git_stat = None
+                    if git_stat is None or stat.S_ISLNK(git_stat.st_mode) or not stat.S_ISDIR(git_stat.st_mode):
+                        exc.details = {
+                            "candidate_project_id": entry.name,
+                            "repair_action": "Adopt this candidate only after its Git metadata is restored to a safe directory.",
+                        }
+                        raise
+                    try:
+                        actual_branch = _run_git(
+                            candidate_dir,
+                            ["rev-parse", "--abbrev-ref", "HEAD"],
+                            operation="inspect legacy candidate lineage branch",
+                        )
+                    except CandidateCloneError:
+                        actual_branch = None
+                    if actual_branch not in {None, "HEAD", branch}:
+                        continue
                     exc.details = {
                         "candidate_project_id": entry.name,
-                        "repair_action": "Reconcile this candidate through the guarded cleanup workflow; do not delete or rewrite lineage metadata blindly.",
+                        "observed_branch": actual_branch,
+                        "repair_action": "Adopt this candidate with candidate_adopt before preparing or cleaning the same lineage.",
                     }
                     raise
                 if metadata.get("source_project") == source_project and metadata.get("branch") == branch:
@@ -1374,6 +1396,7 @@ def _find_lineage_claimant(
     except OSError as exc:
         raise _lineage_scan_failure("candidate lineage directory cannot be scanned") from exc
     return None
+
 
 
 def _safe_claimant_details(claimant: dict[str, Any]) -> dict[str, Any]:
@@ -1989,6 +2012,183 @@ def _require_no_inbound_candidate_dependencies(
         )
 
 
+@dataclass(frozen=True)
+class CandidateAdoptionReceipt:
+    project_id: str
+    source_project: str
+    branch: str
+    head: str
+    already_adopted: bool
+    lineage_reconstructed: bool
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "project_id": self.project_id,
+            "source_project": self.source_project,
+            "branch": self.branch,
+            "head": self.head,
+            "already_adopted": self.already_adopted,
+            "lineage_reconstructed": self.lineage_reconstructed,
+        }
+
+
+@dataclass(frozen=True)
+class IdentityProof:
+    source_project: str
+    branch: str
+    head_sha: str
+    candidate_dir_name: str
+
+
+def _validate_full_sha(value: str, *, field: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", value.strip()):
+        raise _fail("INVALID_INPUT", f"{field} must be a full commit SHA")
+    return value.strip().lower()
+
+
+def _prove_candidate_identity_locked(
+    *,
+    project_id: str,
+    expected_head_sha: str,
+    expected_branch: str,
+    expected_source_project: str,
+    workspace_root: Path,
+    source_root: Path,
+    reference_guard: Callable[[], None],
+) -> IdentityProof:
+    candidates_root = _candidate_clones_root(workspace_root)
+    candidate_root = candidates_root / project_id
+    _validate_candidate_root(candidate_root, candidates_root)
+    _reject_symlinked_git_dir(candidate_root)
+    try:
+        _source_username, source_url, _source_token = _resolve_trusted_remote(source_root)
+    except ManagedSourceBundleError as exc:
+        raise _fail("CHECK_FAILED", "trusted source repository identity could not be resolved", retryable=True) from exc
+    candidate_url = _legacy_trusted_remote(candidate_root)
+    if not candidate_url or candidate_url != source_url:
+        raise _fail(
+            "POLICY_DENIED",
+            "legacy candidate repository identity does not match the requested source project",
+            retryable=False,
+        )
+    dirty, _status_sha, _status_entries = _status_state(candidate_root)
+    current_branch = _run_git(
+        candidate_root,
+        ["rev-parse", "--abbrev-ref", "HEAD"],
+        operation="read legacy candidate branch",
+    )
+    current_head = _run_git(
+        candidate_root,
+        ["rev-parse", "HEAD"],
+        operation="read legacy candidate head",
+    ).lower()
+    if current_branch == "HEAD":
+        raise _fail("WORKSPACE_CONTENDED", "legacy candidate is detached; adoption requires an exact branch")
+    if dirty or current_branch != expected_branch or current_head != expected_head_sha:
+        raise _fail(
+            "WORKSPACE_CONTENDED",
+            "legacy candidate git state does not match adoption expectations",
+            details={"branch": current_branch, "head": current_head, "dirty": dirty},
+        )
+    if _candidate_has_active_evidence(candidate_root):
+        raise _fail("WORKSPACE_CONTENDED", "legacy candidate still has active task or delivery evidence")
+    metadata_path = _metadata_path(candidate_root)
+    if metadata_path.exists() or metadata_path.is_symlink():
+        metadata = _read_metadata(candidate_root)
+        expected_registry_root = f".mcp-candidate-clones/{project_id}"
+        for key, value in {
+            "project_id": project_id,
+            "source_project": expected_source_project,
+            "branch": expected_branch,
+            "head": expected_head_sha,
+            "root": expected_registry_root,
+        }.items():
+            if metadata.get(key) != value:
+                raise _fail("WORKSPACE_CONTENDED", "candidate clone metadata conflicts with proven identity")
+    _enforce_reference_guard(reference_guard)
+    return IdentityProof(
+        source_project=expected_source_project,
+        branch=expected_branch,
+        head_sha=expected_head_sha,
+        candidate_dir_name=project_id,
+    )
+
+
+def adopt_candidate_lineage(
+    project_id: str,
+    expected_head_sha: str,
+    expected_branch: str,
+    expected_source_project: str,
+    *,
+    config_dir: Path,
+    journal_root: Path,
+    reference_guard: Callable[[], None],
+) -> CandidateAdoptionReceipt:
+    """Adopt one proven same-repository legacy candidate without deleting or registering it."""
+    if not isinstance(project_id, str) or not _PROJECT_ID_RE.fullmatch(project_id):
+        raise _fail("INVALID_INPUT", "project_id has an invalid format")
+    expected_head_sha = _validate_full_sha(expected_head_sha, field="expected_head_sha")
+    expected_branch = _validate_branch(expected_branch)
+    if not isinstance(expected_source_project, str) or not expected_source_project.strip():
+        raise _fail("INVALID_INPUT", "expected_source_project must be non-empty")
+    expected_source_project = expected_source_project.strip()
+    if not callable(reference_guard):
+        raise _fail("INVALID_INPUT", "reference_guard must be callable and is required")
+    config_dir = config_dir.resolve()
+    journal_root = journal_root.resolve()
+    workspace_root = _workspace_root(config_dir)
+    source_root = _source_root(config_dir, expected_source_project, workspace_root=workspace_root)
+    candidate_root = _candidate_clones_root(workspace_root) / project_id
+    expected_registry_root = f".mcp-candidate-clones/{project_id}"
+    tombstone_path, _tombstone_id = _cleanup_tombstone_path(journal_root, project_id)
+    if _read_cleanup_tombstone(tombstone_path) is not None:
+        raise _fail(
+            "WORKSPACE_CONTENDED",
+            "candidate cleanup transaction already exists; adoption is not allowed",
+            retryable=False,
+            details={"project_id": project_id, "recovery_action": "resume_candidate_cleanup"},
+        )
+    with _lineage_lock(workspace_root, expected_source_project, expected_branch):
+        proof = _prove_candidate_identity_locked(
+            project_id=project_id,
+            expected_head_sha=expected_head_sha,
+            expected_branch=expected_branch,
+            expected_source_project=expected_source_project,
+            workspace_root=workspace_root,
+            source_root=source_root,
+            reference_guard=reference_guard,
+        )
+        metadata_path = _metadata_path(candidate_root)
+        if metadata_path.exists() or metadata_path.is_symlink():
+            return CandidateAdoptionReceipt(
+                project_id=project_id,
+                source_project=proof.source_project,
+                branch=proof.branch,
+                head=proof.head_sha,
+                already_adopted=True,
+                lineage_reconstructed=bool(_read_metadata(candidate_root).get("lineage_reconstructed")),
+            )
+        metadata = {
+            "version": 2,
+            "project_id": project_id,
+            "source_project": expected_source_project,
+            "branch": expected_branch,
+            "head": expected_head_sha,
+            "root": expected_registry_root,
+            "lineage_reconstructed": True,
+            "historical_provenance": {"kind": "unknown", "base_ref": None, "base_sha": None},
+        }
+        _write_metadata(metadata_path, metadata)
+        return CandidateAdoptionReceipt(
+            project_id=project_id,
+            source_project=proof.source_project,
+            branch=proof.branch,
+            head=proof.head_sha,
+            already_adopted=False,
+            lineage_reconstructed=True,
+        )
+
+
 def candidate_cleanup(
     project_id: str,
     expected_head_sha: str,
@@ -2255,9 +2455,12 @@ def _cleanup_candidate_locked(
 
 
 __all__ = [
+    "CandidateAdoptionReceipt",
     "CandidateCleanupReceipt",
     "CandidateCloneError",
     "CandidateCloneReceipt",
+    "IdentityProof",
+    "adopt_candidate_lineage",
     "candidate_cleanup",
     "prepare_candidate_clone",
 ]

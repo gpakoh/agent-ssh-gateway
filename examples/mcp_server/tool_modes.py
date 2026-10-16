@@ -329,6 +329,7 @@ TOOL_NAMES_BY_MODE["mcp_client_write"] = (
     "supervisor_register_project",
     "supervisor_unregister_project",
     "prepare_candidate_clone",
+    "candidate_adopt",
     "candidate_cleanup",
     "fleet_status",
     "fleet_reconcile_unbound",
