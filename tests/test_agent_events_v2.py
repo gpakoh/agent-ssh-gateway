@@ -445,6 +445,21 @@ def _v2_manager(queue, execute_stream):
     return JobManager(ssh_manager=ssh, max_jobs=100, redis_queue=queue)
 
 
+def _use_controlled_heartbeat_budget(monkeypatch, manager):
+    """Keep cancellation barriers independent of the zero-interval emit deadline."""
+    original_bounded = manager._emit_bounded
+
+    async def bounded_emit(job, event_type, payload=None, *, budget):
+        # These tests explicitly release/cancel the emit within a one-second
+        # outer watchdog. Keep the real timeout/cancellation implementation,
+        # without the unrelated 10ms budget induced by the zero renewal tick.
+        await original_bounded(
+            job, event_type, payload, budget=10.0 if event_type == "heartbeat" else budget
+        )
+
+    monkeypatch.setattr(manager, "_emit_bounded", bounded_emit)
+
+
 def _wire_state_emitter(monkeypatch, fail_forever=False):
     emitter, pg = _make_emitter()
     if fail_forever:
@@ -2106,7 +2121,8 @@ async def test_emit_bounded_same_turn_completion_cancel_race(monkeypatch, caplog
 
 
 @pytest.mark.asyncio
-async def test_durable_heartbeat_cancel_during_bounded_emit_propagates(monkeypatch, caplog):
+@pytest.mark.parametrize("driver_delay", [0.0, 0.03])
+async def test_durable_heartbeat_cancel_during_bounded_emit_propagates(monkeypatch, caplog, driver_delay):
     """Cancel the real durable heartbeat at a proven bounded-emit barrier."""
     import logging
 
@@ -2139,6 +2155,7 @@ async def test_durable_heartbeat_cancel_during_bounded_emit_propagates(monkeypat
         yield "exit", "0"
 
     manager = _v2_manager(queue, stream)
+    _use_controlled_heartbeat_budget(monkeypatch, manager)
     original_emit = manager._emit_observability_event
     heartbeat_emits = 0
 
@@ -2149,6 +2166,8 @@ async def test_durable_heartbeat_cancel_during_bounded_emit_propagates(monkeypat
         heartbeat_emits += 1
         if heartbeat_emits == 1:
             emit_entered.set()
+            # Simulate scheduler starvation before the driver can cancel.
+            time.sleep(driver_delay)
             await emit_release.wait()
             return None
         return await original_emit(job, event_type, payload)
@@ -2242,7 +2261,8 @@ async def test_emit_bounded_true_timeout_warns(monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
-async def test_durable_run_job_completion_survives_heartbeat_cancel_race(monkeypatch):
+@pytest.mark.parametrize("driver_delay", [0.0, 0.03])
+async def test_durable_run_job_completion_survives_heartbeat_cancel_race(monkeypatch, driver_delay):
     """Finalization must win a same-turn heartbeat emit/completion race."""
     monkeypatch.setattr(job_manager_module, "_durable_heartbeat_interval", lambda _ttl: 0.0)
     _wire_state_emitter(monkeypatch)
@@ -2273,6 +2293,7 @@ async def test_durable_run_job_completion_survives_heartbeat_cancel_race(monkeyp
         yield "exit", "0"
 
     manager = _v2_manager(queue, stream)
+    _use_controlled_heartbeat_budget(monkeypatch, manager)
     original_emit = manager._emit_observability_event
     heartbeat_emits = 0
 
@@ -2283,6 +2304,8 @@ async def test_durable_run_job_completion_survives_heartbeat_cancel_race(monkeyp
         heartbeat_emits += 1
         if heartbeat_emits == 1:
             emit_entered.set()
+            # Simulate scheduler starvation before the driver can cancel.
+            time.sleep(driver_delay)
             await emit_release.wait()
             return None
         return await original_emit(job, event_type, payload)
