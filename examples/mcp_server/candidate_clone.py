@@ -950,6 +950,55 @@ def _verify_candidate_clean(
         )
 
 
+def _is_resumable_partial_cleanup_tail(
+    candidate_root: Path,
+    *,
+    config_dir: Path,
+    project_id: str,
+    phase: str | None,
+) -> bool:
+    """Recognize the exact post-unregister tail of an interrupted rmtree.
+
+    A ``registry_removed`` tombstone is written only after the candidate was
+    proven clean, dependency-free, reference-safe, and unregistered. If the
+    same leased directory inode still exists but its ``.git`` directory is
+    already gone, a failed ``shutil.rmtree`` may have removed Git metadata
+    before returning an error. Requiring Git metadata again makes that
+    transaction impossible to resume.
+
+    The caller has already verified the tombstone identity and directory
+    device/inode. Keep this recovery narrow: only a missing ``.git`` after
+    ``registry_removed`` with the project still absent from every registry is
+    eligible. Any present-but-unsafe Git entry remains fail-closed.
+    """
+    if phase != "registry_removed":
+        return False
+
+    git_dir = candidate_root / ".git"
+    try:
+        git_stat = git_dir.lstat()
+    except FileNotFoundError:
+        if _registry_has_candidate(config_dir, project_id):
+            raise _fail(
+                "WORKSPACE_CONTENDED",
+                "partially removed candidate unexpectedly reappeared in the registry",
+            ) from None
+        return True
+    except OSError as exc:
+        raise _fail(
+            "WORKSPACE_CONTENDED",
+            "partially removed candidate git state cannot be inspected",
+            retryable=True,
+        ) from exc
+
+    if stat.S_ISLNK(git_stat.st_mode) or not stat.S_ISDIR(git_stat.st_mode):
+        raise _fail(
+            "WORKSPACE_CONTENDED",
+            "partially removed candidate has unsafe git metadata",
+        )
+    return False
+
+
 def _require_preserved_head(
     source_root: Path,
     preserved_ref: str,
@@ -2426,15 +2475,22 @@ def _cleanup_candidate_locked(
         if tombstone.get("root_dev") != root_dev or tombstone.get("root_ino") != root_ino:
             raise _fail("WORKSPACE_CONTENDED", "candidate directory identity changed during cleanup")
 
-    _verify_candidate_clean(
+    partial_cleanup_tail = _is_resumable_partial_cleanup_tail(
         candidate_root,
+        config_dir=config_dir,
         project_id=project_id,
-        source_project=expected_source_project,
-        branch=expected_branch,
-        head_sha=expected_head_sha,
-        expected_registry_root=expected_registry_root,
+        phase=phase,
     )
-    _require_no_inbound_candidate_dependencies(candidates_root, candidate_root)
+    if not partial_cleanup_tail:
+        _verify_candidate_clean(
+            candidate_root,
+            project_id=project_id,
+            source_project=expected_source_project,
+            branch=expected_branch,
+            head_sha=expected_head_sha,
+            expected_registry_root=expected_registry_root,
+        )
+        _require_no_inbound_candidate_dependencies(candidates_root, candidate_root)
 
     _enforce_reference_guard(reference_guard)
     if tombstone is None:
@@ -2489,16 +2545,24 @@ def _cleanup_candidate_locked(
                 expected_branch,
                 context="before filesystem removal",
             )
-        _verify_candidate_clean(
+        partial_cleanup_tail = _is_resumable_partial_cleanup_tail(
             candidate_root,
+            config_dir=config_dir,
             project_id=project_id,
-            source_project=expected_source_project,
-            branch=expected_branch,
-            head_sha=expected_head_sha,
-            expected_registry_root=expected_registry_root,
+            phase=phase,
         )
+        if not partial_cleanup_tail:
+            _verify_candidate_clean(
+                candidate_root,
+                project_id=project_id,
+                source_project=expected_source_project,
+                branch=expected_branch,
+                head_sha=expected_head_sha,
+                expected_registry_root=expected_registry_root,
+            )
         _enforce_reference_guard(reference_guard)
-        _require_no_inbound_candidate_dependencies(candidates_root, candidate_root)
+        if not partial_cleanup_tail:
+            _require_no_inbound_candidate_dependencies(candidates_root, candidate_root)
         try:
             shutil.rmtree(candidate_root)
         except OSError as exc:
