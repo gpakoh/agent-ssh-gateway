@@ -3515,6 +3515,7 @@ def test_legacy_candidate_requires_proven_foreign_repository(
     workspace, source, config_dir, journal_root, base = registry_fixture
     legacy = workspace / ".mcp-candidate-clones" / "candidate-legacy-manual"
     _init_repo(legacy)
+    _git(legacy, "branch", "-M", "candidate/legacy-isolation")
     before = (config_dir / "projects.yaml").read_bytes()
     requested = "https://trusted.invalid/owner/requested.git"
 
