@@ -1608,6 +1608,90 @@ class DockerClient:
             )
         return await self._run_with_result(argv, timeout=float(timeout))
 
+    async def run_js_chat_engine_deploy_contract_helper(
+        self,
+        *,
+        helper_image_id: str,
+        candidate_root: str,
+        operator_root: str,
+        script_path: str,
+        env_file: str,
+        state_dir: str,
+        core_databases_root: str,
+        target_image: str,
+        release_revision: str,
+        timeout: int = 480,
+    ) -> RunResult:
+        """Run the fixed JS Chat Engine repo-owned deploy helper."""
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", helper_image_id):
+            raise ValueError("helper_image_id must be an immutable sha256 image ID")
+        candidate_root = self._validate_deploy_mount_path(candidate_root, "candidate_root")
+        operator_root = self._validate_deploy_mount_path(operator_root, "operator_root")
+        script_path = self._validate_deploy_mount_path(script_path, "script_path")
+        env_file = self._validate_deploy_mount_path(env_file, "env_file")
+        state_dir = self._validate_deploy_mount_path(state_dir, "state_dir")
+        core_databases_root = self._validate_deploy_mount_path(
+            core_databases_root, "core_databases_root"
+        )
+        if not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}", target_image
+        ):
+            raise ValueError("target_image must be an immutable digest reference")
+        if not re.fullmatch(r"[0-9a-f]{40}", release_revision):
+            raise ValueError("release_revision must be an exact lowercase 40-hex SHA")
+        timeout = max(120, min(timeout, 600))
+
+        argv = [
+            DOCKER_BIN,
+            "run",
+            "--rm",
+            "--network",
+            "host",
+            "--user",
+            "0:0",
+            "--cap-drop",
+            "ALL",
+            "--cap-add",
+            "DAC_OVERRIDE",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--read-only",
+            "--tmpfs",
+            "/tmp:rw,nosuid,nodev,size=64m",
+            "--mount",
+            "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock",
+            "--mount",
+            f"type=bind,src={candidate_root},dst={candidate_root},readonly",
+            "--mount",
+            f"type=bind,src={operator_root},dst={operator_root},readonly",
+            "--mount",
+            f"type=bind,src={state_dir},dst={state_dir}",
+            "--mount",
+            f"type=bind,src={core_databases_root},dst={core_databases_root}",
+            helper_image_id,
+            "python3",
+            "/app/scripts/js_chat_engine_deploy_contract_runner.py",
+            "--script",
+            script_path,
+            "--source-root",
+            candidate_root,
+            "--operator-root",
+            operator_root,
+            "--env-file",
+            env_file,
+            "--state-dir",
+            state_dir,
+            "--core-databases-root",
+            core_databases_root,
+            "--target-image",
+            target_image,
+            "--release-revision",
+            release_revision,
+            "--timeout",
+            str(max(90, timeout - 30)),
+        ]
+        return await self._run_with_result(argv, timeout=float(timeout))
+
     async def run_content_harvester_deploy_contract_helper(
         self,
         *,
