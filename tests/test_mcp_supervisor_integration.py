@@ -347,10 +347,12 @@ class _AuditLogger:
 
 
 class _PullClient:
-    def __init__(self, pages=None, error: Exception | None = None) -> None:
+    def __init__(self, pages=None, error: Exception | None = None, closed_pages=None) -> None:
         self.pages = pages or {1: []}
+        self.closed_pages = closed_pages or {1: []}
         self.error = error
         self.calls: list[int] = []
+        self.closed_calls: list[int] = []
 
     async def __aenter__(self):
         return self
@@ -359,12 +361,15 @@ class _PullClient:
         return None
 
     async def list_pull_requests(self, _owner, _repo, *, state, limit, page):
-        assert state == "open"
         assert limit == 50
-        self.calls.append(page)
         if self.error is not None:
             raise self.error
-        return self.pages.get(page, [])
+        if state == "open":
+            self.calls.append(page)
+            return self.pages.get(page, [])
+        assert state == "closed"
+        self.closed_calls.append(page)
+        return self.closed_pages.get(page, [])
 
 
 def _same_repo_pr(number: int, *, ref: str, sha: str) -> dict[str, object]:
@@ -376,6 +381,14 @@ def _same_repo_pr(number: int, *, ref: str, sha: str) -> dict[str, object]:
             "repo": {"full_name": "gpakoh/agent-ssh-gateway"},
         },
     }
+
+
+def _merged_same_repo_pr(number: int, *, ref: str, sha: str) -> dict[str, object]:
+    pr = _same_repo_pr(number, ref=ref, sha=sha)
+    pr["state"] = "closed"
+    pr["merged"] = True
+    pr["merge_commit_sha"] = "c" * 40
+    return pr
 
 
 def _foreign_pr(number: int, *, ref: str, sha: str) -> dict[str, object]:
@@ -446,9 +459,13 @@ def _configure_cleanup_adapter(
         config_dir,
         journal_root,
         reference_guard,
+        delivery_guard=None,
     ):
         del project_id, expected_head_sha, expected_branch, expected_source_project
         del preserved_ref, config_dir, journal_root
+        if delivery_guard is not None:
+            delivery_guard()
+            delivery_guard()
         guard_calls.append("first")
         reference_guard()
         guard_calls.append("second")
@@ -458,6 +475,78 @@ def _configure_cleanup_adapter(
         return _CleanupReceipt()
 
     monkeypatch.setattr(supervisor, "_candidate_cleanup", _cleanup)
+
+
+async def test_candidate_cleanup_accepts_exact_merged_pr_delivery_without_archive(
+    tmp_path, immediate_run_tool_async, monkeypatch
+):
+    head = "a" * 40
+    client = _PullClient(
+        closed_pages={1: [_merged_same_repo_pr(28, ref="candidate/demo", sha=head)]}
+    )
+    audit = _AuditLogger()
+    guard_calls: list[str] = []
+    _configure_cleanup_adapter(
+        tmp_path,
+        monkeypatch,
+        client=client,
+        audit=audit,
+        guard_calls=guard_calls,
+    )
+
+    result = await supervisor.candidate_cleanup(
+        "candidate-demo",
+        head,
+        "candidate/demo",
+        "demo",
+    )
+
+    assert result["ok"] is True
+    assert client.closed_calls == [1, 1]
+    assert client.calls == [1, 1, 1]
+    assert guard_calls == ["first", "second", "third"]
+    assert len(audit.required) == 1
+    assert audit.required[0].metadata["preservation_mode"] == "merged_pull_request"
+    assert audit.required[0].metadata["delivery_pull_number"] == 28
+    assert audit.required[0].metadata["delivery_merge_commit_sha"] == "c" * 40
+
+
+async def test_candidate_cleanup_rejects_closed_unmerged_pr_without_archive(
+    tmp_path, immediate_run_tool_async, monkeypatch
+):
+    head = "a" * 40
+    closed_unmerged = _same_repo_pr(29, ref="candidate/demo", sha=head)
+    closed_unmerged["state"] = "closed"
+    closed_unmerged["merged"] = False
+    client = _PullClient(closed_pages={1: [closed_unmerged]})
+    audit = _AuditLogger()
+    guard_calls: list[str] = []
+    _configure_cleanup_adapter(
+        tmp_path,
+        monkeypatch,
+        client=client,
+        audit=audit,
+        guard_calls=guard_calls,
+    )
+
+    result = await supervisor.candidate_cleanup(
+        "candidate-demo",
+        head,
+        "candidate/demo",
+        "demo",
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CHECK_FAILED"
+    assert result["error"]["retryable"] is False
+    assert result["error"]["details"] == {
+        "reference_check": "gitea_merged_pull_request",
+        "closed_unmerged_pull_numbers": [29],
+    }
+    assert client.closed_calls == [1]
+    assert client.calls == []
+    assert guard_calls == []
+    assert audit.required == []
 
 
 async def test_candidate_cleanup_uses_fresh_guard_twice_and_required_audit_once(

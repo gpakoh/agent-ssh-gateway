@@ -123,7 +123,7 @@ class CandidateCleanupReceipt:
     source_project: str
     branch: str
     head: str
-    preserved_ref: str
+    preserved_ref: str | None
     registry_removed: bool
     directory_removed: bool
     already_cleaned: bool
@@ -1001,6 +1001,25 @@ def _enforce_reference_guard(reference_guard: Callable[[], None]) -> None:
             "WORKSPACE_CONTENDED",
             "active reference guard blocked candidate cleanup",
             retryable=False,
+            details={"guard_error": type(exc).__name__},
+        ) from exc
+
+
+def _enforce_delivery_guard(delivery_guard: Callable[[], None] | None) -> None:
+    if not callable(delivery_guard):
+        raise _fail(
+            "INVALID_INPUT",
+            "delivery_guard must be callable when preserved_ref is omitted",
+        )
+    try:
+        delivery_guard()
+    except CandidateCloneError:
+        raise
+    except Exception as exc:
+        raise _fail(
+            "CHECK_FAILED",
+            "candidate delivery proof could not be verified",
+            retryable=True,
             details={"guard_error": type(exc).__name__},
         ) from exc
 
@@ -2194,13 +2213,14 @@ def candidate_cleanup(
     expected_head_sha: str,
     expected_branch: str,
     expected_source_project: str,
-    preserved_ref: str,
+    preserved_ref: str | None,
     *,
     config_dir: Path,
     journal_root: Path,
     reference_guard: Callable[[], None],
+    delivery_guard: Callable[[], None] | None = None,
 ) -> CandidateCleanupReceipt:
-    """Remove one exactly identified, remotely preserved candidate clone.
+    """Remove one exactly identified, safely preserved or delivered candidate clone.
 
     The injected ``reference_guard`` is REQUIRED and fail-closed: there is no
     permissive default, so this core cannot be called unguarded. It is invoked
@@ -2224,14 +2244,19 @@ def candidate_cleanup(
         raise _fail("INVALID_INPUT", "expected_source_project must be non-empty")
     expected_source_project = expected_source_project.strip()
     validated_preserved_ref = _validate_ref(preserved_ref)
-    if validated_preserved_ref is None or not validated_preserved_ref.startswith(
-        "archive/candidate-"
-    ):
+    if validated_preserved_ref is not None and not validated_preserved_ref.startswith("archive/candidate-"):
         raise _fail(
             "INVALID_INPUT",
             "preserved_ref must be an explicit archive/candidate-* remote branch",
         )
     preserved_ref = validated_preserved_ref
+    if preserved_ref is None and not callable(delivery_guard):
+        raise _fail(
+            "INVALID_INPUT",
+            "preserved_ref or a fail-closed delivery_guard is required",
+        )
+    if preserved_ref is not None and delivery_guard is not None:
+        raise _fail("INVALID_INPUT", "delivery_guard cannot be combined with preserved_ref")
     if not callable(reference_guard):
         raise _fail("INVALID_INPUT", "reference_guard must be callable and is required")
 
@@ -2271,6 +2296,7 @@ def candidate_cleanup(
                 tombstone_path=tombstone_path,
                 tombstone_id=tombstone_id,
                 reference_guard=reference_guard,
+                delivery_guard=delivery_guard,
             )
 
 
@@ -2280,7 +2306,7 @@ def _cleanup_candidate_locked(
     expected_head_sha: str,
     expected_branch: str,
     expected_source_project: str,
-    preserved_ref: str,
+    preserved_ref: str | None,
     config_dir: Path,
     journal_root: Path,
     source_root: Path,
@@ -2291,6 +2317,7 @@ def _cleanup_candidate_locked(
     tombstone_path: Path,
     tombstone_id: str,
     reference_guard: Callable[[], None],
+    delivery_guard: Callable[[], None] | None,
 ) -> CandidateCleanupReceipt:
     tombstone = _read_cleanup_tombstone(tombstone_path)
     if tombstone is not None:
@@ -2301,17 +2328,21 @@ def _cleanup_candidate_locked(
         if phase_value not in {"prepared", "registry_removed", "complete"}:
             raise _fail("WORKSPACE_CONTENDED", "candidate cleanup tombstone phase is invalid")
 
-    _require_preserved_head(
-        source_root,
-        preserved_ref,
-        expected_head_sha,
-        context="before existence check",
-    )
-    _require_delivery_branch_absent(
-        source_root,
-        expected_branch,
-        context="before existence check",
-    )
+    if preserved_ref is not None:
+        _require_preserved_head(
+            source_root,
+            preserved_ref,
+            expected_head_sha,
+            context="before existence check",
+        )
+    else:
+        _enforce_delivery_guard(delivery_guard)
+    if preserved_ref is not None:
+        _require_delivery_branch_absent(
+            source_root,
+            expected_branch,
+            context="before existence check",
+        )
 
     candidate_exists = candidate_root.exists() or candidate_root.is_symlink()
     phase = str(tombstone.get("phase")) if tombstone is not None else None
@@ -2400,17 +2431,21 @@ def _cleanup_candidate_locked(
         current_dev, current_ino = _validate_candidate_root(candidate_root, candidates_root)
         if current_dev != root_dev or current_ino != root_ino:
             raise _fail("WORKSPACE_CONTENDED", "candidate directory identity changed during cleanup")
-        _require_preserved_head(
-            source_root,
-            preserved_ref,
-            expected_head_sha,
-            context="before filesystem removal",
-        )
-        _require_delivery_branch_absent(
-            source_root,
-            expected_branch,
-            context="before filesystem removal",
-        )
+        if preserved_ref is not None:
+            _require_preserved_head(
+                source_root,
+                preserved_ref,
+                expected_head_sha,
+                context="before filesystem removal",
+            )
+        else:
+            _enforce_delivery_guard(delivery_guard)
+        if preserved_ref is not None:
+            _require_delivery_branch_absent(
+                source_root,
+                expected_branch,
+                context="before filesystem removal",
+            )
         _verify_candidate_clean(
             candidate_root,
             project_id=project_id,
