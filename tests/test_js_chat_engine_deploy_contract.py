@@ -209,6 +209,29 @@ def test_release_pin_parser_binds_exact_image_and_revision(tmp_path: Path) -> No
         docker_adapter._js_chat_engine_release_pin(tmp_path)
 
 
+def test_state_directory_allows_absent_first_rollout_but_rejects_unsafe_existing(
+    tmp_path: Path,
+) -> None:
+    operator_root = tmp_path / "infra-quart"
+    operator_root.mkdir()
+    state_dir = operator_root / ".state"
+
+    resolved = docker_adapter._js_chat_engine_state_directory(operator_root)
+    assert resolved == state_dir
+    assert not state_dir.exists()
+
+    state_dir.write_text("not a directory", encoding="utf-8")
+    with pytest.raises(ValueError, match="not a safe directory"):
+        docker_adapter._js_chat_engine_state_directory(operator_root)
+
+    state_dir.unlink()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    state_dir.symlink_to(elsewhere, target_is_directory=True)
+    with pytest.raises(ValueError, match="not a safe directory"):
+        docker_adapter._js_chat_engine_state_directory(operator_root)
+
+
 @pytest.mark.asyncio
 async def test_confirmation_revalidates_state_and_runtime_before_helper(
     monkeypatch: pytest.MonkeyPatch,
@@ -356,10 +379,12 @@ async def test_docker_client_helper_has_fixed_bounded_mounts() -> None:
     assert argv[argv.index("--network") + 1] == "host"
     assert "/app/scripts/js_chat_engine_deploy_contract_runner.py" in argv
     mounts = [argv[index + 1] for index, value in enumerate(argv[:-1]) if value == "--mount"]
+    volumes = [argv[index + 1] for index, value in enumerate(argv[:-1]) if value == "--volume"]
     assert "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock" in mounts
     assert "type=bind,src=/workspace/infra-candidate,dst=/workspace/infra-candidate,readonly" in mounts
     assert "type=bind,src=/workspace/infra-quart,dst=/workspace/infra-quart,readonly" in mounts
-    assert "type=bind,src=/workspace/infra-quart/.state,dst=/workspace/infra-quart/.state" in mounts
+    assert "/workspace/infra-quart/.state:/workspace/infra-quart/.state:rw" in volumes
+    assert not any("/workspace/infra-quart/.state" in mount for mount in mounts)
     assert "type=bind,src=/workspace/quart-core-databases,dst=/workspace/quart-core-databases" in mounts
     joined = " ".join(argv)
     assert "POSTGRES_PASSWORD" not in joined

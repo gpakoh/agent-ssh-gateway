@@ -1798,6 +1798,38 @@ def _js_chat_engine_safe_directory(path: Path, label: str) -> Path:
     return resolved
 
 
+def _js_chat_engine_state_directory(operator_root: Path) -> Path:
+    """Resolve the fixed deploy-state directory without creating it.
+
+    A first rollout legitimately has no ``.state`` directory yet: the
+    repo-owned deploy script creates it only after a successful qualified
+    rollout. Preflight accepts that absent exact child while rejecting an
+    existing symlink or non-directory before confirmation.
+    """
+    state_dir = operator_root / ".state"
+    try:
+        root = operator_root.resolve(strict=True)
+        info = state_dir.lstat()
+    except FileNotFoundError:
+        resolved = state_dir.resolve(strict=False)
+        try:
+            resolved.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("JS Chat Engine state directory escapes operator root") from exc
+        return resolved
+    except OSError as exc:
+        raise ValueError("JS Chat Engine state directory is unavailable") from exc
+
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise ValueError("JS Chat Engine state directory is not a safe directory")
+    try:
+        resolved = state_dir.resolve(strict=True)
+        resolved.relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise ValueError("JS Chat Engine state directory escapes operator root") from exc
+    return resolved
+
+
 def _js_chat_engine_release_pin(candidate_root: Path) -> dict[str, str]:
     release_path = _safe_regular_under(
         candidate_root,
@@ -1993,7 +2025,7 @@ async def _prepare_js_chat_engine_deploy(
     client = _docker_client()
     client._validate_project_dir(str(operator_root))
     env_file = _safe_regular_under(operator_root, ".env", "JS Chat Engine operator env file")
-    state_dir = _js_chat_engine_safe_directory(operator_root / ".state", "JS Chat Engine state directory")
+    state_dir = _js_chat_engine_state_directory(operator_root)
     core_databases_root = _js_chat_engine_safe_directory(
         operator_root.parent / "quart-core-databases",
         "Quart Core databases root",

@@ -1633,6 +1633,8 @@ class DockerClient:
         core_databases_root = self._validate_deploy_mount_path(
             core_databases_root, "core_databases_root"
         )
+        if Path(state_dir) != Path(operator_root) / ".state" or ":" in state_dir:
+            raise ValueError("state_dir must be the exact operator .state directory")
         if not re.fullmatch(
             r"[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}", target_image
         ):
@@ -1664,8 +1666,8 @@ class DockerClient:
             f"type=bind,src={candidate_root},dst={candidate_root},readonly",
             "--mount",
             f"type=bind,src={operator_root},dst={operator_root},readonly",
-            "--mount",
-            f"type=bind,src={state_dir},dst={state_dir}",
+            "--volume",
+            f"{state_dir}:{state_dir}:rw",
             "--mount",
             f"type=bind,src={core_databases_root},dst={core_databases_root}",
             helper_image_id,
