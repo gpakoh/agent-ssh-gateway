@@ -3842,6 +3842,447 @@ async def _docker_deploy_xloud_impl(
     )
 
 
+def _site_audit_crm_helper_payload(run: RunResult) -> dict[str, Any]:
+    """Parse the fixed CRM helper response without surfacing raw output."""
+    try:
+        payload = json.loads((run.stdout or "").strip())
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Site Audit CRM helper returned invalid evidence") from exc
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        raise RuntimeError("Site Audit CRM helper response schema is invalid")
+    return payload
+
+
+def _site_audit_crm_runtime_snapshot(
+    inspected: dict[str, Any],
+    *,
+    label: str,
+    require_revision: str | None = None,
+) -> dict[str, Any]:
+    runtime = inspected.get("State")
+    config = inspected.get("Config")
+    if not isinstance(runtime, dict) or not isinstance(config, dict):
+        raise RuntimeError(f"{label} runtime metadata is incomplete")
+    health = runtime.get("Health")
+    if runtime.get("Running") is not True:
+        raise RuntimeError(f"{label} is not running")
+    if not isinstance(health, dict) or health.get("Status") != "healthy":
+        raise RuntimeError(f"{label} is not Docker-healthy")
+    restart_count = inspected.get("RestartCount")
+    if not isinstance(restart_count, int) or isinstance(restart_count, bool) or restart_count != 0:
+        raise RuntimeError(f"{label} has non-zero restart evidence")
+    container_id = inspected.get("Id")
+    image_id = inspected.get("Image")
+    started_at = runtime.get("StartedAt")
+    if not isinstance(container_id, str) or not container_id:
+        raise RuntimeError(f"{label} container identity is unavailable")
+    if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+        raise RuntimeError(f"{label} image identity is invalid")
+    if not isinstance(started_at, str) or not started_at:
+        raise RuntimeError(f"{label} StartedAt evidence is unavailable")
+    revision: str | None = None
+    if require_revision is not None:
+        labels = config.get("Labels")
+        if not isinstance(labels, dict):
+            raise RuntimeError(f"{label} OCI labels are unavailable")
+        revision = labels.get("org.opencontainers.image.revision")
+        if revision != require_revision:
+            raise RuntimeError(f"{label} OCI revision differs from expected source")
+    return {
+        "container_id": container_id,
+        "image_id": image_id,
+        "started_at": started_at,
+        "restart_count": restart_count,
+        "revision": revision,
+    }
+
+
+def _site_audit_crm_inspect_evidence(payload: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("version") != 1:
+        raise RuntimeError("Site Audit CRM inspect schema is invalid")
+    env_sha = payload.get("env_sha256")
+    if not isinstance(env_sha, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", env_sha):
+        raise RuntimeError("Site Audit CRM inspect env fingerprint is invalid")
+    env_state = payload.get("crm_env_state")
+    role_state = payload.get("role_state")
+    user_state = payload.get("api_user_state")
+    if env_state not in {"absent", "partial", "conflict", "ready"}:
+        raise RuntimeError("Site Audit CRM inspect env state is invalid")
+    if role_state not in {"absent", "matching", "conflict"}:
+        raise RuntimeError("Site Audit CRM inspect role state is invalid")
+    if user_state not in {"absent", "matching", "conflict"}:
+        raise RuntimeError("Site Audit CRM inspect API-user state is invalid")
+    for key in (
+        "admin_user_configured",
+        "admin_password_configured",
+        "admin_auth_ok",
+    ):
+        if payload.get(key) is not True:
+            raise RuntimeError(f"Site Audit CRM inspect {key} is not ready")
+    evidence: dict[str, Any] = {
+        "env_sha256": env_sha,
+        "crm_env_state": env_state,
+        "role_state": role_state,
+        "api_user_state": user_state,
+    }
+    for key in ("role_id", "api_user_id", "role_conflict", "api_user_conflict"):
+        value = payload.get(key)
+        if value is not None:
+            if not isinstance(value, str) or not value or len(value) > 255:
+                raise RuntimeError(f"Site Audit CRM inspect {key} is malformed")
+            evidence[key] = value
+    return evidence
+
+
+def _site_audit_crm_evidence_fingerprint(evidence: dict[str, Any]) -> str:
+    raw = json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+async def _prepare_site_audit_crm_provision(
+    *,
+    expected_api_revision: str,
+) -> dict[str, Any]:
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_api_revision):
+        raise ValueError("expected_api_revision must be an exact lowercase 40-hex SHA")
+
+    registry = server_attr("_get_workspace_registry")()
+    operator_info = registry.project_info(_SITE_AUDIT_SOURCE_PROJECT)
+    operator_root = _safe_registered_root(operator_info)
+    client = _docker_client()
+    client._validate_project_dir(str(operator_root))
+    env_file = _safe_regular_under(operator_root, ".env", "Site Audit operator env file")
+    env_sha256 = "sha256:" + hashlib.sha256(env_file.read_bytes()).hexdigest()
+
+    helper_container = os.environ.get(
+        "MCP_DEPLOY_HELPER_CONTAINER", _DEPLOY_HELPER_CONTAINER
+    ).strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", helper_container):
+        raise ValueError("MCP_DEPLOY_HELPER_CONTAINER is invalid")
+    helper_image_id = await client.container_image_id(helper_container)
+
+    api = _single_inspect(await client.inspect("site-audit-api", max_lines=10))
+    api_snapshot = _site_audit_crm_runtime_snapshot(
+        api,
+        label="Site Audit API",
+        require_revision=expected_api_revision,
+    )
+    crm = _single_inspect(await client.inspect("site-audit-crm-web", max_lines=10))
+    crm_snapshot = _site_audit_crm_runtime_snapshot(crm, label="Site Audit CRM web")
+    crm_networks = await client.container_network_snapshot("site-audit-crm-web")
+    if "site-audit-control" not in crm_networks:
+        raise RuntimeError("Site Audit CRM web is not attached to the control network")
+
+    run = await client.run_site_audit_crm_provisioner(
+        helper_image_id=helper_image_id,
+        operator_root=str(operator_root),
+        mode="inspect",
+        timeout=60,
+    )
+    if run.exit_code != 0:
+        payload = _site_audit_crm_helper_payload(run)
+        raise RuntimeError(str(payload.get("error") or "Site Audit CRM inspect failed"))
+    evidence = _site_audit_crm_inspect_evidence(_site_audit_crm_helper_payload(run))
+    if evidence["env_sha256"] != env_sha256:
+        raise RuntimeError("Site Audit operator env changed during CRM preflight")
+    if evidence["crm_env_state"] in {"partial", "conflict"}:
+        raise RuntimeError("Site Audit CRM operator env is partially or incompatibly configured")
+    if evidence["role_state"] == "conflict" or evidence["api_user_state"] == "conflict":
+        raise RuntimeError("Site Audit CRM role/API-user identity conflicts with guarded policy")
+    if evidence["crm_env_state"] == "ready":
+        if evidence["role_state"] != "matching" or evidence["api_user_state"] != "matching":
+            raise RuntimeError("Site Audit CRM env is ready but guarded role/API-user identity is missing")
+    elif evidence["api_user_state"] == "matching":
+        # EspoCRM does not promise that an existing API user's secret can be
+        # read back.  Re-creating/rotating it implicitly would destroy the
+        # idempotency boundary, so require operator reconciliation instead.
+        raise RuntimeError("Site Audit CRM API user exists but its durable key is not configured")
+
+    return {
+        "operator_root": str(operator_root),
+        "env_file": str(env_file),
+        "env_sha256": env_sha256,
+        "helper_image_id": helper_image_id,
+        "expected_api_revision": expected_api_revision,
+        "api_snapshot": api_snapshot,
+        "crm_snapshot": crm_snapshot,
+        "inspect_evidence": evidence,
+        "inspect_fingerprint": _site_audit_crm_evidence_fingerprint(evidence),
+    }
+
+
+async def docker_provision_site_audit_crm(
+    expected_api_revision: str,
+    timeout: int = 120,
+) -> dict[str, Any]:
+    """Prepare least-privilege Site Audit EspoCRM API-user provisioning.
+
+    The preflight is read-only. It authenticates with the operator-provisioned
+    EspoCRM admin credential without returning it, verifies the exact live Site
+    Audit API revision and fixed CRM topology, and either reports an already
+    ready state or returns one high-risk confirmation action. The generated API
+    key never crosses the helper boundary.
+    """
+    timeout = max(60, min(timeout, 180))
+    try:
+        plan = await _prepare_site_audit_crm_provision(
+            expected_api_revision=expected_api_revision,
+        )
+    except ValueError as exc:
+        return tool_error(
+            tool="docker_provision_site_audit_crm",
+            code="INVALID_INPUT",
+            message=str(exc),
+            source="docker",
+            retryable=False,
+        )
+    except RuntimeError as exc:
+        return tool_error(
+            tool="docker_provision_site_audit_crm",
+            code="CRM_PROVISION_PRECONDITION_FAILED",
+            message=str(exc),
+            source="docker",
+            retryable=False,
+            redacted=True,
+        )
+
+    evidence = plan["inspect_evidence"]
+    if (
+        evidence["crm_env_state"] == "ready"
+        and evidence["role_state"] == "matching"
+        and evidence["api_user_state"] == "matching"
+    ):
+        return tool_success(
+            "docker_provision_site_audit_crm",
+            result={
+                "status": "ready",
+                "mutation_required": False,
+                "expected_api_revision": expected_api_revision,
+                "env_sha256": plan["env_sha256"],
+                "role_id": evidence.get("role_id"),
+                "api_user_id": evidence.get("api_user_id"),
+                "crm_projection_ready": True,
+                "api_redeploy_required": True,
+            },
+            source="docker",
+            redacted=True,
+        )
+
+    action = _confirm_store().create_action(
+        "docker_provision_site_audit_crm",
+        {
+            "expected_api_revision": expected_api_revision,
+            "env_sha256": plan["env_sha256"],
+            "helper_image_id": plan["helper_image_id"],
+            "api_snapshot": plan["api_snapshot"],
+            "crm_snapshot": plan["crm_snapshot"],
+            "inspect_fingerprint": plan["inspect_fingerprint"],
+            "timeout": timeout,
+        },
+        (
+            "Provision the fixed least-privilege Site Audit EspoCRM API identity "
+            f"for live API revision {expected_api_revision[:12]}"
+        ),
+        risk="high",
+        required_scope="mcp:docker:admin",
+    )
+    response = _confirmation_response(action)
+    response["result"]["crm_preflight"] = {
+        "crm_env_state": evidence["crm_env_state"],
+        "role_state": evidence["role_state"],
+        "api_user_state": evidence["api_user_state"],
+        "crm_projection_ready": False,
+    }
+    return response
+
+
+async def _docker_provision_site_audit_crm_impl(
+    expected_api_revision: str,
+    env_sha256: str,
+    helper_image_id: str,
+    api_snapshot: dict[str, Any],
+    crm_snapshot: dict[str, Any],
+    inspect_fingerprint: str,
+    timeout: int = 120,
+) -> dict[str, Any]:
+    try:
+        plan = await _prepare_site_audit_crm_provision(
+            expected_api_revision=expected_api_revision,
+        )
+        confirmed = {
+            "env_sha256": env_sha256,
+            "helper_image_id": helper_image_id,
+            "api_snapshot": api_snapshot,
+            "crm_snapshot": crm_snapshot,
+            "inspect_fingerprint": inspect_fingerprint,
+        }
+        if any(plan[key] != value for key, value in confirmed.items()):
+            raise RuntimeError("Site Audit CRM confirmation identities changed before execution")
+        evidence = plan["inspect_evidence"]
+        if evidence["crm_env_state"] != "absent":
+            raise RuntimeError("Site Audit CRM env no longer requires first-time provisioning")
+        if evidence["api_user_state"] != "absent":
+            raise RuntimeError("Site Audit CRM API-user state changed before execution")
+    except (ValueError, RuntimeError) as exc:
+        return tool_error(
+            tool="docker_provision_site_audit_crm",
+            code="CRM_PROVISION_PRECONDITION_FAILED",
+            message=str(exc),
+            source="docker",
+            retryable=False,
+            redacted=True,
+        )
+
+    client = _docker_client()
+    run = await client.run_site_audit_crm_provisioner(
+        helper_image_id=plan["helper_image_id"],
+        operator_root=plan["operator_root"],
+        mode="provision",
+        expected_env_sha256=plan["env_sha256"],
+        timeout=timeout,
+    )
+
+    if run.exit_code == -1:
+        try:
+            reconciled = await _prepare_site_audit_crm_provision(
+                expected_api_revision=expected_api_revision,
+            )
+            after = reconciled["inspect_evidence"]
+            if (
+                after["crm_env_state"] == "ready"
+                and after["role_state"] == "matching"
+                and after["api_user_state"] == "matching"
+            ):
+                return tool_success(
+                    "docker_provision_site_audit_crm",
+                    result={
+                        "status": "ready",
+                        "mutation_required": True,
+                        "reconciled_after_unknown": True,
+                        "expected_api_revision": expected_api_revision,
+                        "env_sha256": reconciled["env_sha256"],
+                        "role_id": after.get("role_id"),
+                        "api_user_id": after.get("api_user_id"),
+                        "crm_projection_ready": True,
+                        "api_redeploy_required": True,
+                    },
+                    source="docker",
+                    dangerous=True,
+                    redacted=True,
+                )
+        except (ValueError, RuntimeError):
+            pass
+        return tool_error(
+            tool="docker_provision_site_audit_crm",
+            code="CRM_PROVISION_OUTCOME_AMBIGUOUS",
+            message="Site Audit CRM provisioning timed out and readiness could not be proven",
+            source="docker",
+            retryable=False,
+            redacted=True,
+            hint="Do not retry blindly. Run a fresh read-only provisioning preflight to reconcile role, API-user and operator-env state.",
+        )
+
+    try:
+        payload = _site_audit_crm_helper_payload(run)
+    except RuntimeError as exc:
+        return tool_error(
+            tool="docker_provision_site_audit_crm",
+            code="CRM_PROVISION_EVIDENCE_INVALID",
+            message=str(exc),
+            source="docker",
+            retryable=False,
+            redacted=True,
+        )
+    if run.exit_code != 0 or payload.get("outcome") != "ready":
+        return tool_error(
+            tool="docker_provision_site_audit_crm",
+            code="CRM_PROVISION_FAILED",
+            message=str(payload.get("error") or "Site Audit CRM provisioning failed"),
+            source="docker",
+            retryable=False,
+            redacted=True,
+        )
+
+    for field in ("env_sha256", "api_key_fingerprint"):
+        value = payload.get(field)
+        if not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+            return tool_error(
+                tool="docker_provision_site_audit_crm",
+                code="CRM_PROVISION_EVIDENCE_INVALID",
+                message=f"Site Audit CRM helper returned invalid {field} evidence",
+                source="docker",
+                retryable=False,
+                redacted=True,
+            )
+    role_id = payload.get("role_id")
+    api_user_id = payload.get("api_user_id")
+    if not isinstance(role_id, str) or not role_id or not isinstance(api_user_id, str) or not api_user_id:
+        return tool_error(
+            tool="docker_provision_site_audit_crm",
+            code="CRM_PROVISION_EVIDENCE_INVALID",
+            message="Site Audit CRM helper returned invalid identity evidence",
+            source="docker",
+            retryable=False,
+            redacted=True,
+        )
+    if payload.get("crm_projection_ready") is not True:
+        return tool_error(
+            tool="docker_provision_site_audit_crm",
+            code="CRM_PROVISION_EVIDENCE_INVALID",
+            message="Site Audit CRM helper did not prove projection readiness",
+            source="docker",
+            retryable=False,
+            redacted=True,
+        )
+
+    try:
+        verified = await _prepare_site_audit_crm_provision(
+            expected_api_revision=expected_api_revision,
+        )
+        after = verified["inspect_evidence"]
+        if verified["env_sha256"] != payload["env_sha256"]:
+            raise RuntimeError("Site Audit CRM operator env changed after provisioning")
+        if (
+            after["crm_env_state"] != "ready"
+            or after["role_state"] != "matching"
+            or after["api_user_state"] != "matching"
+            or after.get("role_id") != role_id
+            or after.get("api_user_id") != api_user_id
+        ):
+            raise RuntimeError("Site Audit CRM post-provision readiness verification failed")
+    except (ValueError, RuntimeError) as exc:
+        return tool_error(
+            tool="docker_provision_site_audit_crm",
+            code="CRM_PROVISION_VERIFICATION_FAILED",
+            message=str(exc),
+            source="docker",
+            retryable=False,
+            redacted=True,
+        )
+
+    return tool_success(
+        "docker_provision_site_audit_crm",
+        result={
+            "status": "ready",
+            "mutation_required": True,
+            "reconciled_after_unknown": False,
+            "expected_api_revision": expected_api_revision,
+            "env_sha256": payload["env_sha256"],
+            "api_key_fingerprint": payload["api_key_fingerprint"],
+            "role_id": role_id,
+            "api_user_id": api_user_id,
+            "role_created": payload.get("role_created") is True,
+            "api_user_created": payload.get("api_user_created") is True,
+            "env_updated": payload.get("env_updated") is True,
+            "crm_projection_ready": True,
+            "api_redeploy_required": True,
+        },
+        source="docker",
+        dangerous=True,
+        redacted=True,
+    )
+
+
 async def docker_site_audit_deploy_status() -> dict[str, Any]:
     """Read and verify the durable Site Audit LKG against the live stack.
 
@@ -4564,6 +5005,7 @@ _CONFIRM_HANDLERS: dict[str, Callable[..., Any]] = {
     "docker_volume_rm": _docker_volume_rm_impl,
     "docker_deploy_contract": _docker_deploy_contract_impl,
     "docker_deploy_site_audit": _docker_deploy_site_audit_impl,
+    "docker_provision_site_audit_crm": _docker_provision_site_audit_crm_impl,
     "docker_deploy_xloud": _docker_deploy_xloud_impl,
     "docker_deploy_content_harvester": _docker_deploy_content_harvester_impl,
     "docker_migrate_content_harvester": _docker_migrate_content_harvester_impl,
@@ -5249,6 +5691,7 @@ def register_all() -> None:
         "docker_deploy_contract",
         "docker_site_audit_deploy_status",
         "docker_deploy_site_audit",
+        "docker_provision_site_audit_crm",
         "docker_deploy_xloud",
         "docker_deploy_content_harvester",
         "docker_migrate_content_harvester",
