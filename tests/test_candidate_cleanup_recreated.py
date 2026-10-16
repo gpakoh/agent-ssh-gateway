@@ -180,6 +180,34 @@ def test_recreated_candidate_resumes_after_registry_removal(
     assert not root.exists()
 
 
+def test_recreated_candidate_resumes_after_rmtree_removed_git_metadata(
+    registry_fixture, monkeypatch
+):
+    root, _retired, path, _previous, args, kwargs = _recreated(registry_fixture, monkeypatch)
+    real_remove = module.shutil.rmtree
+
+    def partially_remove(target, *a, **kw):
+        if Path(target) == root:
+            real_remove(root / ".git")
+            raise OSError("interrupted after git metadata removal")
+        return real_remove(target, *a, **kw)
+
+    monkeypatch.setattr(module.shutil, "rmtree", partially_remove)
+    with pytest.raises(CandidateCloneError, match="removal did not complete"):
+        candidate_cleanup(*args, **kwargs)
+
+    interrupted = json.loads(path.read_text())
+    assert interrupted["phase"] == "registry_removed"
+    assert root.is_dir() and not (root / ".git").exists()
+    assert not module._registry_has_candidate(kwargs["config_dir"], args[0])
+
+    monkeypatch.setattr(module.shutil, "rmtree", real_remove)
+    result = candidate_cleanup(*args, **kwargs)
+    assert result.directory_removed and not result.registry_removed
+    assert not root.exists()
+    assert json.loads(path.read_text())["phase"] == "complete"
+
+
 def test_recreated_candidate_retry_after_history_saved_before_new_lease(
     registry_fixture, monkeypatch
 ):
