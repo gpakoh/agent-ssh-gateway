@@ -131,6 +131,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "supervisor_integrate_file": ["mcp:admin"],
     "supervisor_recover_integrations": ["mcp:admin"],
     "supervisor_register_project": ["mcp:admin"],
+    "supervisor_repair_project_git_metadata": ["mcp:project", "mcp:admin"],
     "supervisor_unregister_project": ["mcp:admin"],
     "prepare_candidate_clone": ["mcp:repo", "mcp:admin"],
     "candidate_adopt": ["mcp:repo", "mcp:admin"],

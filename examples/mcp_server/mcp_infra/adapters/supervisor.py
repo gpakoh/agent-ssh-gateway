@@ -43,6 +43,10 @@ from examples.mcp_server.mcp_infra.tool_registry import (
     run_tool,
     run_tool_async,
 )
+from examples.mcp_server.project_git_metadata_repair import (
+    ProjectGitMetadataRepairError,
+    repair_project_git_metadata,
+)
 from examples.mcp_server.project_registry_control import (
     ProjectRegistrationError,
     register_project,
@@ -1059,6 +1063,135 @@ async def candidate_orphan_finalize(
     )
 
 
+def _repair_project_git_metadata_impl(
+    project: str,
+    replacement_dir: str,
+    expected_branch: str,
+    expected_current_head: str,
+    expected_replacement_head: str,
+) -> dict[str, Any]:
+    tool = "supervisor_repair_project_git_metadata"
+    try:
+        project, project_root = _resolve_project(project)
+    except _ProjectResolutionError:
+        return tool_error(
+            tool=tool,
+            code="PROJECT_NOT_FOUND",
+            message="Project is not registered or its root is unavailable.",
+            retryable=False,
+        )
+    try:
+        journal_root = _journal_root_for_project(project, project_root)
+    except ValueError:
+        return tool_error(
+            tool=tool,
+            code="INVALID_INPUT",
+            message="Supervisor journal storage is misconfigured.",
+            retryable=False,
+        )
+
+    correlation_id = uuid.uuid4().hex
+    audit_metadata = {
+        "project": project,
+        "replacement_dir": replacement_dir,
+        "expected_branch": expected_branch,
+        "expected_current_head": expected_current_head,
+        "expected_replacement_head": expected_replacement_head,
+        "correlation_id": correlation_id,
+    }
+    try:
+        server_attr("get_audit_logger")().append_required(
+            McpAuditEvent(
+                event_type="mcp.project_git_metadata_repair_intent",
+                tool=tool,
+                action="repair_project_git_metadata",
+                decision="allow",
+                reason="lease-guarded canonical Git metadata replacement",
+                metadata=audit_metadata,
+            )
+        )
+    except AuditWriteError:
+        return tool_error(
+            tool=tool,
+            code="AUDIT_UNAVAILABLE",
+            message="Audit log unavailable; Git metadata repair refused.",
+            retryable=True,
+        )
+
+    try:
+        receipt = repair_project_git_metadata(
+            project_root=project_root,
+            journal_root=journal_root,
+            replacement_dir=replacement_dir,
+            expected_branch=expected_branch,
+            expected_current_head=expected_current_head,
+            expected_replacement_head=expected_replacement_head,
+        )
+    except ProjectGitMetadataRepairError as exc:
+        return tool_error(
+            tool=tool,
+            code=exc.code,
+            message=exc.message,
+            retryable=exc.retryable,
+            details=exc.details,
+        )
+    except OSError as exc:
+        return _supervisor_io_error(
+            tool,
+            exc,
+            "Git metadata repair could not be completed.",
+        )
+
+    payload = receipt.as_dict()
+    payload["project"] = project
+    payload["correlation_id"] = correlation_id
+    try:
+        server_attr("get_audit_logger")().append(
+            McpAuditEvent(
+                event_type="mcp.project_git_metadata_repair_success",
+                tool=tool,
+                action="repair_project_git_metadata",
+                decision="allow",
+                reason="canonical Git metadata replacement completed",
+                metadata={**audit_metadata, **payload},
+            )
+        )
+    except Exception:
+        pass
+    return tool_success(
+        tool=tool,
+        result=payload,
+        success_text="Project Git metadata repair completed.",
+    )
+
+
+def supervisor_repair_project_git_metadata(
+    project: str,
+    replacement_dir: str,
+    expected_branch: str,
+    expected_current_head: str,
+    expected_replacement_head: str,
+) -> dict[str, Any]:
+    """Promote one exact .git.repair-* directory after lease validation.
+
+    The displaced canonical metadata is preserved outside the worktree under a
+    deterministic server-derived quarantine name.  No caller-selected rename
+    destination or arbitrary filesystem path is accepted.
+    """
+    return run_tool(
+        tool="supervisor_repair_project_git_metadata",
+        title="Supervisor repair project Git metadata",
+        fn=lambda: _repair_project_git_metadata_impl(
+            project,
+            replacement_dir,
+            expected_branch,
+            expected_current_head,
+            expected_replacement_head,
+        ),
+        success_text="Project Git metadata repair completed.",
+    )
+
+
 def _integrate_impl(
     project: str,
     relative_path: str,
@@ -1208,6 +1341,11 @@ def supervisor_recover_integrations(project: str) -> dict[str, Any]:
 
 
 def register_all() -> None:
+    register_tool("supervisor_repair_project_git_metadata")(
+        instrumented("supervisor_repair_project_git_metadata")(
+            supervisor_repair_project_git_metadata
+        )
+    )
     register_tool("supervisor_integrate_file")(
         instrumented("supervisor_integrate_file")(supervisor_integrate_file)
     )
@@ -1236,6 +1374,7 @@ def register_all() -> None:
 
 __all__ = [
     "register_all",
+    "supervisor_repair_project_git_metadata",
     "supervisor_integrate_file",
     "supervisor_recover_integrations",
     "supervisor_register_project",
