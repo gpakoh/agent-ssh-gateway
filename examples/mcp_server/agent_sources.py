@@ -601,16 +601,26 @@ def _fetch_remote_object(
         raise ManagedSourceBundleError(msg)
 
 
-def _materialize_from_remote(
-    project: str,
+def materialize_trusted_remote_bundle(
+    source_root: str | Path,
     expected: str,
-    bundle_path: Path,
+    bundle_path: str | Path,
 ) -> ManagedSourcePublication:
-    """Fetch *expected* from the trusted remote and publish a verified bundle.
+    """Fetch one exact commit from a trusted remote into a verified bundle.
 
-    Returns the bound publication on success.  Raises on any failure.
+    The registered checkout is used only to prove repository identity. Git
+    objects are fetched into executor-private scratch storage, so callers can
+    materialize a fresh authoritative commit without writing the source
+    worktree, index, refs, or object database.
     """
-    project_root = Path(get_registry().project_info(project)["root"])
+    expected = str(expected or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", expected):
+        raise ManagedSourceBundleError("trusted remote expected commit is invalid")
+    try:
+        project_root = Path(source_root).resolve(strict=True)
+    except OSError as exc:
+        raise ManagedSourceBundleError("registered source root is unavailable") from exc
+    bundle_path = Path(bundle_path)
     username, clone_url, token = _resolve_trusted_remote(project_root)
 
     temp_fd, temp_name = tempfile.mkstemp(
@@ -697,6 +707,16 @@ def _materialize_from_remote(
         return bind_publication_bytes(bundle_path, expected)
     finally:
         temp_bundle.unlink(missing_ok=True)
+
+
+def _materialize_from_remote(
+    project: str,
+    expected: str,
+    bundle_path: Path,
+) -> ManagedSourcePublication:
+    """Publish an exact trusted-remote commit into managed source storage."""
+    project_root = Path(get_registry().project_info(project)["root"])
+    return materialize_trusted_remote_bundle(project_root, expected, bundle_path)
 
 
 def ensure_dirty_worktree_review_bundle(

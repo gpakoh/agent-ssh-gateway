@@ -13,6 +13,7 @@ import secrets
 import shutil
 import stat
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -34,6 +35,7 @@ from examples.mcp_server.agent_sources import (
     _resolve_trusted_remote,
     _source_is_shallow,
     ensure_managed_source_bundle,
+    materialize_trusted_remote_bundle,
 )
 from examples.mcp_server.git_trust import with_scoped_safe_directories
 from examples.mcp_server.managed_git import _minimal_git_env
@@ -1743,18 +1745,45 @@ def _prepare_candidate_locked(
                         },
                     ) from exc
                 if publication is None:
-                    raise _fail(
-                        "SOURCE_REPO_STALE",
-                        "trusted remote base exists but managed source storage is unavailable",
-                        retryable=True,
-                        details={"base_ref": requested_ref, "base_sha": base_sha},
+                    try:
+                        with tempfile.TemporaryDirectory(
+                            prefix=".candidate-remote-",
+                            dir=str(candidate_root.parent),
+                        ) as scratch_raw:
+                            remote_publication = materialize_trusted_remote_bundle(
+                                source_root,
+                                base_sha,
+                                Path(scratch_raw) / "source.bundle",
+                            )
+                            _run_git(
+                                candidate_root.parent,
+                                [
+                                    "clone",
+                                    "--no-checkout",
+                                    remote_publication.path,
+                                    str(tmp),
+                                ],
+                                timeout=120,
+                                operation="clone trusted remote bundle",
+                            )
+                    except ManagedSourceBundleError as exc:
+                        raise _fail(
+                            "SOURCE_REPO_STALE",
+                            "trusted remote base exists but cannot be materialized",
+                            retryable=True,
+                            details={
+                                "base_ref": requested_ref,
+                                "base_sha": base_sha,
+                                "source_cause": classify_source_failure_message(str(exc)).value,
+                            },
+                        ) from exc
+                else:
+                    _run_git(
+                        candidate_root.parent,
+                        ["clone", "--no-checkout", publication.path, str(tmp)],
+                        timeout=120,
+                        operation="clone managed source bundle",
                     )
-                _run_git(
-                    candidate_root.parent,
-                    ["clone", "--no-checkout", publication.path, str(tmp)],
-                    timeout=120,
-                    operation="clone managed source bundle",
-                )
             _run_git(
                 tmp,
                 ["checkout", "-B", branch, base_sha],

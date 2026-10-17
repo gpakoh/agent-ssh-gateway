@@ -935,13 +935,89 @@ def test_prepare_candidate_clone_missing_base_returns_typed_source_ref_error(
     assert exc_info.value.retryable is True
 
 
-def test_prepare_candidate_clone_remote_base_without_managed_source_returns_stale_error(
+def test_prepare_candidate_clone_remote_base_without_managed_source_uses_ephemeral_bundle(
+    registry_fixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import agent_sources
+    from examples.mcp_server import candidate_clone as candidate_clone_module
+
+    workspace, source, config_dir, journal_root, _base = registry_fixture
+    remote_source = tmp_path / "ephemeral-remote-source"
+    _git(tmp_path, "clone", "-q", str(source), str(remote_source))
+    _git(remote_source, "config", "user.name", "Test")
+    _git(remote_source, "config", "user.email", "test@example.invalid")
+    (remote_source / "README.md").write_text("remote-ephemeral\n", encoding="utf-8")
+    _git(remote_source, "add", "README.md")
+    _git(remote_source, "commit", "-q", "-m", "remote ephemeral")
+    remote_sha = _git(remote_source, "rev-parse", "HEAD")
+    assert subprocess.run(
+        ["git", "cat-file", "-e", f"{remote_sha}^{{commit}}"],
+        cwd=source,
+        capture_output=True,
+        check=False,
+    ).returncode != 0
+
+    _git(source, "remote", "add", "gitea", "ssh://git@example.invalid/source-project.git")
+    (source / "README.md").write_text("dirty-local-worktree\n", encoding="utf-8")
+    source_head_before = _git(source, "rev-parse", "HEAD")
+    source_status_before = _git(source, "status", "--porcelain=v1")
+
+    monkeypatch.setattr(
+        candidate_clone_module,
+        "_probe_remote_ref",
+        lambda _source, ref: candidate_clone_module.RemoteRefProbe(
+            candidate_clone_module.RemoteRefStatus.FOUND,
+            remote_sha,
+        )
+        if ref == "master"
+        else candidate_clone_module.RemoteRefProbe(
+            candidate_clone_module.RemoteRefStatus.ABSENT
+        ),
+    )
+    monkeypatch.setattr(
+        candidate_clone_module,
+        "ensure_managed_source_bundle",
+        lambda _project, _sha: None,
+    )
+    monkeypatch.setattr(
+        agent_sources,
+        "_resolve_trusted_remote",
+        lambda root: ("testuser", str(remote_source), "fixture-token")
+        if root == source.resolve()
+        else (_ for _ in ()).throw(AssertionError(f"unexpected source root: {root}")),
+    )
+
+    receipt = candidate_clone_module.prepare_candidate_clone(
+        "source-project",
+        "candidate/ephemeral-remote-base",
+        "master",
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    assert receipt.base_sha == remote_sha
+    assert receipt.head == remote_sha
+    assert _git(clone_root, "show", "HEAD:README.md") == "remote-ephemeral"
+    assert _git(source, "rev-parse", "HEAD") == source_head_before
+    assert _git(source, "status", "--porcelain=v1") == source_status_before
+    assert subprocess.run(
+        ["git", "cat-file", "-e", f"{remote_sha}^{{commit}}"],
+        cwd=source,
+        capture_output=True,
+        check=False,
+    ).returncode != 0
+
+
+def test_prepare_candidate_clone_remote_base_without_managed_source_stays_fail_closed(
     registry_fixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from examples.mcp_server import candidate_clone as candidate_clone_module
 
-    _workspace, _source, config_dir, journal_root, _base = registry_fixture
+    workspace, _source, config_dir, journal_root, _base = registry_fixture
     remote_sha = "a" * 40
     monkeypatch.setattr(
         candidate_clone_module,
@@ -951,7 +1027,11 @@ def test_prepare_candidate_clone_remote_base_without_managed_source_returns_stal
             remote_sha,
         ),
     )
-    monkeypatch.setattr(candidate_clone_module, "ensure_managed_source_bundle", lambda _project, _sha: None)
+    monkeypatch.setattr(
+        candidate_clone_module,
+        "ensure_managed_source_bundle",
+        lambda _project, _sha: None,
+    )
 
     with pytest.raises(CandidateCloneError) as exc_info:
         candidate_clone_module.prepare_candidate_clone(
@@ -964,6 +1044,10 @@ def test_prepare_candidate_clone_remote_base_without_managed_source_returns_stal
 
     assert exc_info.value.code == "SOURCE_REPO_STALE"
     assert exc_info.value.retryable is True
+    candidates_root = workspace / ".mcp-candidate-clones"
+    assert not candidates_root.exists() or not any(
+        path for path in candidates_root.iterdir() if path.name.startswith("candidate-")
+    )
 
 
 def test_prepare_candidate_clone_same_lineage_new_base_fails_closed(registry_fixture) -> None:
