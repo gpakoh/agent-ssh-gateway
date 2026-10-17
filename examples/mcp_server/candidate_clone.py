@@ -1120,6 +1120,120 @@ def _registry_has_candidate(config_dir: Path, project_id: str) -> bool:
     return False
 
 
+def candidate_store_inventory(*, config_dir: Path) -> dict[str, Any]:
+    """Compare persisted candidate registrations with the physical candidate store.
+
+    This is deliberately read-only and does not adopt filesystem entries into the
+    trusted project registry.  A direct ``candidate-*`` directory can survive an
+    interrupted unregister/cleanup transaction, while ``WorkspaceRegistry`` omits
+    missing roots by design.  Expose both sides so callers can detect either drift
+    direction instead of treating ``project_list`` as proof that the store is clean.
+    """
+    config_dir = config_dir.resolve()
+    workspace_root = _workspace_root(config_dir)
+    candidates_root = _candidate_clones_root(workspace_root)
+
+    registered: set[str] = set()
+    for path in _registry_store_paths(config_dir):
+        if not path.exists():
+            continue
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, yaml.YAMLError) as exc:
+            raise _fail(
+                "TOOL_EXECUTION_FAILED",
+                "workspace registry cannot be read",
+                retryable=True,
+            ) from exc
+        if not isinstance(data, dict):
+            raise _fail(
+                "TOOL_EXECUTION_FAILED",
+                "workspace registry is malformed",
+                retryable=False,
+            )
+        projects = data.get("projects", {})
+        if projects is None:
+            projects = {}
+        if not isinstance(projects, dict):
+            raise _fail(
+                "TOOL_EXECUTION_FAILED",
+                "workspace registry projects mapping is malformed",
+                retryable=False,
+            )
+        for project_id, entry in projects.items():
+            if not isinstance(project_id, str) or not isinstance(entry, dict):
+                continue
+            if entry.get("type") != "candidate-clone":
+                continue
+            if entry.get("root") != f"{_CANDIDATE_CLONES_DIRNAME}/{project_id}":
+                continue
+            if _PROJECT_ID_RE.fullmatch(project_id):
+                registered.add(project_id)
+
+    physical: set[str] = set()
+    unsafe_entries: list[str] = []
+    invalid_entry_count = 0
+    try:
+        root_stat = candidates_root.lstat()
+    except FileNotFoundError:
+        root_stat = None
+    except OSError as exc:
+        raise _fail(
+            "TOOL_EXECUTION_FAILED",
+            "candidate store cannot be inspected",
+            retryable=True,
+        ) from exc
+
+    if root_stat is not None:
+        if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode):
+            raise _fail(
+                "POLICY_DENIED",
+                "candidate store root is not a safe directory",
+                retryable=False,
+            )
+        try:
+            with os.scandir(candidates_root) as entries:
+                for entry in entries:
+                    if not entry.name.startswith("candidate-"):
+                        continue
+                    if not _PROJECT_ID_RE.fullmatch(entry.name):
+                        invalid_entry_count += 1
+                        continue
+                    try:
+                        if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                            unsafe_entries.append(entry.name)
+                            continue
+                    except OSError as exc:
+                        raise _fail(
+                            "TOOL_EXECUTION_FAILED",
+                            "candidate store entry cannot be inspected",
+                            retryable=True,
+                        ) from exc
+                    physical.add(entry.name)
+        except CandidateCloneError:
+            raise
+        except OSError as exc:
+            raise _fail(
+                "TOOL_EXECUTION_FAILED",
+                "candidate store cannot be scanned",
+                retryable=True,
+            ) from exc
+
+    unregistered = sorted(physical - registered)
+    missing = sorted(registered - physical)
+    unsafe_entries.sort()
+    consistent = not unregistered and not missing and not unsafe_entries and invalid_entry_count == 0
+    return {
+        "consistent": consistent,
+        "physical_candidate_count": len(physical),
+        "registered_candidate_count": len(registered),
+        "unregistered_candidate_ids": unregistered,
+        "missing_candidate_ids": missing,
+        "unsafe_candidate_entries": unsafe_entries,
+        "invalid_candidate_entry_count": invalid_entry_count,
+    }
+
+
 def _register_candidate(
     *,
     config_dir: Path,
@@ -2604,5 +2718,6 @@ __all__ = [
     "IdentityProof",
     "adopt_candidate_lineage",
     "candidate_cleanup",
+    "candidate_store_inventory",
     "prepare_candidate_clone",
 ]
