@@ -151,6 +151,47 @@ def test_descendant_blocks_parent_cleanup(
     assert "candidate-missing-a:" in runtime.read_text()
 
 
+def test_source_project_with_same_candidate_root_blocks_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, journal, runtime, _ = _fixture(tmp_path, monkeypatch)
+    with (config / "projects.yaml").open("a", encoding="utf-8") as f:
+        f.write(
+            "  unrelated-source:\n"
+            "    root: .mcp-candidate-clones/candidate-missing-a\n"
+            "    type: repo\n"
+        )
+    preview = _preview(config, journal)
+    assert preview["stale_count"] == 1
+    _apply(config, journal, preview)
+    assert "candidate-missing-a:" in runtime.read_text()
+
+
+def test_dangling_yaml_alias_refuses_atomic_registry_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, journal, runtime, _ = _fixture(tmp_path, monkeypatch)
+    original = runtime.read_text()
+    original = original.replace(
+        "    type: candidate-clone\n",
+        "    type: candidate-clone\n    tags: &shared-tags [must-survive]\n",
+        1,
+    )
+    original += (
+        "  unrelated:\n"
+        "    root: unrelated\n"
+        "    type: repo\n"
+        "    tags: *shared-tags\n"
+    )
+    runtime.write_text(original)
+    preview = _preview(config, journal)
+    assert preview["stale_count"] == 2
+    with pytest.raises(ProjectRegistrationError, match="invalidate YAML references") as exc:
+        _apply(config, journal, preview)
+    assert exc.value.code == "CHECK_FAILED"
+    assert runtime.read_text() == original
+
+
 def test_existing_source_id_is_preserved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

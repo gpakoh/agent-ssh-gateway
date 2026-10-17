@@ -150,7 +150,7 @@ def reconcile_runtime_candidate_registry(
         # Precompute dependency roots once: legacy overlays may contain
         # thousands of entries, so a scan per candidate is quadratic.
         blocked: set[str] = set()
-        for other in {**source_entries, **runtime_entries}.values():
+        for other_id, other in {**source_entries, **runtime_entries}.items():
             if not isinstance(other, dict):
                 raise _fail("CHECK_FAILED", "Project registry contains malformed entries.")
             parent_id = other.get("parent")
@@ -161,8 +161,11 @@ def reconcile_runtime_candidate_registry(
             other_root = other.get("root")
             if isinstance(other_root, str):
                 parts = other_root.split("/")
-                if len(parts) > 2 and parts[0] == _CLONES_DIR:
-                    blocked.add(parts[1])
+                if len(parts) >= 2 and parts[0] == _CLONES_DIR:
+                    # Ignore the candidate's own root, not another project's
+                    # exact-root alias or a descendant using that candidate.
+                    if len(parts) > 2 or other_id != parts[1]:
+                        blocked.add(parts[1])
 
         eligible: set[str] = set()
         preserved_count = 0
@@ -194,6 +197,21 @@ def reconcile_runtime_candidate_registry(
             if any(not _candidate_root_absent(store, candidate_id) for candidate_id in eligible):
                 raise _fail("WORKSPACE_CONTENDED", "Candidate directory reappeared since preview.")
             updated = _delete_exact_blocks(original, eligible)
+            # YAML anchors or noncanonical blocks can refer across entries.
+            # Refuse a metadata write if textual pruning would invalidate the
+            # overlay or silently change an unrelated project's parsed data.
+            try:
+                updated_data = yaml.safe_load(updated)
+            except yaml.YAMLError as exc:
+                raise _fail("CHECK_FAILED", "Registry pruning would invalidate YAML references.") from exc
+            expected_data = {
+                **runtime_data,
+                "projects": {
+                    key: value for key, value in runtime_entries.items() if key not in eligible
+                },
+            }
+            if updated_data != expected_data:
+                raise _fail("CHECK_FAILED", "Registry pruning would alter unrelated entries.")
             result = integrate_file(
                 runtime_path.parent,
                 runtime_path.name,
