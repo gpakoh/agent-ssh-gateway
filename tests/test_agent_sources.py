@@ -621,6 +621,71 @@ def test_missing_object_fetches_from_trusted_remote(tmp_path, monkeypatch):
     assert (clone_dir / "data.txt").read_text(encoding="utf-8") == "remote-content\n"
 
 
+def test_materialize_trusted_remote_bundle_without_managed_source_root(
+    tmp_path, monkeypatch
+):
+    remote_source, _ = _repo(tmp_path)
+    (remote_source / "payload.txt").write_text("remote-newer\n", encoding="utf-8")
+    _git(remote_source, "add", "payload.txt")
+    _git(remote_source, "commit", "-m", "remote newer")
+    remote_sha = _git(remote_source, "rev-parse", "HEAD")
+    bare_remote, _ = _make_bare_clone(tmp_path, remote_source)
+
+    local_repo = tmp_path / "local-source"
+    local_repo.mkdir()
+    _git(local_repo, "init")
+    _git(local_repo, "config", "user.name", "Test")
+    _git(local_repo, "config", "user.email", "test@example.com")
+    (local_repo / "payload.txt").write_text("local-only\n", encoding="utf-8")
+    _git(local_repo, "add", "payload.txt")
+    _git(local_repo, "commit", "-m", "local only")
+    local_head = _git(local_repo, "rev-parse", "HEAD")
+    (local_repo / "payload.txt").write_text("dirty-local\n", encoding="utf-8")
+    local_status = _git(local_repo, "status", "--porcelain=v1")
+    assert subprocess.run(
+        ["git", "cat-file", "-e", f"{remote_sha}^{{commit}}"],
+        cwd=local_repo,
+        capture_output=True,
+        check=False,
+    ).returncode != 0
+
+    monkeypatch.delenv("MCP_AGENT_SOURCE_ROOT", raising=False)
+    monkeypatch.setattr(
+        agent_sources,
+        "_resolve_trusted_remote",
+        lambda root: ("testuser", str(bare_remote), "fake-token")
+        if root == local_repo.resolve()
+        else (_ for _ in ()).throw(AssertionError(f"unexpected source root: {root}")),
+    )
+
+    bundle = tmp_path / "ephemeral.bundle"
+    publication = agent_sources.materialize_trusted_remote_bundle(
+        local_repo,
+        remote_sha,
+        bundle,
+    )
+
+    assert publication.path == str(bundle)
+    assert bundle.is_file()
+    assert _git(local_repo, "bundle", "list-heads", str(bundle)).split()[0] == remote_sha
+    clone_dir = tmp_path / "ephemeral-verify"
+    subprocess.run(
+        ["git", "clone", "-b", "source", str(bundle), str(clone_dir)],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert (clone_dir / "payload.txt").read_text(encoding="utf-8") == "remote-newer\n"
+    assert _git(local_repo, "rev-parse", "HEAD") == local_head
+    assert _git(local_repo, "status", "--porcelain=v1") == local_status
+    assert subprocess.run(
+        ["git", "cat-file", "-e", f"{remote_sha}^{{commit}}"],
+        cwd=local_repo,
+        capture_output=True,
+        check=False,
+    ).returncode != 0
+
+
 def test_wrong_sha_rejects_bundle(tmp_path, monkeypatch):
     """Test 3: Remote fetch for nonexistent SHA → reject, no bundle installed.
 
