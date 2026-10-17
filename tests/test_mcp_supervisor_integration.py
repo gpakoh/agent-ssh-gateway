@@ -891,7 +891,7 @@ async def test_candidate_orphan_finalize_uses_fresh_reference_guard_and_required
     assert len(audit.success) == 1
 
 
-def test_register_all_registers_exactly_eight_tools(monkeypatch):
+def test_register_all_registers_exactly_nine_tools(monkeypatch):
     registered: list[str] = []
 
     def _register(name):
@@ -907,6 +907,7 @@ def test_register_all_registers_exactly_eight_tools(monkeypatch):
     supervisor.register_all()
 
     assert registered == [
+        "supervisor_repair_project_git_metadata",
         "supervisor_integrate_file",
         "supervisor_recover_integrations",
         "supervisor_register_project",
