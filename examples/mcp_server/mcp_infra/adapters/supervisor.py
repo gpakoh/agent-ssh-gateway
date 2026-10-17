@@ -33,6 +33,7 @@ from examples.mcp_server.candidate_clone import (
 from examples.mcp_server.candidate_orphan_finalize import (
     candidate_orphan_finalize as _candidate_orphan_finalize,
 )
+from examples.mcp_server.candidate_registry_reconcile import reconcile_runtime_candidate_registry
 from examples.mcp_server.control_plane_git import _parse_gitea_remote
 from examples.mcp_server.mcp_audit import AuditWriteError, McpAuditEvent
 from examples.mcp_server.mcp_infra._server_ref import server_attr
@@ -344,6 +345,99 @@ def supervisor_register_project(
             root_selector,
         ),
         success_text="Project registration completed.",
+    )
+
+
+def _reconcile_candidate_registry_impl(
+    apply: bool,
+    expected_runtime_sha256: str | None,
+    expected_stale_count: int | None,
+) -> dict[str, Any]:
+    tool = "supervisor_reconcile_candidate_registry"
+    try:
+        config_dir = _resolve_registry_config_dir()
+        journal_root = _journal_root_for_project("workspace-registry", config_dir)
+    except ValueError:
+        return tool_error(
+            tool=tool,
+            code="INVALID_INPUT",
+            message="Workspace registry control plane is misconfigured.",
+            retryable=False,
+        )
+
+    correlation_id = uuid.uuid4().hex
+    if apply:
+        try:
+            server_attr("get_audit_logger")().append_required(
+                McpAuditEvent(
+                    event_type="mcp.candidate_registry_reconcile_intent",
+                    tool=tool,
+                    action="reconcile_runtime_candidate_registry",
+                    decision="allow",
+                    reason="bounded metadata-only stale candidate registry cleanup",
+                    metadata={
+                        "correlation_id": correlation_id,
+                        "expected_runtime_sha256": expected_runtime_sha256,
+                        "expected_stale_count": expected_stale_count,
+                        "workspace_bytes_mutated": False,
+                        "source_registry_mutated": False,
+                    },
+                )
+            )
+        except AuditWriteError:
+            return tool_error(
+                tool=tool,
+                code="AUDIT_UNAVAILABLE",
+                message="Audit log unavailable; runtime registry cleanup refused.",
+                retryable=True,
+            )
+    try:
+        result = reconcile_runtime_candidate_registry(
+            config_dir=config_dir,
+            journal_root=journal_root,
+            apply=apply,
+            expected_runtime_sha256=expected_runtime_sha256,
+            expected_stale_count=expected_stale_count,
+        )
+    except ProjectRegistrationError as exc:
+        return tool_error(tool=tool, code=exc.code, message=exc.message, retryable=False)
+    except SupervisorIntegrationError as exc:
+        return _integration_error(tool, exc)
+    except (OSError, UnicodeError) as exc:
+        return _supervisor_io_error(tool, exc, "Runtime registry reconciliation failed.")
+
+    result["cache_reset"] = _reset_project_registry_caches() if apply else False
+    result["correlation_id"] = correlation_id
+    if apply:
+        try:
+            server_attr("get_audit_logger")().append(
+                McpAuditEvent(
+                    event_type="mcp.candidate_registry_reconcile_success",
+                    tool=tool,
+                    action="reconcile_runtime_candidate_registry",
+                    decision="allow",
+                    reason="runtime candidate metadata reconciliation completed",
+                    metadata=result,
+                )
+            )
+        except Exception:
+            pass
+    return tool_success(tool=tool, result=result)
+
+
+def supervisor_reconcile_candidate_registry(
+    apply: bool = False,
+    expected_runtime_sha256: str | None = None,
+    expected_stale_count: int | None = None,
+) -> dict[str, Any]:
+    """Preview stale runtime candidate entries; apply only with exact preview leases."""
+    return run_tool(
+        tool="supervisor_reconcile_candidate_registry",
+        title="Supervisor reconcile runtime candidate registry",
+        fn=lambda: _reconcile_candidate_registry_impl(
+            apply, expected_runtime_sha256, expected_stale_count
+        ),
+        success_text="Runtime candidate registry reconciliation completed.",
     )
 
 
@@ -1355,6 +1449,11 @@ def register_all() -> None:
     register_tool("supervisor_register_project")(
         instrumented("supervisor_register_project")(supervisor_register_project)
     )
+    register_tool("supervisor_reconcile_candidate_registry")(
+        instrumented("supervisor_reconcile_candidate_registry")(
+            supervisor_reconcile_candidate_registry
+        )
+    )
     register_tool("supervisor_unregister_project")(
         instrumented("supervisor_unregister_project")(supervisor_unregister_project)
     )
@@ -1378,6 +1477,7 @@ __all__ = [
     "supervisor_integrate_file",
     "supervisor_recover_integrations",
     "supervisor_register_project",
+    "supervisor_reconcile_candidate_registry",
     "supervisor_unregister_project",
     "prepare_candidate_clone",
     "candidate_adopt",
