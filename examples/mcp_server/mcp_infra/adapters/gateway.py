@@ -299,8 +299,39 @@ def gateway_health() -> dict[str, Any]:
     }
 
 
+def _candidate_store_status() -> dict[str, Any]:
+    """Return bounded filesystem-vs-registry candidate reconciliation status."""
+    from app.workspace.registry import WorkspacePolicyError, resolve_registry_root
+    from examples.mcp_server.candidate_clone import (
+        CandidateCloneError,
+        candidate_store_inventory,
+    )
+
+    try:
+        inventory = candidate_store_inventory(config_dir=resolve_registry_root())
+    except CandidateCloneError as exc:
+        return {
+            "status": "unavailable",
+            "consistent": False,
+            "error": {
+                "code": exc.code,
+                "retryable": exc.retryable,
+            },
+        }
+    except (OSError, ValueError, WorkspacePolicyError):
+        return {
+            "status": "unavailable",
+            "consistent": False,
+            "error": {
+                "code": "TOOL_EXECUTION_FAILED",
+                "retryable": True,
+            },
+        }
+    return {"status": "ok", **inventory}
+
+
 def gateway_project_list() -> dict[str, Any]:
-    """List all registered projects with their type, description and tags."""
+    """List registered projects and reconcile the managed candidate store."""
     registry = _server_workspace_registry()
     projects = registry.list_projects()
     return tool_success(
@@ -308,6 +339,7 @@ def gateway_project_list() -> dict[str, Any]:
         result={
             "count": len(projects),
             "projects": projects,
+            "candidate_store": _candidate_store_status(),
         },
     )
 
