@@ -30,6 +30,9 @@ from examples.mcp_server.candidate_clone import candidate_cleanup as _candidate_
 from examples.mcp_server.candidate_clone import (
     prepare_candidate_clone as _prepare_candidate_clone,
 )
+from examples.mcp_server.candidate_orphan_finalize import (
+    candidate_orphan_finalize as _candidate_orphan_finalize,
+)
 from examples.mcp_server.control_plane_git import _parse_gitea_remote
 from examples.mcp_server.mcp_audit import AuditWriteError, McpAuditEvent
 from examples.mcp_server.mcp_infra._server_ref import server_attr
@@ -922,6 +925,140 @@ async def candidate_cleanup(
     )
 
 
+async def candidate_orphan_finalize(
+    project_id: str,
+    expected_base_sha: str,
+    expected_branch: str,
+    expected_source_project: str,
+) -> dict[str, Any]:
+    """Finalize one delivered candidate tail after registry and Git metadata loss."""
+
+    async def _run() -> dict[str, Any]:
+        try:
+            source_project, source_root = _resolve_project(expected_source_project)
+            config_dir = _resolve_registry_config_dir()
+            journal_root = _journal_root_for_project("workspace-registry", config_dir)
+        except _ProjectResolutionError:
+            return tool_error(
+                tool="candidate_orphan_finalize",
+                code="PROJECT_NOT_FOUND",
+                message="Source project is not registered or its root is unavailable.",
+                retryable=False,
+            )
+        except ValueError:
+            return tool_error(
+                tool="candidate_orphan_finalize",
+                code="INVALID_INPUT",
+                message="Workspace registry control plane is misconfigured.",
+                retryable=False,
+            )
+
+        audit_written = False
+        correlation_id = uuid.uuid4().hex
+        audit_metadata = {
+            "project_id": project_id,
+            "expected_base_sha": expected_base_sha,
+            "expected_branch": expected_branch,
+            "expected_source_project": source_project,
+            "recovery_mode": "delivered_base_subset_without_git_metadata",
+            "correlation_id": correlation_id,
+        }
+
+        def _reference_guard() -> None:
+            nonlocal audit_written
+            try:
+                _username, clone_url, token = _resolve_trusted_remote(source_root)
+                _host, owner, repo = _parse_gitea_remote(clone_url)
+            except (ManagedSourceBundleError, RuntimeError, ValueError) as exc:
+                raise CandidateCloneError(
+                    "CHECK_FAILED",
+                    "trusted candidate source remote identity could not be verified",
+                    retryable=True,
+                    details={"reference_check": "trusted_gitea_remote"},
+                ) from exc
+
+            asyncio.run(
+                _assert_no_open_candidate_pr_reference(
+                    token=token,
+                    owner=owner,
+                    repo=repo,
+                    expected_branch=expected_branch,
+                    expected_head_sha=expected_base_sha,
+                )
+            )
+            if not audit_written:
+                try:
+                    server_attr("get_audit_logger")().append_required(
+                        McpAuditEvent(
+                            event_type="mcp.candidate_orphan_destructive_intent",
+                            tool="candidate_orphan_finalize",
+                            action="candidate_orphan_finalize",
+                            decision="allow",
+                            reason="guarded delivered candidate orphan finalization",
+                            metadata=audit_metadata,
+                        )
+                    )
+                except AuditWriteError as exc:
+                    raise CandidateCloneError(
+                        "AUDIT_UNAVAILABLE",
+                        "audit log unavailable; candidate orphan finalization refused",
+                        retryable=True,
+                    ) from exc
+                audit_written = True
+
+        try:
+            with cleanup_remote_resolution_scope():
+                receipt = await asyncio.to_thread(
+                    _candidate_orphan_finalize,
+                    project_id,
+                    expected_base_sha,
+                    expected_branch,
+                    source_project,
+                    config_dir=config_dir,
+                    journal_root=journal_root,
+                    reference_guard=_reference_guard,
+                )
+        except CandidateCloneError as exc:
+            return tool_error(
+                tool="candidate_orphan_finalize",
+                code=exc.code,
+                message=exc.message,
+                retryable=exc.retryable,
+                details=exc.details,
+            )
+
+        if audit_written:
+            try:
+                server_attr("get_audit_logger")().append(
+                    McpAuditEvent(
+                        event_type="mcp.candidate_orphan_destructive_success",
+                        tool="candidate_orphan_finalize",
+                        action="candidate_orphan_finalize",
+                        decision="allow",
+                        reason="guarded delivered candidate orphan finalization completed",
+                        metadata=audit_metadata,
+                    )
+                )
+            except Exception:
+                pass
+
+        cache_reset = _reset_project_registry_caches()
+        result = receipt.as_dict()
+        result["cache_reset"] = cache_reset
+        return tool_success(
+            tool="candidate_orphan_finalize",
+            result=result,
+            success_text="Finalized delivered candidate orphan.",
+        )
+
+    return await run_tool_async(
+        tool="candidate_orphan_finalize",
+        title="Candidate orphan finalize",
+        fn=_run,
+        success_text="Finalized delivered candidate orphan.",
+    )
+
+
 def _integrate_impl(
     project: str,
     relative_path: str,
@@ -1092,6 +1229,9 @@ def register_all() -> None:
     register_tool("candidate_cleanup")(
         instrumented("candidate_cleanup")(candidate_cleanup)
     )
+    register_tool("candidate_orphan_finalize")(
+        instrumented("candidate_orphan_finalize")(candidate_orphan_finalize)
+    )
 
 
 __all__ = [
@@ -1103,4 +1243,5 @@ __all__ = [
     "prepare_candidate_clone",
     "candidate_adopt",
     "candidate_cleanup",
+    "candidate_orphan_finalize",
 ]

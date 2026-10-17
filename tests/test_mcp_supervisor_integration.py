@@ -830,7 +830,68 @@ async def test_candidate_adopt_allows_live_open_pr_because_adoption_is_nondestru
     assert client.calls == []
 
 
-def test_register_all_registers_exactly_seven_tools(monkeypatch):
+async def test_candidate_orphan_finalize_uses_fresh_reference_guard_and_required_audit(
+    tmp_path, immediate_run_tool_async, monkeypatch
+):
+    base = "a" * 40
+    client = _PullClient()
+    audit = _AuditLogger()
+    guard_calls: list[str] = []
+    _configure_cleanup_adapter(
+        tmp_path,
+        monkeypatch,
+        client=client,
+        audit=audit,
+        guard_calls=guard_calls,
+    )
+    captured: dict[str, object] = {}
+
+    def _finalize(
+        project_id,
+        expected_base_sha,
+        expected_branch,
+        expected_source_project,
+        *,
+        config_dir,
+        journal_root,
+        reference_guard,
+    ):
+        captured.update(
+            project_id=project_id,
+            base=expected_base_sha,
+            branch=expected_branch,
+            source=expected_source_project,
+            config_dir=config_dir,
+            journal_root=journal_root,
+        )
+        reference_guard()
+        reference_guard()
+        return _CleanupReceipt()
+
+    monkeypatch.setattr(supervisor, "_candidate_orphan_finalize", _finalize)
+
+    result = await supervisor.candidate_orphan_finalize(
+        "candidate-demo",
+        base,
+        "candidate/demo",
+        "demo",
+    )
+
+    assert result["ok"] is True
+    assert captured["project_id"] == "candidate-demo"
+    assert captured["base"] == base
+    assert captured["branch"] == "candidate/demo"
+    assert captured["source"] == "demo"
+    assert client.calls == [1, 1]
+    assert len(audit.required) == 1
+    assert audit.required[0].tool == "candidate_orphan_finalize"
+    assert audit.required[0].metadata["recovery_mode"] == (
+        "delivered_base_subset_without_git_metadata"
+    )
+    assert len(audit.success) == 1
+
+
+def test_register_all_registers_exactly_eight_tools(monkeypatch):
     registered: list[str] = []
 
     def _register(name):
@@ -853,6 +914,7 @@ def test_register_all_registers_exactly_seven_tools(monkeypatch):
         "prepare_candidate_clone",
         "candidate_adopt",
         "candidate_cleanup",
+        "candidate_orphan_finalize",
     ]
 
 
