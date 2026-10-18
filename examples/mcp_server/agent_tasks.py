@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import stat
+import subprocess
 import time
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
@@ -212,14 +213,29 @@ def validate_workflow_phase(workflow_phase: str | None) -> str:
 
 
 def _is_valid_shell_command(entry: str) -> bool:
-    """Return True if entry tokenizes as a shell command without dangling operators."""
+    """Parse a required check as POSIX shell syntax without executing it.
+
+    shlex alone accepts command fragments such as ``git status (note)``
+    that the verifier would execute as a syntax error after OpenCode succeeds.
+    """
     try:
         tokens = shlex.split(entry, posix=True)
     except ValueError:
         return False
-    if not tokens:
+    if not tokens or tokens[-1] in _TRAILING_OPERATORS:
         return False
-    return tokens[-1] not in _TRAILING_OPERATORS
+    try:
+        result = subprocess.run(
+            ["/bin/sh", "-n", "-c", entry],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 def _has_command_shape(tokens: list[str]) -> bool:

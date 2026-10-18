@@ -164,9 +164,25 @@ class TestValidateRequiredChecks:
                 validate_required_checks([bad])  # type: ignore[list-item]
 
     def test_rejects_invalid_shell_syntax(self):
-        for bad in ["pytest 'unterminated", "ruff check &&", "pytest |", "tox >"]:
+        for bad in [
+            "pytest 'unterminated",
+            "ruff check &&",
+            "pytest |",
+            "tox >",
+            "git status --porcelain (source unchanged)",
+            "pytest -q && (",
+            "pytest -q | | tee log",
+        ]:
             with pytest.raises(ValueError):
                 validate_required_checks([bad])
+
+    def test_accepts_shell_metacharacters_with_valid_quoting(self):
+        validate_required_checks([
+            "python3 -c 'print(\"hello (world)\")'",
+            "echo '(source unchanged)'",
+            "git status --porcelain",
+            "pytest -q && ruff check .",
+        ])
 
     def test_rejects_non_list_input(self):
         with pytest.raises(TypeError):
