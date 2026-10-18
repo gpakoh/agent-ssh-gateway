@@ -180,6 +180,39 @@ Open backlog count after cleanup: **34**
    `git_write_capabilities` to inspect FETCH_HEAD on the actual SSH plane.
    Preserve dirty work and fail closed on ambiguous refs.
 
+   **Canonical fast-forward partial-worktree failure (2026-10-18):**
+   The `agent-ssh-gateway` canonical `master@2ba0ee654bcab1` was 19
+   entries dirty. The unique evidence was delivered in PR #583, and the original
+   bytes were independently preserved as Git stash `939d2cae2f3e` (19 paths)
+   plus an access-restricted archive with SHA-256
+   `a73521a16dbf94e19c422abe3e69ecc438d7473550fae109339cd4bd5e884682`.
+   After guarded `git_fetch_ref(origin/master)` confirmed exact authoritative
+   `master@5ba215ed99427bbbd686927cc7fa7d3767f0d470`, the clean canonical
+   passed `git_write_capabilities` (index/objects/refs/head writeable).
+   `git_refresh_branch_to_head` failed exit 128 because Git could not create
+   four tracked files inside root-owned `scripts/`:
+   `js_chat_engine_deploy_contract_runner.py`,
+   `site_audit_crm_provisioner.py`,
+   `telegram_storage_deploy_contract_runner.py`,
+   `xloud_deploy_contract_runner.py` (`Permission denied`).
+   The failed operation left 58 dirty entries, including 17 newly created
+   untracked files. All tracked content was safely restored from exact old
+   HEAD and only those 17 operation-created files were removed by explicit
+   path; verified canonical `git status --porcelain` empty at old SHA,
+   stash and archive unchanged, remote `master` unaffected.
+
+   **Next:** extend same-execution-plane `git_write_capabilities` /
+   `git_refresh_branch_to_head` with bounded preflight for writing *new*
+   tracked paths and parent-directory permissions (including root-owned
+   directories); fail before checkout/index mutation with exact blocked paths,
+   preserve the clean old HEAD on error, and return audited recovery guidance.
+   Provide a narrowly scoped, owner-approved permissions repair or immutable
+   clean-checkout promotion, not generic recursive chmod/chown or raw reset.
+   Acceptance: regression reproducing root-owned `scripts/` with four absent
+   new files, verifies no dirty side effects and no HEAD/index drift on failure;
+   successful exact-SHA fast-forward after approved remediation, clean worktree,
+   and continued accessibility of all preserved 19-file evidence.
+
 6. ⬜ **Keep ChatGPT-visible tool schemas in parity with server manifests.**
    Tools can appear available in `tools_manifest` while missing or having a
    different callable schema in the ChatGPT resource catalog. PR-A measurement
