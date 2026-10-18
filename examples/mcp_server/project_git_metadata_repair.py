@@ -11,6 +11,7 @@ dirty.
 from __future__ import annotations
 
 import contextlib
+import errno
 import fcntl
 import hashlib
 import os
@@ -60,6 +61,7 @@ class ProjectGitMetadataRepairResult:
     quarantine_id: str
     already_repaired: bool
     tracked_worktree_clean: bool
+    quarantine_location: str = "sibling"
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -70,6 +72,7 @@ class ProjectGitMetadataRepairResult:
             "quarantine_id": self.quarantine_id,
             "already_repaired": self.already_repaired,
             "tracked_worktree_clean": self.tracked_worktree_clean,
+            "quarantine_location": self.quarantine_location,
         }
 
 
@@ -257,10 +260,11 @@ def repair_project_git_metadata(
 ) -> ProjectGitMetadataRepairResult:
     """Promote one exact replacement Git dir while preserving stale metadata.
 
-    The project parent must be writable because the stale ``.git`` is moved to
-    a deterministic sibling quarantine.  No file inside the stale metadata is
-    changed, which allows recovery even when that tree is owned by another Unix
-    user and completely read-only to the Gateway process.
+    The project parent must be writable for the usual sibling quarantine.
+    On EXDEV, stale metadata is atomically nested under the promoted Git dir
+    on the same filesystem so no untracked worktree directory is left behind.
+    No file inside the stale metadata is changed, including when it is
+    owned by another Unix user and read-only to the Gateway process.
     """
     replacement_dir = _normalize_replacement_dir(replacement_dir)
     expected_branch = _normalize_branch(expected_branch)
@@ -292,39 +296,57 @@ def repair_project_git_metadata(
         expected_current_head,
         expected_replacement_head,
     )
-    quarantine = parent / quarantine_id
+    sibling_quarantine = parent / quarantine_id
+    # A project root may be a bind mount while its parent is on another
+    # filesystem in the control-plane namespace. Preserve metadata on the
+    # same filesystem if the sibling rename fails specifically with EXDEV.
+    # Keep the cross-device fallback *inside* the replacement Git directory.
+    # Once promoted it becomes .git/<quarantine_id>, so ordinary git status
+    # stays clean and the original metadata remains preserved.
+    replacement_quarantine = replacement / quarantine_id
+    promoted_quarantine = canonical / quarantine_id
+    quarantine = sibling_quarantine
 
     with _repair_lock(journal_root):
-        # Idempotent reconciliation after an ambiguous transport response: if
-        # the exact promoted repo and exact displaced repo are both present,
-        # the requested transaction is already complete and must not be replayed.
+        # Reconcile either deterministic location after an ambiguous response.
+        # A second quarantine location is always contention, not permission
+        # to remove or replace another operator's preserved metadata.
+        quarantines = (sibling_quarantine, promoted_quarantine, replacement_quarantine)
+        present_quarantines = [
+            path for path in quarantines if path.exists() or path.is_symlink()
+        ]
         final_identity = None
         if canonical.exists() and not canonical.is_symlink():
             final_identity = _git_identity(canonical, project_root)
         if final_identity == (expected_branch, expected_replacement_head) and not replacement.exists():
-            if quarantine.exists() and not quarantine.is_symlink():
-                quarantine_identity = _git_identity(quarantine, project_root)
-                if quarantine_identity == (expected_branch, expected_current_head):
-                    if not _tracked_worktree_clean(canonical, project_root):
-                        raise _error(
-                            "WORKSPACE_CONTENDED",
-                            "Promoted Git metadata exists but tracked worktree no longer matches it.",
-                            retryable=True,
-                            details={"mutation_occurred": True},
+            if len(present_quarantines) == 1:
+                completed_quarantine = present_quarantines[0]
+                if not completed_quarantine.is_symlink():
+                    quarantine_identity = _git_identity(completed_quarantine, project_root)
+                    if quarantine_identity == (expected_branch, expected_current_head):
+                        if not _tracked_worktree_clean(canonical, project_root):
+                            raise _error(
+                                "WORKSPACE_CONTENDED",
+                                "Promoted Git metadata exists but tracked worktree no longer matches it.",
+                                retryable=True,
+                                details={"mutation_occurred": True},
+                            )
+                        return ProjectGitMetadataRepairResult(
+                            branch=expected_branch,
+                            previous_head=expected_current_head,
+                            replacement_head=expected_replacement_head,
+                            replacement_dir=replacement_dir,
+                            quarantine_id=quarantine_id,
+                            already_repaired=True,
+                            tracked_worktree_clean=True,
+                            quarantine_location=(
+                                "sibling" if completed_quarantine == sibling_quarantine else "gitdir"
+                            ),
                         )
-                    return ProjectGitMetadataRepairResult(
-                        branch=expected_branch,
-                        previous_head=expected_current_head,
-                        replacement_head=expected_replacement_head,
-                        replacement_dir=replacement_dir,
-                        quarantine_id=quarantine_id,
-                        already_repaired=True,
-                        tracked_worktree_clean=True,
-                    )
 
         _real_directory(canonical, label="Canonical .git")
         _real_directory(replacement, label="Replacement Git metadata")
-        if quarantine.exists() or quarantine.is_symlink():
+        if present_quarantines:
             raise _error(
                 "WORKSPACE_CONTENDED",
                 "Deterministic Git metadata quarantine already exists with non-reconcilable state.",
@@ -374,11 +396,26 @@ def repair_project_git_metadata(
 
         moved_old = False
         moved_replacement = False
+        failed_stage = "quarantine_sibling"
         try:
-            os.rename(canonical, quarantine)
+            try:
+                os.rename(canonical, quarantine)
+            except OSError as exc:
+                if exc.errno != errno.EXDEV:
+                    raise
+                # Never leave a Git metadata archive untracked in the worktree.
+                # The replacement .git and old .git live on the same filesystem;
+                # the archive moves with the replacement on promotion.
+                quarantine = replacement_quarantine
+                failed_stage = "quarantine_gitdir"
+                os.rename(canonical, quarantine)
             moved_old = True
+            failed_stage = "promote_replacement"
             os.rename(replacement, canonical)
+            if quarantine == replacement_quarantine:
+                quarantine = promoted_quarantine
             moved_replacement = True
+            failed_stage = "fsync"
             _fsync_directory(project_root)
             _fsync_directory(parent)
         except OSError as exc:
@@ -386,6 +423,8 @@ def repair_project_git_metadata(
             try:
                 if moved_replacement and canonical.exists() and not replacement.exists():
                     os.rename(canonical, replacement)
+                    if quarantine == promoted_quarantine:
+                        quarantine = replacement_quarantine
                 if moved_old and quarantine.exists() and not canonical.exists():
                     os.rename(quarantine, canonical)
                 rollback_ok = canonical.exists() and replacement.exists() and not quarantine.exists()
@@ -403,7 +442,11 @@ def repair_project_git_metadata(
                 "TOOL_EXECUTION_FAILED",
                 "Git metadata replacement failed; original metadata was restored.",
                 retryable=True,
-                details={"mutation_occurred": False},
+                details={
+                    "mutation_occurred": False,
+                    "failed_stage": failed_stage,
+                    "os_errno": errno.errorcode.get(exc.errno if exc.errno is not None else -1, "UNKNOWN"),
+                },
             ) from exc
 
         final_identity = _git_identity(canonical, project_root)
@@ -413,6 +456,8 @@ def repair_project_git_metadata(
             try:
                 if canonical.exists() and not replacement.exists():
                     os.rename(canonical, replacement)
+                    if quarantine == promoted_quarantine:
+                        quarantine = replacement_quarantine
                 if quarantine.exists() and not canonical.exists():
                     os.rename(quarantine, canonical)
                 rollback_ok = canonical.exists() and replacement.exists() and not quarantine.exists()
@@ -441,4 +486,7 @@ def repair_project_git_metadata(
             quarantine_id=quarantine_id,
             already_repaired=False,
             tracked_worktree_clean=True,
+            quarantine_location=(
+                "sibling" if quarantine == sibling_quarantine else "gitdir"
+            ),
         )
