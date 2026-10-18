@@ -141,6 +141,45 @@ Open backlog count after cleanup: **34**
    requiring candidate reconstruction. The response-lost/timeout ambiguity of
    the same incident is tracked under existing #51.
 
+   **NOD task/archive identity collision (2026-10-18, fold into #2):**
+   Clean candidate `gpakoh/NOD_gateway@746afde8` matches merged PR #106
+   and post-merge CI #17457, but cleanup failed. Task
+   `web-ui-security-current-audit-20261017` has archived original attempt
+   artifacts and a later live read-only task of the same ID. Agent status:
+   `attempt=null, terminal=false, artifact_incomplete=true`; cancel says
+   missing, archive says already exists, historical job is ambiguous.
+   **Next:** inspect both identities; preserve both artifact sets; implement a
+   fenced CAS/idempotent reconciliation only after independent terminal/owner
+   proof. Regress with colliding different artifacts, stale archived attempts,
+   interrupted retries and concurrent tasks. Unknown ownership fails closed.
+
+   **Merged-PR cleanup after branch deletion (2026-10-18):**
+   `js-chat-engine` PR #54 (`c61c5b9`) and `infra-quart` PR #407
+   (`bf98eff`, head `956e133`) reproduced
+   `CHECK_FAILED/gitea_merged_pull_request`: Gitea rewrites `head.ref`
+   after exact-SHA feature-branch deletion. Explicit
+   `archive/candidate-*` ref recovered js-chat-engine cleanup. Infra-quart
+   then encountered `WORKSPACE_CONTENDED` from an incompatible pre-existing
+   cleanup tombstone when switching preservation modes.
+   **Next:** verify exact merged head and ancestry independent of mutable ref;
+   expose read-only tombstone identity and guarded resume/recovery.
+   Negative regressions: foreign/unmerged PR, wrong SHA, dirty candidate,
+   unknown ancestry and conflicting tombstone. The delivered
+   `abandon_unmodified` mode is not a substitute for merged delivery proof.
+
+   **Exact-base and Git write-plane edge cases (2026-10-17–18):**
+   `clicker_orchestrator` got `SOURCE_REPO_STALE` on exact
+   `main@96f932dc` with dirty/read-only canonical; `infra-quart` snapshot
+   candidate could not fetch newer `main@bf98eff` because its origin
+   was a local bundle (`GIT_REMOTE_NOT_ALLOWED`). Conversely, preparing
+   the Gateway's exact `master@e00c1507` with dirty canonical succeeded.
+   **Next:** test exact trusted remote materialization and forward-port for
+   both restrictive cases; require immutable SHA/identity and no canonical
+   mutation. Separately, js-chat-engine Git preflight claimed metadata fully
+   writable yet `.git/FETCH_HEAD` failed `Permission denied`: extend
+   `git_write_capabilities` to inspect FETCH_HEAD on the actual SSH plane.
+   Preserve dirty work and fail closed on ambiguous refs.
+
 6. ⬜ **Keep ChatGPT-visible tool schemas in parity with server manifests.**
    Tools can appear available in `tools_manifest` while missing or having a
    different callable schema in the ChatGPT resource catalog. PR-A measurement
