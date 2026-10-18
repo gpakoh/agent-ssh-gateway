@@ -213,3 +213,119 @@ def probe_git_write_capabilities(
 def probe_script_for_tests(branch: str | None = None) -> str:
     """Expose the bound script for regression assertions without duplicating it."""
     return _build_probe_script(branch)
+
+
+# Kept separate from the metadata lock probe: checkout also needs permission to
+# create/replace tracked worktree paths, not just to update refs and index.
+_REFRESH_PATH_SCRIPT = r"""python3 - <<'PY'
+import json
+import os
+import pathlib
+import stat
+import subprocess
+
+old = "__CURRENT_HEAD__"
+new = "__TARGET_HEAD__"
+result = subprocess.run(
+    ["git", "diff", "--name-only", "--no-renames", "--diff-filter=ACMRT", "-z", old, new],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    check=False,
+    timeout=20,
+)
+if result.returncode:
+    raise SystemExit("cannot inspect exact-head changed paths")
+
+raw_names = result.stdout.split(bytes([0]))
+if raw_names[-1:] != [b""]:
+    raise SystemExit("malformed NUL-delimited git diff")
+names = raw_names[:-1]
+if len(names) > 10000:
+    raise SystemExit("changed-path preflight bound exceeded")
+
+root = pathlib.Path.cwd()
+blocked = []
+for raw in names:
+    name = os.fsdecode(raw)
+    rel = pathlib.PurePosixPath(name)
+    if not name or rel.is_absolute() or ".." in rel.parts or rel.parts[0] == ".":
+        raise SystemExit("unsafe path in git changed-path preflight")
+    parent = root
+    invalid_parent = False
+    for component in rel.parts[:-1]:
+        candidate = parent / component
+        try:
+            meta = candidate.lstat()
+        except FileNotFoundError:
+            break
+        if not stat.S_ISDIR(meta.st_mode) or stat.S_ISLNK(meta.st_mode):
+            invalid_parent = True
+            break
+        parent = candidate
+    if invalid_parent:
+        blocked.append({"path": name, "reason": "unsafe_parent"})
+    elif not os.access(parent, os.W_OK | os.X_OK):
+        blocked.append({"path": name, "reason": "parent_not_writeable"})
+
+print(json.dumps({
+    "available": True,
+    "checked_count": len(names),
+    "blocked_count": len(blocked),
+    "blocked_paths": blocked[:40],
+}, ensure_ascii=True, separators=(",", ":")))
+PY"""
+
+
+def probe_git_refresh_worktree_paths(
+    client: Any, project: str, *, current_head: str, target_head: str
+) -> dict[str, Any]:
+    """Read-only exact-diff destination permission preflight on the SSH plane.
+
+    This is a non-atomic check: a concurrent permission change may still make
+    Git fail, so callers must retain error classification and unknown-mutation
+    recovery. No parent directory, file, lock, or temporary repository is
+    created by this probe.
+    """
+    if not all(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha) for sha in (current_head, target_head)):
+        raise ValueError("INVALID_INPUT: exact Git commit SHA required for worktree preflight")
+    script = _REFRESH_PATH_SCRIPT.replace("__CURRENT_HEAD__", current_head).replace(
+        "__TARGET_HEAD__", target_head
+    )
+    try:
+        raw = client.execute_project_script(project, script, timeout_s=30)
+    except Exception:
+        return {"available": False, "reason": "probe_transport_failed", "non_mutating": True}
+    if raw.get("exit_code") != 0:
+        return {"available": False, "reason": "probe_command_failed", "non_mutating": True}
+    try:
+        import json
+
+        parsed = json.loads(str(raw.get("stdout", "")))
+        if (
+            not isinstance(parsed, dict)
+            or parsed.get("available") is not True
+            or type(parsed.get("checked_count")) is not int
+            or type(parsed.get("blocked_count")) is not int
+            or not isinstance(parsed.get("blocked_paths"), list)
+            or parsed["checked_count"] < 0
+            or parsed["blocked_count"] < 0
+            or parsed["blocked_count"] > parsed["checked_count"]
+            or len(parsed["blocked_paths"]) != min(parsed["blocked_count"], 40)
+            or any(
+                not isinstance(item, dict)
+                or not isinstance(item.get("path"), str)
+                or item.get("reason") not in {"unsafe_parent", "parent_not_writeable"}
+                for item in parsed["blocked_paths"]
+            )
+        ):
+            raise ValueError("invalid worktree permission evidence")
+    except (ValueError, TypeError):
+        return {"available": False, "reason": "malformed_probe_output", "non_mutating": True}
+    return {
+        "available": True,
+        "blocked_paths": parsed["blocked_paths"],
+        "blocked_count": parsed["blocked_count"],
+        "checked_count": parsed["checked_count"],
+        "non_mutating": True,
+        "execution_plane": "ssh_project",
+    }
