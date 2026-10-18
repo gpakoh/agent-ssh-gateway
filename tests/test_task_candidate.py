@@ -70,6 +70,8 @@ def _write_evidence(
     monkeypatch: pytest.MonkeyPatch,
     *,
     required_checks: list[str],
+    patch: str | None = None,
+    allowed_files: list[str] | None = None,
 ) -> tuple[str, Path]:
     state = root.parent / "state"
     candidate = root.parent / "candidate-store"
@@ -78,22 +80,23 @@ def _write_evidence(
     base = _git(root, "rev-parse", "HEAD")
     td = Path(task_dir(PROJECT, TASK))
     td.mkdir(parents=True)
-    patch = (
-        "diff --git a/base.txt b/base.txt\n"
-        "index df967b9..257cc56 100644\n"
-        "--- a/base.txt\n"
-        "+++ b/base.txt\n"
-        "@@ -1 +1 @@\n"
-        "-base\n"
-        "+candidate\n"
-    )
+    if patch is None:
+        patch = (
+            "diff --git a/base.txt b/base.txt\n"
+            "index df967b9..257cc56 100644\n"
+            "--- a/base.txt\n"
+            "+++ b/base.txt\n"
+            "@@ -1 +1 @@\n"
+            "-base\n"
+            "+candidate\n"
+        )
     (td / "base-head.txt").write_text(base + "\n", encoding="ascii")
     (td / "implementation-diff.patch").write_text(patch, encoding="utf-8")
     record_task_delivery_contract(
         project=PROJECT,
         task_id=TASK,
         base_ref=base,
-        allowed_files=["base.txt"],
+        allowed_files=allowed_files if allowed_files is not None else ["base.txt"],
         forbidden_files=[],
         required_checks=required_checks,
     )
@@ -266,6 +269,62 @@ def test_materialize_persists_verifier_evidence_and_digest(
     assert validated["candidate_head_sha"] == receipt["candidate_head_sha"]
     assert base == receipt["base_head"] or len(receipt["base_head"]) == 40
     assert staging.is_dir()
+
+
+def test_materialize_gitlink_only_patch_stages_exact_submodule_sha(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The trusted staging path must commit a mode-160000-only patch."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    old = "40f9d61cfe434f64cf9f7c9270b2c522f63213c7"
+    new = "b596c0dc569fb3e0e8573675c11ff30dc54ec631"
+    _git(root, "update-index", "--add", "--cacheinfo", f"160000,{old},gateway_client")
+    _git(root, "commit", "-q", "-m", "base includes gitlink")
+    base = _git(root, "rev-parse", "HEAD")
+
+    # Gitlinks represent external commit IDs: the submodule's repository
+    # need not be initialized in the parent's materialization checkout.
+    _git(root, "update-index", "--cacheinfo", f"160000,{new},gateway_client")
+    patch = _git(root, "diff", "--cached", "--", "gateway_client") + "\n"
+    _git(root, "reset", "--hard", "HEAD")
+    assert _git(root, "ls-tree", "HEAD", "gateway_client") == (
+        f"160000 commit {old}\tgateway_client"
+    )
+
+    checks = ["git ls-tree HEAD gateway_client"]
+    _, td = _write_evidence(
+        root,
+        monkeypatch,
+        required_checks=checks,
+        patch=patch,
+        allowed_files=["gateway_client"],
+    )
+
+    def verify(repo: Path, head: str, required: list[str]) -> dict[str, Any]:
+        assert _git(repo, "ls-tree", "HEAD", "gateway_client") == (
+            f"160000 commit {new}\tgateway_client"
+        )
+        assert _git(repo, "diff", "--name-only", base, head) == "gateway_client"
+        assert _git(repo, "status", "--porcelain") == ""
+        return _verifier_receipt(head, required)
+
+    receipt = materialize_task_candidate(
+        project_root=root,
+        project=PROJECT,
+        task_id=TASK,
+        destination_owner=OWNER,
+        destination_repo=REPO,
+        destination_branch=BRANCH,
+        expected_diff_sha256=_diff_sha(td),
+        job_result=_job_success,
+        verify_candidate=verify,
+    )
+
+    assert receipt["base_head"] == base
+    assert receipt["candidate_head_sha"] != base
+    validated, _ = _validate(root, receipt["candidate_head_sha"])
+    assert validated["candidate_head_sha"] == receipt["candidate_head_sha"]
 
 
 def re_fullmatch_sha256(value: str) -> bool:

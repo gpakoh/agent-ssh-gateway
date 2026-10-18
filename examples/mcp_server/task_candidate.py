@@ -1328,7 +1328,12 @@ def _materialize_task_candidate_unlocked(
         )
         patch_path = tmp / "implementation-diff.patch"
         patch_path.write_bytes(evidence["implementation_diff"])
-        _run_git(repo_tmp, ["apply", "--binary", str(patch_path)], env=clean_env)
+        # Stage the reviewed patch against the exact checked-out BASE_HEAD.
+        # A gitlink-only (mode 160000) patch has no normal worktree file:
+        # git apply without --index followed by git add -A silently yields
+        # an empty index diff and git commit fails. --index also rejects
+        # patches whose preimage no longer matches the trusted base.
+        _run_git(repo_tmp, ["apply", "--index", "--binary", str(patch_path)], env=clean_env)
         _run_git(repo_tmp, ["add", "-A", "--", "."], env=clean_env)
         _run_git(repo_tmp, ["commit", "--quiet", "--no-gpg-sign", "-m", f"task candidate {project}/{task_id}"], env=commit_env)
         candidate_head = _validate_sha1(
