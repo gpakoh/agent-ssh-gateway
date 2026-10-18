@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 import subprocess
@@ -186,6 +187,154 @@ def test_second_rename_failure_rolls_back_original_metadata(
     assert (repo / ".git.repair-current").is_dir()
     quarantine_names = list(repo.parent.glob(".demo.git-quarantine-*"))
     assert quarantine_names == []
+
+
+
+
+def test_cross_device_sibling_quarantine_uses_atomic_in_worktree_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo, journal, old_head, new_head = _fixture(tmp_path)
+    real_rename = os.rename
+    cross_device_attempts = 0
+
+    def cross_device_sibling(src, dst, *args, **kwargs):
+        nonlocal cross_device_attempts
+        if Path(src) == repo / ".git" and Path(dst).parent == repo.parent:
+            cross_device_attempts += 1
+            raise OSError(errno.EXDEV, "injected cross-device quarantine")
+        return real_rename(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(repair_module.os, "rename", cross_device_sibling)
+    first = _repair(repo, journal, old_head, new_head)
+    assert first.quarantine_location == "gitdir"
+    assert first.as_dict()["quarantine_location"] == "gitdir"
+    assert cross_device_attempts == 1
+    assert (repo / ".git" / first.quarantine_id).is_dir()
+    assert not (repo / first.quarantine_id).exists()
+    assert not (repo.parent / first.quarantine_id).exists()
+    assert _git(repo, "rev-parse", "HEAD") == new_head
+    assert _git(repo, "status", "--porcelain=v1", "--untracked-files=all") == ""
+
+    again = _repair(repo, journal, old_head, new_head)
+    assert again.already_repaired is True
+    assert again.quarantine_location == "gitdir"
+    assert cross_device_attempts == 1
+
+
+def test_existing_nested_metadata_quarantine_blocks_without_mutation(
+    tmp_path: Path,
+) -> None:
+    repo, journal, old_head, new_head = _fixture(tmp_path)
+    quarantine = repo / ".git.repair-current" / repair_module._quarantine_name(
+        repo, old_head, new_head
+    )
+    quarantine.mkdir()
+    (quarantine / "do-not-delete.txt").write_text("unrelated preserved data", encoding="utf-8")
+
+    with pytest.raises(ProjectGitMetadataRepairError) as raised:
+        _repair(repo, journal, old_head, new_head)
+
+    assert raised.value.code == "WORKSPACE_CONTENDED"
+    assert raised.value.details["mutation_occurred"] is False
+    assert _git(repo, "rev-parse", "HEAD") == old_head
+    assert (repo / ".git.repair-current").is_dir()
+    assert (quarantine / "do-not-delete.txt").read_text(encoding="utf-8") == "unrelated preserved data"
+
+
+def test_non_exdev_quarantine_error_rolls_back_and_exposes_safe_errno(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo, journal, old_head, new_head = _fixture(tmp_path)
+    real_rename = os.rename
+
+    def permission_denied(src, dst, *args, **kwargs):
+        if Path(src) == repo / ".git" and Path(dst).parent == repo.parent:
+            raise OSError(errno.EPERM, "injected metadata permissions")
+        return real_rename(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(repair_module.os, "rename", permission_denied)
+    with pytest.raises(ProjectGitMetadataRepairError) as raised:
+        _repair(repo, journal, old_head, new_head)
+    assert raised.value.code == "TOOL_EXECUTION_FAILED"
+    assert raised.value.details == {
+        "mutation_occurred": False,
+        "failed_stage": "quarantine_sibling",
+        "os_errno": "EPERM",
+    }
+    assert _git(repo, "rev-parse", "HEAD") == old_head
+    assert (repo / ".git.repair-current").is_dir()
+    assert not list(repo.parent.glob(".demo.git-quarantine-*"))
+    assert not list(repo.glob(".demo.git-quarantine-*"))
+
+
+def test_cross_device_fallback_failure_rolls_back_original_git(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo, journal, old_head, new_head = _fixture(tmp_path)
+    real_rename = os.rename
+
+    def fallback_denied(src, dst, *args, **kwargs):
+        if Path(src) == repo / ".git":
+            if Path(dst).parent == repo.parent:
+                raise OSError(errno.EXDEV, "injected cross-device boundary")
+            if Path(dst).parent == repo / ".git.repair-current":
+                raise OSError(errno.EBUSY, "injected busy mount")
+        return real_rename(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(repair_module.os, "rename", fallback_denied)
+    with pytest.raises(ProjectGitMetadataRepairError) as raised:
+        _repair(repo, journal, old_head, new_head)
+    assert raised.value.code == "TOOL_EXECUTION_FAILED"
+    assert raised.value.details["failed_stage"] == "quarantine_gitdir"
+    assert raised.value.details["os_errno"] == "EBUSY"
+    assert _git(repo, "rev-parse", "HEAD") == old_head
+    assert (repo / ".git.repair-current").is_dir()
+    assert not list(repo.parent.glob(".demo.git-quarantine-*"))
+    assert not list(repo.glob(".demo.git-quarantine-*"))
+
+@pytest.mark.parametrize("fail_stage", ["promotion", "fsync"])
+def test_cross_device_nested_quarantine_rolls_back_without_losing_old_git(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fail_stage: str
+) -> None:
+    repo, journal, old_head, new_head = _fixture(tmp_path)
+    real_rename = os.rename
+    real_fsync = repair_module._fsync_directory
+    promoted = False
+
+    def injected_rename(src, dst, *args, **kwargs):
+        nonlocal promoted
+        if Path(src) == repo / ".git" and Path(dst).parent == repo.parent:
+            raise OSError(errno.EXDEV, "injected cross-device sibling rename")
+        if Path(src) == repo / ".git.repair-current" and Path(dst) == repo / ".git":
+            if fail_stage == "promotion":
+                raise OSError(errno.EBUSY, "injected promotion failure")
+            promoted = True
+        return real_rename(src, dst, *args, **kwargs)
+
+    fsync_injected = False
+
+    def injected_fsync(path):
+        nonlocal fsync_injected
+        if promoted and fail_stage == "fsync" and not fsync_injected:
+            # Fail only once; the rollback must be able to sync its result.
+            fsync_injected = True
+            raise OSError(errno.EIO, "injected post-promotion fsync failure")
+        return real_fsync(path)
+
+    monkeypatch.setattr(repair_module.os, "rename", injected_rename)
+    monkeypatch.setattr(repair_module, "_fsync_directory", injected_fsync)
+    with pytest.raises(ProjectGitMetadataRepairError) as raised:
+        _repair(repo, journal, old_head, new_head)
+
+    assert raised.value.code == "TOOL_EXECUTION_FAILED"
+    assert raised.value.details["mutation_occurred"] is False
+    assert _git(repo, "rev-parse", "HEAD") == old_head
+    assert (repo / ".git.repair-current").is_dir()
+    assert not list(repo.glob(".demo.git-quarantine-*"))
+    assert not list((repo / ".git").glob(".demo.git-quarantine-*"))
+    assert not list((repo / ".git.repair-current").glob(".demo.git-quarantine-*"))
+    assert not list(repo.parent.glob(".demo.git-quarantine-*"))
 
 
 def test_tool_is_write_mode_only_and_requires_project_plus_admin() -> None:
