@@ -460,7 +460,10 @@ def _configure_cleanup_adapter(
         journal_root,
         reference_guard,
         delivery_guard=None,
+        abandon_unmodified=False,
     ):
+        if abandon_unmodified:
+            guard_calls.append("abandon")
         del project_id, expected_head_sha, expected_branch, expected_source_project
         del preserved_ref, config_dir, journal_root
         if delivery_guard is not None:
@@ -509,6 +512,46 @@ async def test_candidate_cleanup_accepts_exact_merged_pr_delivery_without_archiv
     assert audit.required[0].metadata["preservation_mode"] == "merged_pull_request"
     assert audit.required[0].metadata["delivery_pull_number"] == 28
     assert audit.required[0].metadata["delivery_merge_commit_sha"] == "c" * 40
+
+
+async def test_candidate_cleanup_abandons_only_with_explicit_opt_in(
+    tmp_path, immediate_run_tool_async, monkeypatch
+):
+    client = _PullClient()
+    audit = _AuditLogger()
+    guard_calls: list[str] = []
+    _configure_cleanup_adapter(
+        tmp_path, monkeypatch, client=client, audit=audit, guard_calls=guard_calls
+    )
+    result = await supervisor.candidate_cleanup(
+        "candidate-demo", "a" * 40, "candidate/demo", "demo", abandon_unmodified=True
+    )
+    assert result["ok"] is True
+    assert client.closed_calls == []
+    assert client.calls == [1, 1, 1]
+    assert guard_calls == ["abandon", "first", "second", "third"]
+    assert len(audit.required) == 1
+    assert audit.required[0].metadata["preservation_mode"] == "abandon_unmodified"
+
+
+async def test_candidate_cleanup_rejects_archive_and_abandon_combination(
+    tmp_path, immediate_run_tool_async, monkeypatch
+):
+    client = _PullClient()
+    audit = _AuditLogger()
+    guard_calls: list[str] = []
+    _configure_cleanup_adapter(
+        tmp_path, monkeypatch, client=client, audit=audit, guard_calls=guard_calls
+    )
+    result = await supervisor.candidate_cleanup(
+        "candidate-demo", "a" * 40, "candidate/demo", "demo",
+        preserved_ref="archive/candidate-demo", abandon_unmodified=True,
+    )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INVALID_INPUT"
+    assert audit.required == []
+    assert client.calls == []
+    assert guard_calls == []
 
 
 async def test_candidate_cleanup_rejects_closed_unmerged_pr_without_archive(
