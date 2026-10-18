@@ -180,6 +180,39 @@ Open backlog count after cleanup: **34**
    `git_write_capabilities` to inspect FETCH_HEAD on the actual SSH plane.
    Preserve dirty work and fail closed on ambiguous refs.
 
+   **Clicker Git metadata recovery blocked by control-plane EACCES
+   (2026-10-18, same write-plane contract):** The live
+   `supervisor_repair_project_git_metadata` on Gateway
+   `master@6b67a8d2b1b1f3e88ae4c519cdee66b1b9667c6b` refused an
+   exact-lease swap of `clicker_orchestrator` from root-owned canonical
+   `main@c96d43c76a5b33ad1dfd940f4f707c166ed4b164` to
+   `main@481a1fe0e14437da9a2ffe9ec9d840c663425dc6`.
+   The replacement `.git.repair-74f608a1` was proven to contain the
+   exact `HEAD` and `origin/main`, with zero tracked worktree changes.
+   Post-merge Clicker Actions #17522 passed on that SHA. The repair
+   returned `TOOL_EXECUTION_FAILED` with
+   `failed_stage=quarantine_sibling`, `os_errno=EACCES`,
+   `mutation_occurred=false`; the original `.git` and replacement
+   were independently verified intact afterward. The SSH execution
+   plane reports the project directory writable (mode 0777) while
+   canonical `.git` is root-owned and read-only to that user; the
+   supervisor's control-plane rename authority is demonstrably
+   different. PR #585 provides an `EXDEV` quarantine fallback, but
+   `EACCES` is not `EXDEV` and must not be treated as one.
+
+   **Required recovery:** surface actual control-plane/SSH-plane
+   permission and mount diagnostics before mutation, with no arbitrary
+   path or credentials exposed; provide an owner-approved bounded
+   same-execution-plane promotion using exact old/new SHA leases,
+   parent/path allowlists, a durable quarantine, idempotent replay,
+   mandatory audit and rollback. Do not work around `EACCES` with
+   generic `chmod/chown/sudo`, raw shell `mv`, or a broader
+   unrestricted execution surface. **Acceptance:** Git metadata can
+   be switched to exact `481a1fe0...` in canonical Clicker, tracked
+   status remains clean, no historical objects/refs are lost, the
+   prior `.git` is recoverable, `origin/main` matches remote, and
+   residual `.git.remote-main` is classified before separate cleanup.
+
    **Canonical fast-forward partial-worktree failure (2026-10-18):**
    The `agent-ssh-gateway` canonical `master@2ba0ee654bcab1` was 19
    entries dirty. The unique evidence was delivered in PR #583, and the original
