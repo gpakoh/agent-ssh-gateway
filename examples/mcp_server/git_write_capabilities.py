@@ -227,7 +227,7 @@ import subprocess
 old = "__CURRENT_HEAD__"
 new = "__TARGET_HEAD__"
 result = subprocess.run(
-    ["git", "diff", "--name-only", "--no-renames", "--diff-filter=ACMRT", "-z", old, new],
+    ["git", "diff", "--name-only", "--no-renames", "--diff-filter=ACMRTD", "-z", old, new],
     stdout=subprocess.PIPE,
     stderr=subprocess.PIPE,
     check=False,

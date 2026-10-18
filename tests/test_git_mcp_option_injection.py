@@ -217,6 +217,48 @@ def test_git_refresh_branch_refuses_unwriteable_new_tracked_path_before_checkout
     assert _git(repo, "status", "--porcelain=v1") == ""
 
 
+def test_git_refresh_refuses_unwriteable_deleted_tracked_path_before_checkout(tmp_path):
+    """Deleting a tracked file needs its parent's write permission too."""
+    import os
+    from unittest.mock import patch
+
+    repo, _ = _init_merge_repo(tmp_path)
+    _git(repo, "switch", "feature/update")
+    scripts = repo / "scripts"
+    scripts.mkdir()
+    old_runner = scripts / "old_runner.py"
+    old_runner.write_text("print('old')\\n", encoding="utf-8")
+    _git(repo, "add", "scripts/old_runner.py")
+    _git(repo, "commit", "-m", "old deploy runner")
+    old_head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "rm", "scripts/old_runner.py")
+    _git(repo, "commit", "-m", "remove deploy runner")
+    target_head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "reset", "--hard", old_head)
+    old_index = (repo / ".git" / "index").read_bytes()
+    scripts.chmod(0o555)
+    client = _LocalGitClient(repo)
+    try:
+        assert not os.access(scripts, os.W_OK)
+        with patch("mcp_client_tools._resolve_project", return_value=repo):
+            result = git_refresh_branch_to_head(
+                client, "proj", "feature/update", old_head, target_head
+            )
+        assert result["ok"] is False
+        assert result["error"]["code"] == "GIT_WRITE_CAPABILITY_BLOCKED", result
+        assert result["error"]["details"]["blocked_paths"] == [
+            {"path": "scripts/old_runner.py", "reason": "parent_not_writeable"}
+        ]
+        assert result["error"]["details"]["mutation_occurred"] is False
+        assert client.commands == []
+        assert _git(repo, "rev-parse", "HEAD") == old_head
+        assert (repo / ".git" / "index").read_bytes() == old_index
+        assert _git(repo, "status", "--porcelain=v1") == ""
+        assert old_runner.read_text(encoding="utf-8") == "print('old')\\n"
+    finally:
+        scripts.chmod(0o755)
+
+
 def test_git_refresh_branch_fails_closed_if_path_probe_unavailable(tmp_path):
     """A broken same-plane path probe never falls back to an unsafe reset."""
     from unittest.mock import patch
