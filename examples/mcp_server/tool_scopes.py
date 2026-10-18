@@ -82,6 +82,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "git_write_capabilities": ["mcp:read", "mcp:project"],
     "git_status": ["mcp:project"],
     "git_add": ["mcp:project"],
+    "git_set_gitlink": ["mcp:project"],
     "git_commit": ["mcp:project"],
     "git_create_branch": ["mcp:project"],
     "git_fetch_ref": ["mcp:project"],

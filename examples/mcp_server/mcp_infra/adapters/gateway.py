@@ -36,6 +36,7 @@ from mcp_client_tools import (
     git_fetch_ref,
     git_push,
     git_refresh_branch_to_head,
+    git_set_gitlink,
     git_status,
     git_update_branch_by_merge,
     git_write_capabilities,
@@ -946,6 +947,33 @@ def gateway_git_add(project: str, paths: list[str]) -> dict[str, Any]:
     )
 
 
+def gateway_git_set_gitlink(
+    project: str,
+    path: str,
+    old_sha: str,
+    new_sha: str,
+    expected_head: str,
+    expected_branch: str,
+    expected_index_sha256: str,
+) -> dict[str, Any]:
+    """Stage one reviewed mode-160000 submodule pointer under exact index/HEAD leases."""
+    return run_tool(
+        tool="git_set_gitlink",
+        title="Stage guarded gitlink",
+        fn=lambda: git_set_gitlink(
+            _server_client(),
+            project,
+            path,
+            old_sha,
+            new_sha,
+            expected_head,
+            expected_branch,
+            expected_index_sha256,
+        ),
+        success_text="Staged exactly one Git submodule pointer.",
+    )
+
+
 def gateway_git_commit(
     project: str,
     message: str,
@@ -1363,6 +1391,7 @@ def register_all() -> None:
     register_tool("git_diff_stat")(gateway_git_diff_stat)
     register_tool("show_changes")(gateway_show_changes)
     register_tool("git_add")(gateway_git_add)
+    register_tool("git_set_gitlink")(gateway_git_set_gitlink)
     register_tool("git_commit")(gateway_git_commit)
     register_tool("git_create_branch")(gateway_git_create_branch)
     register_tool("git_fetch_ref")(gateway_git_fetch_ref)
