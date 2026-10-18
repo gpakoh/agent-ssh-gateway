@@ -859,8 +859,9 @@ async def candidate_cleanup(
     expected_branch: str,
     expected_source_project: str,
     preserved_ref: str | None = None,
+    abandon_unmodified: bool = False,
 ) -> dict[str, Any]:
-    """Guarded cleanup of one archived or already-merged candidate clone."""
+    """Guarded cleanup of one archived, merged, or proven-unmodified candidate clone."""
 
     async def _run() -> dict[str, Any]:
         try:
@@ -882,6 +883,11 @@ async def candidate_cleanup(
                 retryable=False,
             )
 
+        if type(abandon_unmodified) is not bool or (abandon_unmodified and preserved_ref is not None):
+            return tool_error(
+                tool="candidate_cleanup", code="INVALID_INPUT",
+                message="abandon_unmodified must be boolean and cannot be combined with preserved_ref",
+            )
         audit_written = False
         correlation_id = uuid.uuid4().hex
         audit_metadata = {
@@ -890,12 +896,12 @@ async def candidate_cleanup(
             "expected_branch": expected_branch,
             "expected_source_project": source_project,
             "preserved_ref": preserved_ref,
-            "preservation_mode": "archive_ref" if preserved_ref is not None else "merged_pull_request",
+            "preservation_mode": "abandon_unmodified" if abandon_unmodified else ("archive_ref" if preserved_ref is not None else "merged_pull_request"),
             "correlation_id": correlation_id,
         }
 
         delivery_guard = None
-        if preserved_ref is None:
+        if preserved_ref is None and not abandon_unmodified:
 
             def _delivery_guard() -> None:
                 try:
@@ -981,6 +987,7 @@ async def candidate_cleanup(
                     journal_root=journal_root,
                     reference_guard=_reference_guard,
                     delivery_guard=delivery_guard,
+                    **({"abandon_unmodified": True} if abandon_unmodified else {}),
                 )
         except CandidateCloneError as exc:
             return tool_error(

@@ -952,6 +952,56 @@ def _verify_candidate_clean(
         )
 
 
+def _require_unmodified_abandonment(candidate_root: Path, *, expected_head_sha: str, expected_branch: str) -> None:
+    """Refuse to discard even a clean candidate if it contains unique Git data.
+
+    The base identity is immutable provenance from prepare_candidate_clone; the
+    worktree and all local refs are checked separately at cleanup time.  An
+    unreachable object may represent work saved only in the Git object store.
+    """
+    metadata = _read_metadata(candidate_root)
+    if (
+        metadata.get("version") != 1
+        or metadata.get("base_sha") != expected_head_sha
+        or metadata.get("head") != expected_head_sha
+        or not re.fullmatch(r"[0-9a-f]{40}", str(metadata.get("base_ref", "")))
+        or metadata.get("base_ref") != expected_head_sha
+    ):
+        raise _fail(
+            "WORKSPACE_CONTENDED",
+            "abandoned candidate has no exact immutable unchanged-base proof",
+        )
+    refs = _run_git(
+        candidate_root,
+        ["for-each-ref", "--format=%(refname) %(objectname)"],
+        operation="inspect abandoned candidate refs",
+    ).splitlines()
+    expected_ref = f"refs/heads/{expected_branch} {expected_head_sha}"
+    if expected_ref not in refs or any(
+        line != expected_ref
+        and not (
+            line.startswith("refs/remotes/origin/")
+            and line.endswith(f" {expected_head_sha}")
+        )
+        for line in refs
+    ):
+        raise _fail(
+            "WORKSPACE_CONTENDED",
+            "abandoned candidate has extra or changed Git refs",
+        )
+    unreachable = _run_git(
+        candidate_root,
+        ["fsck", "--full", "--no-reflogs", "--unreachable"],
+        timeout=60,
+        operation="inspect abandoned candidate unreachable Git objects",
+    )
+    if unreachable.strip():
+        raise _fail(
+            "WORKSPACE_CONTENDED",
+            "abandoned candidate contains unreachable Git objects",
+        )
+
+
 def _is_resumable_partial_cleanup_tail(
     candidate_root: Path,
     *,
@@ -2411,6 +2461,7 @@ def candidate_cleanup(
     journal_root: Path,
     reference_guard: Callable[[], None],
     delivery_guard: Callable[[], None] | None = None,
+    abandon_unmodified: bool = False,
 ) -> CandidateCleanupReceipt:
     """Remove one exactly identified, safely preserved or delivered candidate clone.
 
@@ -2442,7 +2493,11 @@ def candidate_cleanup(
             "preserved_ref must be an explicit archive/candidate-* remote branch",
         )
     preserved_ref = validated_preserved_ref
-    if preserved_ref is None and not callable(delivery_guard):
+    if type(abandon_unmodified) is not bool:
+        raise _fail("INVALID_INPUT", "abandon_unmodified must be boolean")
+    if abandon_unmodified and (preserved_ref is not None or delivery_guard is not None):
+        raise _fail("INVALID_INPUT", "unmodified abandonment cannot use preservation or delivery evidence")
+    if preserved_ref is None and not abandon_unmodified and not callable(delivery_guard):
         raise _fail(
             "INVALID_INPUT",
             "preserved_ref or a fail-closed delivery_guard is required",
@@ -2469,6 +2524,8 @@ def candidate_cleanup(
         "preserved_ref": preserved_ref,
         "registry_root": expected_registry_root,
     }
+    if abandon_unmodified:
+        expected_identity["abandon_unmodified"] = True
 
     with _lineage_lock(workspace_root, expected_source_project, expected_branch):
         with project_registry_mutation_lock(journal_root):
@@ -2489,6 +2546,7 @@ def candidate_cleanup(
                 tombstone_id=tombstone_id,
                 reference_guard=reference_guard,
                 delivery_guard=delivery_guard,
+                abandon_unmodified=abandon_unmodified,
             )
 
 
@@ -2510,6 +2568,7 @@ def _cleanup_candidate_locked(
     tombstone_id: str,
     reference_guard: Callable[[], None],
     delivery_guard: Callable[[], None] | None,
+    abandon_unmodified: bool,
 ) -> CandidateCleanupReceipt:
     tombstone = _read_cleanup_tombstone(tombstone_path)
     previous_completed: dict[str, Any] | None = None
@@ -2557,9 +2616,9 @@ def _cleanup_candidate_locked(
             expected_head_sha,
             context="before existence check",
         )
-    else:
+    elif not abandon_unmodified:
         _enforce_delivery_guard(delivery_guard)
-    if preserved_ref is not None:
+    if preserved_ref is not None or abandon_unmodified:
         _require_delivery_branch_absent(
             source_root,
             expected_branch,
@@ -2634,6 +2693,8 @@ def _cleanup_candidate_locked(
             expected_registry_root=expected_registry_root,
         )
         _require_no_inbound_candidate_dependencies(candidates_root, candidate_root)
+        if abandon_unmodified:
+            _require_unmodified_abandonment(candidate_root, expected_head_sha=expected_head_sha, expected_branch=expected_branch)
 
     _enforce_reference_guard(reference_guard)
     if tombstone is None:
@@ -2680,9 +2741,9 @@ def _cleanup_candidate_locked(
                 expected_head_sha,
                 context="before filesystem removal",
             )
-        else:
+        elif not abandon_unmodified:
             _enforce_delivery_guard(delivery_guard)
-        if preserved_ref is not None:
+        if preserved_ref is not None or abandon_unmodified:
             _require_delivery_branch_absent(
                 source_root,
                 expected_branch,
@@ -2706,6 +2767,8 @@ def _cleanup_candidate_locked(
         _enforce_reference_guard(reference_guard)
         if not partial_cleanup_tail:
             _require_no_inbound_candidate_dependencies(candidates_root, candidate_root)
+            if abandon_unmodified:
+                _require_unmodified_abandonment(candidate_root, expected_head_sha=expected_head_sha, expected_branch=expected_branch)
         try:
             shutil.rmtree(candidate_root)
         except OSError as exc:
