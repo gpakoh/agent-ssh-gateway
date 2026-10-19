@@ -70,7 +70,8 @@ async def test_live_inventory_is_fixed_twice_and_never_authorizes() -> None:
     assert report["protected_dependencies"] == 6
     assert report["audit_targets"] == 5
     assert report["ingress_absent"] is True
-    assert "firewall_acl_unverified" in report["blockers"]
+    assert "wan_ipv4_exposure_unverified" in report["blockers"]
+    assert "wan_ipv6_exposure_unverified" in report["blockers"]
     assert "protected_compose_drift_unresolved" in report["blockers"]
     assert "immutable_image_missing" in report["blockers"]
     assert all(client.calls[name] == 2 for name in PROTECTED + TARGETS)

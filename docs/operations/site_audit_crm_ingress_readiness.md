@@ -23,13 +23,14 @@ The result always has `status: no_go` and `authorizes_mutation: false`,
 even if both snapshots match. A matching snapshot proves only that the observed
 container state was stable during those two reads. It does **not** prove there
 was no race after sampling or that the source, proxy route, host port, image,
-firewall, or deployment state is safe.
+WAN/DNAT/IPv6 exposure, or deployment state is safe.
 
 The separate pure function `evaluate_ingress_admission` checks the shape and
 consistency of a candidate evidence object. It is not an authorization engine:
 **the caller-supplied fields have no trust provenance** and are never accepted
-by a deployment operation. In particular, setting `host_firewall_acl_verified:
-true` in a test or arbitrary JSON is not firewall evidence.
+by a deployment operation. In particular, setting `wan_ipv4_port_forward_absent_verified: true` or
+`wan_ipv6_nonexposure_verified: true` in arbitrary JSON is not an
+independent router or host-network verification.
 
 ## Requirements for an actual ingress-only deploy operation
 
@@ -43,9 +44,19 @@ from the Site Audit operator checkout and its versioned
    and bound to a verified image ID.
 3. Any legacy CRM Compose hash or network drift must have an explicit reviewed
    compatibility attestation. Do not recreate DB/Web/Daemon to make hashes match.
-4. An authoritative firewall/routing verifier must prove an approved external
-   TLS-terminator source can reach the host bind, while other sources cannot.
-   An Nginx `geo` trust list alone cannot enforce this host boundary.
+4. The operator-approved topology has two **private** entry paths:
+   an authenticated TLS/Authelia terminator reaches a dedicated internal
+   service host, and the operator's private LAN may connect directly using
+   EspoCRM's own login. It does not permit direct WAN entry. Exact interface
+   addresses, private CIDRs and proxy identity belong to the **operator-owned
+   deployment attestation**, not a public repository. Validate both observed
+   endpoints against independently approved addresses within the approved
+   narrow service CIDR, and separately validate the authorized LAN CIDR.
+   Require absence of WAN IPv4 router/NAT forwarding and public IPv6 ingress.
+   Do not require a proxy-only host allowlist when private-LAN access is
+   explicitly approved. TCP reachability and proxy trust are separate:
+   only the specifically approved TLS terminator may supply forwarded identity;
+   do not trust the entire service or home LAN subnet.
 5. The existing protected and target snapshots must remain unchanged under a
    single exclusive operation lease, including revalidation at confirmation.
 6. Only the fixed `crm-ingress` service may be created, with `--no-deps` and
