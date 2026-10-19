@@ -72,10 +72,19 @@ def _evidence() -> dict[str, object]:
         "durable_receipt_ready": True,
         "listen_host": "0.0.0.0",
         "listen_port": 8094,
+        "tls_proxy_private_source": "172.20.30.1",
+        "operator_approved_tls_proxy_source": "172.20.30.1",
+        "operator_approved_service_cidr": "172.20.30.0/24",
+        "ingress_private_target": "172.20.30.3",
+        "operator_approved_private_ingress_target": "172.20.30.3",
         "trusted_tls_proxy_verified": True,
-        "host_firewall_acl_verified": True,
+        "private_proxy_route_verified": True,
         "forwarded_headers_restricted": True,
-        "allowed_proxy_source_matches_firewall": True,
+        "lan_access_cidr": "172.20.40.0/24",
+        "operator_approved_lan_access_cidr": "172.20.40.0/24",
+        "lan_access_operator_approved": True,
+        "wan_ipv4_port_forward_absent_verified": True,
+        "wan_ipv6_nonexposure_verified": True,
         "protected_before": _snapshot(PROTECTED),
         "protected_current": _snapshot(PROTECTED),
         "targets_before": _snapshot(TARGETS),
@@ -117,9 +126,18 @@ def test_even_verified_snapshot_cannot_authorize_mutation() -> None:
         ("port_8094_available", False, "host_port_unavailable_or_unknown"),
         ("listen_host", "127.0.0.1", "reviewed_bind_mismatch"),
         ("trusted_tls_proxy_verified", False, "trusted_proxy_unverified"),
-        ("host_firewall_acl_verified", None, "firewall_acl_unverified"),
-        ("allowed_proxy_source_matches_firewall", False, "proxy_firewall_mismatch"),
+        ("tls_proxy_private_source", "172.20.30.9", "reviewed_tls_proxy_source_mismatch"),
+        ("operator_approved_tls_proxy_source", "172.20.30.9", "reviewed_tls_proxy_source_mismatch"),
+        ("operator_approved_service_cidr", "172.20.31.0/24", "reviewed_tls_proxy_source_mismatch"),
+        ("ingress_private_target", "172.20.30.9", "reviewed_private_ingress_target_mismatch"),
+        ("operator_approved_private_ingress_target", "172.20.30.9", "reviewed_private_ingress_target_mismatch"),
+        ("private_proxy_route_verified", False, "private_proxy_route_unverified"),
         ("forwarded_headers_restricted", False, "forwarded_header_boundary_unverified"),
+        ("lan_access_cidr", "0.0.0.0/0", "lan_access_scope_mismatch"),
+        ("operator_approved_lan_access_cidr", "172.20.30.0/24", "lan_access_scope_mismatch"),
+        ("lan_access_operator_approved", False, "lan_access_not_approved"),
+        ("wan_ipv4_port_forward_absent_verified", None, "wan_ipv4_exposure_unverified"),
+        ("wan_ipv6_nonexposure_verified", None, "wan_ipv6_exposure_unverified"),
         ("control_network", "unknown", "control_network_unverified"),
         ("no_dependencies", False, "unsafe_compose_scope"),
         ("no_build", False, "unsafe_compose_scope"),
@@ -203,4 +221,40 @@ def test_audit_api_published_control_port_is_not_crm_ingress_bypass() -> None:
     assert "targets_host_port_exposed" not in result["blockers"]
     assert "targets_current_host_port_exposed" not in result["blockers"]
     assert result["status"] == "prerequisites_met"
+    assert result["authorizes_mutation"] is False
+
+def test_old_firewall_only_proof_is_insufficient_for_private_lan_policy() -> None:
+    evidence = _evidence()
+    evidence["wan_ipv4_port_forward_absent_verified"] = False
+    evidence["wan_ipv6_nonexposure_verified"] = False
+    evidence["host_firewall_acl_verified"] = True  # legacy flag cannot override WAN checks
+    evidence["allowed_proxy_source_matches_firewall"] = True
+    result = evaluate_ingress_admission(evidence)
+    assert "wan_ipv4_exposure_unverified" in result["blockers"]
+    assert "wan_ipv6_exposure_unverified" in result["blockers"]
+    assert result["authorizes_mutation"] is False
+
+
+def test_entire_10_10_service_subnet_cannot_impersonate_proxy() -> None:
+    evidence = _evidence()
+    evidence["tls_proxy_private_source"] = "172.20.30.0/24"
+    result = evaluate_ingress_admission(evidence)
+    assert "reviewed_tls_proxy_source_mismatch" in result["blockers"]
+    assert result["authorizes_mutation"] is False
+
+def test_private_sources_and_approved_scopes_must_match() -> None:
+    evidence = _evidence()
+    evidence["lan_access_cidr"] = "172.20.30.0/24"
+    evidence["operator_approved_lan_access_cidr"] = "172.20.30.0/24"
+    result = evaluate_ingress_admission(evidence)
+    assert "lan_access_scope_mismatch" in result["blockers"]
+    assert result["authorizes_mutation"] is False
+
+
+def test_unroutable_or_public_proxy_source_is_never_approved() -> None:
+    evidence = _evidence()
+    evidence["tls_proxy_private_source"] = "203.0.113.4"
+    evidence["operator_approved_tls_proxy_source"] = "203.0.113.4"
+    result = evaluate_ingress_admission(evidence)
+    assert "reviewed_tls_proxy_source_mismatch" in result["blockers"]
     assert result["authorizes_mutation"] is False

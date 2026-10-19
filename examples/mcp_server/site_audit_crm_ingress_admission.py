@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from ipaddress import IPv4Address, IPv4Network, ip_address, ip_network
 from typing import Any
 
 _SOURCE_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -42,6 +43,51 @@ _INGRESS = "site-audit-crm-ingress"
 
 def _is_hash(value: Any, pattern: re.Pattern[str]) -> bool:
     return isinstance(value, str) and pattern.fullmatch(value) is not None
+
+
+def _is_rfc1918_address(value: IPv4Address) -> bool:
+    # ipaddress.is_private also includes some documentation/reserved ranges.
+    # Only the three private RFC1918 ranges are valid operator LAN inputs.
+    octets = value.packed
+    return (
+        octets[0] == 10
+        or (octets[0] == 172 and 16 <= octets[1] <= 31)
+        or (octets[0] == 192 and octets[1] == 168)
+    )
+
+
+def _private_address(value: Any) -> IPv4Address | None:
+    """Reject broad/unroutable peer assertions; never grant address authority."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = ip_address(value)
+    except ValueError:
+        return None
+    if (
+        not isinstance(parsed, IPv4Address)
+        or not _is_rfc1918_address(parsed)
+    ):
+        return None
+    return parsed
+
+
+def _private_network(value: Any) -> IPv4Network | None:
+    """Require a narrow, explicit operator-owned private CIDR."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = ip_network(value, strict=True)
+    except ValueError:
+        return None
+    if (
+        not isinstance(parsed, IPv4Network)
+        or parsed.prefixlen < 24
+        or not _is_rfc1918_address(parsed.network_address)
+        or not _is_rfc1918_address(parsed.broadcast_address)
+    ):
+        return None
+    return parsed
 
 
 def _check_snapshot(
@@ -147,18 +193,55 @@ def evaluate_ingress_admission(evidence: Mapping[str, Any] | Any) -> dict[str, A
     if evidence.get("durable_receipt_ready") is not True:
         blockers.add("durable_receipt_missing")
 
-    # Only a host-enforced ACL can protect an all-interface bind. An nginx
-    # trust-list alone is not an authorization or a firewall.
+    # Public source must not embed operator addresses or infrastructure
+    # identifiers. Compare against *independently authenticated* operator
+    # evidence, not a caller-supplied address treated as approval.
+    # This pure validator still NEVER authorizes mutation.
     if evidence.get("listen_host") != "0.0.0.0" or evidence.get("listen_port") != 8094:
         blockers.add("reviewed_bind_mismatch")
+    approved_network = _private_network(evidence.get("operator_approved_service_cidr"))
+    source = _private_address(evidence.get("tls_proxy_private_source"))
+    approved_source = _private_address(evidence.get("operator_approved_tls_proxy_source"))
+    target = _private_address(evidence.get("ingress_private_target"))
+    approved_target = _private_address(evidence.get("operator_approved_private_ingress_target"))
+    if (
+        approved_network is None
+        or source is None
+        or approved_source is None
+        or source != approved_source
+        or source not in approved_network
+    ):
+        blockers.add("reviewed_tls_proxy_source_mismatch")
+    if (
+        approved_network is None
+        or target is None
+        or approved_target is None
+        or target != approved_target
+        or target == source
+        or target not in approved_network
+    ):
+        blockers.add("reviewed_private_ingress_target_mismatch")
     if evidence.get("trusted_tls_proxy_verified") is not True:
         blockers.add("trusted_proxy_unverified")
-    if evidence.get("host_firewall_acl_verified") is not True:
-        blockers.add("firewall_acl_unverified")
+    if evidence.get("private_proxy_route_verified") is not True:
+        blockers.add("private_proxy_route_unverified")
     if evidence.get("forwarded_headers_restricted") is not True:
         blockers.add("forwarded_header_boundary_unverified")
-    if evidence.get("allowed_proxy_source_matches_firewall") is not True:
-        blockers.add("proxy_firewall_mismatch")
+    lan = _private_network(evidence.get("lan_access_cidr"))
+    approved_lan = _private_network(evidence.get("operator_approved_lan_access_cidr"))
+    if (
+        lan is None
+        or approved_lan is None
+        or lan != approved_lan
+        or (approved_network is not None and lan.overlaps(approved_network))
+    ):
+        blockers.add("lan_access_scope_mismatch")
+    if evidence.get("lan_access_operator_approved") is not True:
+        blockers.add("lan_access_not_approved")
+    if evidence.get("wan_ipv4_port_forward_absent_verified") is not True:
+        blockers.add("wan_ipv4_exposure_unverified")
+    if evidence.get("wan_ipv6_nonexposure_verified") is not True:
+        blockers.add("wan_ipv6_exposure_unverified")
 
     before = evidence.get("protected_before")
     current = evidence.get("protected_current")
