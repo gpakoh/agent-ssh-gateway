@@ -302,6 +302,7 @@ TOOL_NAMES_BY_MODE["mcp_client_write"] = (
     "cancel_agent_task",
     "retry_agent_task",
     "git_add",
+    "git_set_gitlink",
     "git_commit",
     "git_create_branch",
     "git_fetch_ref",
