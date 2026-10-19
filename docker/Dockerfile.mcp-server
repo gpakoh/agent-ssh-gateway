@@ -58,6 +58,13 @@ COPY --chown=appuser:appuser app/ ./app/
 COPY --chown=appuser:appuser examples/ ./examples/
 COPY --chown=appuser:appuser scripts/ ./scripts/
 
+# Exercise the fixed CRM provisioning helper in the exact MCP image before
+# publishing it. --help performs only imports and argument parsing: no env,
+# Docker socket, network traffic, CRM API calls, or provision mutations.
+# This catches missing packaged scripts/dependencies that would otherwise
+# produce empty, non-JSON evidence only when a production preflight runs.
+RUN /app/.venv/bin/python /app/scripts/site_audit_crm_provisioner.py --help > /dev/null
+
 # Security: Create necessary directories.  The supervisor journal target is
 # pre-owned by appuser so a fresh named volume inherits a writable root when
 # Docker initializes it from the image; only mcp-oauth mounts that volume.
