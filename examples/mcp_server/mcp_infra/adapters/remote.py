@@ -517,13 +517,16 @@ def _branch_protection_snapshot(payload: Any) -> dict[str, Any]:
         raise ValueError("Gitea branch protection rule_name must be string or null")
     if branch_name is not None and not isinstance(branch_name, str):
         raise ValueError("Gitea branch protection branch_name must be string or null")
+    contexts = payload.get("status_check_contexts")
+    # Gitea reports null when required checks are explicitly disabled.
+    # Preserve strict rejection of null while checks are enabled.
+    if contexts is None and payload["enable_status_check"] is False:
+        contexts = []
     return {
         "rule_name": rule_name,
         "branch_name": branch_name,
         "enable_status_check": payload["enable_status_check"],
-        "status_check_contexts": _branch_protection_contexts(
-            payload.get("status_check_contexts")
-        ),
+        "status_check_contexts": _branch_protection_contexts(contexts),
         "required_approvals": approvals,
         "block_on_outdated_branch": payload["block_on_outdated_branch"],
         "block_on_rejected_reviews": payload["block_on_rejected_reviews"],

@@ -575,6 +575,54 @@ async def test_branch_protection_read_fingerprints_absence(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_branch_protection_read_disabled_null_yields_usable_cas_snapshot(monkeypatch):
+    client = FakeGovernanceClient(
+        protection=_protection(enable_status_check=False, status_check_contexts=None)
+    )
+    _setup(monkeypatch, client)
+
+    result = await remote.gitea_get_branch_protection("owner", "repo", PROTECTION_NAME)
+
+    assert result["ok"] is True
+    state = result["result"]["state"]
+    assert state["exists"] is True
+    assert state["protection"]["enable_status_check"] is False
+    assert state["protection"]["status_check_contexts"] == []
+    assert result["result"]["state_sha256"] == remote._branch_protection_state_sha256(
+        remote._branch_protection_state(
+            _protection(enable_status_check=False, status_check_contexts=[])
+        )
+    )
+
+    updated = await remote.gitea_set_branch_protection(
+        "owner", "repo", PROTECTION_NAME,
+        result["result"]["state_sha256"],
+        True, ["test", "postgres-readiness"], 0, True, True, True,
+        "enable required CI on an existing protected branch",
+    )
+    assert updated["ok"] is True
+    assert updated["result"]["changed"] is True
+    assert updated["result"]["state"]["protection"]["status_check_contexts"] == [
+        "postgres-readiness", "test",
+    ]
+    assert len(client.protection_update_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_branch_protection_read_rejects_null_if_checks_enabled(monkeypatch):
+    client = FakeGovernanceClient(
+        protection=_protection(enable_status_check=True, status_check_contexts=None)
+    )
+    _setup(monkeypatch, client)
+
+    result = await remote.gitea_get_branch_protection("owner", "repo", PROTECTION_NAME)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INVALID_INPUT"
+    assert client.protection_update_calls == []
+
+
+@pytest.mark.asyncio
 async def test_branch_protection_expected_absence_creates_and_verifies(monkeypatch):
     client = FakeGovernanceClient(protection=None)
     audit = _setup(monkeypatch, client)
