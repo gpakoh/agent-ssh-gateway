@@ -1,10 +1,11 @@
 {
   "mode": "mcp_client",
   "safe_mode": true,
-  "expected_safe_count": 84,
+  "expected_safe_count": 85,
   "expected_blocked_count": 36,
-  "expected_mcp_client_full_count": 115,
+  "expected_mcp_client_full_count": 116,
   "must_include": [
+    "docker_site_audit_crm_ingress_readiness",
     "docker_site_audit_deploy_status",
     "health",
     "info",

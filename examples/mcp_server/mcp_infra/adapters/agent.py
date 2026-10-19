@@ -349,28 +349,62 @@ def _agent_router_terminal_observer() -> Callable[[str, dict[str, Any]], None] |
 
 
 def _normalize_single_agent_submission(tool: str, result: dict[str, Any]) -> dict[str, Any]:
-    """Fail honestly when a single-agent pre-submit path returns status=error.
+    """Bind the outer envelope to the actual single-agent submission receipt.
 
     project_run_agent/project_run_opencode use raw result dicts for execution
     receipts. A raw ``status=error`` means no successful submission contract
     exists and must not be wrapped by run_tool_async as ``ok=true`` merely
-    because no Python exception was raised. Batch submission intentionally has
-    different semantics and does not use this helper: one failed item can
-    coexist with other successfully submitted items.
+    because no Python exception was raised. The same fail-closed rule extends
+    to every other confirmed or unproven non-submission outcome: pre-submit
+    validation failures, backend/fleet ``blocked`` replays, ``not-accepted``
+    submits, and ``running``/``unknown`` receipts that carry no job identity
+    all prove that no runnable job was accepted, so they must never surface
+    as outer ``ok=true`` with the submission success text.
+
+    A receipt that carries an accepted ``job_id`` -- an accepted async
+    submission, a wait-timeout durable receipt, or an idempotent replay of a
+    terminal bound job -- or an evidenced terminal ``exit_code`` (legacy
+    blocking path) keeps its existing envelope semantics: true submissions
+    retain success, and a non-zero exit_code is still surfaced as an error
+    by run_tool_async. The raw receipt (idempotency, diagnostic codes,
+    attempt/job identity) is always preserved under ``result``. Batch
+    submission intentionally has different semantics and does not use this
+    helper: one failed item can coexist with other successfully submitted
+    items.
     """
-    if "ok" in result or result.get("status") != "error":
+    if "ok" in result:
         return result
-    raw_message = result.get("error")
-    message = (
-        raw_message.strip()
-        if isinstance(raw_message, str) and raw_message.strip()
-        else "Agent submission failed before a runnable job was accepted."
-    )
+    status = str(result.get("status") or "")
+    if status == "error":
+        raw_message = result.get("error")
+        message = (
+            raw_message.strip()
+            if isinstance(raw_message, str) and raw_message.strip()
+            else "Agent submission failed before a runnable job was accepted."
+        )
+    else:
+        job_id = result.get("job_id")
+        has_accepted_job = isinstance(job_id, str) and bool(job_id.strip())
+        exit_code = result.get("exit_code")
+        has_evidenced_exit = isinstance(exit_code, int) and not isinstance(exit_code, bool)
+        if has_accepted_job or has_evidenced_exit:
+            # The backend accepted a job identity (or the legacy blocking
+            # path produced an evidenced terminal outcome): the submission
+            # contract exists, so wait/terminal/idempotent-replay semantics
+            # pass through unchanged.
+            return result
+        raw_message = result.get("error")
+        message = (
+            raw_message.strip()
+            if isinstance(raw_message, str) and raw_message.strip()
+            else f"Agent task was not submitted (status={status or 'missing'})."
+        )
     return tool_error(
         tool=tool,
         code="AGENT_SUBMISSION_FAILED",
         message=message,
         result=result,
+        retryable=bool(result.get("retryable")),
         source="agent",
     )
 

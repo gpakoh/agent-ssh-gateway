@@ -513,6 +513,30 @@ async def docker_inspect(name: str) -> dict[str, Any]:
         source="docker",
     )
 
+async def docker_site_audit_crm_ingress_readiness() -> dict[str, Any]:
+    """Read-only Site Audit CRM ingress inventory; never authorizes Docker mutation."""
+    from examples.mcp_server.site_audit_crm_ingress_runtime import (
+        IngressReadinessError,
+        collect_live_readiness,
+    )
+
+    try:
+        report = await collect_live_readiness(_docker_client())
+    except IngressReadinessError as exc:
+        return tool_error(
+            tool="docker_site_audit_crm_ingress_readiness",
+            code="DEPLOY_CONTRACT_PRECONDITION_FAILED",
+            message=str(exc),
+            source="docker",
+            retryable=False,
+        )
+    return tool_success(
+        "docker_site_audit_crm_ingress_readiness",
+        result=report,
+        source="docker",
+        redacted=True,
+    )
+
 async def docker_logs(container: str, tail: int = 200) -> dict[str, Any]:
     """Fetch logs from a running container. tail: number of recent lines (1-1000, default 200)."""
     try:
@@ -6281,6 +6305,7 @@ def register_all() -> None:
         "docker_volume_rm",
         "docker_deploy_contract",
         "docker_site_audit_deploy_status",
+        "docker_site_audit_crm_ingress_readiness",
         "docker_deploy_site_audit",
         "docker_provision_site_audit_crm",
         "docker_deploy_xloud",
