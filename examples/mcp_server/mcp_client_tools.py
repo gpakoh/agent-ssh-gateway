@@ -19,7 +19,7 @@ from typing import Any
 
 from control_plane_git import git_fetch_ref_control_plane, git_push_control_plane
 from gateway_client import GatewayClient, GatewayClientError, _script_stdin_wrapper
-from git_write_capabilities import probe_git_write_capabilities
+from git_write_capabilities import probe_git_refresh_worktree_paths, probe_git_write_capabilities
 from tool_results import build_command_result, tool_error, tool_success
 
 
@@ -2773,6 +2773,46 @@ def git_refresh_branch_to_head(
     )
     if preflight_error is not None:
         return preflight_error
+
+    # Metadata writeability does not prove that checkout can create new files
+    # in root-owned paths such as scripts/. Probe all changed path parents on
+    # the SSH execution plane before reset --keep mutates any worktree content.
+    worktree_preflight = probe_git_refresh_worktree_paths(
+        client, project, current_head=current_head, target_head=target_head
+    )
+    if not worktree_preflight["available"]:
+        return tool_error(
+            tool="git_refresh_branch_to_head",
+            code="GIT_WRITE_PREFLIGHT_UNAVAILABLE",
+            message="Cannot prove exact-head worktree destination writeability; no refresh attempted.",
+            retryable=True,
+            hint="Restore same-plane path inspection before retrying; do not retry a partial Git checkout blindly.",
+            details={
+                "project": project,
+                "reason": worktree_preflight.get("reason"),
+                "mutation_occurred": False,
+            },
+            source="gateway",
+        )
+    if worktree_preflight["blocked_count"]:
+        return tool_error(
+            tool="git_refresh_branch_to_head",
+            code="GIT_WRITE_CAPABILITY_BLOCKED",
+            message="Exact-head refresh would write tracked files under non-writeable or unsafe parent directories.",
+            retryable=False,
+            hint="Review the blocked relative paths and obtain narrowly scoped owner-approved remediation; no checkout was attempted.",
+            details={
+                "project": project,
+                "branch": branch,
+                "current_head": current_head,
+                "target_head": target_head,
+                "checked_count": worktree_preflight["checked_count"],
+                "blocked_count": worktree_preflight["blocked_count"],
+                "blocked_paths": worktree_preflight["blocked_paths"],
+                "mutation_occurred": False,
+            },
+            source="gateway",
+        )
 
     result = run_project_command(
         client,

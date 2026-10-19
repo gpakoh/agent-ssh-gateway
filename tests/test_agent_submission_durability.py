@@ -23,9 +23,12 @@ from __future__ import annotations
 
 import json
 import threading
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from unittest.mock import call as mcall
 
+import pytest
+
+import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
 from examples.mcp_server.agent_backend_router import AgentBackendRouter
 from examples.mcp_server.agent_tools import (
     _agent_attempt_key,
@@ -485,3 +488,394 @@ class TestDurableSyncContractRunOpencode:
         assert result["status"] == "failed"
         assert result["exit_code"] == 1
         assert result["job_id"] == "job-o3"
+
+
+class TestOuterSubmissionEnvelopeBinding:
+    """Outer envelope of run_agent/run_opencode must bind to the receipt.
+
+    Gateway TODO #33: pre-submit validation failures, backend/fleet blocked
+    replays, not-accepted submits and unknown/running receipts without a job
+    identity are confirmed or unproven NON-submissions and must never return
+    outer ok=true with the "Submitted ..." success text. A receipt with an
+    accepted job_id (or an evidenced terminal exit_code) is a true
+    submission and keeps success semantics. All submission fakes are local
+    mocks -- no agent is ever dispatched.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _handoff_write_mode(self, monkeypatch):
+        monkeypatch.setenv("MCP_GATEWAY_WRITE_MODE", "handoff")
+
+    def _normalize(self, raw: dict) -> dict:
+        return agent_adapter._normalize_single_agent_submission("run_agent", raw)
+
+    # ── direct normalizer: confirmed non-submissions fail closed ──────
+
+    def test_raw_error_receipt_is_agent_submission_failed(self):
+        raw = {
+            "task_id": TASK_ID,
+            "status": "error",
+            "error": "task.json missing allowed_backends",
+            "job_id": None,
+        }
+        envelope = self._normalize(raw)
+        assert envelope["ok"] is False
+        assert envelope["error"]["code"] == "AGENT_SUBMISSION_FAILED"
+        assert envelope["error"]["message"] == "task.json missing allowed_backends"
+        assert envelope["result"] is raw
+        assert envelope["meta"]["source"] == "agent"
+
+    def test_backend_blocked_receipt_without_job_is_outer_failure(self):
+        """Pre-submit router cooldown: status=blocked, no job, exit_code None."""
+        raw = {
+            "task_id": TASK_ID,
+            "status": "blocked",
+            "error": "all backends unavailable (opencode: blocked until ...)",
+            "job_id": None,
+            "exit_code": None,
+        }
+        envelope = self._normalize(raw)
+        assert envelope["ok"] is False
+        assert envelope["error"]["code"] == "AGENT_SUBMISSION_FAILED"
+        assert "all backends unavailable" in envelope["error"]["message"]
+        assert envelope["result"] is raw
+
+    def test_not_accepted_receipt_is_outer_failure_and_keeps_retryable(self):
+        raw = {
+            "task_id": TASK_ID,
+            "status": "not-accepted",
+            "retryable": True,
+            "error": "Gateway request timed out",
+            "attempt_id": "att-1",
+            "job_id": None,
+            "exit_code": None,
+        }
+        envelope = self._normalize(raw)
+        assert envelope["ok"] is False
+        assert envelope["error"]["code"] == "AGENT_SUBMISSION_FAILED"
+        assert envelope["error"]["retryable"] is True
+        assert envelope["error"]["message"] == "Gateway request timed out"
+        assert envelope["result"]["attempt_id"] == "att-1"
+        assert envelope["result"]["job_id"] is None
+
+    def test_running_receipt_without_job_identity_is_outer_failure(self):
+        """Fail closed: a running claim with no job_id proves no submission."""
+        raw = {"task_id": TASK_ID, "status": "running", "job_id": None}
+        envelope = self._normalize(raw)
+        assert envelope["ok"] is False
+        assert "status=running" in envelope["error"]["message"]
+        assert envelope["result"] is raw
+
+    def test_unknown_receipt_without_job_identity_is_outer_failure(self):
+        raw = {"task_id": TASK_ID, "status": "unknown", "job_id": None}
+        envelope = self._normalize(raw)
+        assert envelope["ok"] is False
+        assert "status=unknown" in envelope["error"]["message"]
+
+    def test_missing_status_without_job_identity_is_outer_failure(self):
+        raw = {"task_id": TASK_ID, "job_id": None}
+        envelope = self._normalize(raw)
+        assert envelope["ok"] is False
+        assert "status=missing" in envelope["error"]["message"]
+
+    def test_fleet_capacity_blocked_receipt_preserves_diagnostics(self):
+        raw = {
+            "task_id": TASK_ID,
+            "status": "blocked",
+            "error_code": "FLEET_CAPACITY_EXHAUSTED",
+            "error": "Fleet worker pool is at capacity",
+            "retryable": True,
+            "retry_after_seconds": 30,
+            "fleet": {"pool": "std", "capacity": 1, "active": 1},
+        }
+        envelope = self._normalize(raw)
+        assert envelope["ok"] is False
+        assert envelope["error"]["code"] == "AGENT_SUBMISSION_FAILED"
+        assert envelope["error"]["retryable"] is True
+        assert envelope["result"]["error_code"] == "FLEET_CAPACITY_EXHAUSTED"
+        assert envelope["result"]["retry_after_seconds"] == 30
+        assert envelope["result"]["fleet"] == {"pool": "std", "capacity": 1, "active": 1}
+
+    # ── direct normalizer: true submissions retain success ────────────
+
+    def test_terminal_replay_receipt_with_job_passes_through(self):
+        raw = {
+            "task_id": TASK_ID,
+            "status": "needs-review",
+            "attempt_id": "att-1",
+            "job_id": "job-done",
+            "exit_code": 0,
+            "stdout": "immutable-result",
+        }
+        assert self._normalize(raw) is raw
+
+    def test_wait_timeout_durable_receipt_with_job_passes_through(self):
+        raw = {
+            "task_id": TASK_ID,
+            "status": "running",
+            "job_id": "job-7",
+            "attempt_id": "att-1",
+            "wait_timed_out": True,
+            "exit_code": None,
+        }
+        assert self._normalize(raw) is raw
+
+    def test_async_submission_running_receipt_with_job_passes_through(self):
+        raw = {"task_id": TASK_ID, "status": "running", "job_id": "job-single"}
+        assert self._normalize(raw) is raw
+
+    def test_terminal_blocked_with_evidenced_exit_passes_through(self):
+        """Exit-76 terminal blocked is a real job outcome; run_tool_async
+        surfaces its non-zero exit_code as an error, not a success."""
+        raw = {
+            "task_id": TASK_ID,
+            "status": "blocked",
+            "job_id": "job-b76",
+            "attempt_id": "att-1",
+            "exit_code": 76,
+        }
+        assert self._normalize(raw) is raw
+
+    def test_legacy_blocking_terminal_receipt_with_exit_evidence_passes_through(self):
+        raw = {
+            "task_id": TASK_ID,
+            "status": "needs-review",
+            "attempt_id": None,
+            "job_id": None,
+            "exit_code": 0,
+            "stdout": "done",
+        }
+        assert self._normalize(raw) is raw
+
+    def test_canonical_envelope_is_untouched(self):
+        canonical = {
+            "ok": False,
+            "tool": "run_agent",
+            "result": {"status": "error"},
+            "error": {"code": "INVALID_INPUT", "message": "already normalized"},
+            "meta": {},
+        }
+        assert self._normalize(canonical) is canonical
+
+    # ── end-to-end: project_run_agent receipts -> outer envelope ──────
+
+    def test_project_run_agent_not_accepted_receipt_normalizes_to_failure(self):
+        """A real not-accepted receipt from the durable executor must never
+        become outer ok=true; no new submission happens on normalization."""
+        rc = _run_cmd(task_json=_task_json())
+        _, read, claim, write = _attempt_store()
+        keys: list[str] = []
+
+        def dead(project: str, script: str, submission_key: str) -> dict:
+            keys.append(submission_key)
+            raise RuntimeError("gateway unreachable")
+
+        receipt = project_run_agent(
+            rc, project="test", task_id=TASK_ID,
+            run_script_async=dead, run_script_wait=MagicMock(),
+            read_attempt_state=read, claim_attempt_state=claim, write_attempt_state=write,
+            job_status=_running_status(),
+        )
+        assert receipt["status"] == "not-accepted"
+
+        envelope = self._normalize(receipt)
+        assert envelope["ok"] is False
+        assert envelope["error"]["code"] == "AGENT_SUBMISSION_FAILED"
+        assert envelope["result"]["status"] == "not-accepted"
+        assert len(keys) == 3 and len(set(keys)) == 1, "bounded same-key retry only"
+
+    def test_project_run_agent_terminal_replay_stays_accepted_submission(self):
+        """Idempotent replay of a terminal bound job is a true submission:
+        the outer envelope stays accepted and no second launch occurs."""
+        _, read, claim, write = _attempt_store()
+        keys: list[str] = []
+        rc = _run_cmd(task_json=_task_json())
+        call_kwargs = dict(
+            project="test", task_id=TASK_ID,
+            run_script_async=_submit(keys, "job-replay"),
+            run_script_wait=MagicMock(return_value=_completed(stdout="replayed")),
+            read_attempt_state=read, claim_attempt_state=claim, write_attempt_state=write,
+            job_status=_running_status(),
+        )
+        first = project_run_agent(rc, **call_kwargs)
+        replay = project_run_agent(rc, **call_kwargs)
+
+        envelope = self._normalize(replay)
+        assert envelope is replay, "true submission receipts pass through unchanged"
+        assert replay["status"] == "needs-review"
+        assert replay["job_id"] == first["job_id"] == "job-replay"
+        assert len(keys) == 1, "terminal replay must not launch a second execution"
+
+    # ── gateway_run_agent outer envelope (fakes only; no dispatch) ────
+
+    async def test_gateway_run_agent_blocked_fleet_receipt_is_outer_failure(
+        self, monkeypatch
+    ):
+        raw = {
+            "task_id": "single",
+            "status": "blocked",
+            "error": "unbound lease is in-flight or indeterminate; refusing to re-dispatch",
+            "fleet": {"submit_state": "attempted"},
+        }
+
+        async def fake_submit(**_kwargs):
+            return dict(raw)
+
+        monkeypatch.setattr(agent_adapter, "_submit_agent_with_fleet", fake_submit)
+        monkeypatch.setattr(
+            agent_adapter, "_agent_router_terminal_observer", lambda: None
+        )
+
+        result = await agent_adapter.gateway_run_agent("test", "single")
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "AGENT_SUBMISSION_FAILED"
+        assert result["result"]["status"] == "blocked"
+        assert result["meta"]["source"] == "agent"
+
+    async def test_gateway_run_agent_not_accepted_receipt_is_outer_failure(
+        self, monkeypatch
+    ):
+        raw = {
+            "task_id": "single",
+            "status": "not-accepted",
+            "retryable": True,
+            "error": "submit transport timed out",
+            "attempt_id": "att-g1",
+            "job_id": None,
+        }
+
+        async def fake_submit(**_kwargs):
+            return dict(raw)
+
+        monkeypatch.setattr(agent_adapter, "_submit_agent_with_fleet", fake_submit)
+        monkeypatch.setattr(
+            agent_adapter, "_agent_router_terminal_observer", lambda: None
+        )
+
+        result = await agent_adapter.gateway_run_agent("test", "single")
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "AGENT_SUBMISSION_FAILED"
+        assert result["error"]["retryable"] is True
+        assert result["result"]["attempt_id"] == "att-g1"
+
+    async def test_gateway_run_agent_running_receipt_with_job_stays_success(
+        self, monkeypatch
+    ):
+        raw = {"task_id": "single", "status": "running", "job_id": "job-single"}
+
+        async def fake_submit(**_kwargs):
+            return dict(raw)
+
+        monkeypatch.setattr(agent_adapter, "_submit_agent_with_fleet", fake_submit)
+        monkeypatch.setattr(
+            agent_adapter, "_agent_router_terminal_observer", lambda: None
+        )
+
+        result = await agent_adapter.gateway_run_agent("test", "single")
+
+        assert result["ok"] is True
+        assert result["result"]["job_id"] == "job-single"
+
+    async def test_gateway_run_agent_unknown_receipt_without_job_is_failure(
+        self, monkeypatch
+    ):
+        raw = {
+            "task_id": "single",
+            "status": "unknown",
+            "job_id": None,
+            "error": "job state unresolved after transport loss",
+        }
+
+        async def fake_submit(**_kwargs):
+            return dict(raw)
+
+        monkeypatch.setattr(agent_adapter, "_submit_agent_with_fleet", fake_submit)
+        monkeypatch.setattr(
+            agent_adapter, "_agent_router_terminal_observer", lambda: None
+        )
+
+        result = await agent_adapter.gateway_run_agent("test", "single")
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "AGENT_SUBMISSION_FAILED"
+        assert result["result"]["status"] == "unknown"
+
+    # ── gateway_run_opencode outer envelope (direct OpenCode path) ────
+
+    async def test_gateway_run_opencode_not_accepted_receipt_is_outer_failure(
+        self, monkeypatch
+    ):
+        raw = {
+            "task_id": OPENC_TASK_ID,
+            "status": "not-accepted",
+            "retryable": True,
+            "error": "Gateway request timed out",
+            "job_id": None,
+        }
+
+        def fake_run(*_args, **_kwargs):
+            return dict(raw)
+
+        monkeypatch.delenv("MCP_OPENCODE_FLEET_ADMISSION_ENABLED", raising=False)
+        monkeypatch.setattr(agent_adapter, "_project_run_opencode", fake_run)
+
+        result = await agent_adapter.gateway_run_opencode("test", OPENC_TASK_ID)
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "AGENT_SUBMISSION_FAILED"
+        assert result["error"]["retryable"] is True
+        assert result["result"]["status"] == "not-accepted"
+        assert result["help"]["recommended_model"] == "big-pickle"
+
+    async def test_gateway_run_opencode_blocked_fleet_receipt_is_outer_failure(
+        self, monkeypatch
+    ):
+        raw = {
+            "task_id": OPENC_TASK_ID,
+            "status": "blocked",
+            "error_code": "FLEET_CAPACITY_EXHAUSTED",
+            "error": "Fleet worker pool is at capacity",
+            "retryable": True,
+        }
+
+        fleet = MagicMock()
+        fleet.submit = AsyncMock(return_value=dict(raw))
+
+        async def get_fleet():
+            return fleet
+
+        monkeypatch.setenv("MCP_OPENCODE_FLEET_ADMISSION_ENABLED", "true")
+        monkeypatch.setattr(agent_adapter, "get_fleet_runtime", get_fleet)
+
+        result = await agent_adapter.gateway_run_opencode("test", OPENC_TASK_ID)
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "AGENT_SUBMISSION_FAILED"
+        assert result["result"]["error_code"] == "FLEET_CAPACITY_EXHAUSTED"
+        assert result["help"]["recommended_model"] == "big-pickle"
+
+    async def test_gateway_run_opencode_terminal_receipt_with_job_stays_success(
+        self, monkeypatch
+    ):
+        raw = {
+            "task_id": OPENC_TASK_ID,
+            "status": "needs-review",
+            "attempt_id": "att-o1",
+            "job_id": "job-o1",
+            "exit_code": 0,
+            "stdout": "openc-ok",
+        }
+
+        def fake_run(*_args, **_kwargs):
+            return dict(raw)
+
+        monkeypatch.delenv("MCP_OPENCODE_FLEET_ADMISSION_ENABLED", raising=False)
+        monkeypatch.setattr(agent_adapter, "_project_run_opencode", fake_run)
+
+        result = await agent_adapter.gateway_run_opencode("test", OPENC_TASK_ID)
+
+        assert result["ok"] is True
+        assert result["result"]["job_id"] == "job-o1"
+        assert result["result"]["exit_code"] == 0

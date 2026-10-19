@@ -66,6 +66,7 @@ from tool_results import (
     text_result,
     tool_error,
     tool_success,
+    validate_pagination,
 )
 from write_modes import WriteModeError, WritePermissionError
 
@@ -331,17 +332,182 @@ def _candidate_store_status() -> dict[str, Any]:
     return {"status": "ok", **inventory}
 
 
-def gateway_project_list() -> dict[str, Any]:
-    """List registered projects and reconcile the managed candidate store."""
+_PROJECT_LIST_COMPACT_FIELDS = ("project_id", "root", "type")
+
+
+def _validate_project_list_selector(name: str, value: Any) -> None:
+    """Reject non-string project_list selector values before any inventory work."""
+    if value is None:
+        return
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be a string, got {type(value).__name__}")
+    if not value.strip():
+        raise ValueError(f"{name} must be a non-empty string")
+
+
+def _validate_project_list_tags(tags: Any) -> None:
+    """Reject invalid project_list tags selectors before any inventory work."""
+    if tags is None:
+        return
+    if not isinstance(tags, list):
+        raise ValueError(f"tags must be a list of strings, got {type(tags).__name__}")
+    for tag in tags:
+        if not isinstance(tag, str) or not tag.strip():
+            raise ValueError("tags must contain only non-empty strings")
+
+
+def _validate_project_list_args(
+    project_id: Any,
+    query: Any,
+    project_type: Any,
+    tags: Any,
+    parent: Any,
+    limit: Any,
+    offset: Any,
+) -> None:
+    """Validate all optional project_list arguments before registry/candidate inventory."""
+    for name, value in (
+        ("project_id", project_id),
+        ("query", query),
+        ("project_type", project_type),
+        ("parent", parent),
+    ):
+        _validate_project_list_selector(name, value)
+    _validate_project_list_tags(tags)
+    for name, value in (("limit", limit), ("offset", offset)):
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{name} must be an integer, got {type(value).__name__}")
+    if limit is not None:
+        validate_pagination(limit, "limit")
+    if offset is not None:
+        validate_pagination(offset, "offset", min_value=0, max_value=10_000)
+
+
+def _project_row_matches(
+    row: dict[str, Any],
+    *,
+    project_id: str | None,
+    query: str | None,
+    project_type: str | None,
+    tags: list[str] | None,
+    parent: str | None,
+) -> bool:
+    """Apply AND-combined exact/substring project_list selectors to one registry row."""
+    if project_id is not None and row.get("project_id") != project_id:
+        return False
+    if project_type is not None and row.get("type") != project_type:
+        return False
+    if parent is not None and row.get("parent") != parent:
+        return False
+    if tags:
+        row_tags = row.get("tags")
+        row_tag_set = {t for t in row_tags if isinstance(t, str)} if isinstance(row_tags, list) else set()
+        if not set(tags).issubset(row_tag_set):
+            return False
+    if query is not None:
+        needle = query.casefold()
+        haystack = f"{row.get('project_id', '')} {row.get('description', '')}".casefold()
+        if needle not in haystack:
+            return False
+    return True
+
+
+def _compact_project_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Reduce a project row to the compact projection (id, root, type)."""
+    return {field: row[field] for field in _PROJECT_LIST_COMPACT_FIELDS if field in row}
+
+
+def gateway_project_list(
+    project_id: str | None = None,
+    query: str | None = None,
+    project_type: str | None = None,
+    tags: list[str] | None = None,
+    parent: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+    compact: bool = False,
+) -> dict[str, Any]:
+    """List registered projects and reconcile the managed candidate store.
+
+    Optional selectors (AND-combined, all applied to the registry catalog only):
+
+    - project_id: exact registered project id; returns at most that one entry
+      (empty page when unknown) instead of the whole catalog.
+    - query: case-insensitive substring match against project_id and
+      description (also covers id prefixes).
+    - project_type: exact match on the registered project type.
+    - tags: every listed tag must be present on the project (AND semantics).
+    - parent: exact match on the registered parent project id; only projects
+      declared with a parent can match.
+
+    Pagination and projection:
+
+    - limit/offset: bounded deterministic paging over the filtered catalog,
+      ordered by project_id ascending. limit is 1-500; offset is 0-10000.
+      Invalid values fail with INVALID_INPUT before any registry or candidate
+      store inventory work.
+    - compact: reduce each returned row to project_id, root and type.
+
+    Backward compatibility: calling with no arguments returns the previous
+    count/projects/candidate_store contract unchanged. Filtered or paginated
+    calls additionally report total (post-filter count), returned, offset and
+    limit. candidate_store diagnostics are preserved on every successful call.
+    """
+    try:
+        _validate_project_list_args(project_id, query, project_type, tags, parent, limit, offset)
+    except ValueError as exc:
+        return tool_error(
+            tool="project_list",
+            code="INVALID_INPUT",
+            message=str(exc),
+            retryable=False,
+            source="gateway",
+            read_only=True,
+        )
+
     registry = _server_workspace_registry()
-    projects = registry.list_projects()
+    projects = sorted(registry.list_projects(), key=lambda row: str(row.get("project_id", "")))
+    filtered = [
+        row
+        for row in projects
+        if _project_row_matches(
+            row,
+            project_id=project_id,
+            query=query,
+            project_type=project_type,
+            tags=tags,
+            parent=parent,
+        )
+    ]
+    total = len(filtered)
+    page = filtered[offset:] if limit is None else filtered[offset : offset + limit]
+    if compact:
+        page = [_compact_project_row(row) for row in page]
+
+    result: dict[str, Any] = {"count": total}
+    if any(
+        (
+            project_id,
+            query,
+            project_type,
+            tags,
+            parent,
+            limit is not None,
+            offset != 0,
+            compact,
+        )
+    ):
+        result["total"] = total
+        result["returned"] = len(page)
+        result["offset"] = offset
+        result["limit"] = limit
+    result["projects"] = page
+    result["candidate_store"] = _candidate_store_status()
     return tool_success(
         tool="project_list",
-        result={
-            "count": len(projects),
-            "projects": projects,
-            "candidate_store": _candidate_store_status(),
-        },
+        result=result,
     )
 
 

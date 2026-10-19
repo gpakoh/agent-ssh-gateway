@@ -3262,6 +3262,46 @@ class TestRuntimeTimeout:
         status = (artifacts / "agent-status.md").read_text(encoding="utf-8")
         assert status.strip() == "Status: run-timeout"
 
+    def test_runtime_idle_watchdog_kills_silent_opencode(self, tmp_path, monkeypatch):
+        """After useful output, a silent worker has a separate bounded deadline."""
+        source = tmp_path / "idle-source"
+        source.mkdir()
+        _init_git_repo(source)
+        artifacts = tmp_path / "idle-artifacts"
+        artifacts.mkdir()
+        (artifacts / "current-plan.md").write_text("# scoped task\n", encoding="utf-8")
+        fake_bin = tmp_path / "idle-bin"
+        fake_bin.mkdir()
+        fake = fake_bin / "opencode"
+        fake.write_text('#!/bin/sh\nprintf "> big-pickle\n"\nsleep 3600\n', encoding="utf-8")
+        fake.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+        monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
+        monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "false")
+        monkeypatch.setenv("OPENCODE_RUN_IDLE_TIMEOUT_SECONDS", "2")
+        monkeypatch.setenv("OPENCODE_RUN_TIMEOUT_SECONDS", "30")
+
+        script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
+        result = subprocess.run(
+            ["sh", "-c", script], cwd=source, text=True, capture_output=True,
+            check=False, timeout=RUNTIME_TIMEOUT_HARNESS_TIMEOUT_SECONDS,
+        )
+        assert result.returncode == 79, result.stderr or result.stdout
+        report = (artifacts / "agent-report.md").read_text(encoding="utf-8")
+        assert "Failure reason: opencode-run-idle-timeout" in report
+        assert (artifacts / "agent-status.md").read_text(encoding="utf-8").strip() == "Status: run-timeout"
+
+    def test_default_runtime_idle_timeout_is_900_seconds(self, monkeypatch):
+        monkeypatch.delenv("OPENCODE_RUN_IDLE_TIMEOUT_SECONDS", raising=False)
+        monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
+        script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
+        assert "OPENCODE_RUNTIME_IDLE_TIMEOUT_SECONDS=900" in script
+
+    def test_runtime_idle_timeout_rejects_nonpositive_value(self, monkeypatch):
+        monkeypatch.setenv("OPENCODE_RUN_IDLE_TIMEOUT_SECONDS", "0")
+        with pytest.raises(ValueError, match="timing/reserve values are invalid"):
+            _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
+
     def test_default_runtime_timeout_is_7200_seconds(self, monkeypatch):
         monkeypatch.delenv("OPENCODE_RUN_TIMEOUT_SECONDS", raising=False)
         monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)

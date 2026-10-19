@@ -1264,6 +1264,7 @@ def _opencode_startup_watchdog_script_lines(
     startup_timeout_seconds: int,
     kill_grace_seconds: int,
     runtime_timeout_seconds: int,
+    runtime_idle_timeout_seconds: int,
 ) -> list[str]:
     prompt = (
         "Read the plan at $td/current-plan.md and the acceptance gates at "
@@ -1280,6 +1281,7 @@ def _opencode_startup_watchdog_script_lines(
         f"OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS={startup_timeout_seconds}",
         f"OPENCODE_STARTUP_KILL_GRACE_SECONDS={kill_grace_seconds}",
         f"OPENCODE_RUNTIME_TIMEOUT_SECONDS={runtime_timeout_seconds}",
+        f"OPENCODE_RUNTIME_IDLE_TIMEOUT_SECONDS={runtime_idle_timeout_seconds}",
         "OPENCODE_STARTUP_STALLED=0",
         "OPENCODE_PRE_USEFUL_RETRY=0",
         "_kill_opencode_process() {",
@@ -1388,6 +1390,8 @@ def _opencode_startup_watchdog_script_lines(
         "      mark_agent_runtime_started",
         '      if command -v write_proxy_status >/dev/null 2>&1; then write_proxy_status running "" 0; fi',
         '      OPENCODE_RUNTIME_STARTED=$(date +%s)',
+        '      OPENCODE_RUNTIME_LAST_OUTPUT_AT="$OPENCODE_RUNTIME_STARTED"',
+        '      OPENCODE_RUNTIME_LAST_OUTPUT_BYTES=$(wc -c < "$RUNNER_OUTPUT_LOG")',
         '      while kill -0 "$OPENCODE_PID" 2>/dev/null; do',
         '        snapshot_runner_log_tail "$RUNNER_OUTPUT_LOG" "$td/opencode-output.log" 65536',
         '        if _opencode_process_is_zombie; then',
@@ -1397,7 +1401,17 @@ def _opencode_startup_watchdog_script_lines(
         "          return",
         "        fi",
         "        OPENCODE_RUNTIME_NOW=$(date +%s)",
-        '        if [ $((OPENCODE_RUNTIME_NOW - OPENCODE_RUNTIME_STARTED)) -ge "$OPENCODE_RUNTIME_TIMEOUT_SECONDS" ]; then',
+        '        OPENCODE_RUNTIME_OUTPUT_BYTES=$(wc -c < "$RUNNER_OUTPUT_LOG")',
+        '        if [ "$OPENCODE_RUNTIME_OUTPUT_BYTES" != "$OPENCODE_RUNTIME_LAST_OUTPUT_BYTES" ]; then',
+        '          OPENCODE_RUNTIME_LAST_OUTPUT_AT="$OPENCODE_RUNTIME_NOW"',
+        '          OPENCODE_RUNTIME_LAST_OUTPUT_BYTES="$OPENCODE_RUNTIME_OUTPUT_BYTES"',
+        "        fi",
+        '        if [ $((OPENCODE_RUNTIME_NOW - OPENCODE_RUNTIME_STARTED)) -ge "$OPENCODE_RUNTIME_TIMEOUT_SECONDS" ] || [ $((OPENCODE_RUNTIME_NOW - OPENCODE_RUNTIME_LAST_OUTPUT_AT)) -ge "$OPENCODE_RUNTIME_IDLE_TIMEOUT_SECONDS" ]; then',
+        '          if [ $((OPENCODE_RUNTIME_NOW - OPENCODE_RUNTIME_STARTED)) -ge "$OPENCODE_RUNTIME_TIMEOUT_SECONDS" ]; then',
+        '            FAILURE_REASON="opencode-run-timeout"',
+        '          else',
+        '            FAILURE_REASON="opencode-run-idle-timeout"',
+        '          fi',
         '          _kill_opencode_process -TERM',
         "          OPENCODE_RUNTIME_KILL_STARTED=$(date +%s)",
         '          while kill -0 "$OPENCODE_PID" 2>/dev/null; do',
@@ -1410,7 +1424,6 @@ def _opencode_startup_watchdog_script_lines(
         "          done",
         '          wait "$OPENCODE_PID" 2>/dev/null || true',
         "          RC=79",
-        '          FAILURE_REASON="opencode-run-timeout"',
         "          classify_opencode_server_error",
         '          cat "$RUNNER_OUTPUT_LOG"',
         "          return",
@@ -2483,6 +2496,7 @@ def _build_opencode_script(
         os.environ.get("OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS", "6")
     )
     runtime_timeout_seconds = int(os.environ.get("OPENCODE_RUN_TIMEOUT_SECONDS", "7200"))
+    runtime_idle_timeout_seconds = int(os.environ.get("OPENCODE_RUN_IDLE_TIMEOUT_SECONDS", "900"))
     upgrade_gate_enabled = os.environ.get(
         "OPENCODE_UPGRADE_GATE_ENABLED", "false"
     ).strip().lower() not in {"0", "false", "no", "off"}
@@ -2512,6 +2526,7 @@ def _build_opencode_script(
         or startup_kill_grace_seconds < 0
         or startup_max_proxy_attempts <= 0
         or runtime_timeout_seconds <= 0
+        or runtime_idle_timeout_seconds <= 0
         or upgrade_interval_seconds <= 0
         or upgrade_timeout_seconds <= 0
     ):
@@ -2749,6 +2764,7 @@ def _build_opencode_script(
             startup_response_timeout_seconds,
             startup_kill_grace_seconds,
             runtime_timeout_seconds,
+            runtime_idle_timeout_seconds,
         )
     )
     if proxy_provider_url:
@@ -2932,7 +2948,7 @@ def _build_opencode_script(
             'if [ "${RATE_LIMITED:-0}" = "1" ] && [ "$PARENT_RC" -eq 0 ] && [ "$EVIDENCE_RC" -eq 0 ] && [ "$SCOPE_RC" -eq 0 ] && [ "$CHECKS_RC" -eq 0 ]; then FINAL_RC=77; fi',
             'if [ "$FINAL_RC" -eq 77 ] && [ "${RATE_LIMITED:-0}" != "1" ]; then FINAL_RC=1; fi',
             'if [ "$FINAL_RC" -eq 78 ] && [ "${FAILURE_REASON:-}" != "opencode-startup-timeout" ]; then FINAL_RC=1; fi',
-            'if [ "$FINAL_RC" -eq 79 ] && [ "${FAILURE_REASON:-}" != "opencode-run-timeout" ]; then FINAL_RC=1; fi',
+            'if [ "$FINAL_RC" -eq 79 ] && [ "${FAILURE_REASON:-}" != "opencode-run-timeout" ] && [ "${FAILURE_REASON:-}" != "opencode-run-idle-timeout" ]; then FINAL_RC=1; fi',
             'if [ "$FINAL_RC" -eq 80 ] && [ "${FAILURE_REASON:-}" != "opencode-upgrade-failed" ] && [ "${FAILURE_REASON:-}" != "opencode-permission-mode-unsupported" ]; then FINAL_RC=1; fi',
             *proxy_final_status_lines,
             'if [ $FINAL_RC -eq 0 ] && [ "${CHECKS_WARNING:-0}" -eq 1 ]; then',
