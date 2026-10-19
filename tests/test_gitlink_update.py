@@ -6,11 +6,18 @@ import hashlib
 import subprocess
 from pathlib import Path
 
+import mcp_client_tools
 import pytest
 from mcp_client_tools import git_set_gitlink
 
 OLD = "b596c0dc569fb3e0e8573675c11ff30dc54ec631"
 NEW = "70d8adb5f8e91583ecd6bde40929aa4bf67d05cb"
+
+
+@pytest.fixture(autouse=True)
+def _registered_project_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Model the registered SSH Gateway project without shared global state."""
+    monkeypatch.setattr(mcp_client_tools, "_resolve_project", lambda project: tmp_path / "source")
 
 
 def test_gitlink_mutation_requires_explicit_write_mode() -> None:
@@ -65,6 +72,9 @@ class LocalGateway:
 
     def execute_project_script(self, project: str, script: str, timeout_s: int = 30) -> dict:
         assert project == "demo"
+        # The Git write-capability preflight itself uses a script. Count
+        # only the actual gitlink staging operation.
+        self.mutations += int('GITLINK_STAGED=1' in script)
         proc = subprocess.run(
             ["sh"], input=script, cwd=self.repo, capture_output=True,
             text=True, timeout=timeout_s, check=False,
@@ -72,13 +82,7 @@ class LocalGateway:
         return {"exit_code": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}
 
     def execute_project_command(self, project: str, command: str) -> dict:
-        assert project == "demo"
-        self.mutations += 1
-        proc = subprocess.run(
-            ["sh"], input=command, cwd=self.repo, capture_output=True,
-            text=True, timeout=30, check=False,
-        )
-        return {"exit_code": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}
+        raise AssertionError("A multiline Git guard must use execute_project_script, not shlex argv")
 
 
 def _stage(repo: Path, **overrides: str) -> tuple[dict, LocalGateway]:

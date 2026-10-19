@@ -2307,14 +2307,39 @@ def git_set_gitlink(
             'echo "GITLINK_NEW=$NEW_SHA"',
         ]
     )
-    return _run_git_mutation_with_preflight(
+    # Multiline shell guards require the project-script transport (stdin
+    # wrapper); execute_project_command splits text into argv and cannot
+    # execute shell constructs. Keep the same preflight/permission typing as
+    # other Git mutations, without routing through the argv-only transport.
+    required_components = ("index",)
+    preflight_error, probe = _git_write_preflight(
         client,
         project,
-        script,
         tool_name="git_set_gitlink",
         action="stage_gitlink_exact",
-        required_components=("index",),
+        required_components=required_components,
         branch=expected_branch,
+    )
+    if preflight_error is not None:
+        return preflight_error
+    raw = client.execute_project_script(project, script, timeout_s=60)
+    root = str(_resolve_project(project))
+    result = build_command_result(
+        outcome="passed" if raw.get("exit_code") == 0 else "failed",
+        exit_code=raw.get("exit_code", -1),
+        stdout=_redact_project_root(str(raw.get("stdout") or raw.get("output", "")), root),
+        stderr=_redact_project_root(str(raw.get("stderr", "")), root),
+        execution_duration_ms=_execution_duration_ms(raw),
+        job_id=raw.get("job_id"),
+        cwd=".",
+    )
+    return _git_mutation_result(
+        tool_name="git_set_gitlink",
+        project=project,
+        action="stage_gitlink_exact",
+        required_components=required_components,
+        preflight=probe,
+        result=result,
     )
 
 
