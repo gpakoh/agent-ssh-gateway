@@ -1069,7 +1069,10 @@ def test_compose_runner_mounts_registry_auth_volume_read_only(tmp_path, monkeypa
         "type=volume,src=mcp-compose-registry-auth,dst=/run/mcp-docker-config,readonly",
     ]
     env_values = [argv[i + 1] for i, item in enumerate(argv) if item == "--env"]
-    assert env_values == ["DOCKER_CONFIG=/run/mcp-docker-config"]
+    assert env_values == [
+        "BUILDX_CONFIG=/tmp/mcp-buildx",
+        "DOCKER_CONFIG=/run/mcp-docker-config",
+    ]
 
 
 def test_compose_runner_rejects_invalid_registry_auth_volume(tmp_path, monkeypatch):
@@ -1111,3 +1114,38 @@ def test_compose_runner_rejects_mount_option_injection(tmp_path, monkeypatch, su
     monkeypatch.setattr(config, "ALLOWED_PROJECT_ROOTS", [str(tmp_path)])
     with pytest.raises(ValueError, match="safe for a Compose runner mount"):
         _client()._compose_base_argv(str(root))
+
+
+@pytest.mark.parametrize("registry_auth", ["", "mcp-compose-registry-auth"])
+def test_compose_runner_buildx_state_stays_in_writable_tmpfs(tmp_path, monkeypatch, registry_auth):
+    from examples.mcp_server import config
+
+    root = tmp_path / "infra"
+    root.mkdir()
+    monkeypatch.setenv("MCP_COMPOSE_RUNNER_IMAGE", "mcp@sha256:" + "a" * 64)
+    monkeypatch.setenv("MCP_COMPOSE_DOCKER_CONFIG_VOLUME", registry_auth)
+    monkeypatch.setattr(config, "ALLOWED_PROJECT_ROOTS", [str(root)])
+
+    argv = _client()._compose_base_argv(str(root))
+    env = dict(argv[i + 1].split("=", 1) for i, item in enumerate(argv) if item == "--env")
+    assert env["BUILDX_CONFIG"] == "/tmp/mcp-buildx"
+    tmpfs = [argv[i + 1] for i, item in enumerate(argv) if item == "--tmpfs"]
+    assert tmpfs == ["/tmp:rw,nosuid,nodev,size=64m"]
+    assert "--read-only" in argv
+    mounts = [argv[i + 1] for i, item in enumerate(argv) if item == "--mount"]
+    assert f"type=bind,src={root},dst={root},readonly" in mounts
+    if registry_auth:
+        assert env["DOCKER_CONFIG"] == "/run/mcp-docker-config"
+        assert env["BUILDX_CONFIG"] != env["DOCKER_CONFIG"] + "/buildx"
+        assert (
+            "type=volume,src=mcp-compose-registry-auth,dst=/run/mcp-docker-config,readonly"
+        ) in mounts
+    else:
+        assert "DOCKER_CONFIG" not in env
+
+
+def test_direct_compose_does_not_change_host_buildx_environment(tmp_path, monkeypatch):
+    monkeypatch.delenv("MCP_COMPOSE_RUNNER_IMAGE", raising=False)
+    assert _client()._compose_base_argv(str(tmp_path)) == [
+        "/usr/bin/docker", "compose", "--project-directory", str(tmp_path)
+    ]
