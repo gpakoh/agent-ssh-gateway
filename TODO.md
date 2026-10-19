@@ -621,6 +621,26 @@ Open backlog count after cleanup: **34**
     the compose context, HOME/buildx/cache, builder state or daemon namespace,
     and offer a sanctioned writable-builder-cache recovery path.
 
+    **Confirmed subcase, 2026-10-19:** cleaning-service image qualification
+    failed with mkdir /run/mcp-docker-config/buildx: read-only file system
+    (receipt a6b0108a-8e1b-4e00-b5ae-4129404eebea). The trusted Compose
+    helper pointed DOCKER_CONFIG at read-only registry auth; Buildx tried
+    to create its default state there.
+
+    **Partial implementation:** fix/compose-buildx-writable-state-20261019
+    supplies a fixed BUILDX_CONFIG=/tmp/mcp-buildx in the existing bounded
+    writable tmpfs, both with and without a registry auth volume. Auth,
+    project and rootfs remain read-only; allowed roots, image pin and network
+    isolation remain unchanged. Two new regressions failed before the fix;
+    all 106 DockerClient tests and Ruff pass afterward. Independent review
+    found no blockers. See docs/operations/COMPOSE_RUNNER_BUILDX_STATE.md.
+
+    **Still open:** this is one path-specific correction, not closure of
+    all #27 diagnostics/recovery work. Deployment of the new helper and real
+    image build remain unverified. Owner: agent-ssh-gateway; before resuming
+    blocked image qualification. Never-started helper cleanup after command
+    timeout is a separate lifecycle issue, not fixed here.
+
 30. ⬜ **Add Gitea Actions artifact listing and bounded download.**
     Operators can inspect runs/jobs/logs, but need first-class artifact metadata
     and safe archive/file retrieval with run/head provenance, size limits,

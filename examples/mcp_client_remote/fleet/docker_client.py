@@ -799,6 +799,8 @@ class DockerClient:
                 "--security-opt", "no-new-privileges:true",
                 "--user", "0:0",
                 "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m",
+                # Keep mutable Buildx state out of read-only registry auth/rootfs.
+                "--env", "BUILDX_CONFIG=/tmp/mcp-buildx",
                 "--mount", f"type=bind,src={resolved},dst={resolved},readonly",
                 "--mount", "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock",
             ]
