@@ -44,3 +44,33 @@ Independent read-only review found no blocking findings.
 These are regression/argv contract checks. They do not establish that the
 running MCP image already uses this change. Credential mounts remain protected;
 no secret-path write or global daemon configuration change was performed.
+
+## CI dependency blocker and bounded repair — 2026-10-19
+
+Exact-head PR run 18153 for 32966f19484b483f8cda6f519e1e3b28a0375050:
+all 12 unit shards, both coverage jobs, integration/smoke, PostgreSQL and
+Selenium passed. Checks 3.11/3.12 failed at pip-audit (jobs 88131/88132):
+aiohttp 3.14.3, GHSA-2g87-pp6c-29x5, CVE-2026-111063 and CVE-2026-111064;
+the audit lists 3.14.4 as fixed. This does not demonstrate exploitation.
+
+Repair scope: require aiohttp>=3.14.4 in pyproject.toml, resolve precisely
+aiohttp==3.14.4 in uv.lock using the existing package registry, and reject
+unrelated package drift. The published PyPI 3.14.4 release was checked.
+No suppression, ignored advisory or security-gate change is permitted.
+Rules: GOV-01/04, dependency/security risk under section 1.4 and CI-02.
+
+Acceptance: locked install and uv lock --check; strict OSV pip-audit exits 0;
+existing HTTP-client, event-hook, notifier and Docker tests pass, plus Ruff
+and mypy. Required PR CI on the new exact head must pass before merge.
+The image and real cleaning Docker qualification remain separate gates.
+If resolution or compatibility fails, keep the candidate isolated and
+report the failure; production packages and running processes are untouched.
+
+Validation in this candidate after locked installation: 153 selected HTTP-client/
+notifier/event-hook/Docker tests passed (receipt 7a36dfac-dd6f-443f-ab04-aa074aba05d1);
+strict OSV pip-audit exited 0, "No known vulnerabilities found"
+(receipt a9f038c2-1438-45e2-8931-64a22e7adc48); mypy passed on 221 source files
+(receipt c13bf332-ecc2-4375-8adf-4284e14bebd6); uv lock --check passed.
+The only package-version changes are aiohttp 3.14.3 -> 3.14.4 and its required
+yarl 1.24.5 -> 1.25.1. Explicitly retaining yarl 1.24.5 was rejected by the
+resolver because aiohttp 3.14.4 requires yarl>=1.25.1,<2.0. No unrelated upgrade.
