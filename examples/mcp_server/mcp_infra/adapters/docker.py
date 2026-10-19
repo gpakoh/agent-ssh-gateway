@@ -4376,8 +4376,17 @@ async def _docker_deploy_xloud_impl(
 
 def _site_audit_crm_helper_payload(run: RunResult) -> dict[str, Any]:
     """Parse the fixed CRM helper response without surfacing raw output."""
+    if run.exit_code == -1:
+        raise RuntimeError("Site Audit CRM helper timed out without evidence")
+    raw = (run.stdout or "").strip()
+    if not raw:
+        # stderr may include Python tracebacks, operator paths or secrets.
+        # Diagnose only the control-plane outcome, never echo raw output.
+        if run.exit_code != 0:
+            raise RuntimeError("Site Audit CRM helper failed before producing evidence")
+        raise RuntimeError("Site Audit CRM helper produced no evidence")
     try:
-        payload = json.loads((run.stdout or "").strip())
+        payload = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise RuntimeError("Site Audit CRM helper returned invalid evidence") from exc
     if not isinstance(payload, dict) or payload.get("version") != 1:
