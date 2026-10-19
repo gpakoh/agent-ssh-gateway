@@ -66,6 +66,30 @@ def _plan(*, ready: bool = False, env_sha: str = ENV_SHA) -> dict:
     }
 
 
+@pytest.mark.parametrize(
+    ("stdout", "exit_code", "diagnosis"),
+    [
+        ("", -1, "timed out without evidence"),
+        ("", 1, "failed before producing evidence"),
+        ("", 0, "produced no evidence"),
+        ("not-json", 1, "returned invalid evidence"),
+    ],
+)
+def test_crm_helper_failure_is_classified_without_leaking_stderr(
+    stdout: str, exit_code: int, diagnosis: str
+) -> None:
+    # Runtime stderr is deliberately untrusted, and may include env/host data.
+    result = RunResult(
+        stdout=stdout,
+        stderr="CRM_ADMIN_PASSWORD=synthetic-secret operator=/internal/path",
+        exit_code=exit_code,
+    )
+    with pytest.raises(RuntimeError, match=diagnosis) as exc:
+        docker_adapter._site_audit_crm_helper_payload(result)
+    assert "synthetic-secret" not in str(exc.value)
+    assert "/internal/path" not in str(exc.value)
+
+
 @pytest.mark.asyncio
 async def test_crm_provision_preflight_returns_admin_confirmation(monkeypatch):
     monkeypatch.setattr(
