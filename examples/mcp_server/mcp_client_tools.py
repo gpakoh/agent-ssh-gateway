@@ -2225,6 +2225,124 @@ def _run_git_mutation_with_preflight(
     )
 
 
+def git_set_gitlink(
+    client: GatewayClient,
+    project: str,
+    path: str,
+    old_sha: str,
+    new_sha: str,
+    expected_head: str,
+    expected_branch: str,
+    expected_index_sha256: str,
+) -> dict[str, Any]:
+    """Stage exactly one pre-existing gitlink under a content-bound index lease.
+
+    The target SHA is a commit in the *child* repository, so it need not exist
+    in the parent's object database. This tool only stages mode 160000; normal
+    commit and remote delivery remain separate guarded operations.
+    """
+    hashes = (old_sha, new_sha, expected_head, expected_index_sha256)
+    if any(re.fullmatch(r"[0-9a-f]{40}", s) is None for s in hashes[:3]):
+        raise ValueError("INVALID_INPUT: old_sha/new_sha/expected_head must be 40-char lowercase Git SHAs")
+    if re.fullmatch(r"[0-9a-f]{64}", hashes[3]) is None:
+        raise ValueError("INVALID_INPUT: expected_index_sha256 must be a 64-char lowercase SHA-256")
+    if old_sha == new_sha:
+        raise ValueError("INVALID_INPUT: gitlink target already equals old SHA")
+    if (
+        not path
+        or path.startswith(("-", "/"))
+        or "\\" in path
+        or any(part in ("", ".", "..", ".git") for part in path.split("/"))
+        or re.fullmatch(r"[A-Za-z0-9_./-]+", path) is None
+    ):
+        raise ValueError("INVALID_INPUT: gitlink path must be safe and relative")
+    if (
+        expected_branch in ("main", "master", "HEAD")
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./-]*", expected_branch) is None
+        or ".." in expected_branch
+    ):
+        raise ValueError("INVALID_INPUT: a non-protected exact feature branch is required")
+
+    q = shlex.quote
+    script = "\n".join(
+        [
+            "set -eu",
+            f"EXPECTED_BRANCH={q(expected_branch)}",
+            f"EXPECTED_HEAD={q(expected_head)}",
+            f"EXPECTED_INDEX={q(expected_index_sha256)}",
+            f"OLD_SHA={q(old_sha)}",
+            f"NEW_SHA={q(new_sha)}",
+            f"SUBMODULE_PATH={q(path)}",
+            'INDEX_PATH="$(git rev-parse --git-path index)"',
+            'INDEX_LOCK="${INDEX_PATH}.lock"',
+            'INDEX_DIR="$(dirname "$INDEX_PATH")"',
+            'SNAPSHOT="$(mktemp "$INDEX_DIR/.mcp-gitlink-index.XXXXXX")"',
+            'LOCK_OWNED=0',
+            'cleanup() { rm -f "$SNAPSHOT"; if [ "$LOCK_OWNED" = 1 ]; then rm -f "$INDEX_LOCK"; fi; }',
+            'trap cleanup EXIT',
+            'trap \'exit 99\' HUP INT TERM',
+            'if ( set -C; : > "$INDEX_LOCK" ) 2>/dev/null; then LOCK_OWNED=1; else echo "GITLINK_BLOCKED=index_lock"; exit 96; fi',
+            'cp "$INDEX_PATH" "$SNAPSHOT"',
+            'BRANCH="$(git rev-parse --abbrev-ref HEAD)"',
+            'HEAD_SHA="$(git rev-parse HEAD)"',
+            'if [ "$BRANCH" != "$EXPECTED_BRANCH" ] || [ "$HEAD_SHA" != "$EXPECTED_HEAD" ]; then echo "GITLINK_MISMATCH=head_or_branch"; exit 97; fi',
+            'if [ -n "$(GIT_OPTIONAL_LOCKS=0 git status --porcelain=v1)" ]; then echo "GITLINK_MISMATCH=dirty_worktree"; exit 97; fi',
+            'INDEX_SHA="$(GIT_INDEX_FILE="$SNAPSHOT" git ls-files --stage -z | sha256sum | awk \'{print $1}\')"',
+            'if [ "$INDEX_SHA" != "$EXPECTED_INDEX" ]; then echo "GITLINK_MISMATCH=index"; exit 97; fi',
+            'TREE_ENTRY="$(git ls-tree HEAD -- "$SUBMODULE_PATH")"',
+            'EXPECTED_TREE="$(printf "160000 commit %s\\t%s" "$OLD_SHA" "$SUBMODULE_PATH")"',
+            'if [ "$TREE_ENTRY" != "$EXPECTED_TREE" ]; then echo "GITLINK_MISMATCH=tree_entry"; exit 97; fi',
+            'INDEX_ENTRY="$(GIT_INDEX_FILE="$SNAPSHOT" git ls-files --stage -- "$SUBMODULE_PATH")"',
+            'EXPECTED_ENTRY="$(printf "160000 %s 0\\t%s" "$OLD_SHA" "$SUBMODULE_PATH")"',
+            'if [ "$INDEX_ENTRY" != "$EXPECTED_ENTRY" ]; then echo "GITLINK_MISMATCH=index_entry"; exit 97; fi',
+            'GIT_INDEX_FILE="$SNAPSHOT" git update-index --cacheinfo "160000,$NEW_SHA,$SUBMODULE_PATH"',
+            'UPDATED="$(GIT_INDEX_FILE="$SNAPSHOT" git ls-files --stage -- "$SUBMODULE_PATH")"',
+            'EXPECTED_UPDATED="$(printf "160000 %s 0\\t%s" "$NEW_SHA" "$SUBMODULE_PATH")"',
+            'CHANGED="$(GIT_INDEX_FILE="$SNAPSHOT" git diff --cached --name-only)"',
+            'if [ "$UPDATED" != "$EXPECTED_UPDATED" ] || [ "$CHANGED" != "$SUBMODULE_PATH" ]; then echo "GITLINK_MISMATCH=staged_scope"; exit 98; fi',
+            'if [ "$(git rev-parse HEAD)" != "$EXPECTED_HEAD" ]; then echo "GITLINK_MISMATCH=head_changed"; exit 97; fi',
+            'mv -f "$SNAPSHOT" "$INDEX_PATH"',
+            'echo "GITLINK_STAGED=1"',
+            'echo "GITLINK_OLD=$OLD_SHA"',
+            'echo "GITLINK_NEW=$NEW_SHA"',
+        ]
+    )
+    # Multiline shell guards require the project-script transport (stdin
+    # wrapper); execute_project_command splits text into argv and cannot
+    # execute shell constructs. Keep the same preflight/permission typing as
+    # other Git mutations, without routing through the argv-only transport.
+    required_components = ("index",)
+    preflight_error, probe = _git_write_preflight(
+        client,
+        project,
+        tool_name="git_set_gitlink",
+        action="stage_gitlink_exact",
+        required_components=required_components,
+        branch=expected_branch,
+    )
+    if preflight_error is not None:
+        return preflight_error
+    raw = client.execute_project_script(project, script, timeout_s=60)
+    root = str(_resolve_project(project))
+    result = build_command_result(
+        outcome="passed" if raw.get("exit_code") == 0 else "failed",
+        exit_code=raw.get("exit_code", -1),
+        stdout=_redact_project_root(str(raw.get("stdout") or raw.get("output", "")), root),
+        stderr=_redact_project_root(str(raw.get("stderr", "")), root),
+        execution_duration_ms=_execution_duration_ms(raw),
+        job_id=raw.get("job_id"),
+        cwd=".",
+    )
+    return _git_mutation_result(
+        tool_name="git_set_gitlink",
+        project=project,
+        action="stage_gitlink_exact",
+        required_components=required_components,
+        preflight=probe,
+        result=result,
+    )
+
+
 def git_add(
     client: GatewayClient,
     project: str,

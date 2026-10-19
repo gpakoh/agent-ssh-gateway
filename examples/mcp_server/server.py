@@ -706,6 +706,7 @@ gateway_recent_commits = gateway.gateway_recent_commits
 gateway_git_diff_stat = gateway.gateway_git_diff_stat
 gateway_show_changes = gateway.gateway_show_changes
 gateway_git_add = gateway.gateway_git_add
+gateway_git_set_gitlink = gateway.gateway_git_set_gitlink
 gateway_git_commit = gateway.gateway_git_commit
 gateway_git_push = gateway.gateway_git_push
 gateway_run_tests = gateway.gateway_run_tests
