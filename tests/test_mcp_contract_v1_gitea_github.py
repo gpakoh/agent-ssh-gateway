@@ -15,7 +15,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -517,6 +517,86 @@ class TestPaginationValidation:
         _assert_envelope(result, ok=False)
         assert result["error"]["code"] == "INVALID_INPUT"
         list_branches.assert_not_awaited()
+
+
+class TestGiteaListIssuesStatePreflight:
+    """TODO #24: pure local/schema errors (an unsupported enum value) must
+    fail fast at the adapter boundary with a typed diagnostic and the
+    allowed values, before any provider/HTTP work happens.
+
+    Regression: gitea_list_issues used to forward an unsupported `state`
+    verbatim to GiteaClient.list_issues, which sent it as a remote HTTP
+    query parameter with no local validation at all.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("unsupported_state", ["bogus", "OPEN", "", "open|closed"])
+    async def test_gitea_list_issues_rejects_unsupported_state_before_client(
+        self, monkeypatch, unsupported_state
+    ):
+        list_issues = AsyncMock(return_value=[])
+        client_factory = Mock(
+            return_value=_FakeRemoteClient({"list_issues": list_issues})
+        )
+        monkeypatch.setattr(mcp_server_mod, "GiteaClient", client_factory)
+        monkeypatch.setenv("GITEA_TOKEN", "super-secret-token")
+
+        result = await mcp_server_mod.gitea_list_issues(
+            "gpakoh", "web-ssh-gateway", state=unsupported_state
+        )
+
+        _assert_envelope(result, ok=False)
+        assert result["error"]["code"] == "INVALID_INPUT"
+        assert result["error"]["retryable"] is False
+        message = result["error"]["message"]
+        for allowed in ("open", "closed", "all"):
+            assert allowed in message
+        details = result["error"].get("details") or {}
+        assert details.get("field") == "state"
+        assert set(details.get("allowed_values") or []) == {"open", "closed", "all"}
+        client_factory.assert_not_called()
+        list_issues.assert_not_awaited()
+        import json
+
+        serialized = json.dumps(result)
+        assert "super-secret-token" not in serialized
+        assert "GITEA_TOKEN" not in serialized
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("state_kwarg", "expected_state"),
+        [
+            (None, "open"),
+            ("open", "open"),
+            ("closed", "closed"),
+            ("all", "all"),
+        ],
+    )
+    async def test_gitea_list_issues_valid_states_keep_semantics(
+        self, monkeypatch, state_kwarg, expected_state
+    ):
+        list_issues = AsyncMock(return_value=[dict(GITEA_ISSUE_PAYLOAD)])
+        client_factory = Mock(
+            return_value=_FakeRemoteClient({"list_issues": list_issues})
+        )
+        monkeypatch.setattr(mcp_server_mod, "GiteaClient", client_factory)
+        monkeypatch.setenv("GITEA_TOKEN", "tok")
+
+        if state_kwarg is None:
+            result = await mcp_server_mod.gitea_list_issues(
+                "gpakoh", "web-ssh-gateway"
+            )
+        else:
+            result = await mcp_server_mod.gitea_list_issues(
+                "gpakoh", "web-ssh-gateway", state=state_kwarg
+            )
+
+        _assert_envelope(result)
+        client_factory.assert_called_once()
+        list_issues.assert_awaited_once_with(
+            "gpakoh", "web-ssh-gateway", state=expected_state, limit=30
+        )
+        assert result["result"]["items"][0]["number"] == 42
 
 
 class TestIssuePayloadMinimization:

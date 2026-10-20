@@ -1082,10 +1082,30 @@ async def gitea_get_file(
     return tool_success("gitea_get_file", result=data, source="gitea")
 
 
+# Issue state filter documented for this tool (and the fleet Gitea/GitHub
+# servers): "State: open, closed, all." Anything else is a caller schema
+# error, not something to forward to Gitea as a remote query parameter.
+_GITEA_ISSUE_STATE_FILTERS = frozenset({"open", "closed", "all"})
+
+
 async def gitea_list_issues(
     owner: str, repo: str, state: str = "open", limit: int = 30
 ) -> dict[str, Any]:
     """List issues in a Gitea repository. State: open, closed, all."""
+    if not isinstance(state, str) or state not in _GITEA_ISSUE_STATE_FILTERS:
+        allowed = ", ".join(sorted(_GITEA_ISSUE_STATE_FILTERS))
+        return tool_error(
+            tool="gitea_list_issues",
+            code="INVALID_INPUT",
+            message=f"state must be one of: {allowed}",
+            retryable=False,
+            hint="Reissue gitea_list_issues with one of the allowed state values.",
+            details={
+                "field": "state",
+                "allowed_values": sorted(_GITEA_ISSUE_STATE_FILTERS),
+            },
+            source="gitea",
+        )
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
