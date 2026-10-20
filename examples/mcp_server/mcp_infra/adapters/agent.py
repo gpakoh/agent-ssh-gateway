@@ -59,6 +59,9 @@ from agent_tasks import (
 )
 from agent_tasks import validate_task_id as _validate_task_id
 from agent_tasks import (
+    validate_workflow_phase as _validate_workflow_phase,
+)
+from agent_tasks import (
     write_agent_attempt_state as _write_agent_attempt_state,
 )
 from agent_tasks import (
@@ -458,6 +461,7 @@ def gateway_write_agent_task(
         # Any failure here propagates: no runnable task without a bound
         # digest, and no supervisor-time recapture fallback exists.
         normalized_source_mode = _validate_source_mode(source_mode)
+        _validate_workflow_phase(workflow_phase)
         source_ref = base_ref.strip() if isinstance(base_ref, str) and base_ref.strip() else None
         source_tree_sha = None
         managed_source_sha256: str | None = None

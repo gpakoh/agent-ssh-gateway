@@ -592,6 +592,160 @@ async def test_candidate_cleanup_rejects_closed_unmerged_pr_without_archive(
     assert audit.required == []
 
 
+async def test_candidate_cleanup_accepts_exact_merged_gitea_synthetic_pr_head(
+    tmp_path, immediate_run_tool_async, monkeypatch
+):
+    head = "a" * 40
+    client = _PullClient(
+        closed_pages={1: [_merged_same_repo_pr(608, ref="refs/pull/608/head", sha=head)]}
+    )
+    audit = _AuditLogger()
+    guard_calls: list[str] = []
+    _configure_cleanup_adapter(
+        tmp_path,
+        monkeypatch,
+        client=client,
+        audit=audit,
+        guard_calls=guard_calls,
+    )
+
+    result = await supervisor.candidate_cleanup(
+        "candidate-demo",
+        head,
+        "candidate/demo",
+        "demo",
+    )
+
+    assert result["ok"] is True
+    assert client.closed_calls == [1, 1]
+    assert client.calls == [1, 1, 1]
+    assert guard_calls == ["first", "second", "third"]
+    assert len(audit.required) == 1
+    assert audit.required[0].metadata["preservation_mode"] == "merged_pull_request"
+    assert audit.required[0].metadata["delivery_pull_number"] == 608
+    assert audit.required[0].metadata["delivery_merge_commit_sha"] == "c" * 40
+
+
+def _merged_synthetic_head_wrong_pr_number(head: str) -> dict[str, object]:
+    return _merged_same_repo_pr(609, ref="refs/pull/608/head", sha=head)
+
+
+def _merged_synthetic_head_merge_ref(head: str) -> dict[str, object]:
+    return _merged_same_repo_pr(608, ref="refs/pull/608/merge", sha=head)
+
+
+def _merged_unrelated_head_ref(head: str) -> dict[str, object]:
+    return _merged_same_repo_pr(608, ref="unrelated/feature", sha=head)
+
+
+def _merged_synthetic_head_mismatched_sha(head: str) -> dict[str, object]:
+    return _merged_same_repo_pr(608, ref="refs/pull/608/head", sha="b" * 40)
+
+
+def _unmerged_synthetic_head(head: str) -> dict[str, object]:
+    pr = _same_repo_pr(608, ref="refs/pull/608/head", sha=head)
+    pr["state"] = "closed"
+    pr["merged"] = False
+    return pr
+
+
+def _foreign_synthetic_head(head: str) -> dict[str, object]:
+    return _foreign_pr(608, ref="refs/pull/608/head", sha=head)
+
+
+def _unknown_repo_synthetic_head(head: str) -> dict[str, object]:
+    return {"number": 608, "head": {"ref": "refs/pull/608/head", "sha": head}}
+
+
+@pytest.mark.parametrize(
+    ("pull_request_factory", "expected_details", "expected_retryable"),
+    [
+        (
+            _merged_synthetic_head_wrong_pr_number,
+            {"reference_check": "gitea_merged_pull_request"},
+            False,
+        ),
+        (
+            _merged_synthetic_head_merge_ref,
+            {"reference_check": "gitea_merged_pull_request"},
+            False,
+        ),
+        (
+            _merged_unrelated_head_ref,
+            {"reference_check": "gitea_merged_pull_request"},
+            False,
+        ),
+        (
+            _merged_synthetic_head_mismatched_sha,
+            {"reference_check": "gitea_merged_pull_request"},
+            False,
+        ),
+        (
+            _unmerged_synthetic_head,
+            {
+                "reference_check": "gitea_merged_pull_request",
+                "closed_unmerged_pull_numbers": [608],
+            },
+            False,
+        ),
+        (
+            _foreign_synthetic_head,
+            {"reference_check": "gitea_merged_pull_request"},
+            False,
+        ),
+        (
+            _unknown_repo_synthetic_head,
+            {"reference_check": "gitea_merged_pull_request", "pull_number": 608},
+            True,
+        ),
+    ],
+    ids=[
+        "wrong-pr-number",
+        "pull-merge-ref",
+        "unrelated-head-ref",
+        "mismatched-sha",
+        "unmerged",
+        "foreign-repo",
+        "unknown-repo",
+    ],
+)
+async def test_candidate_cleanup_fails_closed_without_synthetic_head_delivery_proof(
+    tmp_path,
+    immediate_run_tool_async,
+    monkeypatch,
+    pull_request_factory,
+    expected_details,
+    expected_retryable,
+):
+    head = "a" * 40
+    client = _PullClient(closed_pages={1: [pull_request_factory(head)]})
+    audit = _AuditLogger()
+    guard_calls: list[str] = []
+    _configure_cleanup_adapter(
+        tmp_path,
+        monkeypatch,
+        client=client,
+        audit=audit,
+        guard_calls=guard_calls,
+    )
+
+    result = await supervisor.candidate_cleanup(
+        "candidate-demo",
+        head,
+        "candidate/demo",
+        "demo",
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CHECK_FAILED"
+    assert result["error"]["retryable"] is expected_retryable
+    assert result["error"]["details"] == expected_details
+    assert client.closed_calls == [1]
+    assert client.calls == []
+    assert guard_calls == []
+    assert audit.required == []
+
+
 async def test_candidate_cleanup_uses_fresh_guard_twice_and_required_audit_once(
     tmp_path, immediate_run_tool_async, monkeypatch
 ):
@@ -635,6 +789,7 @@ async def test_candidate_cleanup_uses_fresh_guard_twice_and_required_audit_once(
     [
         ("candidate/demo", "b" * 40, "branch"),
         ("different/ref", "a" * 40, "head_sha"),
+        ("refs/pull/42/head", "a" * 40, "head_sha"),
     ],
 )
 async def test_candidate_cleanup_blocks_open_same_repo_pr_reference(

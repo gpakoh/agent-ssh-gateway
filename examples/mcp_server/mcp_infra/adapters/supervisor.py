@@ -698,6 +698,32 @@ async def _assert_no_open_candidate_pr_reference(
         ) from exc
 
 
+def _candidate_pr_delivery_ref_matches(
+    head_ref: str,
+    pull_number: Any,
+    *,
+    expected_branch: str,
+) -> bool:
+    """Return whether a closed PR head ref proves it heads ``expected_branch``.
+
+    True only for the original branch name or for Gitea's synthetic post-delete
+    head ref ``refs/pull/<n>/head`` where ``<n>`` is exactly this PR's own
+    number. Synthetic refs for another PR number, ``refs/pull/<n>/merge``,
+    padded numbers, and any other head ref all return False so the caller keeps
+    its fail-closed rejection.
+    """
+    if head_ref == expected_branch:
+        return True
+    if type(pull_number) is not int or pull_number < 1:
+        return False
+    prefix = "refs/pull/"
+    suffix = "/head"
+    if not head_ref.startswith(prefix) or not head_ref.endswith(suffix):
+        return False
+    digits = head_ref[len(prefix) : len(head_ref) - len(suffix)]
+    return digits == str(pull_number)
+
+
 async def _require_merged_candidate_pr_delivery(
     *,
     token: str,
@@ -706,7 +732,15 @@ async def _require_merged_candidate_pr_delivery(
     expected_branch: str,
     expected_head_sha: str,
 ) -> dict[str, Any]:
-    """Require one closed merged same-repository PR for the exact candidate head."""
+    """Require one closed merged same-repository PR for the exact candidate head.
+
+    The head ref must be ``expected_branch`` or the exact synthetic Gitea pull
+    request head ref ``refs/pull/<this PR number>/head`` that Gitea serves after
+    the source branch is deleted. The synthetic form is only accepted when the
+    PR number embedded in the ref is this PR's own number, the head SHA matches
+    exactly, the PR is really merged, and the head repository is proven to be
+    this same repository; anything else keeps the fail-closed rejection.
+    """
     try:
         from examples.mcp_server.mcp_infra.adapters.remote import (
             _same_gitea_repo_from_pr_head,
@@ -736,7 +770,13 @@ async def _require_merged_candidate_pr_delivery(
                         continue
                     head_ref = str(head.get("ref") or "").strip()
                     head_sha = str(head.get("sha") or "").strip().lower()
-                    if head_ref != expected_branch or head_sha != expected_head_sha:
+                    if not _candidate_pr_delivery_ref_matches(
+                        head_ref,
+                        pr.get("number"),
+                        expected_branch=expected_branch,
+                    ):
+                        continue
+                    if head_sha != expected_head_sha:
                         continue
                     same_repo = _same_gitea_repo_from_pr_head(head, owner=owner, repo=repo)
                     if same_repo is False:
