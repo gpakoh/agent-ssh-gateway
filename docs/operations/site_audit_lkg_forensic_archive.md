@@ -28,8 +28,10 @@ states `accepted_lkg=false` and `authorizes_deployment=false`. Old
 The helper container has the fixed named state volume, candidate bind and
 Docker socket; while the script issues inspect-only calls, the Docker socket is
 privileged, so **never run an unreviewed candidate**. The code is pinned by
-full source SHA, Git blob and file SHA-256. The caller cannot supply a Docker
-target name, arbitrary executable, volume, or host path.
+full source SHA, Git blob and file SHA-256. The helper independently hashes the
+mounted script immediately before execution and executes only that same in-memory
+byte buffer; it refuses any changed, symlinked or malformed script. The caller
+cannot supply a Docker target name, arbitrary executable, volume, or host path.
 
 ## Remaining acceptance gates
 

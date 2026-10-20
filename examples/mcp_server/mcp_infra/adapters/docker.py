@@ -5062,6 +5062,7 @@ async def docker_prepare_site_audit_lkg_recovery(
             script_path=plan["script_path"],
             state_volume=plan["state_volume"],
             historical_revision=historical_revision,
+            expected_script_sha256=plan["expected_script_sha256"],
             archive=False,
             timeout=timeout,
         )
@@ -5116,6 +5117,7 @@ async def _docker_prepare_site_audit_lkg_recovery_impl(
         "script_path": plan["script_path"],
         "state_volume": plan["state_volume"],
         "historical_revision": historical_revision,
+        "expected_script_sha256": plan["expected_script_sha256"],
         "timeout": timeout,
     }
     fresh = _verified_forensic_receipt(

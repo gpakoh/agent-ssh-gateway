@@ -1272,6 +1272,7 @@ class DockerClient:
         script_path: str,
         state_volume: str,
         historical_revision: str,
+        expected_script_sha256: str,
         archive: bool,
         timeout: int = 180,
     ) -> RunResult:
@@ -1291,12 +1292,34 @@ class DockerClient:
             raise ValueError("forensic helper script is outside the pinned candidate")
         if not re.fullmatch(r"[0-9a-f]{40}", historical_revision):
             raise ValueError("historical_revision must be an exact lowercase 40-hex SHA")
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_script_sha256):
+            raise ValueError("expected_script_sha256 must be an exact lowercase SHA-256")
         self._validate_volume_name(state_volume)
         timeout = max(120, min(timeout, 900))
         state_root = "/var/lib/site-audit-deploy-state"
         volume_mount = f"type=volume,src={state_volume},dst={state_root}"
         if not archive:
             volume_mount += ",readonly"
+        # Read the candidate script once, verify the exact byte sequence
+        # *inside* the privileged helper, then execute that same buffer.
+        # A source-file replacement between Gateway preflight and container
+        # startup cannot cause the Docker-socket helper to run changed code.
+        bootstrap = """\
+import hashlib, os, stat, sys
+path, digest, *args = sys.argv[1:]
+fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > 2000000:
+        raise SystemExit(86)
+    raw = os.read(fd, 2000001)
+    if len(raw) != st.st_size or hashlib.sha256(raw).hexdigest() != digest:
+        raise SystemExit(86)
+finally:
+    os.close(fd)
+sys.argv = [path] + args
+exec(compile(raw, path, "exec"), {"__name__": "__main__", "__file__": path, "__package__": None})
+"""
         argv = [
             DOCKER_BIN, "run", "--rm", "--network", "none",
             "--user", "0:0", "--cap-drop", "ALL",
@@ -1305,7 +1328,8 @@ class DockerClient:
             "--mount", "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock,readonly",
             "--mount", f"type=bind,src={candidate_root},dst={candidate_root},readonly",
             "--mount", volume_mount,
-            helper_image_id, "python3", script_path,
+            helper_image_id, "python3", "-I", "-c", bootstrap, script_path,
+            expected_script_sha256,
             "--state-file", f"{state_root}/deploy.json",
             "--expected-revision", historical_revision,
             "--stability-seconds", "10",

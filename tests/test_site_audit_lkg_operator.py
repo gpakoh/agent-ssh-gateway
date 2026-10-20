@@ -215,6 +215,7 @@ async def test_docker_client_forensic_helper_has_fixed_scope(monkeypatch):
         "script_path": "/verified/candidate/scripts/prepare_site_audit_lkg_recovery.py",
         "state_volume": adapter._SITE_AUDIT_STATE_VOLUME,
         "historical_revision": OLD_SHA,
+        "expected_script_sha256": "d" * 64,
     }
     await fake.run_site_audit_lkg_forensics(**base, archive=False)
     args = captured[-1][0]
@@ -357,3 +358,63 @@ async def test_forensic_preflight_binds_source_and_volume_on_valid_fixture(tmp_p
     assert result["script_path"] == str(script)
     assert result["state_volume"] == adapter._SITE_AUDIT_STATE_VOLUME
     assert result["historical_revision"] == OLD_SHA
+
+@pytest.mark.asyncio
+async def test_forensic_bootstrap_executes_only_digest_verified_bytes(tmp_path):
+    """A changed candidate file must not execute with the Docker socket."""
+    import hashlib
+    import subprocess
+
+    script_dir = tmp_path / "scripts"
+    script_dir.mkdir()
+    script = script_dir / "prepare_site_audit_lkg_recovery.py"
+    initial = b"print('PINNED_FORENSIC_SCRIPT_OK')\n"
+    script.write_bytes(initial)
+    digest = hashlib.sha256(initial).hexdigest()
+    client = object.__new__(DockerClient)
+    client._validate_deploy_mount_path = lambda value, _field: value
+    client._validate_volume_name = lambda value: value
+    commands = []
+
+    async def capture(argv, *, timeout):
+        commands.append(argv)
+        return run()
+
+    client._run_with_result = capture
+    await client.run_site_audit_lkg_forensics(
+        helper_image_id="sha256:" + "8" * 64,
+        candidate_root=str(tmp_path),
+        script_path=str(script),
+        state_volume=adapter._SITE_AUDIT_STATE_VOLUME,
+        historical_revision=OLD_SHA,
+        expected_script_sha256=digest,
+        archive=False,
+    )
+    argv = commands[0]
+    index = argv.index("python3")
+    assert argv[index + 1:index + 3] == ["-I", "-c"]
+    bootstrap = argv[index + 3]
+    assert argv[index + 4] == str(script)
+    assert argv[index + 5] == digest
+
+    def check():
+        return subprocess.run(
+            [sys.executable, "-I", "-c", bootstrap, str(script), digest],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+
+    good = check()
+    assert good.returncode == 0, good.stderr
+    assert good.stdout.strip() == "PINNED_FORENSIC_SCRIPT_OK"
+
+    script.write_bytes(b"print('UNTRUSTED_SCRIPT_EXECUTED')\n")
+    bad = check()
+    assert bad.returncode != 0
+    assert "UNTRUSTED_SCRIPT_EXECUTED" not in bad.stdout
+    script.unlink()
+    script.symlink_to(script_dir / "nonexistent")
+    symlinked = check()
+    assert symlinked.returncode != 0
