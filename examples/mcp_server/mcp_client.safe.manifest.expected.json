@@ -2,8 +2,8 @@
   "mode": "mcp_client",
   "safe_mode": true,
   "expected_safe_count": 85,
-  "expected_blocked_count": 36,
-  "expected_mcp_client_full_count": 116,
+  "expected_blocked_count": 37,
+  "expected_mcp_client_full_count": 117,
   "must_include": [
     "docker_site_audit_crm_ingress_readiness",
     "docker_site_audit_deploy_status",
@@ -19,6 +19,7 @@
     "docker_compose_up",
     "docker_deploy_content_harvester",
     "docker_migrate_content_harvester",
+    "docker_prepare_site_audit_lkg_recovery",
     "docker_exec",
     "apply_patch",
     "run_agent",
