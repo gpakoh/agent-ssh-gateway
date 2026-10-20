@@ -194,6 +194,67 @@ def test_cancel_agent_task_uses_bound_attempt_job(monkeypatch):
     assert result["result"]["status"] == "cancelling"
 
 
+def test_cancel_agent_task_rejects_unconfirmed_gateway_ack(monkeypatch):
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    monkeypatch.setattr(
+        agent_adapter,
+        "_cancel_agent_task",
+        lambda *args, **kwargs: {
+            "status": "unconfirmed",
+            "task_id": TASK_ID,
+            "job_id": "job-1",
+            "cancel_requested": False,
+            "worker_termination_proven": False,
+            "replacement_allowed_now": False,
+        },
+    )
+
+    result = agent_adapter.gateway_cancel_agent_task("test", TASK_ID)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CHECK_FAILED"
+    assert result["error"]["retryable"] is False
+    assert result["error"]["details"]["replacement_allowed_now"] is False
+
+
+def test_cancel_agent_task_404_never_recommends_replacing_worker(monkeypatch):
+    from gateway_client import GatewayClientError
+
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    class Client:
+        def cancel_job(self, job_id):
+            raise GatewayClientError(
+                "POST cancel failed: 404 JOB_NOT_FOUND",
+                status_code=404,
+                body={"detail": {
+                    "code": "JOB_NOT_FOUND",
+                    "message": "Job not found",
+                    "retryable": False,
+                }},
+            )
+
+    monkeypatch.setattr(agent_adapter, "_server_client", lambda: Client())
+    monkeypatch.setattr(
+        agent_adapter,
+        "run_project_command",
+        lambda _client, _project, command: (
+            {"stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": "", "exit_code": 0}
+            if command.startswith("ls -ld -- ")
+            else {
+                "stdout": json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+                "stderr": "", "exit_code": 0,
+            }
+        ),
+    )
+    result = agent_adapter.gateway_cancel_agent_task("test", TASK_ID)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "JOB_NOT_FOUND"
+    assert result["error"]["retryable"] is False
+    assert "inspect_agent_task" in result["error"]["hint"]
+    assert "new job" not in result["error"]["hint"]
+
+
 def test_read_agent_diff_returns_hash_of_exact_review_text(monkeypatch):
     import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
 

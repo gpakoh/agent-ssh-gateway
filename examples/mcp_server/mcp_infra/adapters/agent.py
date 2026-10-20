@@ -735,15 +735,37 @@ def gateway_list_agent_tasks(project: str) -> dict[str, Any]:
 def gateway_cancel_agent_task(project: str, task_id: str) -> dict[str, Any]:
     """Cancel the gateway job bound to an agent task's durable attempt record."""
 
-    return run_tool(
-        tool="cancel_agent_task",
-        title="Cancel agent task",
-        fn=lambda: _cancel_agent_task(
+    def _request_and_check_ack() -> dict[str, Any]:
+        result = _cancel_agent_task(
             lambda p, c: run_project_command(_server_client(), p, c),
             project=project,
             task_id=task_id,
             cancel_job=lambda job_id: _server_client().cancel_job(job_id),
-        ),
+        )
+        if result.get("status") == "unconfirmed":
+            return tool_error(
+                tool="cancel_agent_task",
+                code="CHECK_FAILED",
+                message="Gateway did not confirm cancellation for the bound agent job",
+                retryable=False,
+                hint=(
+                    "Inspect the original task with inspect_agent_task; do not "
+                    "create a replacement until worker termination is proven."
+                ),
+                details={
+                    "task_id": result["task_id"],
+                    "job_id": result["job_id"],
+                    "worker_termination_proven": False,
+                    "replacement_allowed_now": False,
+                },
+                source="gateway",
+            )
+        return result
+
+    return run_tool(
+        tool="cancel_agent_task",
+        title="Cancel agent task",
+        fn=_request_and_check_ack,
         success_text="Requested agent task cancellation.",
     )
 

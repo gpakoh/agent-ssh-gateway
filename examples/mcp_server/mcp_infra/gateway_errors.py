@@ -141,7 +141,7 @@ def _gateway_error_details(exc: GatewayClientError) -> dict[str, Any] | None:
     return details or None
 
 
-def _gateway_error_hint(exc: GatewayClientError, code: str) -> str | None:
+def _gateway_error_hint(exc: GatewayClientError, code: str, *, tool: str | None = None) -> str | None:
     """Extract an operator-safe MCP hint for a gateway failure.
 
     Gateway hints are written for the REST surface, so MCP-specific recovery
@@ -150,6 +150,12 @@ def _gateway_error_hint(exc: GatewayClientError, code: str) -> str | None:
     arbitrary flat REST hints are not propagated implicitly.
     """
     if code == "JOB_NOT_FOUND":
+        if tool == "cancel_agent_task":
+            return (
+                "The bound Gateway job is missing; this does not prove that the "
+                "OpenCode worker stopped. Inspect the original task using "
+                "inspect_agent_task, preserve its identity, and do not start a replacement."
+            )
         return "The job no longer exists (it may have expired); re-run the tool to start a new job, or call job_status/job_result with the id of a job returned by this run"
     if code in _RATE_LIMIT_GATEWAY_CODES:
         return (
