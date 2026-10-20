@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import subprocess
 import sys
@@ -1040,6 +1041,71 @@ class TestProjectGitStateGuards:
         assert before_mode["index_sha256"] != after_mode["index_sha256"]
 
 
+_VERBATIM_STUB_UV = """#!/bin/sh
+python3 - "$0" "$@" <<'PY'
+import json
+import os
+import sys
+
+captured = [os.path.basename(sys.argv[1]), *sys.argv[2:]]
+with open(os.environ["VERBATIM_CAPTURE_FILE"], "w", encoding="utf-8") as handle:
+    json.dump(captured, handle)
+PY
+"""
+
+_DEV_MYPY_PYPROJECT = """
+[project]
+name = "demo"
+[project.optional-dependencies]
+dev = ["pytest", "ruff", "mypy"]
+""".strip()
+
+
+def _advertised_verification_round_trip(
+    mod,
+    monkeypatch: pytest.MonkeyPatch,
+    project_root: Path,
+) -> tuple[dict[str, object], list[list[str]]]:
+    """Execute every advertised verification command verbatim (direct argv,
+    no shell) against a stubbed ``uv`` that records the argv it received.
+
+    Returns the raw ``info()`` payload and the recorded argv list so callers
+    can assert the round trip advertised == executed, plus per-command
+    properties such as required mypy targets.
+    """
+    stub_bin = project_root / "stub-bin"
+    stub_bin.mkdir(exist_ok=True)
+    stub_uv = stub_bin / "uv"
+    stub_uv.write_text(_VERBATIM_STUB_UV, encoding="utf-8")
+    stub_uv.chmod(0o755)
+    monkeypatch.setattr(mod, "_resolve_project", lambda project: project_root)
+
+    result = mod.info(None, "demo")
+    env = dict(os.environ)
+    env["PATH"] = f"{stub_bin}{os.pathsep}{env.get('PATH', '')}"
+    capture_file = stub_bin / "captured.json"
+    env["VERBATIM_CAPTURE_FILE"] = str(capture_file)
+
+    recorded: list[list[str]] = []
+    for command in result["verification"]["commands"]:
+        completed = subprocess.run(
+            command["argv"],
+            cwd=project_root,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert completed.returncode == 0, (
+            command["name"],
+            command["argv"],
+            completed.stdout,
+            completed.stderr,
+        )
+        recorded.append(json.loads(capture_file.read_text(encoding="utf-8")))
+    return result, recorded
+
+
 class TestProjectInfoVerificationHints:
     def test_info_exposes_cwd_bound_uv_verification_hints(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1221,6 +1287,114 @@ dev = ["pytest", "ruff", "mypy"]
                 completed.stdout,
                 completed.stderr,
             )
+
+    def test_round_trip_makefile_mypy_target_executes_verbatim(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        (tmp_path / "pyproject.toml").write_text(_DEV_MYPY_PYPROJECT, encoding="utf-8")
+        (tmp_path / "Makefile").write_text(
+            "mypy:\n\tuv run mypy app scripts tests\n", encoding="utf-8"
+        )
+
+        result, recorded = _advertised_verification_round_trip(mod, monkeypatch, tmp_path)
+
+        verification = result["verification"]
+        commands = verification["commands"]
+        assert {command["name"] for command in commands} == {"pytest", "ruff", "mypy"}
+        assert "omitted_commands" not in verification
+        assert recorded == [command["argv"] for command in commands]
+        mypy_command = next(command for command in commands if command["name"] == "mypy")
+        assert mypy_command["contract_source"] == "Makefile:mypy"
+        assert mypy_command["argv"][mypy_command["argv"].index("mypy") + 1 :] == [
+            "app",
+            "scripts",
+            "tests",
+        ]
+        for command in commands:
+            assert str(tmp_path) not in " ".join(command["argv"])
+            assert command["argv"][:2] == ["uv", "run"]
+
+    def test_round_trip_pyproject_mypy_files_executes_verbatim(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import tomllib
+
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        (tmp_path / "pyproject.toml").write_text(
+            _DEV_MYPY_PYPROJECT + "\n[tool.mypy]\nfiles = ['app', 'scripts', 'tests']",
+            encoding="utf-8",
+        )
+
+        result, recorded = _advertised_verification_round_trip(mod, monkeypatch, tmp_path)
+
+        verification = result["verification"]
+        commands = verification["commands"]
+        assert "omitted_commands" not in verification
+        assert recorded == [command["argv"] for command in commands]
+        mypy_command = next(command for command in commands if command["name"] == "mypy")
+        assert mypy_command == {
+            "name": "mypy",
+            "argv": ["uv", "run", "--extra", "dev", "mypy"],
+            "contract_source": "pyproject.toml:[tool.mypy].files",
+        }
+        parsed = tomllib.loads((tmp_path / "pyproject.toml").read_text(encoding="utf-8"))
+        assert parsed["tool"]["mypy"]["files"] == ["app", "scripts", "tests"]
+
+    def test_round_trip_mypy_without_target_set_is_omitted_with_reason(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        (tmp_path / "pyproject.toml").write_text(_DEV_MYPY_PYPROJECT, encoding="utf-8")
+
+        result, recorded = _advertised_verification_round_trip(mod, monkeypatch, tmp_path)
+
+        verification = result["verification"]
+        commands = verification["commands"]
+        assert {command["name"] for command in commands} == {"pytest", "ruff"}
+        assert recorded == [command["argv"] for command in commands]
+        omitted = verification["omitted_commands"]
+        assert [entry["name"] for entry in omitted] == ["mypy"]
+        assert omitted[0]["reason"].strip()
+        assert "Missing target" in omitted[0]["reason"]
+
+    @pytest.mark.parametrize(
+        "shell_only_tail",
+        [
+            "2>/dev/null",
+            ">/dev/null",
+            "2>&1",
+            "&",
+            "app;echo unsafe-shell-tail",
+            "# type-check",
+            "~/app",
+            "app/*",
+        ],
+    )
+    def test_info_omits_makefile_mypy_recipe_requiring_shell_interpretation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        shell_only_tail: str,
+    ) -> None:
+        """A recipe token that only means something to a shell is passed
+        through literally by a verbatim argv execution, so the advertised
+        command cannot run as written and must be omitted with a reason.
+        """
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        (tmp_path / "pyproject.toml").write_text(_DEV_MYPY_PYPROJECT, encoding="utf-8")
+        (tmp_path / "Makefile").write_text(
+            f"mypy:\n\tuv run mypy {shell_only_tail}\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+
+        result = mod.info(None, "demo")
+        verification = result["verification"]
+
+        assert "mypy" not in {command["name"] for command in verification["commands"]}
+        omitted = verification.get("omitted_commands", [])
+        assert [entry["name"] for entry in omitted] == ["mypy"]
+        assert omitted[0]["reason"].strip()
 
     def test_info_does_not_invent_dev_extra_from_unrelated_text(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

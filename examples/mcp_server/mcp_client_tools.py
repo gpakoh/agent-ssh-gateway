@@ -1641,6 +1641,30 @@ def working_directory(client: GatewayClient, project: str) -> dict[str, Any]:
 
 
 
+_SHELL_ONLY_CHARS = frozenset("&;|<>*?[")
+
+
+def _has_shell_only_token(argv: list[str]) -> bool:
+    """True when a token only carries meaning through shell re-interpretation.
+
+    ``shlex`` splits on whitespace, not on shell syntax, so a token-equality
+    check against operators misses glued forms: ``app;echo`` and
+    ``2>/dev/null`` arrive as a single token, and fd redirections,
+    backgrounding, comments, tilde targets and globs are handed to the
+    program literally when argv runs without a shell — the advertised command
+    then cannot run as written. ``$VAR``/``$(...)`` and backticks are
+    expansion for the same reason and are rejected here too.
+    """
+    for token in argv:
+        if _SHELL_ONLY_CHARS.intersection(token):
+            return True
+        if "$" in token or "`" in token:
+            return True
+        if token.startswith(("#", "~")):
+            return True
+    return False
+
+
 def _makefile_target_uv_argv(
     resolved: Path, target: str, tool_name: str
 ) -> list[str] | None:
@@ -1652,7 +1676,6 @@ def _makefile_target_uv_argv(
     verbatim without requiring ``make`` or re-interpreting project shell code.
     """
     target_pattern = re.compile(rf"^[ \t]*{re.escape(target)}[ \t]*:[^=\n]*$")
-    shell_tokens = {"&&", "||", ";", "|", ">", ">>", "<", "<<"}
     for name in ("GNUmakefile", "Makefile", "makefile"):
         makefile = resolved / name
         if not makefile.is_file():
@@ -1687,9 +1710,7 @@ def _makefile_target_uv_argv(
                 return None
             if tool_name not in argv[2:]:
                 return None
-            if any(token in shell_tokens for token in argv):
-                return None
-            if any("$" in token or "`" in token for token in argv):
+            if _has_shell_only_token(argv):
                 return None
             return argv
     return None
