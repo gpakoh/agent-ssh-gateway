@@ -453,6 +453,8 @@ _GITEA_ACTIONS_SECRET_DESCRIPTION_PREFIX = "mcp-source-sha256:"
 _GITEA_CI_PAGE_LIMIT = 50
 _GITEA_CI_MAX_RUNS = 1000
 _GITEA_CI_MAX_PAGES = 20
+_GITEA_SUPERSEDING_PR_PAGE_LIMIT = 50
+_GITEA_SUPERSEDING_PR_MAX_PAGES = 20
 _GITEA_BRANCH_PROTECTION_MAX_CONTEXTS = 64
 _GITEA_BRANCH_PROTECTION_MAX_CONTEXT_LEN = 200
 _GITEA_BRANCH_PROTECTION_MAX_APPROVALS = 100
@@ -1629,6 +1631,79 @@ def _normalize_superseding_branch(superseding_ref: str) -> str:
     return validate_feature_branch(_superseding_branch_name(superseding_ref))
 
 
+async def _find_merged_superseding_pr(
+    client: Any,
+    owner: str,
+    repo: str,
+    *,
+    superseding_branch: str,
+    superseding_head_sha: str,
+) -> dict[str, Any] | None:
+    """Prove a distinct superseding head is the head of a merged same-repo PR.
+
+    Used only when the superseding branch head differs from the obsolete PR's
+    ``expected_head_sha``. Returns an evidence record when, and only when, a
+    PR is found that:
+
+    * is in the SAME target repository (fork/foreign head repos are refused),
+    * is closed and explicitly ``merged is True``,
+    * exposes a valid 40-hex ``merge_commit_sha``,
+    * has base ref equals the superseding PR base (recorded, not compared to
+      the obsolete PR), and
+    * whose ``head.ref`` equals the normalized superseding branch AND whose
+      ``head.sha`` equals ``superseding_head_sha``.
+
+    Returns ``None`` for any ambiguous/missing/unmerged/foreign/open case so
+    the caller fails closed. There is deliberately no "best effort" success:
+    the operator's semantic code-equivalence claim is only an attestation and
+    is recorded as residual risk, never re-derived here.
+    """
+    page = 1
+    while True:
+        page_prs = await client.list_pull_requests(
+            owner,
+            repo,
+            state="all",
+            limit=_GITEA_SUPERSEDING_PR_PAGE_LIMIT,
+            page=page,
+        )
+        for pr in page_prs:
+            if not isinstance(pr, dict):
+                continue
+            head = pr.get("head") or {}
+            if str(head.get("ref") or "") != superseding_branch:
+                continue
+            same_repo = _same_gitea_repo_from_pr_head(head, owner=owner, repo=repo)
+            if same_repo is not True:
+                continue
+            head_sha = _valid_commit_sha(head.get("sha"))
+            if head_sha != superseding_head_sha:
+                continue
+            if pr.get("merged") is not True or pr.get("state") != "closed":
+                continue
+            merge_commit_sha = _valid_commit_sha(pr.get("merge_commit_sha"))
+            if merge_commit_sha is None:
+                continue
+            base = pr.get("base") or {}
+            base_ref = str(base.get("ref") or "")
+            if not base_ref:
+                continue
+            return {
+                "number": pr.get("number"),
+                "state": "closed",
+                "merged": True,
+                "base_ref": base_ref,
+                "merge_commit_sha": merge_commit_sha,
+                "head_sha": head_sha,
+                "head_ref": superseding_branch,
+            }
+        if len(page_prs) < _GITEA_SUPERSEDING_PR_PAGE_LIMIT:
+            return None
+        if page >= _GITEA_SUPERSEDING_PR_MAX_PAGES:
+            return None
+        page += 1
+
+
 async def gitea_close_pull_request(
     owner: str,
     repo: str,
@@ -1656,10 +1731,22 @@ async def gitea_close_pull_request(
     both equal that default branch and whose head/base SHAs both equal
     ``expected_head_sha``. No default ref is invented. Immediately before a
     real close, the adapter freshly resolves the supplied branch via the same
-    Gitea client and requires its exact head commit to equal
-    ``expected_head_sha``. Missing branch, malformed ref, moved/different head,
-    or ambiguous zero-delta proof fails closed with zero audit intent and zero
-    close mutation. No arbitrary URL/repo-qualified strings are accepted. A
+    Gitea client. When that branch head equals ``expected_head_sha`` the
+    existing same-SHA contract applies. When the branch head is a DISTINCT
+    40-hex SHA, the branch is accepted only if it is independently proven to
+    be the head of a CLOSED, MERGED pull request in the SAME target
+    repository with a valid merge commit and preserved branch/repo identity,
+    using only the existing Gitea read/list protocols. Missing branch,
+    malformed ref, moved head, unmerged/open/foreign/unknown superseding PR,
+    missing merge commit, or ambiguous zero-delta proof fails closed with zero
+    audit intent and zero close mutation. The exact superseding branch head is
+    re-fetched immediately before the close mutation to avoid TOCTOU, and the
+    audit metadata records both the original expected head and the distinct
+    replacement SHA plus the merged PR/merge-commit evidence. The operator's
+    superseding_ref plus human-readable reason remain the attestation that the
+    merged work is equivalent; the adapter never infers code equivalence from
+    SHAs and reports that residual risk. No arbitrary URL/repo-qualified
+    strings are accepted. A
     PR already closed whose
     head still matches and is explicitly merged=false remains an idempotent
     success (already_closed=true): the argument is still required for schema
@@ -1851,21 +1938,65 @@ async def gitea_close_pull_request(
                 superseding_head_sha = str(
                     superseding_commit.get("id") or superseding_commit.get("sha") or ""
                 ).lower()
+                merged_supersession_evidence: dict[str, Any] | None = None
                 if superseding_head_sha != expected_head_sha:
-                    return tool_error(
-                        tool="gitea_close_pull_request",
-                        code="POLICY_DENIED",
-                        message=(
-                            f"superseding branch {superseding_branch!r} head does not "
-                            "equal expected_head_sha; re-read the branch before closing"
-                        ),
-                        details={
-                            "superseding_branch": superseding_branch,
-                            "expected_head_sha": expected_head_sha,
-                            "observed_superseding_head_sha": superseding_head_sha,
-                        },
-                        source="gitea",
-                    )
+                    if degenerate_same_default_ref:
+                        return tool_error(
+                            tool="gitea_close_pull_request",
+                            code="POLICY_DENIED",
+                            message=(
+                                f"superseding branch {superseding_branch!r} head does not "
+                                "equal expected_head_sha; re-read the branch before closing"
+                            ),
+                            details={
+                                "superseding_branch": superseding_branch,
+                                "expected_head_sha": expected_head_sha,
+                                "observed_superseding_head_sha": superseding_head_sha,
+                            },
+                            source="gitea",
+                        )
+                    if _valid_commit_sha(superseding_head_sha) is None:
+                        return tool_error(
+                            tool="gitea_close_pull_request",
+                            code="POLICY_DENIED",
+                            message=(
+                                f"superseding branch {superseding_branch!r} head does not "
+                                "equal expected_head_sha; re-read the branch before closing"
+                            ),
+                            details={
+                                "superseding_branch": superseding_branch,
+                                "expected_head_sha": expected_head_sha,
+                                "observed_superseding_head_sha": superseding_head_sha,
+                            },
+                            source="gitea",
+                        )
+                    try:
+                        merged_supersession_evidence = await _find_merged_superseding_pr(
+                            client,
+                            owner,
+                            repo,
+                            superseding_branch=superseding_branch,
+                            superseding_head_sha=superseding_head_sha,
+                        )
+                    except httpx.HTTPStatusError:
+                        pass
+                    if merged_supersession_evidence is None:
+                        return tool_error(
+                            tool="gitea_close_pull_request",
+                            code="POLICY_DENIED",
+                            message=(
+                                f"superseding branch {superseding_branch!r} head does not "
+                                "equal expected_head_sha and is not proven to be the head "
+                                "of a closed, merged pull request in the same repository; "
+                                "re-read the branch before closing"
+                            ),
+                            details={
+                                "superseding_branch": superseding_branch,
+                                "expected_head_sha": expected_head_sha,
+                                "observed_superseding_head_sha": superseding_head_sha,
+                            },
+                            source="gitea",
+                        )
                 canonical_superseding_ref = f"refs/heads/{superseding_branch}"
                 correlation_id = uuid.uuid4().hex
                 audit_metadata = {
@@ -1882,6 +2013,17 @@ async def gitea_close_pull_request(
                 }
                 if degenerate_same_default_ref:
                     audit_metadata["degenerate_same_default_ref"] = True
+                if merged_supersession_evidence is not None:
+                    audit_metadata["merged_supersession"] = True
+                    audit_metadata["superseding_pr_number"] = (
+                        merged_supersession_evidence["number"]
+                    )
+                    audit_metadata["superseding_pr_base"] = (
+                        merged_supersession_evidence["base_ref"]
+                    )
+                    audit_metadata["superseding_merge_commit_sha"] = (
+                        merged_supersession_evidence["merge_commit_sha"]
+                    )
                 audit_logger = _get_gitea_audit_logger()
                 try:
                     audit_logger.append_required(
@@ -1899,6 +2041,42 @@ async def gitea_close_pull_request(
                         tool="gitea_close_pull_request",
                         code="AUDIT_UNAVAILABLE",
                         message="Audit log unavailable; destructive operation refused",
+                        source="gitea",
+                    )
+                try:
+                    recheck_branch = await client.get_branch(
+                        owner, repo, superseding_branch
+                    )
+                except httpx.HTTPStatusError as exc:
+                    response = getattr(exc, "response", None)
+                    if response is not None and response.status_code == 404:
+                        return tool_error(
+                            tool="gitea_close_pull_request",
+                            code="POLICY_DENIED",
+                            message=(
+                                f"superseding branch {superseding_branch!r} disappeared "
+                                "before close; failing closed"
+                            ),
+                            source="gitea",
+                        )
+                    raise
+                recheck_commit = recheck_branch.get("commit") or {}
+                recheck_head_sha = str(
+                    recheck_commit.get("id") or recheck_commit.get("sha") or ""
+                ).lower()
+                if recheck_head_sha != superseding_head_sha:
+                    return tool_error(
+                        tool="gitea_close_pull_request",
+                        code="POLICY_DENIED",
+                        message=(
+                            f"superseding branch {superseding_branch!r} head changed "
+                            "before close; re-read the branch before closing"
+                        ),
+                        details={
+                            "superseding_branch": superseding_branch,
+                            "expected_superseding_head_sha": superseding_head_sha,
+                            "observed_superseding_head_sha": recheck_head_sha,
+                        },
                         source="gitea",
                     )
                 await client.close_pull_request(owner, repo, pull_number)
