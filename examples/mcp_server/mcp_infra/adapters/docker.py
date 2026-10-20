@@ -1449,6 +1449,142 @@ async def _prepare_site_audit_deploy(
     }
 
 
+_SITE_AUDIT_FORENSIC_SCRIPT = "scripts/prepare_site_audit_lkg_recovery.py"
+
+
+async def _prepare_site_audit_lkg_forensics(
+    *,
+    candidate_project: str,
+    expected_head_sha: str,
+    expected_script_blob_sha: str,
+    expected_script_sha256: str,
+    historical_revision: str,
+) -> dict[str, Any]:
+    """Bind an immutable source-owned forensic helper and fixed state volume."""
+    for name, value, length in (
+        ("expected_head_sha", expected_head_sha, 40),
+        ("expected_script_blob_sha", expected_script_blob_sha, 40),
+        ("expected_script_sha256", expected_script_sha256, 64),
+        ("historical_revision", historical_revision, 40),
+    ):
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{" + str(length) + r"}", value):
+            raise ValueError(f"{name} must be an exact lowercase {length}-hex digest")
+    if historical_revision == expected_head_sha:
+        raise ValueError("historical revision must differ from the new source snapshot")
+    registry = server_attr("_get_workspace_registry")()
+    info = registry.project_info(candidate_project)
+    root = _safe_registered_root(info, expected_type="candidate-clone")
+    meta = _read_candidate_metadata(root)
+    if meta.get("project_id") != candidate_project or meta.get("source_project") != _SITE_AUDIT_SOURCE_PROJECT:
+        raise ValueError("forensic candidate source identity mismatch")
+    if meta.get("head") != expected_head_sha or meta.get("base_sha") != expected_head_sha:
+        raise ValueError("forensic candidate must be an exact clean main snapshot")
+    if _git_capture(root, "rev-parse", "HEAD").lower() != expected_head_sha:
+        raise ValueError("forensic candidate HEAD moved")
+    if _git_capture(root, "status", "--porcelain=v1", "--untracked-files=all"):
+        raise ValueError("forensic candidate is dirty")
+    script = _safe_regular_under(root, _SITE_AUDIT_FORENSIC_SCRIPT, "Site Audit forensic script")
+    if _git_capture(root, "rev-parse", f"{expected_head_sha}:{_SITE_AUDIT_FORENSIC_SCRIPT}") != expected_script_blob_sha:
+        raise ValueError("forensic helper Git blob mismatch")
+    if hashlib.sha256(script.read_bytes()).hexdigest() != expected_script_sha256:
+        raise ValueError("forensic helper SHA-256 mismatch")
+    client = _docker_client()
+    volume = await client.volume_metadata(_SITE_AUDIT_STATE_VOLUME)
+    if volume.get("Name") != _SITE_AUDIT_STATE_VOLUME:
+        raise RuntimeError("forensic state volume identity mismatch")
+    if volume.get("Driver") not in (None, "", "local") or volume.get("Options") not in (None, {}, []):
+        raise RuntimeError("forensic state volume driver/options cannot be trusted")
+    helper = os.environ.get("MCP_DEPLOY_HELPER_CONTAINER", _DEPLOY_HELPER_CONTAINER).strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", helper):
+        raise ValueError("forensic helper image container selector invalid")
+    helper_image_id = await client.container_image_id(helper)
+    return {
+        "candidate_root": str(root),
+        "script_path": str(script),
+        "helper_image_id": helper_image_id,
+        "state_volume": _SITE_AUDIT_STATE_VOLUME,
+        "historical_revision": historical_revision,
+        "expected_head_sha": expected_head_sha,
+        "expected_script_blob_sha": expected_script_blob_sha,
+        "expected_script_sha256": expected_script_sha256,
+    }
+
+
+def _verified_forensic_receipt(run: RunResult, historical_revision: str) -> dict[str, Any]:
+    """Accept only the bounded, nonauthorizing source-owned evidence schema."""
+    if run.exit_code != 0:
+        raise RuntimeError("Site Audit forensic helper refused the observed state")
+    try:
+        value = json.loads((run.stdout or "").strip())
+    except (ValueError, UnicodeError) as exc:
+        raise RuntimeError("Site Audit forensic helper returned invalid JSON") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError("Site Audit forensic helper returned invalid evidence")
+    if (
+        value.get("schema_version") != 1
+        or value.get("status") != "forensic_preflight_only"
+        or value.get("kind") != "site_audit_legacy_lkg_recovery_evidence"
+        or value.get("accepted_lkg") is not False
+        or value.get("authorizes_deployment") is not False
+        or value.get("source_revision") != historical_revision
+        or value.get("historically_missing_container") != "site-audit-crm-ingress"
+    ):
+        raise RuntimeError("Site Audit forensic evidence attempts to override LKG acceptance")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(value.get("historical_state_sha256") or "")):
+        raise RuntimeError("forensic historical state hash is missing")
+    targets = value.get("current_target_observations")
+    protected = value.get("current_protected_observations_not_backdated")
+    target_drift = value.get("historical_target_identity_drift")
+    if not isinstance(targets, dict) or set(targets) != {t[1] for t in _SITE_AUDIT_TARGETS}:
+        raise RuntimeError("forensic audit target inventory is incomplete")
+    if not isinstance(protected, dict) or set(protected) != set(_SITE_AUDIT_PROTECTED_CONTAINERS):
+        raise RuntimeError("forensic protected inventory is incomplete")
+    drift = value.get("historical_protected_identity_drift")
+    original = set(_SITE_AUDIT_PROTECTED_CONTAINERS) - {"site-audit-crm-ingress"}
+    if (
+        not isinstance(drift, list)
+        or any(not isinstance(x, str) for x in drift)
+        or len(set(drift)) != len(drift)
+        or not set(drift) <= original
+    ):
+        raise RuntimeError("forensic historical drift evidence is malformed")
+    for row in targets.values():
+        if not isinstance(row, dict) or row.get("revision") != historical_revision:
+            raise RuntimeError("forensic target source revision mismatch")
+        if row.get("restart_count") != 0 or type(row.get("restart_count")) is not int:
+            raise RuntimeError("forensic target restart count is not zero")
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(row.get("image_id") or "")):
+            raise RuntimeError("forensic target image identity malformed")
+        if not isinstance(row.get("image"), str) or not row["image"].endswith(":" + historical_revision):
+            raise RuntimeError("forensic target image reference malformed")
+        if not all(isinstance(row.get(k), str) and row[k] for k in ("container_id", "started_at")):
+            raise RuntimeError("forensic target container identity malformed")
+        if type(row.get("differs_from_historical")) is not bool:
+            raise RuntimeError("forensic target historical comparison missing")
+    expected_target_drift = {
+        name for name, row in targets.items() if row["differs_from_historical"]
+    }
+    if (
+        not isinstance(target_drift, list)
+        or any(not isinstance(name, str) for name in target_drift)
+        or len(set(target_drift)) != len(target_drift)
+        or set(target_drift) != expected_target_drift
+    ):
+        raise RuntimeError("forensic target drift inventory mismatch")
+    for name, row in protected.items():
+        if not isinstance(row, dict) or not all(
+            isinstance(row.get(k), str) and row[k] for k in ("container_id", "started_at")
+        ):
+            raise RuntimeError("forensic protected container identity malformed")
+        if name in original and type(row.get("differs_from_historical")) is not bool:
+            raise RuntimeError("forensic protected historical comparison missing")
+    if set(drift) != {
+        name for name in original if protected[name]["differs_from_historical"]
+    }:
+        raise RuntimeError("forensic protected drift inventory mismatch")
+    return value
+
+
 def _site_audit_state_maps(
     state: dict[str, Any],
     *,
@@ -4903,6 +5039,134 @@ async def docker_site_audit_deploy_status() -> dict[str, Any]:
     )
 
 
+def _site_audit_forensic_fingerprint(receipt: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+async def docker_prepare_site_audit_lkg_recovery(
+    candidate_project: str,
+    expected_head_sha: str,
+    expected_script_blob_sha: str,
+    expected_script_sha256: str,
+    historical_revision: str,
+    timeout: int = 240,
+) -> dict[str, Any]:
+    """ADMIN + HIGH-RISK confirmation to preserve an incomplete historical LKG.
+
+    This is **not** accepted-LKG recovery or a deployment. An immutable
+    source-pinned forensic helper first proves the fixed live inventory.
+    Confirmation permits only creation of append-only recovery evidence.
+    """
+    params = {
+        "candidate_project": candidate_project,
+        "expected_head_sha": expected_head_sha,
+        "expected_script_blob_sha": expected_script_blob_sha,
+        "expected_script_sha256": expected_script_sha256,
+        "historical_revision": historical_revision,
+    }
+    try:
+        timeout = int(timeout)
+        if not 180 <= timeout <= 900:
+            raise ValueError("Site Audit forensic timeout must be 180..900 seconds")
+        plan = await _prepare_site_audit_lkg_forensics(**params)
+        run = await _docker_client().run_site_audit_lkg_forensics(
+            helper_image_id=plan["helper_image_id"],
+            candidate_root=plan["candidate_root"],
+            script_path=plan["script_path"],
+            state_volume=plan["state_volume"],
+            historical_revision=historical_revision,
+            expected_script_sha256=plan["expected_script_sha256"],
+            archive=False,
+            timeout=timeout,
+        )
+        receipt = _verified_forensic_receipt(run, historical_revision)
+    except (ValueError, RuntimeError, OSError) as exc:
+        return tool_error(
+            tool="docker_prepare_site_audit_lkg_recovery",
+            code="DEPLOY_CONTRACT_PRECONDITION_FAILED",
+            message=str(exc),
+            source="docker",
+            retryable=False,
+        )
+    action = _confirm_store().create_action(
+        "docker_prepare_site_audit_lkg_recovery",
+        {**params, "timeout": timeout,
+         "expected_historical_state_sha256": receipt["historical_state_sha256"],
+         "expected_receipt_fingerprint": _site_audit_forensic_fingerprint(receipt)},
+        "Archive Site Audit historical LKG evidence without changing deploy.json "
+        f"(historical={historical_revision[:12]}, source={expected_head_sha[:12]})",
+        risk="high",
+        required_scope="mcp:docker:admin",
+    )
+    return _confirmation_response(action)
+
+
+async def _docker_prepare_site_audit_lkg_recovery_impl(
+    candidate_project: str,
+    expected_head_sha: str,
+    expected_script_blob_sha: str,
+    expected_script_sha256: str,
+    historical_revision: str,
+    expected_historical_state_sha256: str,
+    expected_receipt_fingerprint: str,
+    timeout: int = 240,
+) -> dict[str, Any]:
+    """Exact-lease confirmation handler; never edits accepted LKG or Docker."""
+    plan = await _prepare_site_audit_lkg_forensics(
+        candidate_project=candidate_project,
+        expected_head_sha=expected_head_sha,
+        expected_script_blob_sha=expected_script_blob_sha,
+        expected_script_sha256=expected_script_sha256,
+        historical_revision=historical_revision,
+    )
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_historical_state_sha256):
+        raise RuntimeError("forensic historical state digest lease is invalid")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_receipt_fingerprint):
+        raise RuntimeError("forensic receipt fingerprint lease is invalid")
+    client = _docker_client()
+    common = {
+        "helper_image_id": plan["helper_image_id"],
+        "candidate_root": plan["candidate_root"],
+        "script_path": plan["script_path"],
+        "state_volume": plan["state_volume"],
+        "historical_revision": historical_revision,
+        "expected_script_sha256": plan["expected_script_sha256"],
+        "timeout": timeout,
+    }
+    fresh = _verified_forensic_receipt(
+        await client.run_site_audit_lkg_forensics(**common, archive=False),
+        historical_revision,
+    )
+    if (
+        fresh["historical_state_sha256"] != expected_historical_state_sha256
+        or _site_audit_forensic_fingerprint(fresh) != expected_receipt_fingerprint
+    ):
+        raise RuntimeError("forensic evidence changed after operator confirmation")
+    archived = _verified_forensic_receipt(
+        await client.run_site_audit_lkg_forensics(**common, archive=True),
+        historical_revision,
+    )
+    if archived != fresh:
+        raise RuntimeError("forensic observations changed while archiving; inspect the evidence before retry")
+    # The source-owned helper completed fsync of *both* archival files prior
+    # to its successful return. Archive is evidence, not an accepted LKG.
+    return tool_success(
+        "docker_prepare_site_audit_lkg_recovery",
+        result={
+            "status": "forensic_archive_created",
+            "historical_revision": historical_revision,
+            "source_revision": expected_head_sha,
+            "historical_state_sha256": archived["historical_state_sha256"],
+            "accepted_lkg": False,
+            "authorizes_deployment": False,
+            "historical_protected_identity_drift": archived["historical_protected_identity_drift"],
+            "requires_new_guarded_rollout": True,
+        },
+        source="docker",
+        redacted=True,
+    )
+
+
 async def docker_deploy_site_audit(
     candidate_project: str,
     expected_head_sha: str,
@@ -5628,6 +5892,7 @@ _CONFIRM_HANDLERS: dict[str, Callable[..., Any]] = {
     "docker_rmi": _docker_rmi_impl,
     "docker_volume_rm": _docker_volume_rm_impl,
     "docker_deploy_contract": _docker_deploy_contract_impl,
+    "docker_prepare_site_audit_lkg_recovery": _docker_prepare_site_audit_lkg_recovery_impl,
     "docker_deploy_site_audit": _docker_deploy_site_audit_impl,
     "docker_provision_site_audit_crm": _docker_provision_site_audit_crm_impl,
     "docker_deploy_xloud": _docker_deploy_xloud_impl,
@@ -6315,6 +6580,7 @@ def register_all() -> None:
         "docker_deploy_contract",
         "docker_site_audit_deploy_status",
         "docker_site_audit_crm_ingress_readiness",
+        "docker_prepare_site_audit_lkg_recovery",
         "docker_deploy_site_audit",
         "docker_provision_site_audit_crm",
         "docker_deploy_xloud",

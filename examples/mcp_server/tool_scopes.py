@@ -215,6 +215,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "docker_rmi": ["mcp:docker:admin"],
     "docker_volume_rm": ["mcp:docker:admin"],
     "docker_deploy_contract": ["mcp:docker:admin"],
+    "docker_prepare_site_audit_lkg_recovery": ["mcp:docker:admin"],
     "docker_deploy_site_audit": ["mcp:docker:admin"],
     "docker_provision_site_audit_crm": ["mcp:docker:admin"],
     "docker_deploy_xloud": ["mcp:docker:admin"],
