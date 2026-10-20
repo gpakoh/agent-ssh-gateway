@@ -1534,6 +1534,7 @@ def _verified_forensic_receipt(run: RunResult, historical_revision: str) -> dict
         raise RuntimeError("forensic historical state hash is missing")
     targets = value.get("current_target_observations")
     protected = value.get("current_protected_observations_not_backdated")
+    target_drift = value.get("historical_target_identity_drift")
     if not isinstance(targets, dict) or set(targets) != {t[1] for t in _SITE_AUDIT_TARGETS}:
         raise RuntimeError("forensic audit target inventory is incomplete")
     if not isinstance(protected, dict) or set(protected) != set(_SITE_AUDIT_PROTECTED_CONTAINERS):
@@ -1558,6 +1559,18 @@ def _verified_forensic_receipt(run: RunResult, historical_revision: str) -> dict
             raise RuntimeError("forensic target image reference malformed")
         if not all(isinstance(row.get(k), str) and row[k] for k in ("container_id", "started_at")):
             raise RuntimeError("forensic target container identity malformed")
+        if type(row.get("differs_from_historical")) is not bool:
+            raise RuntimeError("forensic target historical comparison missing")
+    expected_target_drift = {
+        name for name, row in targets.items() if row["differs_from_historical"]
+    }
+    if (
+        not isinstance(target_drift, list)
+        or any(not isinstance(name, str) for name in target_drift)
+        or len(set(target_drift)) != len(target_drift)
+        or set(target_drift) != expected_target_drift
+    ):
+        raise RuntimeError("forensic target drift inventory mismatch")
     for name, row in protected.items():
         if not isinstance(row, dict) or not all(
             isinstance(row.get(k), str) and row[k] for k in ("container_id", "started_at")

@@ -13,6 +13,11 @@ It rejects mismatched Git state, untrusted volumes and helper images.
 
 The first read-only Docker helper run checks 12 live containers and the old
 deployment receipt. It reports a forensic snapshot, **not** an accepted LKG.
+If audit containers restarted since the historical rollout, their changed
+ID/StartedAt is explicitly reported as historical_target_identity_drift;
+current image IDs/refs, OCI revision, zero restarts and health still must pass.
+The Gateway verifies that the drift list exactly matches each target observation
+and never treats a restarted target as historical continuity.
 The high-risk confirmation binds the historical SHA-256 and an exact fingerprint
 of the observed inventory. During confirmation, Gateway revalidates the exact
 Git/source/volume and repeats the read-only check; a changed fingerprint stops

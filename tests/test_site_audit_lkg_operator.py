@@ -36,6 +36,7 @@ def receipt():
         "historical_generation": OLD_SHA[:12] + "-20261018T010203Z",
         "source_revision": OLD_SHA,
         "historically_missing_container": "site-audit-crm-ingress",
+        "historical_target_identity_drift": [],
         "historical_protected_identity_drift": [],
         "current_target_observations": {
             name: {
@@ -45,6 +46,7 @@ def receipt():
                 "image_id": "sha256:" + f"{idx + 1:x}" * 64,
                 "revision": OLD_SHA,
                 "restart_count": 0,
+                "differs_from_historical": False,
             }
             for idx, (_service, name, _image) in enumerate(adapter._SITE_AUDIT_TARGETS)
         },
@@ -59,6 +61,16 @@ def receipt():
         },
         "independent_stability_seconds": 10,
     }
+
+
+def test_forensic_target_drift_is_recorded_without_lkg_acceptance():
+    value = receipt()
+    value["historical_target_identity_drift"] = ["site-audit-api"]
+    value["current_target_observations"]["site-audit-api"]["differs_from_historical"] = True
+    observed = adapter._verified_forensic_receipt(run(value), OLD_SHA)
+    assert observed["historical_target_identity_drift"] == ["site-audit-api"]
+    assert observed["accepted_lkg"] is False
+    assert observed["authorizes_deployment"] is False
 
 
 def call_args():
@@ -107,6 +119,9 @@ class FakeClient:
     lambda r: r["current_target_observations"].pop("site-audit-api"),
     lambda r: r.update(source_revision=NEW_SHA),
     lambda r: r.update(historical_protected_identity_drift=["unknown"]),
+    lambda r: r.update(historical_target_identity_drift=["site-audit-api"]),
+    lambda r: r["current_target_observations"]["site-audit-api"].pop("differs_from_historical"),
+    lambda r: r["current_target_observations"]["site-audit-api"].update(differs_from_historical=True),
 ])
 def test_forensic_receipt_must_not_promote_historical_lkg(mutate):
     value = receipt()
