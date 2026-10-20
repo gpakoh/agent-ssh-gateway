@@ -1066,6 +1066,321 @@ class TestMapUvExitCodeContract:
         assert error is None
 
 
+
+    def test_run_uv_tool_handles_none_exit_code_as_nonpass_envelope(self, monkeypatch):
+        from mcp_client_tools import _run_uv_tool
+
+        class FakeClient:
+            def execute_raw(self, cmd, **kw):
+                if cmd == "command -v uv":
+                    return {"job_id": "check1"}
+                # The submitted identity must equal the identity wait_job
+                # reports; a differing report is a mismatch (see
+                # TestWaitResultJobIdentityReconciliation), not this test's
+                # subject.
+                return {"job_id": "42d0c459-727d-400d-b26b-16c5f7327c5b"}
+
+            def wait_job(self, job_id, **kw):
+                if job_id == "check1":
+                    return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
+                return {
+                    "exit_code": None,
+                    "job_id": "42d0c459-727d-400d-b26b-16c5f7327c5b",
+                    "status": "running",
+                    "progress": {"phase": "running"},
+                    "stdout": "",
+                    "stderr": "",
+                }
+
+        monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
+        monkeypatch.setattr("mcp_client_tools._validate_targets", lambda proj, targets: targets)
+        result = _run_uv_tool(FakeClient(), "proj", "pytest", "run_pytest", target=["tests/"])
+
+        assert result["ok"] is False
+        assert result["result"]["job_id"] == "42d0c459-727d-400d-b26b-16c5f7327c5b"
+        assert result["result"]["exit_code"] is None
+        if result["result"].get("outcome"):
+            assert result["result"]["outcome"] != "passed"
+
+
+class TestWaitResultJobIdentityReconciliation:
+    """_run_uv_tool must reconcile the submitted job identity with wait_job.
+
+    Regression (OpenCode a4 follow-up): the incomplete-result branch read
+    only ``raw.get("job_id")``, so a wait payload carrying no job_id of its
+    own dropped the *submitted* ``result["job_id"]`` -- the only identity
+    the caller can poll -- from both ``error.details`` and ``result``. A
+    payload that claims a *different* job id must fail safe rather than be
+    trusted or surfaced for polling.
+    """
+
+    SUBMITTED = "submitted-j2"
+
+    def _client(self, wait_payload, polled):
+        submitted = self.SUBMITTED
+
+        class FakeClient:
+            async_job_timeout = 60
+
+            def execute_raw(self, cmd, **kw):
+                if cmd == "command -v uv":
+                    return {"job_id": "check1"}
+                return {"job_id": submitted}
+
+            def wait_job(self, job_id, **kw):
+                polled.append(job_id)
+                if job_id == "check1":
+                    return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
+                return dict(wait_payload)
+
+        return FakeClient()
+
+    def _run(self, monkeypatch, wait_payload, polled=None):
+        from mcp_client_tools import _run_uv_tool
+
+        polled = [] if polled is None else polled
+        monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
+        monkeypatch.setattr("mcp_client_tools._validate_targets", lambda proj, targets: targets)
+        client = self._client(wait_payload, polled)
+        return _run_uv_tool(client, "proj", "pytest", "run_pytest", target=["tests/"]), polled
+
+    @staticmethod
+    def _assert_poll_not_resubmit(error):
+        hint = (error.get("hint") or "").lower()
+        assert "job_status" in hint, "hint must point at job_status polling"
+        assert "job_result" in hint, "hint must point at job_result polling"
+        assert "do not submit the command again" in hint, "hint must forbid resubmission"
+        assert "retry" not in hint, "hint must not imply retrying is safe"
+
+    def test_running_wait_result_without_job_id_keeps_submitted_identity(self, monkeypatch):
+        """RED regression: wait_job omitted job_id -> submitted-j2 must survive
+        in error.details.job_id and result.job_id."""
+        result, polled = self._run(
+            monkeypatch,
+            {"exit_code": None, "status": "running", "stdout": "", "stderr": ""},
+        )
+
+        assert polled == ["check1", self.SUBMITTED], "wait_job must be polled with the submitted id"
+        assert result["ok"] is False
+        assert result["error"]["code"] == "WAIT_TIMEOUT"
+        details = result["error"].get("details") or {}
+        assert details.get("job_id") == self.SUBMITTED
+        assert details.get("status") == "running"
+        assert result["result"]["job_id"] == self.SUBMITTED
+        assert result["result"]["exit_code"] is None
+        assert result["result"].get("outcome") != "passed"
+        self._assert_poll_not_resubmit(result["error"])
+
+    @pytest.mark.parametrize(
+        "payload, expected_code, retryable",
+        [
+            pytest.param(
+                {"exit_code": None, "status": "pending"},
+                "WAIT_TIMEOUT",
+                True,
+                id="pending-without-exit",
+            ),
+            pytest.param(
+                {"exit_code": None, "status": "running"},
+                "WAIT_TIMEOUT",
+                True,
+                id="running-without-exit",
+            ),
+            pytest.param(
+                {"exit_code": None, "status": "cancelling"},
+                "WAIT_TIMEOUT",
+                True,
+                id="cancelling-without-exit",
+            ),
+            pytest.param(
+                {"exit_code": None, "wait_timed_out": True},
+                "WAIT_TIMEOUT",
+                True,
+                id="wait-timed-out-flag-no-status",
+            ),
+            pytest.param(
+                {"exit_code": None, "status": "finished"},
+                "TOOL_EXECUTION_FAILED",
+                False,
+                id="finished-without-exit",
+            ),
+            pytest.param(
+                {"exit_code": None, "status": "failed"},
+                "TOOL_EXECUTION_FAILED",
+                False,
+                id="failed-without-exit",
+            ),
+            pytest.param(
+                {"exit_code": None, "status": "unknown"},
+                "TOOL_EXECUTION_FAILED",
+                False,
+                id="unknown-status-is-not-running",
+            ),
+            pytest.param(
+                {"exit_code": None},
+                "TOOL_EXECUTION_FAILED",
+                False,
+                id="missing-status-is-not-running",
+            ),
+        ],
+    )
+    def test_incomplete_wait_result_is_typed_nonpassing_keeps_job_id(
+        self, monkeypatch, payload, expected_code, retryable
+    ):
+        result, polled = self._run(monkeypatch, payload)
+
+        assert polled == ["check1", self.SUBMITTED]
+        assert result["ok"] is False
+        assert result["error"]["code"] == expected_code
+        assert result["error"]["retryable"] is retryable
+        details = result["error"].get("details") or {}
+        assert details.get("job_id") == self.SUBMITTED
+        if "status" in payload:
+            assert details.get("status") == payload["status"]
+        assert result["result"]["job_id"] == self.SUBMITTED
+        assert result["result"]["exit_code"] is None
+        assert result["result"].get("outcome") != "passed"
+        self._assert_poll_not_resubmit(result["error"])
+
+    @pytest.mark.parametrize(
+        "payload, ok, expected_code, expected_outcome",
+        [
+            pytest.param(
+                {"exit_code": 0, "job_id": "submitted-j2", "stdout": "ok", "stderr": ""},
+                True,
+                None,
+                "passed",
+                id="exit-zero-unchanged",
+            ),
+            pytest.param(
+                {"exit_code": 1, "job_id": "submitted-j2", "stdout": "", "stderr": "2 failed"},
+                False,
+                "CHECK_FAILED",
+                "failed",
+                id="exit-nonzero-unchanged",
+            ),
+        ],
+    )
+    def test_completed_wait_result_envelopes_unchanged(
+        self, monkeypatch, payload, ok, expected_code, expected_outcome
+    ):
+        result, polled = self._run(monkeypatch, payload)
+
+        assert polled == ["check1", self.SUBMITTED]
+        assert result["ok"] is ok
+        assert result["result"]["exit_code"] == payload["exit_code"]
+        assert result["result"]["outcome"] == expected_outcome
+        if ok:
+            assert result.get("error") is None
+        else:
+            assert result["error"]["code"] == expected_code
+            assert result["error"]["code"] != "WAIT_TIMEOUT"
+
+    def test_wait_result_reporting_a_different_job_fails_safe(self, monkeypatch):
+        result, polled = self._run(
+            monkeypatch,
+            {
+                "exit_code": None,
+                "status": "running",
+                "job_id": "reported-j9",
+                "stdout": "",
+                "stderr": "",
+            },
+        )
+
+        assert polled == ["check1", self.SUBMITTED]
+        assert "reported-j9" not in polled, "an untrusted id must never be polled"
+        assert result["ok"] is False
+        assert result["error"]["code"] == "JOB_ID_MISMATCH"
+        assert result["error"]["retryable"] is False
+        details = result["error"].get("details") or {}
+        assert details.get("submitted_job_id") == self.SUBMITTED
+        assert details.get("reported_job_id") == "reported-j9"
+        assert result["result"]["job_id"] == self.SUBMITTED
+        assert result["result"]["exit_code"] is None
+        assert result["result"].get("outcome") != "passed"
+        hint = (result["error"].get("hint") or "").lower()
+        assert "reported_j9" not in hint and "reported-j9" not in hint
+        self._assert_poll_not_resubmit(result["error"])
+
+    def test_completed_result_from_another_job_is_not_a_false_success(self, monkeypatch):
+        """A payload that claims another job's identity must not be reported
+        as this job's exit 0, even when it carries a valid exit code."""
+        result, polled = self._run(
+            monkeypatch,
+            {"exit_code": 0, "job_id": "reported-j9", "stdout": "", "stderr": ""},
+        )
+
+        assert polled == ["check1", self.SUBMITTED]
+        assert "reported-j9" not in polled
+        assert result["ok"] is False
+        assert result["error"]["code"] == "JOB_ID_MISMATCH"
+        assert result["result"]["job_id"] == self.SUBMITTED
+        assert result["result"]["exit_code"] is None
+        assert result["result"].get("outcome") != "passed"
+
+    @pytest.mark.parametrize("exit_code", [None, 0, 1])
+    def test_mismatched_job_must_not_reveal_foreign_result_data(
+        self, monkeypatch, exit_code
+    ):
+        """Mismatched job output and timing are not attributable to our task."""
+        result, polled = self._run(
+            monkeypatch,
+            {
+                "job_id": "foreign-j9",
+                "exit_code": exit_code,
+                "status": "running",
+                "stdout": "FOREIGN_PRIVATE_SENTINEL",
+                "stderr": "FOREIGN_SECRET_SENTINEL",
+                "execution_duration_ms": 987654,
+            },
+        )
+        assert polled == ["check1", self.SUBMITTED]
+        assert result["ok"] is False
+        assert result["error"]["code"] == "JOB_ID_MISMATCH"
+        assert result["error"]["retryable"] is False
+        assert result["error"]["details"]["submitted_job_id"] == self.SUBMITTED
+        assert result["result"]["job_id"] == self.SUBMITTED
+        assert result["result"]["outcome"] == "error"
+        assert result["result"]["exit_code"] is None
+        assert result["result"]["stdout"] == ""
+        assert result["result"]["stderr"] == ""
+        assert result["result"]["execution_duration_ms"] is None
+        assert "FOREIGN_PRIVATE_SENTINEL" not in str(result)
+        assert "FOREIGN_SECRET_SENTINEL" not in str(result)
+        assert "987654" not in str(result)
+
+    @pytest.mark.parametrize(
+        "submitted, raw_job_id, expected_id, expected_mismatch",
+        [
+            pytest.param("j-1", None, "j-1", None, id="raw-omits-id"),
+            pytest.param(None, "j-2", "j-2", None, id="submitted-missing"),
+            pytest.param("j-1", "j-1", "j-1", None, id="identical"),
+            pytest.param("", "j-2", "j-2", None, id="submitted-empty"),
+            pytest.param("j-1", "", "j-1", None, id="raw-empty"),
+            pytest.param("j-1", "   ", "j-1", None, id="raw-blank"),
+            pytest.param(None, None, None, None, id="both-absent"),
+            pytest.param(
+                "j-1",
+                "j-2",
+                "j-1",
+                {"submitted_job_id": "j-1", "reported_job_id": "j-2"},
+                id="different-jobs-fail-safe",
+            ),
+        ],
+    )
+    def test_reconcile_waited_job_id_boundaries(
+        self, submitted, raw_job_id, expected_id, expected_mismatch
+    ):
+        from mcp_client_tools import _reconcile_waited_job_id
+
+        raw = {"job_id": raw_job_id} if raw_job_id is not None else {}
+        job_id, mismatch = _reconcile_waited_job_id(submitted, raw)
+
+        assert job_id == expected_id
+        assert mismatch == expected_mismatch
+
+
 class TestReadOnlyFallbackRejectsAbsoluteTargetsInRealFlow:
     """_run_uv_tool must pass sanitized (validated) targets to the readonly fallback.
     Absolute target like /etc/passwd must reach fallback as project_dir/etc/passwd."""
