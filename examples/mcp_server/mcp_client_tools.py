@@ -1174,6 +1174,34 @@ def _fallback_result(
     )
 
 
+def _reconcile_waited_job_id(
+    submitted_job_id: Any, wait_result: Any
+) -> tuple[str | None, dict[str, str] | None]:
+    """Reconcile the submitted job identity with what ``wait_job`` reports.
+
+    ``wait_job`` is polled with the submitted id, so the submitted id is the
+    authoritative identity: a payload may omit its own ``job_id`` (incomplete
+    result / gateway shape variation) and must never lose the only id the
+    caller can poll. A payload that claims a *different* non-empty job id is
+    untrusted -- its exit code and output may belong to another job -- so it
+    is returned as a mismatch for the caller to fail safe on instead of being
+    silently preferred, echoed, or polled.
+    """
+    def _normalize(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        return value.strip() or None
+
+    submitted = _normalize(submitted_job_id)
+    reported = _normalize(wait_result.get("job_id")) if isinstance(wait_result, dict) else None
+    if submitted and reported and submitted != reported:
+        return submitted, {
+            "submitted_job_id": submitted,
+            "reported_job_id": reported,
+        }
+    return submitted or reported, None
+
+
 def _run_uv_tool(
     client: GatewayClient,
     project: str,
@@ -1273,6 +1301,90 @@ def _run_uv_tool(
 
     raw = client.wait_job(result["job_id"])
 
+    # Identity boundary: ``result["job_id"]`` is what wait_job was polled
+    # with, so it stays authoritative when the payload omits its own
+    # job_id; a payload claiming a different job fails safe instead of
+    # being trusted or polled.
+    job_id, job_id_mismatch = _reconcile_waited_job_id(result.get("job_id"), raw)
+    if job_id_mismatch is not None:
+        return tool_error(
+            code="JOB_ID_MISMATCH",
+            message=f"{tool_key} wait result reports a different job than the submitted job",
+            retryable=False,
+            hint=(
+                "This wait result does not belong to the submitted job, so its exit "
+                "code and output are untrusted. Poll job_status then job_result with "
+                "error.details.submitted_job_id for the submitted job's own state; "
+                "do not submit the command again, and do not poll "
+                "error.details.reported_job_id."
+            ),
+            details=job_id_mismatch,
+            result=build_command_result(
+                outcome="error",
+                exit_code=None,
+                # Mismatched job output and timing are not attributable to this job.
+                # Keep only the authoritative submitted identity for reconciliation.
+                stdout="",
+                stderr="",
+                execution_duration_ms=None,
+                job_id=job_id,
+                cwd=".",
+            ),
+            tool_name=tool_name,
+        )
+
+    # If the gateway/job result has no concrete exit code but indicates a
+    # still-running/ambiguous state or a wait timeout, treat as non-passing
+    # without inventing semantics; preserve job_id and poll guidance.
+    if raw.get("exit_code") is None:
+        status = raw.get("status")
+        if raw.get("wait_timed_out") or status in {"running", "cancelling", "pending"}:
+            return tool_error(
+                code="WAIT_TIMEOUT",
+                message=f"{tool_key} did not finish before timeout",
+                retryable=True,
+                hint=(
+                    "Poll job_status then job_result with error.details.job_id for "
+                    "this job's final result; do not submit the command again, a "
+                    "duplicate execution is not safe while it is still running."
+                ),
+                details={"job_id": job_id, "status": status} if job_id is not None or status is not None else None,
+                result=build_command_result(
+                    outcome="error",
+                    exit_code=None,
+                    stdout=_redact_project_root(raw.get("stdout") or raw.get("output", "") or "", str(project_dir)),
+                    stderr=_redact_project_root(raw.get("stderr", "") or "", str(project_dir)),
+                    execution_duration_ms=_execution_duration_ms(raw),
+                    job_id=job_id,
+                    cwd=".",
+                ),
+                tool_name=tool_name,
+            )
+        # Unknown/final-but-missing-exit classification: fail safe with
+        # accurate non-success envelope, no false passed outcome, preserve
+        # job_id, and useful next action.
+        return tool_error(
+            code="TOOL_EXECUTION_FAILED",
+            message=f"{tool_key} returned no exit code",
+            retryable=False,
+            hint=(
+                "Poll job_status then job_result with error.details.job_id to "
+                "inspect this job's final state before deciding any next step; do "
+                "not submit the command again on the strength of this envelope."
+            ),
+            details={"job_id": job_id, "status": status} if job_id is not None or status is not None else None,
+            result=build_command_result(
+                outcome="error",
+                exit_code=None,
+                stdout=_redact_project_root(raw.get("stdout") or raw.get("output", "") or "", str(project_dir)),
+                stderr=_redact_project_root(raw.get("stderr", "") or "", str(project_dir)),
+                execution_duration_ms=_execution_duration_ms(raw),
+                job_id=job_id,
+                cwd=".",
+            ),
+            tool_name=tool_name,
+        )
+
     env_failure = _classify_env_failure(raw.get("stderr", ""), raw.get("exit_code"))
     if env_failure:
         return tool_error(
@@ -1284,7 +1396,7 @@ def _run_uv_tool(
                 stdout=_redact_project_root(raw.get("stdout") or raw.get("output", ""), str(project_dir)),
                 stderr=_redact_project_root(raw.get("stderr", ""), str(project_dir)),
                 execution_duration_ms=_execution_duration_ms(raw),
-                job_id=raw.get("job_id"),
+                job_id=job_id,
                 cwd=".",
             ),
             tool_name=tool_name,
@@ -1355,7 +1467,7 @@ def _run_uv_tool(
                 stdout=_redact_project_root(raw.get("stdout") or raw.get("output", ""), str(project_dir)),
                 stderr=_redact_project_root(raw.get("stderr", ""), str(project_dir)),
                 execution_duration_ms=_execution_duration_ms(raw),
-                job_id=raw.get("job_id"),
+                job_id=job_id,
                 cwd=".",
             ),
             tool_name=tool_name,
@@ -1368,7 +1480,7 @@ def _run_uv_tool(
             stdout=_redact_project_root(raw.get("stdout") or raw.get("output", ""), str(project_dir)),
             stderr=_redact_project_root(raw.get("stderr", ""), str(project_dir)),
             execution_duration_ms=_execution_duration_ms(raw),
-            job_id=raw.get("job_id"),
+            job_id=job_id,
             cwd=".",
         ),
     )
