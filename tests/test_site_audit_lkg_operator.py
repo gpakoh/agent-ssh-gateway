@@ -130,6 +130,7 @@ async def test_operator_preflight_requests_high_risk_confirmation_only(monkeypat
     assert pending["risk"] == "high"
     action, _ = srv._confirm_store.peek_action_id(pending["action_id"])
     assert action.tool == "docker_prepare_site_audit_lkg_recovery"
+    assert action.required_scope == "mcp:docker:admin"
     assert action.kwargs["expected_historical_state_sha256"] == STATE_HASH
     assert action.kwargs["expected_receipt_fingerprint"] == adapter._site_audit_forensic_fingerprint(receipt())
     assert len(client.calls) == 1 and client.calls[0]["archive"] is False

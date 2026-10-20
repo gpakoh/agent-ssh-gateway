@@ -5082,6 +5082,7 @@ async def docker_prepare_site_audit_lkg_recovery(
         "Archive Site Audit historical LKG evidence without changing deploy.json "
         f"(historical={historical_revision[:12]}, source={expected_head_sha[:12]})",
         risk="high",
+        required_scope="mcp:docker:admin",
     )
     return _confirmation_response(action)
 
