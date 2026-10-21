@@ -98,6 +98,17 @@ def test_gateway_error_hint_prefers_structured_detail_hint():
     assert "job_status" in hint
 
 
+def test_cancel_agent_task_job_not_found_hint_preserves_worker_identity():
+    from examples.mcp_server.server import _gateway_error_hint
+
+    hint = _gateway_error_hint(
+        _make_job_not_found_exc(), "JOB_NOT_FOUND", tool="cancel_agent_task"
+    )
+    assert "inspect_agent_task" in hint
+    assert "do not" in hint.lower()
+    assert "new job" not in hint.lower()
+
+
 def test_gateway_error_hint_falls_back_for_file_not_found_with_no_body_hint():
     from examples.mcp_server.gateway_client import GatewayClientError
     from examples.mcp_server.server import _gateway_error_hint

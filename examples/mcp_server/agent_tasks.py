@@ -3542,14 +3542,36 @@ def cancel_agent_task(
             "message": "agent attempt exists but has no bound job_id",
         }
     cancelled = cancel_job(job_id)
-    if not isinstance(cancelled, dict):
-        cancelled = {"status": "unknown", "job_id": job_id}
+    if (
+        not isinstance(cancelled, dict)
+        or cancelled.get("job_id") != job_id
+        or cancelled.get("status") not in {"cancelling", "cancelled"}
+    ):
+        # Cancellation has crossed a remote boundary, but no authoritative
+        # acknowledgement for THIS attempt was received. Never expose a
+        # mismatched job's payload or suggest a replacement worker.
+        return {
+            "task_id": task_id,
+            "attempt_id": record.get("attempt_id"),
+            "job_id": job_id,
+            "status": "unconfirmed",
+            "cancel_requested": False,
+            "worker_termination_proven": False,
+            "replacement_allowed_now": False,
+            "message": "gateway did not confirm cancellation for the bound job",
+            "diagnostics": {
+                "inspect_agent_task": {"project": project, "task_id": task_id},
+                "job_status": {"job_id": job_id},
+            },
+        }
     return {
         "task_id": task_id,
         "attempt_id": record.get("attempt_id"),
         "job_id": job_id,
         "status": cancelled.get("status"),
         "cancel_requested": True,
+        "worker_termination_proven": False,
+        "replacement_allowed_now": False,
         "gateway": cancelled,
         "diagnostics": {
             "inspect_agent_task": {

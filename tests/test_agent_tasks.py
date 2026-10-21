@@ -3688,6 +3688,59 @@ class TestCancelAgentTask:
         assert result["diagnostics"]["inspect_agent_task"]["task_id"] == "a12345678901"
         assert any("attempt-state.json" in command for command in calls)
 
+    @pytest.mark.parametrize(
+        "gateway_response",
+        [
+            {"status": "cancelling", "job_id": "foreign-job", "stdout": "foreign secret"},
+            {"status": "cancelling"},
+            {"status": "ambiguous", "job_id": "job-1"},
+            {"status": "running", "job_id": "job-1"},
+            None,
+        ],
+    )
+    def test_untrusted_cancel_ack_never_claims_request_or_termination(self, gateway_response):
+        def fake_run_cmd(project: str, command: str) -> dict:
+            if command.startswith("ls -ld -- "):
+                return {"stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat ") and "attempt-state.json" in command:
+                return {
+                    "stdout": json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            return {"stdout": "", "stderr": "not found", "exit_code": 1}
+
+        result = cancel_agent_task(
+            fake_run_cmd, project="my-proj", task_id="a12345678901",
+            cancel_job=lambda job_id: gateway_response,
+        )
+        assert result["status"] == "unconfirmed"
+        assert result["cancel_requested"] is False
+        assert result["worker_termination_proven"] is False
+        assert result["replacement_allowed_now"] is False
+        assert result["job_id"] == "job-1"
+        assert "foreign secret" not in str(result)
+
+    def test_cancelling_ack_is_not_worker_termination_proof(self):
+        def fake_run_cmd(project: str, command: str) -> dict:
+            if command.startswith("ls -ld -- "):
+                return {"stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat ") and "attempt-state.json" in command:
+                return {
+                    "stdout": json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+                    "stderr": "", "exit_code": 0,
+                }
+            return {"stdout": "", "stderr": "", "exit_code": 1}
+
+        result = cancel_agent_task(
+            fake_run_cmd, project="my-proj", task_id="a12345678901",
+            cancel_job=lambda job_id: {"status": "cancelling", "job_id": job_id},
+        )
+        assert result["cancel_requested"] is True
+        assert result["worker_termination_proven"] is False
+        assert result["replacement_allowed_now"] is False
+
+
     def test_refuses_to_guess_job_without_attempt_state(self):
         def fake_run_cmd(project: str, command: str) -> dict:
             if command.startswith("ls -ld -- "):
