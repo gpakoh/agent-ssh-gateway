@@ -203,8 +203,8 @@ async def test_session_limit_error_gets_specific_session_limit_code():
 
 
 @pytest.mark.asyncio
-async def test_jobs_cancel_maps_not_cancellable_to_conflict(monkeypatch):
-    """Terminal/non-cancellable jobs are job-state conflicts, not 500s."""
+async def test_jobs_cancel_ambiguous_preserves_worker_termination_uncertainty(monkeypatch):
+    """Ambiguous cancellation is a conflict, never proof of remote termination."""
     from fastapi import HTTPException
 
     from app.auth_middleware import AuthIdentity
@@ -233,8 +233,11 @@ async def test_jobs_cancel_maps_not_cancellable_to_conflict(monkeypatch):
         await jobs_router.jobs_cancel("job-ambiguous", owner_identity)
 
     assert exc_info.value.status_code == 409
-    assert exc_info.value.detail["code"] == "JOB_NOT_CANCELLABLE"
+    assert exc_info.value.detail["code"] == "JOB_WORKER_TERMINATION_UNPROVEN"
     assert exc_info.value.detail["retryable"] is False
+    assert exc_info.value.detail["job_id"] == "job-ambiguous"
+    assert exc_info.value.detail["worker_termination_proven"] is False
+    assert exc_info.value.detail["replacement_allowed_now"] is False
 
 
 def test_auto_code_project_not_found_maps_to_project_not_found():
