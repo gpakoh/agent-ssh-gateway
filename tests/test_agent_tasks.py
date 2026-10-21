@@ -4428,3 +4428,93 @@ class TestPrepareAgentTaskRetry:
         assert result["code"] == "AGENT_RETRY_SOURCE_UNTRUSTED"
         assert "trusted never-submitted proof" in result["stderr"]
         assert not (tmp_path / ".ai-bridge" / "tasks" / retry).exists()
+
+
+class TestTerminalHeartbeatConflict:
+    @pytest.mark.parametrize(
+        "valid,state,heartbeat_mtime,fresh,expected",
+        [
+            (True, "running", 105, True, False),
+            (True, "running", 95, True, True),
+            (False, "running", 105, True, True),
+            (True, "running", 105, False, True),
+            (True, "finished", 105, False, True),
+        ],
+    )
+    def test_current_attempt_heartbeat_vetoes_false_terminal_proof(
+        self, valid, state, heartbeat_mtime, fresh, expected
+    ):
+        from examples.mcp_server.agent_tasks import (
+            _agent_task_terminal,
+            _runner_lifecycle_completed,
+        )
+
+        job = {"known": True, "status": "completed"}
+        heartbeat = {"valid": valid, "state": state, "phase": "loop", "exit_code": None}
+        common = {
+            "job": job,
+            "heartbeat": heartbeat,
+            "heartbeat_mtime": heartbeat_mtime,
+            "attempt_state_mtime": 100,
+            "runner_heartbeat_fresh": fresh,
+        }
+        assert _agent_task_terminal(status_token="completed", **common) is expected
+        assert _runner_lifecycle_completed(gate_ledger_valid=True, **common) is expected
+
+    def test_inspection_refuses_finished_when_current_runner_is_heartbeating(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        now = 2_000
+        task_id = "a12345678901"
+        task_dir = tmp_path / ".ai-bridge" / "tasks" / task_id
+        task_dir.mkdir(parents=True)
+        (task_dir / "agent-status.md").write_text("Status: completed\n", encoding="utf-8")
+        (task_dir / "attempt-state.json").write_text(
+            json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+            encoding="utf-8",
+        )
+        (task_dir / "agent-heartbeat.json").write_text(
+            json.dumps({
+                "version": 1,
+                "state": "running",
+                "phase": "loop",
+                "updated_epoch": now - 5,
+                "updated_at": "2026-09-03T12:00:00Z",
+                "runner_pid": 123,
+                "exit_code": None,
+            }),
+            encoding="utf-8",
+        )
+        os.utime(task_dir / "attempt-state.json", (now - 20, now - 20))
+        os.utime(task_dir / "agent-heartbeat.json", (now - 5, now - 5))
+
+        result = inspect_agent_task(
+            TestInspectAgentTask._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            now_epoch=now,
+            job_status=lambda job_id: {"job_id": job_id, "status": "completed"},
+        )
+        assert result["runner_heartbeat_fresh"] is True
+        assert result["terminal"] is False
+        assert result["acceptance"]["runner_lifecycle_completed"] is False
+        assert result["verdict"] != "finished"
+        assert result["reconciliation"]["state"] == "terminal_conflict_live_runner"
+        assert result["reconciliation"]["terminal_claim_conflict"] is True
+        assert result["recovery"]["replacement_allowed_now"] is False
+        assert result["recovery"]["do_not_create_new_task_id"] is True
+
+        lightweight = agent_task_status(
+            TestInspectAgentTask._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            now_epoch=now,
+            job_status=lambda job_id: {"job_id": job_id, "status": "completed"},
+        )
+        assert lightweight["runner_heartbeat_fresh"] is True
+        assert lightweight["terminal"] is False
+        assert lightweight["acceptance"]["runner_lifecycle_completed"] is False
+        assert lightweight["verdict"] != "finished"
+        assert lightweight["reconciliation"]["state"] == "terminal_conflict_live_runner"
+        assert lightweight["reconciliation"]["terminal_claim_conflict"] is True
