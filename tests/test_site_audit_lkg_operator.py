@@ -63,6 +63,50 @@ def receipt():
     }
 
 
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        ("recovery evidence for this legacy digest already exists", "ARCHIVE_ALREADY_EXISTS"),
+        ("container or historical state changed during observation", "OBSERVATION_CHANGED"),
+        ("target image differs from historical state", "TARGET_IMAGE_DRIFT"),
+        ("target restarted after historical rollout", "TARGET_RESTARTED"),
+        ("unresolved pending transaction", "PENDING_TRANSACTION"),
+        ("target OCI revision mismatch", "TARGET_REVISION_MISMATCH"),
+    ],
+)
+def test_forensic_refusal_exposes_only_approved_reason_code(reason, expected):
+    refusal = RunResult(json.dumps({"status": "no_go", "error": reason}), "", 1)
+    with pytest.raises(RuntimeError, match=f"refused: {expected}"):
+        adapter._verified_forensic_receipt(refusal, OLD_SHA)
+
+
+@pytest.mark.parametrize(
+    "run_result",
+    [
+        RunResult("", "secrets in stderr: /restricted/file", 1),
+        RunResult("not-json: /secret", "", 1),
+        RunResult(json.dumps({"status": "no_go", "error": "/restricted/file"}), "", 1),
+        RunResult(json.dumps({"status": "no_go", "error": "unhealthy live container: unknown"}), "", 1),
+        RunResult(json.dumps({"status": "ok", "error": "target restarted after historical rollout"}), "", 1),
+        RunResult(json.dumps({"status": "no_go", "error": "unresolved pending transaction", "extra": "secret"}), "", 1),
+        RunResult(json.dumps({"status": "no_go", "error": "unresolved pending transaction"}) + "x" * 1025, "", 1),
+    ],
+)
+def test_forensic_refusal_never_echoes_untrusted_helper_output(run_result):
+    with pytest.raises(RuntimeError) as exc:
+        adapter._verified_forensic_receipt(run_result, OLD_SHA)
+    assert str(exc.value) == "Site Audit forensic helper refused the observed state"
+    assert "/restricted" not in str(exc.value)
+    assert "secret" not in str(exc.value)
+
+
+def test_successful_forensic_receipt_cannot_be_replaced_by_refusal():
+    value = receipt()
+    value.update(status="no_go", error="recovery evidence for this legacy digest already exists")
+    with pytest.raises(RuntimeError, match="attempts to override LKG acceptance"):
+        adapter._verified_forensic_receipt(RunResult(json.dumps(value), "", 0), OLD_SHA)
+
+
 def test_forensic_target_drift_is_recorded_without_lkg_acceptance():
     value = receipt()
     value["historical_target_identity_drift"] = ["site-audit-api"]
