@@ -15,10 +15,15 @@ Docker inventory scope), and #51 (verified-push ambiguous-outcome reconciliation
 Partial progress on still-open items remains recorded under those items rather
 than being treated as closure.
 
-Open backlog count after cleanup: **31**
+On 2026-10-21, #23 (parallel verifier container isolation), #33 (agent
+non-submission envelope), #35 (catalog filters/pagination) and #50 (bounded
+workspace parent creation) met applicable code/tests and, where required,
+live-MCP acceptance. Evidence is maintained in their Git/CI history and PR.
+
+Open backlog count after cleanup: **30**
 
 - **P1 / critical:** 8
-- **P2 / important:** 14
+- **P2 / important:** 13
 - **P3 / capability / wishlist:** 9
 
 ## P1 / Critical blockers
@@ -600,11 +605,6 @@ Open backlog count after cleanup: **31**
     stale `running` status. Inspect/status APIs should derive terminal states
     such as `lost_after_restart`, `orphaned_attempt` or `artifact_incomplete`,
     including last useful activity and safe recovery guidance.
-
-23. ⬜ **Make candidate verifier containers concurrency-safe.**
-    Parallel verified-push/delivery operations must not collide on a fixed Docker
-    container name. Allocate per-request verifier identities, clean them up
-    deterministically, and test concurrent success/failure/cancellation paths.
 
 24. ⬜ **Fail schema validation quickly before slow control-plane work.**
     Pure local/schema errors such as invalid enum values should return near the

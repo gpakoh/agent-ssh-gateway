@@ -331,6 +331,61 @@ def test_concurrent_verifications_do_not_reuse_or_cross_clean_container_names(
     assert sorted(cleanup_names) == sorted(run_names)
 
 
+@pytest.mark.parametrize("failure_mode", ["nonzero", "cancelled"])
+def test_concurrent_success_and_failure_clean_up_only_owned_containers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure_mode: str
+) -> None:
+    staging = _configure(monkeypatch, tmp_path)
+    overlap = Barrier(2)
+    lock = Lock()
+    names: list[str] = []
+    removed: list[str] = []
+
+    def runner(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if argv[1] == "rm":
+            with lock:
+                removed.append(argv[-1])
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        assert argv[1] == "run"
+        name = argv[argv.index("--name") + 1]
+        with lock:
+            names.append(name)
+            should_fail = len(names) == 2
+        overlap.wait(timeout=5)
+        if should_fail and failure_mode == "cancelled":
+            raise asyncio.CancelledError
+        if should_fail:
+            return subprocess.CompletedProcess(argv, 83, "", "controlled failure")
+        return subprocess.CompletedProcess(
+            argv, 0, _stdout_from_script(kwargs["input"]), ""
+        )
+
+    def verify_once(expected_sha: str) -> str:
+        try:
+            verify_candidate_via_docker(
+                staging_root=staging,
+                expected_sha=expected_sha,
+                required_checks=["true"],
+                runner=runner,
+            )
+        except CandidateVerificationError:
+            return "failed"
+        except asyncio.CancelledError:
+            return "cancelled"
+        return "passed"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(verify_once, "a" * 40), pool.submit(verify_once, "b" * 40)]
+        outcomes = [future.result(timeout=10) for future in futures]
+
+    assert sorted(outcomes) == sorted(
+        ["passed", "cancelled" if failure_mode == "cancelled" else "failed"]
+    )
+    assert len(names) == 2
+    assert names[0] != names[1]
+    assert sorted(removed) == sorted(names)
+
+
 def test_cancellation_cleans_only_started_execution_container(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
