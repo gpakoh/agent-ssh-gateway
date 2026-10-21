@@ -1,6 +1,6 @@
 # Agent SSH Gateway — TODO
 
-Last reconciled: 2026-10-14.
+Last reconciled: 2026-10-21.
 
 This file is the active backlog only. Completed audit notes, fixed CI blockers,
 merged PR evidence, and superseded diagnostics should live in PR history,
@@ -15,11 +15,16 @@ Docker inventory scope), and #51 (verified-push ambiguous-outcome reconciliation
 Partial progress on still-open items remains recorded under those items rather
 than being treated as closure.
 
-Open backlog count after cleanup: **34**
+On 2026-10-21, #23 (parallel verifier container isolation), #33 (agent
+non-submission envelope), #35 (catalog filters/pagination) and #50 (bounded
+workspace parent creation) met applicable code/tests and, where required,
+live-MCP acceptance. Evidence is maintained in their Git/CI history and PR.
+
+Open backlog count after cleanup: **30**
 
 - **P1 / critical:** 8
-- **P2 / important:** 16
-- **P3 / capability / wishlist:** 10
+- **P2 / important:** 13
+- **P3 / capability / wishlist:** 9
 
 ## P1 / Critical blockers
 
@@ -601,11 +606,6 @@ Open backlog count after cleanup: **34**
     such as `lost_after_restart`, `orphaned_attempt` or `artifact_incomplete`,
     including last useful activity and safe recovery guidance.
 
-23. ⬜ **Make candidate verifier containers concurrency-safe.**
-    Parallel verified-push/delivery operations must not collide on a fixed Docker
-    container name. Allocate per-request verifier identities, clean them up
-    deterministically, and test concurrent success/failure/cancellation paths.
-
 24. ⬜ **Fail schema validation quickly before slow control-plane work.**
     Pure local/schema errors such as invalid enum values should return near the
     API boundary with allowed values and typed diagnostics, not after long router
@@ -645,12 +645,6 @@ Open backlog count after cleanup: **34**
     Operators can inspect runs/jobs/logs, but need first-class artifact metadata
     and safe archive/file retrieval with run/head provenance, size limits,
     checksum where available, path traversal protection and expiry diagnostics.
-
-33. ⬜ **Align outer `run_agent` success envelopes with non-submission results.**
-    Pre-submit validation failures, blocked terminal replays and other
-    non-submitted outcomes must not return outer `ok=true` with submission
-    success text. Bind outer status, nested status, job/attempt presence and
-    submission occurrence.
 
 34. ⬜ **Support managed read-only agent tasks over non-Git workspaces.**
     Non-Git registered script/config/data workspaces need immutable snapshot
@@ -693,36 +687,7 @@ Open backlog count after cleanup: **34**
     Acceptance covers zero mutation during outage and exactly-once audited success
     after recovery for both PR close and exact-SHA branch deletion.
 
-50. ⬜ **Allow guarded workspace parent-directory creation.**
-    `workspace_file_write` cannot bootstrap a new package/workflow tree when a
-    parent directory does not already exist, forcing placeholder commits or
-    manual scaffolding. Add either explicit `create_parents=true` or a bounded
-    `workspace_mkdir`/scaffold primitive with project-relative paths, depth/name
-    limits, symlink/root-escape protection and receipts. Default behavior must
-    remain fail-closed with a typed `PARENT_MISSING` diagnostic.
-
-    **2026-10-13 deployed progress / external-schema blocker:** PR #533 merged
-    guarded `create_parents` support as `master@0cf0c0b651ce...`; post-merge run
-    #16365 completed build-and-push, deploy and host-smoke successfully, and live
-    Gateway/MCP health reported exact build SHA `0cf0c0b651ce...`, ready=true.
-    The deployed server manifest documents `create_parents` on
-    `workspace_file_write` and emits toolset hash `sha256:f250b44e2878...`.
-    A live external call through the currently attached client proved the default
-    path now returns typed non-retryable `PARENT_MISSING` with zero filesystem
-    mutation (`acceptance-parent/**` remained absent). However, even after the
-    server sent `notifications/tools/list_changed` and the external catalog was
-    queried again, this attached callable schema still omitted the new optional
-    `create_parents` argument. Do not close #50 until a fresh/correct external
-    schema can invoke `create_parents=true` and prove nested creation plus the
-    returned parent/post-write verification receipt. Track the stale optional-
-    argument refresh defect under #6/#45; do not bypass it with raw transport.
-
 ## P3 / Capability and ergonomics wishlist
-
-35. ⬜ **Add project catalog filtering and pagination.**
-    `project_list()` should support exact id, prefix/text filters, project type,
-    tags, parent, limit/offset, total count and compact projections so operators
-    do not retrieve hundreds of historical candidates to find one canonical id.
 
 36. ⬜ **Make candidate preparation observable and cancellable.**
     Slow `prepare_candidate_clone` calls should support async mode, progress
