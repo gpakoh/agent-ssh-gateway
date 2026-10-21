@@ -76,14 +76,77 @@ def test_build_pytest_argv():
 def test_build_compileall_argv():
     argv = _build_uv_argv("compileall", "/project", ["src/"])
     assert argv[:7] == [
-        "uv", "run", "--frozen", "--directory", "/project", "--",
-        "python",
+        "uv", "run", "--no-project", "--directory", "/project", "--",
+        "python3",
     ]
     assert argv[7] == "-c"
     walk_code = argv[8]
     assert "os.walk" in walk_code, "compileall must use the pruning walk, not -m compileall"
     assert "-m" not in walk_code
     assert argv[-2:] == ["--", "src/"]
+
+
+def test_compileall_uses_stdlib_without_source_dependency_bootstrap(tmp_path):
+    """No pyproject.toml or uv.lock is needed for syntax-only verification."""
+    from mcp_client_tools import _build_primary_script, _build_uv_argv
+
+    (tmp_path / "syntax.py").write_text("x = 1\n", encoding="utf-8")
+    assert not (tmp_path / "pyproject.toml").exists()
+    assert not (tmp_path / "uv.lock").exists()
+
+    script = _build_primary_script("compileall", str(tmp_path), ["syntax.py"])
+    assert "uv run --no-project --directory" in script
+    assert "python3 -c" in script
+    assert "uv run --frozen" not in script
+    assert "uv sync" not in script
+    assert "PYTHONPYCACHEPREFIX=" in script
+    assert ".sync.lock" in script  # the trusted verifier root remains serialized
+
+    argv = _build_uv_argv("compileall", str(tmp_path), ["syntax.py"])
+    assert "--no-project" in argv
+    assert "--frozen" not in argv
+    assert "--all-extras" not in argv
+
+
+def test_compileall_syntax_failure_retains_product_failure_classification(
+    tmp_path, monkeypatch
+):
+    from mcp_client_tools import _run_uv_tool
+
+    broken = tmp_path / "broken.py"
+    broken.write_text("def broken(:\n", encoding="utf-8")
+    monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: tmp_path)
+
+    class Client:
+        def __init__(self):
+            self.commands = []
+
+        def execute_raw(self, command, **kwargs):
+            self.commands.append((command, kwargs))
+            return {"job_id": str(len(self.commands))}
+
+        def wait_job(self, job_id):
+            if job_id == "1":
+                return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
+            return {
+                "exit_code": 1,
+                "stdout": "SyntaxError: invalid syntax",
+                "stderr": "",
+                "job_id": job_id,
+            }
+
+    client = Client()
+    result = _run_uv_tool(
+        client, "without-root-pyproject", "compileall", "run_compileall",
+        target=["broken.py"],
+    )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CHECK_FAILED"
+    assert "SyntaxError" in result["result"]["stdout"]
+    assert len(client.commands) == 2
+    primary = client.commands[1][1]["stdin"]
+    assert "uv run --no-project --directory" in primary
+    assert "uv run --frozen" not in primary
 
 
 def test_build_compileall_argv_prunes_service_dirs():

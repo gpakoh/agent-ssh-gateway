@@ -259,7 +259,7 @@ def _build_compileall_walk_code() -> str:
 
 
 def _compileall_command() -> list[str]:
-    return ["python", "-c", _build_compileall_walk_code()]
+    return ["python3", "-c", _build_compileall_walk_code()]
 
 
 def _validate_targets(project_dir: str, targets: list[str]) -> list[str]:
@@ -425,9 +425,11 @@ def _uv_run_args(tool: str, project_dir: str, targets: list[str]) -> list[str]:
         raise ValueError("INVALID_INPUT: at least one target required")
     validated = _validate_targets(project_dir, targets)
     cmd = _compileall_command() if tool == "compileall" else _UV_TOOL_MAP[tool]
-    uv_args = ["uv", "run", "--frozen"]
-    if tool != "compileall":
-        uv_args.append("--all-extras")
+    uv_args = (
+        ["uv", "run", "--no-project"]
+        if tool == "compileall"
+        else ["uv", "run", "--frozen", "--all-extras"]
+    )
     return uv_args + ["--directory", project_dir, "--"] + cmd + _tool_cache_args(tool, project_dir) + ["--"] + validated
 
 
@@ -443,9 +445,11 @@ def _build_uv_argv(tool: str, project_dir: str, targets: list[str]) -> list[str]
         raise ValueError("INVALID_INPUT: at least one target required")
     validated = _validate_targets(project_dir, targets)
     cmd = _compileall_command() if tool == "compileall" else _UV_TOOL_MAP[tool]
-    uv_args = ["uv", "run", "--frozen"]
-    if tool != "compileall":
-        uv_args.append("--all-extras")
+    uv_args = (
+        ["uv", "run", "--no-project"]
+        if tool == "compileall"
+        else ["uv", "run", "--frozen", "--all-extras"]
+    )
     return uv_args + ["--directory", project_dir, "--"] + cmd + ["--"] + validated
 
 
@@ -466,9 +470,12 @@ def _build_primary_script(tool: str, project_dir: str, targets: list[str]) -> st
     ]
     if tool == "compileall":
         walk = _build_compileall_walk_code()
+        # Syntax-only compilation needs no project venv, uv.lock or native
+        # dependencies. Keep the trusted verifier-root lock and external
+        # PYTHONPYCACHEPREFIX while letting uv provide its managed Python.
         run = (
-            f"uv run --frozen --directory {shlex.quote(proj)} -- "
-            f"python -c {shlex.quote(walk)} -- {target_args}"
+            f"uv run --no-project --directory {shlex.quote(proj)} -- "
+            f"python3 -c {shlex.quote(walk)} -- {target_args}"
         )
     else:
         cmd_s = " ".join(shlex.quote(a) for a in _UV_TOOL_MAP[tool])
