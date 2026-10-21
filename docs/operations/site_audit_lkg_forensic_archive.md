@@ -38,6 +38,24 @@ mounted script immediately before execution and executes only that same in-memor
 byte buffer; it refuses any changed, symlinked or malformed script. The caller
 cannot supply a Docker target name, arbitrary executable, volume, or host path.
 
+### Safe diagnosis of a rejected confirmation
+
+The source-owned helper returns a `{"status":"no_go","error":"..."}` envelope when
+a bounded check fails. Gateway must never relay that raw error or stderr:
+they can contain host paths, Docker diagnostics, or unexpected data. For
+nonzero helper exits, Gateway emits a **fixed, allowlisted refusal code** only
+when the entire helper stdout is a small, exact two-field `no_go` object.
+Unknown, malformed, or oversized results retain the generic refusal. Codes
+such as `ARCHIVE_ALREADY_EXISTS`, `OBSERVATION_CHANGED`,
+`TARGET_IMAGE_DRIFT`, `PENDING_TRANSACTION`, and `TARGET_RESTARTED`
+identify the failed invariant without disclosing the historical LKG or
+authorizing a retry with weaker evidence. A successful forensic receipt still
+requires all existing schema, identity, drift, and fail-closed checks.
+
+A `ARCHIVE_ALREADY_EXISTS` refusal does **not** prove archive integrity or
+accepted-LKG status. Archive verification and any later rollout require a
+separate approved operator procedure.
+
 ## Remaining acceptance gates
 
 Archival evidence is not permission to deploy. Independently qualify immutable
