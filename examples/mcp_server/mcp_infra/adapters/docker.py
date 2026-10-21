@@ -1510,9 +1510,59 @@ async def _prepare_site_audit_lkg_forensics(
     }
 
 
+# Only literal, source-owned refusal reasons are exposed. Container output, paths,
+# Docker errors and unknown strings must never cross the operator boundary.
+_SITE_AUDIT_FORENSIC_REFUSAL_CODES = {
+    "recovery evidence for this legacy digest already exists": "ARCHIVE_ALREADY_EXISTS",
+    "container or historical state changed during observation": "OBSERVATION_CHANGED",
+    "unresolved pending transaction": "PENDING_TRANSACTION",
+    "target image differs from historical state": "TARGET_IMAGE_DRIFT",
+    "target restarted after historical rollout": "TARGET_RESTARTED",
+    "target OCI revision mismatch": "TARGET_REVISION_MISMATCH",
+    "required Docker container is unavailable": "CONTAINER_UNAVAILABLE",
+    "incomplete live container metadata": "LIVE_METADATA_INCOMPLETE",
+    "missing live container identity": "LIVE_IDENTITY_MISSING",
+    "invalid historical state JSON": "HISTORICAL_JSON_INVALID",
+    "unexpected historical state schema": "HISTORICAL_SCHEMA_INVALID",
+    "historical source revision mismatch": "HISTORICAL_REVISION_MISMATCH",
+    "historical CRM route evidence missing": "HISTORICAL_CRM_EVIDENCE_MISSING",
+    "invalid historical generation": "HISTORICAL_GENERATION_INVALID",
+    "invalid historical stability evidence": "HISTORICAL_STABILITY_INVALID",
+    "historical image reference mismatch": "HISTORICAL_IMAGE_MISMATCH",
+    "invalid historical image id": "HISTORICAL_IMAGE_ID_INVALID",
+    "historical restarts cannot qualify": "HISTORICAL_RESTART_INVALID",
+    "incomplete historical rollback evidence": "HISTORICAL_ROLLBACK_INCOMPLETE",
+    "unsafe deployment state file": "STATE_FILE_UNSAFE",
+    "deployment state changed while reading": "STATE_FILE_CHANGED",
+    "unsafe state parent": "STATE_PARENT_UNSAFE",
+    "atomic no-replace archive publication unavailable": "ARCHIVE_ATOMICITY_UNAVAILABLE",
+    "unsafe recovery evidence directory": "ARCHIVE_DIRECTORY_UNSAFE",
+    "unsafe recovery evidence path": "ARCHIVE_PATH_UNSAFE",
+}
+
+
+def _site_audit_forensic_refusal_code(run: RunResult) -> str | None:
+    """Return a fixed code from an exact, bounded helper no_go object only."""
+    raw = run.stdout or ""
+    if not isinstance(raw, str) or len(raw) > 1024:
+        return None
+    try:
+        value = json.loads(raw)
+    except (ValueError, UnicodeError):
+        return None
+    if not isinstance(value, dict) or set(value) != {"status", "error"}:
+        return None
+    if value["status"] != "no_go" or not isinstance(value["error"], str):
+        return None
+    return _SITE_AUDIT_FORENSIC_REFUSAL_CODES.get(value["error"])
+
+
 def _verified_forensic_receipt(run: RunResult, historical_revision: str) -> dict[str, Any]:
     """Accept only the bounded, nonauthorizing source-owned evidence schema."""
     if run.exit_code != 0:
+        code = _site_audit_forensic_refusal_code(run)
+        if code is not None:
+            raise RuntimeError(f"Site Audit forensic helper refused: {code}")
         raise RuntimeError("Site Audit forensic helper refused the observed state")
     try:
         value = json.loads((run.stdout or "").strip())
