@@ -15,10 +15,10 @@ Docker inventory scope), and #51 (verified-push ambiguous-outcome reconciliation
 Partial progress on still-open items remains recorded under those items rather
 than being treated as closure.
 
-Open backlog count after cleanup: **32**
+Open backlog count after cleanup: **31**
 
 - **P1 / critical:** 8
-- **P2 / important:** 15
+- **P2 / important:** 14
 - **P3 / capability / wishlist:** 9
 
 ## P1 / Critical blockers
@@ -645,12 +645,6 @@ Open backlog count after cleanup: **32**
     Operators can inspect runs/jobs/logs, but need first-class artifact metadata
     and safe archive/file retrieval with run/head provenance, size limits,
     checksum where available, path traversal protection and expiry diagnostics.
-
-33. ⬜ **Align outer `run_agent` success envelopes with non-submission results.**
-    Pre-submit validation failures, blocked terminal replays and other
-    non-submitted outcomes must not return outer `ok=true` with submission
-    success text. Bind outer status, nested status, job/attempt presence and
-    submission occurrence.
 
 34. ⬜ **Support managed read-only agent tasks over non-Git workspaces.**
     Non-Git registered script/config/data workspaces need immutable snapshot
