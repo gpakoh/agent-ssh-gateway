@@ -2121,6 +2121,28 @@ def _runner_heartbeat_proves_completion(
     return heartbeat_mtime >= attempt_state_mtime
 
 
+def _current_attempt_runner_still_live(
+    *,
+    runner_heartbeat_fresh: bool,
+    heartbeat: dict[str, Any],
+    heartbeat_mtime: int | None,
+    attempt_state_mtime: int | None,
+) -> bool:
+    """A fresh running heartbeat for this attempt contradicts terminal claims.
+
+    An old attempt's heartbeat or an untrusted sidecar cannot veto terminal
+    evidence. Preserve execution identity until the conflict is reconciled.
+    """
+    return bool(
+        runner_heartbeat_fresh
+        and heartbeat.get("valid") is True
+        and heartbeat.get("state") == "running"
+        and isinstance(heartbeat_mtime, int)
+        and isinstance(attempt_state_mtime, int)
+        and heartbeat_mtime >= attempt_state_mtime
+    )
+
+
 def _runner_lifecycle_completed(
     *,
     job: dict[str, Any] | None,
@@ -2128,6 +2150,7 @@ def _runner_lifecycle_completed(
     heartbeat: dict[str, Any],
     heartbeat_mtime: int | None,
     attempt_state_mtime: int | None,
+    runner_heartbeat_fresh: bool,
 ) -> bool:
     """Return True only when the runner lifecycle is provably complete.
 
@@ -2135,6 +2158,13 @@ def _runner_lifecycle_completed(
     state backed by a valid gate ledger, or from a strict final current-attempt
     runner heartbeat. Gateway outcome ambiguity alone proves nothing.
     """
+    if _current_attempt_runner_still_live(
+        runner_heartbeat_fresh=runner_heartbeat_fresh,
+        heartbeat=heartbeat,
+        heartbeat_mtime=heartbeat_mtime,
+        attempt_state_mtime=attempt_state_mtime,
+    ):
+        return False
     return bool(
         (gate_ledger_valid and _gateway_job_terminal_proven(job))
         or _runner_heartbeat_proves_completion(
@@ -2152,6 +2182,7 @@ def _agent_task_terminal(
     heartbeat: dict[str, Any],
     heartbeat_mtime: int | None,
     attempt_state_mtime: int | None,
+    runner_heartbeat_fresh: bool,
 ) -> bool:
     """Judge wrapper-lifecycle terminality through the shared proof helpers.
 
@@ -2159,6 +2190,13 @@ def _agent_task_terminal(
     state, or a strict final current-attempt runner heartbeat all prove
     terminality. A fresh state="running" heartbeat keeps the lifecycle live.
     """
+    if _current_attempt_runner_still_live(
+        runner_heartbeat_fresh=runner_heartbeat_fresh,
+        heartbeat=heartbeat,
+        heartbeat_mtime=heartbeat_mtime,
+        attempt_state_mtime=attempt_state_mtime,
+    ):
+        return False
     return bool(
         status_token in _AGENT_TERMINAL_STATUSES
         or _gateway_job_terminal_proven(job)
@@ -2181,6 +2219,7 @@ def _agent_reconciliation_diagnostics(
     last_activity: dict[str, Any],
     semantic_activity: dict[str, Any],
     runner_heartbeat_fresh: bool,
+    heartbeat: dict[str, Any],
 ) -> dict[str, Any]:
     """Summarize restart/orphan evidence without inventing worker finality."""
     attempt_job_id = (attempt or {}).get("job_id")
@@ -2191,8 +2230,19 @@ def _agent_reconciliation_diagnostics(
     report_has_content = isinstance(report_size, int) and report_size > 0
     diff_has_content = isinstance(diff_size, int) and diff_size > 0
     artifact_incomplete = not (report_has_content or diff_has_content)
+    terminal_claim_conflict = bool(
+        _current_attempt_runner_still_live(
+            runner_heartbeat_fresh=runner_heartbeat_fresh,
+            heartbeat=heartbeat,
+            heartbeat_mtime=(files.get("heartbeat") or {}).get("mtime_epoch"),
+            attempt_state_mtime=(files.get("attempt_state") or {}).get("mtime_epoch"),
+        )
+        and (status in _AGENT_TERMINAL_STATUSES or _gateway_job_terminal_proven(job))
+    )
     state = None
-    if gateway_job_absent and attempt_bound_job and not terminal:
+    if terminal_claim_conflict:
+        state = "terminal_conflict_live_runner"
+    elif gateway_job_absent and attempt_bound_job and not terminal:
         if active and not runner_heartbeat_fresh:
             state = "lost_after_restart"
         elif active:
@@ -2201,13 +2251,14 @@ def _agent_reconciliation_diagnostics(
             state = "artifact_incomplete"
     return {
         "state": state,
+        "terminal_claim_conflict": terminal_claim_conflict,
         "gateway_job_absent": gateway_job_absent,
         "attempt_bound_job": attempt_bound_job,
         "status": status,
         "status_active": active,
         "runner_heartbeat_fresh": runner_heartbeat_fresh,
         "artifact_incomplete": artifact_incomplete,
-        "worker_termination_proven": False if gateway_job_absent else None,
+        "worker_termination_proven": False if (gateway_job_absent or terminal_claim_conflict) else None,
         "last_activity": last_activity,
         "last_useful_activity": semantic_activity,
     }
@@ -2885,6 +2936,7 @@ def agent_task_status(
         heartbeat=heartbeat,
         heartbeat_mtime=(files.get("heartbeat") or {}).get("mtime_epoch"),
         attempt_state_mtime=(files.get("attempt_state") or {}).get("mtime_epoch"),
+        runner_heartbeat_fresh=runner_heartbeat_fresh,
     )
     gate_ledger["runner_lifecycle_completed"] = runner_lifecycle_completed
     gate_ledger["authoritative"] = False
@@ -2894,6 +2946,7 @@ def agent_task_status(
         heartbeat=heartbeat,
         heartbeat_mtime=(files.get("heartbeat") or {}).get("mtime_epoch"),
         attempt_state_mtime=(files.get("attempt_state") or {}).get("mtime_epoch"),
+        runner_heartbeat_fresh=runner_heartbeat_fresh,
     )
     awaiting_executor = bool(
         status_token in _AGENT_PRE_EXECUTION_STATUSES
@@ -2910,6 +2963,7 @@ def agent_task_status(
         last_activity=activity,
         semantic_activity=semantic_activity,
         runner_heartbeat_fresh=runner_heartbeat_fresh,
+        heartbeat=heartbeat,
     )
     startup = _agent_startup_diagnostics(
         status=status_token,
@@ -3171,6 +3225,7 @@ def inspect_agent_task(
         heartbeat=heartbeat,
         heartbeat_mtime=(files.get("heartbeat") or {}).get("mtime_epoch"),
         attempt_state_mtime=(files.get("attempt_state") or {}).get("mtime_epoch"),
+        runner_heartbeat_fresh=runner_heartbeat_fresh,
     )
     gate_ledger["runner_lifecycle_completed"] = runner_lifecycle_completed
     gate_ledger["authoritative"] = False
@@ -3180,6 +3235,7 @@ def inspect_agent_task(
         heartbeat=heartbeat,
         heartbeat_mtime=(files.get("heartbeat") or {}).get("mtime_epoch"),
         attempt_state_mtime=(files.get("attempt_state") or {}).get("mtime_epoch"),
+        runner_heartbeat_fresh=runner_heartbeat_fresh,
     )
     awaiting_executor = bool(
         status_token in _AGENT_PRE_EXECUTION_STATUSES
@@ -3196,6 +3252,7 @@ def inspect_agent_task(
         last_activity=activity,
         semantic_activity=semantic_activity,
         runner_heartbeat_fresh=runner_heartbeat_fresh,
+        heartbeat=heartbeat,
     )
     likely_hung = bool(active and not terminal and isinstance(semantic_age, int) and semantic_age >= stale_after_seconds)
     if reconciliation.get("state") is not None:
