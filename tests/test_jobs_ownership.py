@@ -127,6 +127,99 @@ class TestJobsCancelOwnership:
         assert result["status"] == "cancelled"
         _mock_job_manager.cancel_job.assert_called_once_with(job.job_id)
 
+    @pytest.mark.asyncio
+    async def test_evicted_ambiguous_job_preserves_identity_and_blocks_replacement(
+        self, _mock_job_manager, monkeypatch
+    ):
+        _mock_job_manager.get_job.return_value = None
+        queue = AsyncMock()
+        queue.get_job.return_value = {
+            "job_id": "job-retained",
+            "status": "ambiguous",
+            "owner_id": token_fingerprint(OWNER_TOKEN),
+        }
+        monkeypatch.setattr(_state, "redis_queue", queue)
+        with pytest.raises(HTTPException) as exc:
+            await jobs_router.jobs_cancel("job-retained", _identity(OWNER_TOKEN))
+        assert exc.value.status_code == 409
+        assert exc.value.detail["code"] == "JOB_WORKER_TERMINATION_UNPROVEN"
+        assert exc.value.detail["job_id"] == "job-retained"
+        assert exc.value.detail["worker_termination_proven"] is False
+        assert exc.value.detail["replacement_allowed_now"] is False
+        assert exc.value.detail["retryable"] is False
+        _mock_job_manager.cancel_job.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_evicted_ambiguous_job_is_not_visible_to_foreign_owner(
+        self, _mock_job_manager, monkeypatch
+    ):
+        _mock_job_manager.get_job.return_value = None
+        queue = AsyncMock()
+        queue.get_job.return_value = {
+            "job_id": "job-retained",
+            "status": "ambiguous",
+            "owner_id": token_fingerprint(OTHER_TOKEN),
+        }
+        monkeypatch.setattr(_state, "redis_queue", queue)
+        with pytest.raises(HTTPException) as exc:
+            await jobs_router.jobs_cancel("job-retained", _identity(OWNER_TOKEN))
+        assert exc.value.status_code == 403
+        _mock_job_manager.cancel_job.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["completed", "failed", "cancelled"])
+    async def test_evicted_factual_terminal_job_is_not_recancelled(
+        self, _mock_job_manager, monkeypatch, status
+    ):
+        _mock_job_manager.get_job.return_value = None
+        queue = AsyncMock()
+        queue.get_job.return_value = {
+            "job_id": "job-retained",
+            "status": status,
+            "owner_id": token_fingerprint(OWNER_TOKEN),
+        }
+        monkeypatch.setattr(_state, "redis_queue", queue)
+        with pytest.raises(HTTPException) as exc:
+            await jobs_router.jobs_cancel("job-retained", _identity(OWNER_TOKEN))
+        assert exc.value.status_code == 409
+        assert exc.value.detail["code"] == "JOB_NOT_CANCELLABLE"
+        _mock_job_manager.cancel_job.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_raced_in_memory_ambiguous_job_never_claims_termination(
+        self, _mock_job_manager
+    ):
+        from app.ssh_manager import ExecutionError
+
+        job = _owned_job("job-race")
+        job.status = "ambiguous"
+        _mock_job_manager.get_job.return_value = job
+        _mock_job_manager.cancel_job.side_effect = ExecutionError(
+            "Cannot cancel job with status: ambiguous"
+        )
+        with pytest.raises(HTTPException) as exc:
+            await jobs_router.jobs_cancel(job.job_id, _identity(OWNER_TOKEN))
+        assert exc.value.status_code == 409
+        assert exc.value.detail["code"] == "JOB_WORKER_TERMINATION_UNPROVEN"
+        assert exc.value.detail["replacement_allowed_now"] is False
+
+    @pytest.mark.asyncio
+    async def test_processing_snapshot_does_not_impersonate_running_job(
+        self, _mock_job_manager, monkeypatch
+    ):
+        _mock_job_manager.get_job.return_value = None
+        queue = AsyncMock()
+        queue.get_job.return_value = {
+            "job_id": "job-retained",
+            "status": "processing",
+            "owner_id": token_fingerprint(OWNER_TOKEN),
+        }
+        monkeypatch.setattr(_state, "redis_queue", queue)
+        with pytest.raises(HTTPException) as exc:
+            await jobs_router.jobs_cancel("job-retained", _identity(OWNER_TOKEN))
+        assert exc.value.status_code == 404
+        _mock_job_manager.cancel_job.assert_not_called()
+
 
 class TestJobsListFiltering:
     @pytest.mark.asyncio

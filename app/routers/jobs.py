@@ -430,11 +430,49 @@ async def jobs_list(
 
 @router.post("/api/jobs/{job_id}/cancel")
 async def jobs_cancel(job_id: str, _identity: AuthIdentity = Depends(require_scope("jobs:run"))):
-    """Cancel a running job."""
-    await _get_owned_job(job_id, _identity)
+    """Cancel an owned job, without mistaking lost coordinator state for a stop."""
+    job = await _get_owned_job_or_redis(job_id, _identity)
+
+    def _unproven_worker_stop() -> HTTPException:
+        detail = _err(
+            409,
+            "Gateway cannot prove that the original remote worker stopped",
+            code="JOB_WORKER_TERMINATION_UNPROVEN",
+            retryable=False,
+            hint=(
+                "Inspect the original agent task and remote worker; preserve the job identity. "
+                "Do not start a replacement until termination or fencing is proven."
+            ),
+        )
+        detail.update({
+            "job_id": job_id,
+            "worker_termination_proven": False,
+            "replacement_allowed_now": False,
+        })
+        return HTTPException(status_code=409, detail=detail)
+
+    # After restart/eviction a terminal Redis snapshot can still identify an
+    # ambiguous job. No in-process cancellation handle survives; never return
+    # a misleading 404 or claim cancellation just because the snapshot exists.
+    if isinstance(job, dict):
+        if job.get("status") == "ambiguous":
+            raise _unproven_worker_stop()
+        raise HTTPException(
+            status_code=409,
+            detail=_err(
+                409,
+                "The job is already terminal and cannot be cancelled",
+                code="JOB_NOT_CANCELLABLE",
+                retryable=False,
+                hint="Read job_status/job_result for the retained terminal state.",
+            ),
+        )
     try:
         status = await _state.job_manager.cancel_job(job_id)
     except ExecutionError as exc:
+        # Status may have raced to ambiguous after the ownership lookup.
+        if job.status == "ambiguous":
+            raise _unproven_worker_stop() from None
         raise HTTPException(
             status_code=409,
             detail=_err(
