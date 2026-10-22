@@ -2402,8 +2402,10 @@ class TestSshdVersionedArtifact:
         steps = wf["jobs"]["build-and-push"]["steps"]
         push = next(s for s in steps if s.get("name") == "Push sshd executor image")
         assert push.get("if") == "github.event_name == 'push'"
-        assert "ssh-gateway-sshd:${{ github.sha }}" in push["run"]
-        assert "ssh-gateway-sshd:latest" in push["run"]
+        assert "bash scripts/ci-docker-push-pinned.sh" in push["run"]
+        assert '"$CI_SMOKE_SSHD_IMAGE_ID"' in push["run"]
+        assert '"$REGISTRY/gpakoh/ssh-gateway-sshd"' in push["run"]
+        assert '"${{ github.sha }}"' in push["run"]
 
     def test_sshd_dockerfile_installs_ripgrep(self):
         """The agent's grep tool shells out to `rg` on the SSH target, so
