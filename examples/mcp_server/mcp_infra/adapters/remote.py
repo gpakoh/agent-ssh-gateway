@@ -1152,6 +1152,26 @@ async def gitea_list_pull_requests(
     owner: str, repo: str, state: str = "open", limit: int = 30
 ) -> dict[str, Any]:
     """List pull requests in a Gitea repository. State: open, closed, all."""
+    # Client input errors must fail before token resolution and HTTP setup.
+    if not isinstance(state, str) or state not in _GITEA_ISSUE_STATE_FILTERS:
+        allowed = sorted(_GITEA_ISSUE_STATE_FILTERS)
+        return tool_error(
+            tool="gitea_list_pull_requests",
+            code="INVALID_INPUT",
+            message=f"state must be one of: {', '.join(allowed)}",
+            retryable=False,
+            details={"field": "state", "allowed_values": allowed},
+            source="gitea",
+        )
+    if type(limit) is not int or not 1 <= limit <= 500:
+        return tool_error(
+            tool="gitea_list_pull_requests",
+            code="INVALID_INPUT",
+            message="limit must be an integer between 1 and 500",
+            retryable=False,
+            details={"field": "limit", "min_value": 1, "max_value": 500},
+            source="gitea",
+        )
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(

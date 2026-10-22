@@ -599,6 +599,63 @@ class TestGiteaListIssuesStatePreflight:
         assert result["result"]["items"][0]["number"] == 42
 
 
+
+class TestGiteaListPullRequestsFailFast:
+    """Reject invalid filters locally, before any Gitea client or network I/O."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("state", ["unknown", "OPEN", "", "open,closed", None, 1])
+    async def test_invalid_state_never_opens_remote_client(self, monkeypatch, state):
+        client_factory = Mock()
+        monkeypatch.setattr(mcp_server_mod, "GiteaClient", client_factory)
+        monkeypatch.setenv("GITEA_TOKEN", "secret-test-token")
+
+        result = await mcp_server_mod.gitea_list_pull_requests(
+            "gpakoh", "repo", state=state,
+        )
+
+        _assert_envelope(result, ok=False)
+        assert result["error"]["code"] == "INVALID_INPUT"
+        assert result["error"]["retryable"] is False
+        assert result["error"]["details"] == {
+            "field": "state", "allowed_values": ["all", "closed", "open"],
+        }
+        assert "secret-test-token" not in str(result)
+        client_factory.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("limit", [0, -1, 501, False, "10", 1.5])
+    async def test_invalid_limit_never_opens_remote_client(self, monkeypatch, limit):
+        client_factory = Mock()
+        monkeypatch.setattr(mcp_server_mod, "GiteaClient", client_factory)
+        monkeypatch.setenv("GITEA_TOKEN", "tok")
+        result = await mcp_server_mod.gitea_list_pull_requests(
+            "gpakoh", "repo", limit=limit,
+        )
+        _assert_envelope(result, ok=False)
+        assert result["error"]["code"] == "INVALID_INPUT"
+        assert result["error"]["details"]["field"] == "limit"
+        client_factory.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("state", ["open", "closed", "all"])
+    async def test_supported_filter_preserves_remote_behavior(self, monkeypatch, state):
+        list_prs = AsyncMock(return_value=[])
+        client_factory = Mock(
+            return_value=_FakeRemoteClient({"list_pull_requests": list_prs})
+        )
+        monkeypatch.setattr(mcp_server_mod, "GiteaClient", client_factory)
+        monkeypatch.setenv("GITEA_TOKEN", "tok")
+        result = await mcp_server_mod.gitea_list_pull_requests(
+            "gpakoh", "repo", state=state, limit=20,
+        )
+        _assert_envelope(result)
+        client_factory.assert_called_once()
+        list_prs.assert_awaited_once_with(
+            "gpakoh", "repo", state=state, limit=20,
+        )
+
+
 class TestIssuePayloadMinimization:
     """Regression: gitea_*/github_* issue tools must not leak user PII.
 
