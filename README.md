@@ -47,7 +47,7 @@ over credentials, targets, scopes, and execution policy.
 | Agent coordination | Structured task handoff, isolated worktrees, agent status/report artifacts, controlled runner workflows, and a Gitea-backed cross-project inbox |
 | Access control | Master and short-lived agent tokens, optional SSO login, scopes, access profiles, session ownership, target allowlists, command policies, and confirmation flows |
 
-Py Coordination v1 tools (`coord_inbox`, `coord_open`, `coord_create`,
+Py Coordination v1 tools (`coord_inbox`, `coord_board`, `coord_open`, `coord_create`,
 `coord_reply`, `coord_accept`, `coord_update`) and their safety/rollout
 contract are documented in [docs/py-coordination-v1.md](docs/py-coordination-v1.md).
 

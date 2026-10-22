@@ -113,6 +113,43 @@ async def _pages(fetch: Any) -> list[dict[str, Any]]:
     raise CoordinationOutcomeUnknown("collection exceeds bounded 500-row reconciliation window")
 
 
+# Stable, read-only Kanban representation of the authoritative Gitea threads.
+# This projection never creates a second status store or treats a merged PR
+# as a closed cross-project dependency.
+_BOARD_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("open", "Входящие"),
+    ("accepted", "В работе"),
+    ("waiting_review", "Ожидает проверки"),
+    ("resolved", "Решено"),
+)
+
+
+def board_from_threads(threads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group a bounded set of verified coordination threads into Kanban columns.
+
+    Ordering follows Gitea's returned issue order. In particular, this does
+    not infer completion from Gitea issue state or Git branch/PR status.
+    """
+    grouped: dict[str, list[dict[str, Any]]] = {state: [] for state, _ in _BOARD_COLUMNS}
+    for item in threads:
+        status = item.get("coord_state")
+        if status not in grouped:
+            raise ValueError("Gitea thread has an invalid coordination state")
+        grouped[status].append({
+            "number": item["number"],
+            "title": item["title"],
+            "url": item["url"],
+            "source_project": item["source_project"],
+            "request_key": item["request_key"],
+            "updated_at": item["updated_at"],
+            "gitea_issue_state": item["state"],
+        })
+    return [
+        {"state": state, "label": label, "count": len(grouped[state]), "cards": grouped[state]}
+        for state, label in _BOARD_COLUMNS
+    ]
+
+
 async def list_threads(client: Any, owner: str, repo: str) -> list[dict[str, Any]]:
     rows = await _pages(
         lambda page: client.list_issues(owner, repo, state="all", limit=_PAGE_SIZE, page=page)
