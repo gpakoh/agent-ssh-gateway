@@ -325,6 +325,89 @@ async def _fake_aexit(client, *args):
     return None
 
 
+@pytest.mark.asyncio
+async def test_idempotent_create_and_reply_survive_new_gateway_session():
+    client = FakeClient()
+    original = "0123456789abcdef"
+    rotated = "abcdef0123456789"
+    created = await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway",
+        source_project="business-analytics-service",
+        title="Durable handoff", body="Same problem",
+        request_key="migrate-chat-issue-1", actor=original,
+    )
+    replay = await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway",
+        source_project="business-analytics-service",
+        title="Durable handoff", body="Same problem",
+        request_key="migrate-chat-issue-1", actor=rotated,
+    )
+    assert created["created"] is True and replay["created"] is False
+    assert replay["thread"]["created_by"] == original
+    assert client.create_calls == 1
+
+    first = await core.write_event(
+        client, "gpakoh", "agent-ssh-gateway", 1,
+        text="Accepted; please review", request_key="migrate-chat-event-1",
+        state="accepted", actor=original,
+    )
+    again = await core.write_event(
+        client, "gpakoh", "agent-ssh-gateway", 1,
+        text="Accepted; please review", request_key="migrate-chat-event-1",
+        state="accepted", actor=rotated,
+    )
+    assert first["created"] is True and again["created"] is False
+    assert again["event"]["caller"] == original
+    assert client.comment_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_create_wrong_payload_same_key_is_not_misidentified():
+    client = FakeClient()
+
+    async def wrong_write(owner, repo, *, title, body):
+        client.issues.append({
+            "number": 1, "title": title, "body": body.split("\n", 1)[0] + "\nwrong content",
+        })
+        raise OSError("response lost")
+
+    client.create_coord_issue = wrong_write
+    with pytest.raises(core.CoordinationOutcomeUnknown, match="uncertain"):
+        await core.create_thread(
+            client, "gpakoh", "agent-ssh-gateway",
+            source_project="business-analytics-service",
+            title="Same title", body="expected content",
+            request_key="ambiguous-content-mismatch",
+        )
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_comment_wrong_state_same_key_is_not_misidentified():
+    client = FakeClient()
+    await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway",
+        source_project="business-analytics-service",
+        title="Same thread", body="description",
+        request_key="ambiguous-comment-issue",
+    )
+
+    async def wrong_write(owner, repo, number, *, body):
+        client.comments.setdefault(number, []).append({
+            "id": 1,
+            "body": body.replace("state=accepted", "state=waiting_review"),
+            "user": {"login": "gpakoh"},
+        })
+        raise OSError("response lost")
+
+    client.create_coord_comment = wrong_write
+    with pytest.raises(core.CoordinationOutcomeUnknown, match="uncertain"):
+        await core.write_event(
+            client, "gpakoh", "agent-ssh-gateway", 1,
+            text="accepted the case", request_key="ambiguous-comment-replay",
+            state="accepted",
+        )
+
+
 def test_coord_tools_mode_and_scope_contract():
     for name in ("coord_inbox", "coord_open"):
         assert should_register_tool(name, "mcp_client") is True

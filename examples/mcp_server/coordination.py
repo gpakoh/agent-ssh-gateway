@@ -158,6 +158,29 @@ async def open_thread(client: Any, owner: str, repo: str, number: int) -> dict[s
     return item
 
 
+def _same_issue_payload(
+    raw: dict[str, Any], *, title: str, source_project: str, request_key: str, text: str
+) -> bool:
+    if raw.get("title") != title:
+        return False
+    body = raw.get("body")
+    if not isinstance(body, str):
+        return False
+    marker = _parse(body, "issue")
+    return (
+        marker is not None
+        and marker["key"] == request_key
+        and marker["source"] == source_project
+        and body.partition("\n")[2] == text
+    )
+
+
+def _same_event_payload(entry: dict[str, Any], *, state: str, text: str) -> bool:
+    # Caller fingerprint is audit identity from the ORIGINAL write. Session
+    # rotation/new chats must not invalidate idempotent replay of the same key.
+    return entry["state"] == state and entry["body"] == text
+
+
 async def create_thread(
     client: Any, owner: str, repo: str, *,
     source_project: str, title: str, body: str, request_key: str, actor: str = ""
@@ -171,9 +194,9 @@ async def create_thread(
         if len(existing) != 1:
             raise CoordinationOutcomeUnknown("request_key matches more than one Gitea issue")
         previous = await client.get_issue(owner, repo, existing[0]["number"])
-        if previous.get("title") != title or previous.get("body") != (
-            _header(kind="issue", key=request_key, source=source_project, state="open", actor=actor)
-            + "\n" + body
+        if not _same_issue_payload(
+            previous, title=title, source_project=source_project,
+            request_key=request_key, text=body,
         ):
             raise ValueError("request_key reused with different issue content")
         return {"thread": existing[0], "created": False}
@@ -188,12 +211,20 @@ async def create_thread(
         try:
             found = [x for x in await list_threads(client, owner, repo) if x["request_key"] == request_key]
             if len(found) == 1:
-                return {"thread": found[0], "created": True, "reconciled": True}
+                observed = await client.get_issue(owner, repo, found[0]["number"])
+                if _same_issue_payload(
+                    observed, title=title, source_project=source_project,
+                    request_key=request_key, text=body,
+                ):
+                    return {"thread": found[0], "created": True, "reconciled": True}
         except Exception:
             pass
         raise CoordinationOutcomeUnknown("issue write outcome uncertain; do not replay with a new key") from exc
     item = _issue(result)
-    if item is None or item["request_key"] != request_key:
+    if item is None or not _same_issue_payload(
+        result, title=title, source_project=source_project,
+        request_key=request_key, text=body,
+    ):
         raise CoordinationOutcomeUnknown("issue created but result could not be verified")
     return {"thread": item, "created": True}
 
@@ -209,11 +240,7 @@ async def write_event(
     thread = await open_thread(client, owner, repo, number)
     existing = [e for e in thread["history"] if e["request_key"] == request_key]
     if existing:
-        if (
-            existing[0]["state"] != state
-            or existing[0]["body"] != text
-            or existing[0]["caller"] != actor
-        ):
+        if len(existing) != 1 or not _same_event_payload(existing[0], state=state, text=text):
             raise ValueError("request_key reused with different event content")
         return {"number": number, "event": existing[0], "created": False}
     if state not in _TRANSITIONS.get(thread["coord_state"], frozenset()):
@@ -229,12 +256,15 @@ async def write_event(
         try:
             refreshed = await open_thread(client, owner, repo, number)
             found = [e for e in refreshed["history"] if e["request_key"] == request_key]
-            if len(found) == 1:
+            if len(found) == 1 and _same_event_payload(found[0], state=state, text=text):
                 return {"number": number, "event": found[0], "created": True, "reconciled": True}
         except Exception:
             pass
         raise CoordinationOutcomeUnknown("comment write outcome uncertain; do not replay with a new key") from exc
     marker = _parse(result.get("body"), "event")
-    if marker is None or marker["key"] != request_key or marker["state"] != state:
+    if (
+        marker is None or marker["key"] != request_key or marker["state"] != state
+        or result.get("body", "").partition("\n")[2] != text
+    ):
         raise CoordinationOutcomeUnknown("comment created but result could not be verified")
     return {"number": number, "event_id": result.get("id"), "created": True, "state": state}
