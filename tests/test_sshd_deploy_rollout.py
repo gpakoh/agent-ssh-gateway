@@ -40,7 +40,7 @@ def test_first_rollout_raw_image_id_is_bound_to_the_actual_running_executor() ->
     assert 'local ref="$1" expected_running_id="$2"' in text
     assert '[ "$ref" = "$expected_running_id" ]' in text
     assert 'validate_sshd_image_ref "$PREVIOUS_SSHD_IMAGE" "$RUNNING_SSHD_ID"' in text
-    assert "'sshd_image': '''$3'''" in text
+    assert 'python3 "$ROOT/scripts/deploy_state.py" write "$STATE_DIR" "$1" "$2" "$3" "$DEPLOY_TAG"' in text
 
 def test_deploy_services_fail_closed_on_each_compose_up() -> None:
     text = DEPLOY.read_text(encoding="utf-8")

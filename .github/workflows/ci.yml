@@ -1704,7 +1704,9 @@ jobs:
         # from a mutable host working tree. Only runtime-only state is mounted
         # from the host: the gitignored environment and persistent rollback state.
         - /media/1TB/Python/web_ssh/web-ssh-gateway/docker/.env:/deploy/web-ssh-gateway.env:ro
-        - /media/1TB/Python/web_ssh/web-ssh-gateway/.state:/deploy/web-ssh-gateway-state
+        # Dedicated Docker volume: never bind the writable host checkout's
+        # legacy .state to the authority used for rollback.
+        - ssh-gateway-deploy-state:/deploy/web-ssh-gateway-state
         - /media/1TB/Python/quart-platform/infra-quart/secrets/registry.token:/deploy/secrets/registry.token:ro
     env:
       REGISTRY: 192.168.1.103:3005
@@ -1713,6 +1715,7 @@ jobs:
       # operator-owned volume below from the Actions secret store.
       MCP_COMPOSE_DOCKER_CONFIG_VOLUME: mcp-compose-registry-auth
       MCP_ACTIONS_SECRET_SOURCE_VOLUME: mcp-actions-secret-sources
+      DEPLOY_STATE_DIR: /deploy/web-ssh-gateway-state
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1728,9 +1731,9 @@ jobs:
       - name: Link runtime deployment inputs
         run: |
           test ! -e docker/.env
-          test ! -e .state
           ln -s /deploy/web-ssh-gateway.env docker/.env
-          ln -s /deploy/web-ssh-gateway-state .state
+          # State must remain inside DEPLOY_STATE_DIR, not a checkout symlink.
+          test -n "$DEPLOY_STATE_DIR"
       # Each job gets its own fresh container — build-and-push's docker
       # login doesn't carry over, even on the same runner.
       - name: Log in to the Gitea container registry

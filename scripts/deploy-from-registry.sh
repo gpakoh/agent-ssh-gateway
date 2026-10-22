@@ -48,13 +48,12 @@ SSHD_REPO="${SSH_GATEWAY_SSHD_REPO:-${GATEWAY_REPO%/*}/ssh-gateway-sshd}"
 # run failing or even noticing. :latest is kept as the fallback for
 # manual/local invocation, where no DEPLOY_SHA exists.
 DEPLOY_TAG="${DEPLOY_SHA:-latest}"
-STATE_DIR="$ROOT/.state"
+# CI must provide a private, dedicated deployment-state mount. The legacy
+# host-checkout .state (historically 0777/0666) is NOT trusted or migrated.
+STATE_DIR="${DEPLOY_STATE_DIR:-$ROOT/.state}"
 STATE_FILE="$STATE_DIR/web-ssh-gateway-deploy.json"
-mkdir -p "$STATE_DIR"
-# world-writable: this script may run as root (manual, on the host) or as
-# a non-root UID (the CI deploy job, via the bind-mounted host checkout)
-# — same rationale as deploy-quart-core.sh's STATE_DIR handling.
-chmod 777 "$STATE_DIR" 2>/dev/null || true
+# Fail before Docker pulls/migrations when rollback identity is uncertain.
+python3 "$ROOT/scripts/deploy_state.py" preflight "$STATE_DIR"
 
 log() { echo "[$(date -Is)] $*"; }
 
@@ -233,15 +232,9 @@ verify_provenance() {
 }
 
 validate_image_ref() {
-  # STATE_FILE is intentionally world-writable (chmod 777/666 above) so
-  # both the manual-root path and the CI job's non-root UID can write it
-  # -- but that also means any other local account on this host can edit
-  # it. Without this check, a tampered gateway_image/mcp_server_image
-  # field would be fed straight into `docker compose up` as the ROLLBACK
-  # target with no validation at all. Only accept the exact digest-pinned
-  # shape repo_digest() itself produces for the expected repo -- anything
-  # else (a different image, a local path, garbage) fails the deploy
-  # instead of silently deploying it.
+  # Defense in depth after trust-checked receipt reads: only allow a digest
+  # pinned to the exact expected repository. Path/owner/mode verification
+  # alone does not establish semantic image provenance.
   local ref="$1" expected_repo="$2"
   if [[ "$ref" =~ ^${expected_repo}@sha256:[0-9a-f]{64}$ ]]; then
     return 0
@@ -258,14 +251,7 @@ validate_sshd_image_ref() {
 }
 
 read_state_field() {
-  python3 -c "
-import json
-try:
-    d = json.load(open('$STATE_FILE'))
-    print(d.get('$1', ''))
-except Exception:
-    print('')
-"
+  python3 "$ROOT/scripts/deploy_state.py" read "$STATE_DIR" "$1"
 }
 
 image_build_sha() {
@@ -276,21 +262,7 @@ image_build_sha() {
 }
 
 write_state() {
-  python3 -c "
-import json
-json.dump(
-    {
-        'gateway_image': '''$1''',
-        'mcp_server_image': '''$2''',
-        'sshd_image': '''$3''',
-        'deploy_sha': '''$DEPLOY_TAG''',
-        'deployed_at': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
-    },
-    open('$STATE_FILE', 'w'),
-    indent=2,
-)
-"
-  chmod 666 "$STATE_FILE" 2>/dev/null || true
+  python3 "$ROOT/scripts/deploy_state.py" write "$STATE_DIR" "$1" "$2" "$3" "$DEPLOY_TAG"
 }
 
 is_transient_compose_failure() {
