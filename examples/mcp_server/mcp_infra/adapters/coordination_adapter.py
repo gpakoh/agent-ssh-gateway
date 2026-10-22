@@ -12,7 +12,7 @@ from examples.mcp_server.coordination import (
     CoordinationOutcomeUnknown,
     board_from_threads,
     create_thread,
-    list_threads,
+    list_threads_preview,
     open_thread,
     validate_project,
     write_event,
@@ -76,7 +76,7 @@ async def coord_inbox(project: str, limit: int = 25) -> dict[str, Any]:
             raise ValueError("limit must be an integer from 1 to 30")
         owner, repo = await _connection(tool, project, write=False)
         async with server_attr("GiteaClient")(os.environ["GITEA_TOKEN"]) as client:
-            all_threads = await list_threads(client, owner, repo)
+            all_threads, scan_truncated = await list_threads_preview(client, owner, repo)
             threads = []
             for item in all_threads[:limit]:
                 full = await open_thread(client, owner, repo, item["number"])
@@ -86,7 +86,7 @@ async def coord_inbox(project: str, limit: int = 25) -> dict[str, Any]:
     return tool_success(
         tool,
         result={"project": repo, "threads": threads, "count": len(threads),
-                "truncated": len(all_threads) > limit},
+                "truncated": scan_truncated or len(all_threads) > limit},
         source="gitea",
     )
 
@@ -99,7 +99,7 @@ async def coord_board(project: str, limit: int = 25) -> dict[str, Any]:
             raise ValueError("limit must be an integer from 1 to 30")
         owner, repo = await _connection(tool, project, write=False)
         async with server_attr("GiteaClient")(os.environ["GITEA_TOKEN"]) as client:
-            all_threads = await list_threads(client, owner, repo)
+            all_threads, scan_truncated = await list_threads_preview(client, owner, repo)
             enriched = []
             for item in all_threads[:limit]:
                 thread = await open_thread(client, owner, repo, item["number"])
@@ -110,7 +110,7 @@ async def coord_board(project: str, limit: int = 25) -> dict[str, Any]:
     return tool_success(
         tool, result={
             "project": repo, "columns": columns, "count": len(enriched),
-            "truncated": len(all_threads) > limit,
+            "truncated": scan_truncated or len(all_threads) > limit,
             "note": "Gitea Issues is authoritative; resolved does not automatically close an Issue",
         }, source="gitea",
     )

@@ -25,6 +25,9 @@ _TRANSITIONS = {
 }
 _PAGE_SIZE = 50
 _MAX_PAGES = 10
+# Exhaustive idempotency checks may inspect a larger bounded history than UI
+# reads. Never use the truncated UI scan to decide whether a POST is safe.
+_WRITE_MAX_PAGES = 100
 
 
 class CoordinationOutcomeUnknown(RuntimeError):
@@ -100,17 +103,29 @@ def _issue(issue: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-async def _pages(fetch: Any) -> list[dict[str, Any]]:
+async def _pages(
+    fetch: Any, *, max_pages: int = _MAX_PAGES, allow_partial: bool = False
+) -> tuple[list[dict[str, Any]], bool]:
+    """Collect bounded pages; only read-only callers can accept truncation."""
     result: list[dict[str, Any]] = []
-    for page in range(1, _MAX_PAGES + 1):
+    for page in range(1, max_pages + 1):
         rows = await fetch(page)
-        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        if (
+            not isinstance(rows, list)
+            or len(rows) > _PAGE_SIZE
+            or any(not isinstance(row, dict) for row in rows)
+        ):
             raise ValueError("Gitea collection returned invalid rows")
         result.extend(rows)
         if len(rows) < _PAGE_SIZE:
-            return result
-    # Incomplete lookups must not authorize potentially duplicate writes.
-    raise CoordinationOutcomeUnknown("collection exceeds bounded 500-row reconciliation window")
+            return result, False
+    if allow_partial:
+        # The last full page might be the end, but we cannot prove that;
+        # conservative truncation is preferable to an incorrect claim of completeness.
+        return result, True
+    raise CoordinationOutcomeUnknown(
+        f"collection exceeds bounded {max_pages * _PAGE_SIZE}-row reconciliation window"
+    )
 
 
 # Stable, read-only Kanban representation of the authoritative Gitea threads.
@@ -150,9 +165,22 @@ def board_from_threads(threads: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+async def list_threads_preview(
+    client: Any, owner: str, repo: str
+) -> tuple[list[dict[str, Any]], bool]:
+    """Read-only bounded sample, explicitly marking a possibly incomplete scan."""
+    rows, truncated = await _pages(
+        lambda page: client.list_issues(owner, repo, state="all", limit=_PAGE_SIZE, page=page),
+        allow_partial=True,
+    )
+    return [item for row in rows if (item := _issue(row)) is not None], truncated
+
+
 async def list_threads(client: Any, owner: str, repo: str) -> list[dict[str, Any]]:
-    rows = await _pages(
-        lambda page: client.list_issues(owner, repo, state="all", limit=_PAGE_SIZE, page=page)
+    """Exhaustive within a bounded window; fail closed before duplicate writes."""
+    rows, _ = await _pages(
+        lambda page: client.list_issues(owner, repo, state="all", limit=_PAGE_SIZE, page=page),
+        max_pages=_WRITE_MAX_PAGES,
     )
     return [item for row in rows if (item := _issue(row)) is not None]
 
@@ -164,8 +192,9 @@ async def open_thread(client: Any, owner: str, repo: str, number: int) -> dict[s
     item = _issue(issue)
     if item is None:
         raise ValueError("issue is not a Py Coordination thread")
-    comments = await _pages(
-        lambda page: client.list_issue_comments(owner, repo, number, limit=_PAGE_SIZE, page=page)
+    comments, _ = await _pages(
+        lambda page: client.list_issue_comments(owner, repo, number, limit=_PAGE_SIZE, page=page),
+        max_pages=_WRITE_MAX_PAGES,
     )
     trusted_identity = await client.get_user()
     trusted_login = trusted_identity.get("login")

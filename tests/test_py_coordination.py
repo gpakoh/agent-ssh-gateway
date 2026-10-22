@@ -494,6 +494,78 @@ async def test_board_refuses_invalid_limit_before_gitea_connection():
         assert response["error"]["code"] == "INVALID_INPUT"
 
 
+@pytest.mark.asyncio
+async def test_large_repo_read_only_board_returns_bounded_truncated_result(monkeypatch):
+    """Hundreds of unrelated Gitea PRs must not blank the entire project board."""
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setattr(adapter, "_registered", lambda p: core.validate_project(p))
+    client = FakeClient()
+    client.issues = [
+        {"number": i + 1, "title": f"PR {i}", "body": "ordinary issue"}
+        for i in range(525)
+    ]
+    client.issues[0] = {
+        "number": 1, "title": "Gateway blocker", "state": "open",
+        "html_url": "https://gitea.example/gpakoh/agent-ssh-gateway/issues/1",
+        "body": core._header(kind="issue", key="large-repo-open-2026",
+                              source="business-analytics-service", state="open") + "\nFailure",
+    }
+
+    async def enter(self):
+        return self
+
+    async def leave(self, *args):
+        return None
+
+    monkeypatch.setattr(FakeClient, "__aenter__", enter, raising=False)
+    monkeypatch.setattr(FakeClient, "__aexit__", leave, raising=False)
+    monkeypatch.setattr(adapter, "server_attr",
+                        lambda name: (lambda _: client) if name == "GiteaClient" else None)
+    board = await adapter.coord_board("agent-ssh-gateway")
+    inbox = await adapter.coord_inbox("agent-ssh-gateway")
+    assert board["ok"] is True, board
+    assert board["result"]["count"] == 1
+    assert board["result"]["truncated"] is True
+    assert board["result"]["columns"][0]["cards"][0]["number"] == 1
+    assert inbox["ok"] is True, inbox
+    assert inbox["result"]["threads"][0]["number"] == 1
+    assert inbox["result"]["truncated"] is True
+
+    # Read-only preview must not authorize a new POST. The exact key is
+    # outside the 500-row preview window but inside exhaustive write scope.
+    client.issues[524] = {
+        "number": 525, "title": "Existing beyond preview", "state": "open",
+        "html_url": "https://gitea.example/gpakoh/agent-ssh-gateway/issues/525",
+        "body": core._header(kind="issue", key="late-key-not-visible",
+                              source="business-analytics-service", state="open") + "\nOriginal",
+    }
+    replay = await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway",
+        source_project="business-analytics-service",
+        title="Existing beyond preview", body="Original", request_key="late-key-not-visible",
+    )
+    assert replay["created"] is False
+    assert client.create_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_create_fails_closed_when_full_write_history_is_unscannable():
+    class EndlessGitea(FakeClient):
+        async def list_issues(self, owner, repo, *, state="all", limit=50, page=1):
+            return [{"number": (page - 1) * limit + i + 1, "body": "ordinary"}
+                    for i in range(limit)]
+
+    client = EndlessGitea()
+    with pytest.raises(core.CoordinationOutcomeUnknown, match="5000-row"):
+        await core.create_thread(
+            client, "gpakoh", "agent-ssh-gateway",
+            source_project="business-analytics-service",
+            title="Do not duplicate", body="Uncertain old history",
+            request_key="endless-reconciliation-safety",
+        )
+    assert client.create_calls == 0
+
+
 def test_coord_tools_mode_and_scope_contract():
     for name in ("coord_inbox", "coord_open"):
         assert should_register_tool(name, "mcp_client") is True
