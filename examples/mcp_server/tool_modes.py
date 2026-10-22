@@ -98,6 +98,7 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "gitea_list_issues",
         "gitea_get_issue",
         "coord_inbox",
+        "coord_board",
         "coord_open",
         "gitea_list_pull_requests",
         "gitea_get_pull_request",

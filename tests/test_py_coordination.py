@@ -408,6 +408,92 @@ async def test_ambiguous_comment_wrong_state_same_key_is_not_misidentified():
         )
 
 
+@pytest.mark.asyncio
+async def test_project_board_projects_gitea_threads_into_four_columns(monkeypatch):
+    from examples.mcp_server.mcp_infra.adapters import coordination_adapter as adapter
+
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setattr(adapter, "_registered", lambda x: core.validate_project(x))
+    fake = FakeClient()
+
+    async def aenter(self):
+        return self
+
+    async def aexit(self, *args):
+        return None
+
+    monkeypatch.setattr(FakeClient, "__aenter__", aenter, raising=False)
+    monkeypatch.setattr(FakeClient, "__aexit__", aexit, raising=False)
+    monkeypatch.setattr(adapter, "server_attr", lambda name: (lambda _: fake) if name == "GiteaClient" else None)
+    for state, key in (
+        ("open", "board-task-open-123"),
+        ("accepted", "board-task-accept-123"),
+        ("waiting_review", "board-task-review-123"),
+        ("resolved", "board-task-resolved-123"),
+    ):
+        created = await core.create_thread(
+            fake, "gpakoh", "agent-ssh-gateway",
+            source_project="business-analytics-service",
+            title="Board " + state,
+            body="Check state",
+            request_key=key,
+        )
+        n = created["thread"]["number"]
+        if state != "open":
+            await core.write_event(
+                fake, "gpakoh", "agent-ssh-gateway", n,
+                text="Acknowledged", request_key=f"board-accept-{n}-123", state="accepted",
+            )
+        if state in ("waiting_review", "resolved"):
+            await core.write_event(
+                fake, "gpakoh", "agent-ssh-gateway", n,
+                text="PR and tests", request_key=f"board-review-{n}-123", state="waiting_review",
+            )
+        if state == "resolved":
+            await core.write_event(
+                fake, "gpakoh", "agent-ssh-gateway", n,
+                text="Requester verified cleanup", request_key=f"board-done-{n}-123", state="resolved",
+            )
+    fake.issues.append({"number": 99, "title": "ordinary", "body": "not a coordination thread"})
+    fake.issues.append({
+        "number": 100, "title": "PR", "body": core._header(
+            kind="issue", key="board-task-ignore-123",
+            source="business-analytics-service", state="open",
+        ),
+        "pull_request": {"url": "https://gitea.example/pulls/100"},
+    })
+    result = await adapter.coord_board("agent-ssh-gateway")
+    assert result["ok"] is True, result
+    data = result["result"]
+    assert data["count"] == 4
+    assert data["truncated"] is False
+    assert [col["state"] for col in data["columns"]] == [
+        "open", "accepted", "waiting_review", "resolved",
+    ]
+    assert [col["count"] for col in data["columns"]] == [1, 1, 1, 1]
+    assert [col["cards"][0]["number"] for col in data["columns"]] == [1, 2, 3, 4]
+    assert all("history" not in c["cards"][0] for c in data["columns"])
+    assert data["columns"][-1]["cards"][0]["gitea_issue_state"] == "open"
+
+
+def test_board_does_not_silently_map_unknown_coord_state():
+    with pytest.raises(ValueError, match="invalid coordination state"):
+        core.board_from_threads([{"coord_state": "in_progress_without_receipt"}])
+
+
+def test_readonly_board_visible_in_safe_mcp_mode():
+    assert should_register_tool("coord_board", "mcp_client") is True
+    assert get_required_scopes("coord_board") == ["mcp:repo"]
+
+
+@pytest.mark.asyncio
+async def test_board_refuses_invalid_limit_before_gitea_connection():
+    for limit in (0, -1, 31, True, "10"):
+        response = await adapter.coord_board("agent-ssh-gateway", limit=limit)
+        assert response["ok"] is False
+        assert response["error"]["code"] == "INVALID_INPUT"
+
+
 def test_coord_tools_mode_and_scope_contract():
     for name in ("coord_inbox", "coord_open"):
         assert should_register_tool(name, "mcp_client") is True

@@ -10,6 +10,7 @@ from tool_results import tool_error, tool_success
 
 from examples.mcp_server.coordination import (
     CoordinationOutcomeUnknown,
+    board_from_threads,
     create_thread,
     list_threads,
     open_thread,
@@ -90,6 +91,31 @@ async def coord_inbox(project: str, limit: int = 25) -> dict[str, Any]:
     )
 
 
+async def coord_board(project: str, limit: int = 25) -> dict[str, Any]:
+    """Read the project's Gitea-backed Kanban columns without changing issues."""
+    tool = "coord_board"
+    try:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 30:
+            raise ValueError("limit must be an integer from 1 to 30")
+        owner, repo = await _connection(tool, project, write=False)
+        async with server_attr("GiteaClient")(os.environ["GITEA_TOKEN"]) as client:
+            all_threads = await list_threads(client, owner, repo)
+            enriched = []
+            for item in all_threads[:limit]:
+                thread = await open_thread(client, owner, repo, item["number"])
+                enriched.append({**item, "coord_state": thread["coord_state"]})
+            columns = board_from_threads(enriched)
+    except Exception as exc:
+        return _fail(tool, exc)
+    return tool_success(
+        tool, result={
+            "project": repo, "columns": columns, "count": len(enriched),
+            "truncated": len(all_threads) > limit,
+            "note": "Gitea Issues is authoritative; resolved does not automatically close an Issue",
+        }, source="gitea",
+    )
+
+
 async def coord_open(project: str, issue_number: int) -> dict[str, Any]:
     """Read the full coordination thread and its durable Gitea comments."""
     tool = "coord_open"
@@ -165,6 +191,7 @@ async def coord_update(
 
 def register_all() -> None:
     register_tool("coord_inbox")(coord_inbox)
+    register_tool("coord_board")(coord_board)
     register_tool("coord_open")(coord_open)
     register_tool("coord_create")(coord_create)
     register_tool("coord_reply")(coord_reply)
