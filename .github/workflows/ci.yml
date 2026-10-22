@@ -1664,28 +1664,20 @@ jobs:
             exit 1
           fi
       - name: Push web-ssh-gateway image
-        # PRs build+smoke-test the image above but never push it -- an
-        # unmerged commit must never become :latest or be pullable by
-        # deploy-from-registry.sh.
-        #
-        # Push :latest before :<sha>: once its layers are in the registry,
-        # the :<sha> push reduces to tag metadata and has no upload left to
-        # lose. Both pushes go through ci-docker-push-retry.sh so transient
-        # registry/network errors are retried (docker push is idempotent).
+        # PRs build and smoke-test but never publish unmerged images.
+        # The release SHA tag is repinned from the previously captured
+        # immutable, smoke-tested image ID before any Docker push.
         if: github.event_name == 'push'
         run: |
-          bash scripts/ci-docker-push-retry.sh "$REGISTRY/gpakoh/agent-ssh-gateway:latest"
-          bash scripts/ci-docker-push-retry.sh "$REGISTRY/gpakoh/agent-ssh-gateway:${{ github.sha }}"
+          bash scripts/ci-docker-push-pinned.sh "$CI_SMOKE_GW_IMAGE_ID" "$REGISTRY/gpakoh/agent-ssh-gateway" "${{ github.sha }}"
       - name: Push mcp-server image
         if: github.event_name == 'push'
         run: |
-          bash scripts/ci-docker-push-retry.sh "$REGISTRY/gpakoh/mcp-server:latest"
-          bash scripts/ci-docker-push-retry.sh "$REGISTRY/gpakoh/mcp-server:${{ github.sha }}"
+          bash scripts/ci-docker-push-pinned.sh "$CI_SMOKE_MCP_IMAGE_ID" "$REGISTRY/gpakoh/mcp-server" "${{ github.sha }}"
       - name: Push sshd executor image
         if: github.event_name == 'push'
         run: |
-          bash scripts/ci-docker-push-retry.sh "$REGISTRY/gpakoh/ssh-gateway-sshd:latest"
-          bash scripts/ci-docker-push-retry.sh "$REGISTRY/gpakoh/ssh-gateway-sshd:${{ github.sha }}"
+          bash scripts/ci-docker-push-pinned.sh "$CI_SMOKE_SSHD_IMAGE_ID" "$REGISTRY/gpakoh/ssh-gateway-sshd" "${{ github.sha }}"
 
   deploy:
     # Runs right after real images are pushed — pulls them, redeploys
