@@ -2226,6 +2226,112 @@ def test_candidate_cleanup_guard_recheck_blocks_rmtree_then_recovers(
     assert not clone_root.exists()
 
 
+def test_cleanup_evidence_diagnostics_plan_only_is_read_only(tmp_path: Path) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    bridge = tmp_path / ".ai-bridge"
+    bridge.mkdir()
+    plan = bridge / "current-plan.md"
+    plan.write_text("historical work item", encoding="utf-8")
+    result = module._candidate_active_evidence_details(tmp_path)
+    assert result is not None
+    assert result["plan_present"] is True
+    assert result["plan_type"] == "regular"
+    assert result["task_status"] == "unverified"
+    assert result["lease_status"] == "unverified"
+    assert result["task_entries"] == []
+    assert plan.read_text(encoding="utf-8") == "historical work item"
+
+
+def test_cleanup_evidence_diagnostics_task_entries_are_bounded(tmp_path: Path) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    directory = tmp_path / ".ai-bridge" / "tasks"
+    directory.mkdir(parents=True)
+    for i in range(34):
+        (directory / f"task-{i}").touch()
+    result = module._candidate_active_evidence_details(tmp_path)
+    assert result is not None
+    assert len(result["task_entries"]) == 30
+    assert result["task_entries_truncated"] is True
+    assert result["tasks_type"] == "directory"
+    assert module._candidate_has_active_evidence(tmp_path)
+
+
+def test_cleanup_evidence_diagnostics_never_follows_symlink(tmp_path: Path) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    bridge = tmp_path / ".ai-bridge"
+    bridge.mkdir()
+    (bridge / "tasks").symlink_to(tmp_path, target_is_directory=True)
+    result = module._candidate_active_evidence_details(tmp_path)
+    assert result is not None
+    assert result["tasks_type"] == "unsafe"
+    assert result["task_entries"] == []
+
+
+def test_candidate_cleanup_exposes_evidence_details_without_mutation(
+    registry_fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-physical-evidence"
+    preserved_ref = "archive/candidate-cleanup-physical-evidence"
+    receipt = prepare_candidate_clone(
+        "source-project", branch, base,
+        config_dir=config_dir, journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    # Delivery metadata belongs to the ignored runtime sidecar, not Git.
+    exclude = clone_root / ".git" / "info" / "exclude"
+    exclude.write_text(exclude.read_text(encoding="utf-8") + "\n.ai-bridge/\n", encoding="utf-8")
+    bridge = clone_root / ".ai-bridge"
+    bridge.mkdir(exist_ok=True)
+    (bridge / "current-plan.md").write_text("already completed", encoding="utf-8")
+    _mock_cleanup_remote_probe(
+        monkeypatch, module,
+        preserved_ref=preserved_ref, head=base,
+        delivery_branch=branch, delivery="absent",
+    )
+
+    with pytest.raises(CandidateCloneError) as failure:
+        candidate_cleanup(
+            receipt.project_id, base, branch, "source-project", preserved_ref,
+            config_dir=config_dir, journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+    assert failure.value.code == "WORKSPACE_CONTENDED"
+    assert failure.value.details is not None
+    evidence = failure.value.details["evidence"]
+    assert evidence["plan_present"] is True
+    assert evidence["lease_status"] == "unverified"
+    assert evidence["task_entries"] == []
+    assert clone_root.exists()
+    assert receipt.project_id in (config_dir / "projects.yaml").read_text(encoding="utf-8")
+    tombstone_path, _ = module._cleanup_tombstone_path(journal_root, receipt.project_id)
+    assert not tombstone_path.exists()
+
+
+def test_cleanup_evidence_diagnostics_keeps_unsafe_bridge_blocked(tmp_path: Path) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    (tmp_path / ".ai-bridge").symlink_to(tmp_path, target_is_directory=True)
+    details = module._candidate_active_evidence_details(tmp_path)
+    assert details is not None
+    assert details["evidence_root_type"] == "unsafe"
+    assert module._candidate_has_active_evidence(tmp_path)
+
+
+def test_cleanup_evidence_diagnostics_status_file_is_not_blocker(tmp_path: Path) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    bridge = tmp_path / ".ai-bridge"
+    bridge.mkdir()
+    (bridge / "agent-status.md").write_text("past run", encoding="utf-8")
+    assert module._candidate_active_evidence_details(tmp_path) is None
+
+
 def test_candidate_cleanup_refuses_dirty_candidate(
     registry_fixture,
     monkeypatch: pytest.MonkeyPatch,
