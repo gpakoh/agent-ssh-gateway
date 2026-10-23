@@ -146,6 +146,13 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "run_agent": ["mcp:agent-run"],
     "run_agents": ["mcp:agent-run"],
     # repo — mcp:repo
+    "coord_inbox": ["mcp:repo"],
+    "coord_board": ["mcp:repo"],
+    "coord_open": ["mcp:repo"],
+    "coord_create": ["mcp:repo"],
+    "coord_reply": ["mcp:repo"],
+    "coord_accept": ["mcp:repo"],
+    "coord_update": ["mcp:repo"],
     "gitea_get_repo": ["mcp:repo"],
     "gitea_list_branches": ["mcp:repo"],
     "gitea_list_commits": ["mcp:repo"],

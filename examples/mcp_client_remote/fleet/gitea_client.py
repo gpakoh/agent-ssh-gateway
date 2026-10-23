@@ -60,6 +60,7 @@ ALLOWED_ENDPOINTS = frozenset(
         "/repos/{owner}/{repo}/contents/{path}",
         "/repos/{owner}/{repo}/issues",
         "/repos/{owner}/{repo}/issues/{number}",
+        "/repos/{owner}/{repo}/issues/{number}/comments",
         "/repos/{owner}/{repo}/pulls",
         "/repos/{owner}/{repo}/pulls/{number}",
         "/repos/{owner}/{repo}/actions/runs",
@@ -82,6 +83,12 @@ ALLOWED_WRITE_ENDPOINTS = frozenset(
         "/repos/{owner}/{repo}/pulls/{number}/merge",
     }
 )
+# Coordination writes have their own narrow allowlist; generic _post remains
+# restricted to pull requests.
+ALLOWED_COORD_WRITE_ENDPOINTS = frozenset({
+    "/repos/{owner}/{repo}/issues",
+    "/repos/{owner}/{repo}/issues/{number}/comments",
+})
 # PATCH is not a generic mutation tool either: the close operation may
 # touch exactly one endpoint, and only to set state=closed.
 ALLOWED_CLOSE_ENDPOINTS = frozenset(
@@ -491,6 +498,33 @@ class GiteaClient:
             raise GiteaMutationOutcomeUnknown(
                 "gitea mutation returned an undecodable success response"
             ) from exc
+
+    async def _post_coord(self, endpoint: str, payload: dict[str, Any], **path_params: Any) -> Any:
+        """Only create coordination Issues or append comments; never edit PRs."""
+        if endpoint not in ALLOWED_COORD_WRITE_ENDPOINTS:
+            raise ValueError("Coordination write endpoint not allowed")
+        validate_repo_owner_or_name(path_params["owner"], label="owner")
+        validate_repo_owner_or_name(path_params["repo"], label="repo")
+        if "number" in path_params:
+            path_params["number"] = _validate_positive_int(path_params["number"], "number")
+        path = endpoint.format(**path_params)
+        response = await self._client.post(path, json=payload)
+        if response.status_code in (401, 403):
+            raise PermissionError("Gitea coordination write is not authorized")
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise httpx.HTTPStatusError(
+                f"gitea api {path}: {response.status_code} {response.reason_phrase}",
+                request=exc.request, response=exc.response,
+            ) from None
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise GiteaMutationOutcomeUnknown("Gitea coordination POST returned an unreadable response") from exc
+        if not isinstance(data, dict):
+            raise GiteaMutationOutcomeUnknown("Gitea coordination POST returned an invalid response")
+        return data
 
     async def _post_action(
         self,
@@ -1103,11 +1137,15 @@ class GiteaClient:
         repo: str,
         state: str = "open",
         limit: int = 30,
+        page: int = 1,
     ) -> list[dict[str, Any]]:
-        limit = min(limit, MAX_LIMIT)
+        limit = _validate_positive_int(limit, "limit")
+        if limit > MAX_LIMIT:
+            raise ValueError(f"limit must be <= {MAX_LIMIT}")
+        page = _validate_positive_int(page, "page")
         return await self._get(
             "/repos/{owner}/{repo}/issues",
-            params={"state": state, "limit": limit},
+            params={"state": state, "limit": limit, "page": page},
             owner=owner,
             repo=repo,
         )
@@ -1123,6 +1161,30 @@ class GiteaClient:
             owner=owner,
             repo=repo,
             number=issue_number,
+        )
+
+    async def list_issue_comments(self, owner: str, repo: str, number: int, *, limit: int = 50, page: int = 1) -> list[dict[str, Any]]:
+        limit = _validate_positive_int(limit, "limit")
+        if limit > MAX_LIMIT:
+            raise ValueError("limit exceeds maximum")
+        page = _validate_positive_int(page, "page")
+        number = _validate_positive_int(number, "number")
+        return await self._get(
+            "/repos/{owner}/{repo}/issues/{number}/comments",
+            params={"limit": limit, "page": page},
+            owner=owner, repo=repo, number=number,
+        )
+
+    async def create_coord_issue(self, owner: str, repo: str, *, title: str, body: str) -> dict[str, Any]:
+        return await self._post_coord(
+            "/repos/{owner}/{repo}/issues", {"title": title, "body": body},
+            owner=owner, repo=repo,
+        )
+
+    async def create_coord_comment(self, owner: str, repo: str, number: int, *, body: str) -> dict[str, Any]:
+        return await self._post_coord(
+            "/repos/{owner}/{repo}/issues/{number}/comments", {"body": body},
+            owner=owner, repo=repo, number=number,
         )
 
     async def list_pull_requests(

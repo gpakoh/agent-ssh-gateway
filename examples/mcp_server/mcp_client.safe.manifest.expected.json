@@ -1,9 +1,9 @@
 {
   "mode": "mcp_client",
   "safe_mode": true,
-  "expected_safe_count": 85,
+  "expected_safe_count": 88,
   "expected_blocked_count": 37,
-  "expected_mcp_client_full_count": 117,
+  "expected_mcp_client_full_count": 120,
   "must_include": [
     "docker_site_audit_crm_ingress_readiness",
     "docker_site_audit_deploy_status",
@@ -13,7 +13,10 @@
     "repo_status",
     "scan_command",
     "gitea_get_branch_protection",
-    "tools_manifest"
+    "tools_manifest",
+    "coord_inbox",
+    "coord_open",
+    "coord_board"
   ],
   "must_exclude": [
     "docker_compose_up",
@@ -27,6 +30,10 @@
     "run_opencode",
     "workspace_apply_patch",
     "workspace_file_write",
-    "todo_backlog_upsert"
+    "todo_backlog_upsert",
+    "coord_create",
+    "coord_reply",
+    "coord_accept",
+    "coord_update"
   ]
 }
