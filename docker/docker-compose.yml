@@ -539,6 +539,12 @@ services:
       - SSH_CONNECTION_POOL_SIZE=${SSH_CONNECTION_POOL_SIZE:-0}
       - SSH_CONNECTION_POOL_TTL_SECONDS=${SSH_CONNECTION_POOL_TTL_SECONDS:-60}
       - JWT_SECRET=${JWT_SECRET:?set JWT_SECRET}
+      # Separate operator-provisioned Gitea read-only credential for the
+      # browser board; never fall back to the MCP's privileged write token.
+      - COORDINATION_GITEA_READ_TOKEN=${COORDINATION_GITEA_READ_TOKEN:-}
+      - COORDINATION_GITEA_OWNER=${COORDINATION_GITEA_OWNER:-gpakoh}
+      - COORDINATION_GITEA_WRITER_LOGIN=${COORDINATION_GITEA_WRITER_LOGIN:-gpakoh}
+      - COORDINATION_GITEA_API_BASE=${COORDINATION_GITEA_API_BASE:-https://git.xloud.ru/api/v1}
       # P1 MAJOR audit finding: JWT_COOKIE_SECURE defaults to false at the
       # Python settings level (app/config.py) so the local http demo
       # stack (docker compose --profile demo, curl http://localhost:8085)
