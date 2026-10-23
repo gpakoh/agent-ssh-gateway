@@ -864,3 +864,21 @@ Open backlog count after cleanup: **30**
    **Acceptance:** Obtain and hash the exact `4fc863ef` diff; verify its parent/base and changed-file scope; compare each behavioral hunk with current `candidate_clone.py` and current regression coverage; if still applicable, reimplement or port it on a fresh exact-current-master candidate with focused tests and normal PR/CI delivery; if superseded or invalid, record concrete current-master evidence proving why. Only after one of those terminal outcomes may the historical worktree be considered safe for deletion.
 
    **Related evidence:** Historical local candidate: `asg-selenium-reaper`, branch `fix/selenium-session-reaper-20261003`, HEAD `4fc863ef`; reported unique scope `examples/mcp_server/candidate_clone.py` +81 and `tests/test_candidate_clone.py` +156. Current master at review start: `6bbcee7cac283868a61691674c48598010d75e4b`; current `candidate_clone.py` last-change blob `8a980c8ad3bc0a9d845b760c62e261508d08cf21`; guarded searches returned zero Selenium/reap matches on the cited current files.
+
+## Runtime/tooling intake — 2026-10-22
+
+1. ⬜ **OpenCode scheduled upgrade failure prevents bounded agent jobs before implementation.**
+   <!-- gateway-todo-key: opencode-upgrade-failed -->
+   **Severity:** P1
+
+   **Observed behavior:** 2026-10-22 launch pilot: a valid, isolated OpenCode task was admitted as running but finished upgrade-blocked; worker exit 80, final exit 80, proxy last_error_class=opencode_upgrade_failed, provider_kind=configured_provider. Required checks ran=0, review diff empty, no code mutation. Scope guard passed, cgroup oom_kill 0->0. This was an upgrade/bootstrap failure, not a failed regression or proof of provider authorization failure.
+
+   **Reproduction:** Via registered project candidate-engineering-supervisor-service-pilot-clamp-canary-source-20261022-b0f75c0aaef9-f6cd43841528 at clean seed commit 3c6b76101ce6a448e4a00114c49819f1a8c2df88, write an OpenCode task restricted to pilot_fixture_clamp.py (task pilot-clamp-repair-20261022-3c6b761), run_agent async, inspect_agent_task and read_agent_report/proxy_status. Observed job 013c0734-d5b9-45ad-9f4f-4d442a950d2e attempt 57451ba0d62d4a23b80c0619f270ee29 terminal failed/upgrade-blocked 2026-10-22T15:35:05Z. Do not blindly replay the same job; use a new bounded qualification after fixing the upgrade path.
+
+   **Expected behavior:** A pinned/reviewed OpenCode runtime upgrade succeeds before execution or fails with precise, actionable diagnosis and no mutation; upgrade failures must not be conflated with task/code/provider errors. Upgrades should have bounded timeouts and be independently qualified.
+
+   **Impact:** Blocks the authorised Supervisor/Gateway/OpenCode internal engineering pilot after real Browser->ChatGPT smoke succeeded; repeated attempts would waste resources and risk inappropriate reconciliation.
+
+   **Acceptance:** Diagnose the failing scheduled-upgrade operation with redacted logs/exit detail and reproducible test; fix or pre-provision a pinned verified OpenCode version through owner-approved process; verify one bounded isolated agent task reaches execution and returns nonempty diff plus targeted required checks, with job/attempt/evidence recorded; ensure upgrade failure remains terminal non-success and replays cannot produce duplicate code side effects.
+
+   **Related evidence:** Task pilot-clamp-repair-20261022-3c6b761, Gateway job 013c0734-d5b9-45ad-9f4f-4d442a950d2e, attempt 57451ba0d62d4a23b80c0619f270ee29, runner report exit=80 status=upgrade-blocked, proxy_status 2026-10-22T15:35:04Z final_outcome=upgrade_blocked; canary seed SHA 3c6b76101ce6a448e4a00114c49819f1a8c2df88.
