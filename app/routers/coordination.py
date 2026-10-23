@@ -18,12 +18,12 @@ from fastapi.responses import FileResponse
 
 from app.auth_middleware import AuthIdentity, require_any_auth
 from app.config import settings
-from app.workspace.registry import WorkspacePolicyError, get_registry
-from examples.mcp_server.coordination import (
+from app.coordination_logic import (
     board_from_threads,
     list_threads_preview,
     open_thread,
 )
+from app.workspace.registry import WorkspacePolicyError, get_registry
 
 router = APIRouter(tags=["coordination"])
 _PROJECT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")

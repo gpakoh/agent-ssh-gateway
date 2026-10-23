@@ -82,7 +82,7 @@ CI #18877 SUCCESS, запрос `61aa4e7a-4bf2-4830-82ea-c34169777831`.
 Браузер использует существующую HTTP-only сессию веб-Gateway. Он **не получает**
 Gitea token, MCP OAuth credential или сведения о секретах. Получение данных
 делает серверный GET-only адаптер, применяющий ту же функцию проекции
-`examples/mcp_server/coordination.py`, что и MCP. Данные и статусы не
+`app/coordination_logic.py`, что и MCP. Данные и статусы не
 копируются в другую БД.
 
 Для включения оператор отдельно предоставляет *ограниченный только чтением*
@@ -94,7 +94,7 @@ MCP публикует Coordination events: иначе проверка авто
 завершается ошибкой без ложного отображения статуса.
 Опциональны `COORDINATION_GITEA_OWNER` (по умолчанию `gpakoh`) и
 `COORDINATION_GITEA_API_BASE` (по умолчанию
-`https://git.xloud.ru/api/v1`; только HTTPS). Значение credential нельзя
+`https://gitea.example/api/v1`; только HTTPS). Значение credential нельзя
 указывать в issue, логе, команде или браузере. В случае отсутствия credential
 GET endpoint возвращает 503; **автоматического fallback на привилегированный
 GITEA_TOKEN нет**. Изменение конфигурации и production credential —
