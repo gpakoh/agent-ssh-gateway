@@ -39,6 +39,8 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 # Security: Copy application with proper ownership
 COPY --chown=appuser:appuser app/ ./app/
+# A single pure coordination projection is reused by the browser and MCP.
+COPY --chown=appuser:appuser examples/mcp_server/coordination.py ./examples/mcp_server/coordination.py
 
 # Copy SDK for download endpoint
 COPY --chown=appuser:appuser sdk/ ./sdk/

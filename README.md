@@ -49,7 +49,9 @@ over credentials, targets, scopes, and execution policy.
 
 Py Coordination v1 tools (`coord_inbox`, `coord_board`, `coord_open`, `coord_create`,
 `coord_reply`, `coord_accept`, `coord_update`) and their safety/rollout
-contract are documented in [docs/py-coordination-v1.md](docs/py-coordination-v1.md).
+contract are documented in [docs/py-coordination-v1.md](docs/py-coordination-v1.md). Для администратора
+добавлена защищённая read-only доска `/coordination` (после настройки
+`COORDINATION_GITEA_READ_TOKEN`).
 
 Tool visibility depends on the selected MCP mode and access profile. The project
 ships minimal, standard, full, and ChatGPT-oriented modes, including a safe mode
