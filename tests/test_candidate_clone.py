@@ -2226,6 +2226,77 @@ def test_candidate_cleanup_guard_recheck_blocks_rmtree_then_recovers(
     assert not clone_root.exists()
 
 
+def test_cleanup_plan_fingerprint_is_exact_and_never_reveals_plan_text(tmp_path: Path) -> None:
+    import hashlib
+
+    from examples.mcp_server import candidate_clone as module
+
+    bridge = tmp_path / ".ai-bridge"
+    bridge.mkdir()
+    text = "private operator note: terminal evidence is not proof of termination"
+    plan = bridge / "current-plan.md"
+    plan.write_text(text, encoding="utf-8")
+    details = module._candidate_active_evidence_details(tmp_path)
+    assert details is not None
+    assert details["plan_fingerprint_status"] == "verified"
+    assert details["plan_sha256"] == hashlib.sha256(text.encode()).hexdigest()
+    assert details["plan_size_bytes"] == len(text.encode())
+    assert text not in str(details)
+    assert plan.read_text(encoding="utf-8") == text
+    assert module._candidate_has_active_evidence(tmp_path)
+
+
+def test_cleanup_plan_fingerprint_rejects_symlink_without_read(tmp_path: Path) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    bridge = tmp_path / ".ai-bridge"
+    bridge.mkdir()
+    secret = tmp_path / "secret"
+    secret.write_text("must not read", encoding="utf-8")
+    (bridge / "current-plan.md").symlink_to(secret)
+    details = module._candidate_active_evidence_details(tmp_path)
+    assert details is not None
+    assert details["plan_type"] == "unsafe"
+    assert details["plan_fingerprint_status"] == "unsafe"
+    assert "plan_sha256" not in details
+    assert secret.read_text(encoding="utf-8") == "must not read"
+
+
+def test_cleanup_plan_fingerprint_oversize_fails_closed(tmp_path: Path) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    bridge = tmp_path / ".ai-bridge"
+    bridge.mkdir()
+    (bridge / "current-plan.md").write_bytes(b"x" * (1024 * 1024 + 1))
+    details = module._candidate_active_evidence_details(tmp_path)
+    assert details is not None
+    assert details["plan_fingerprint_status"] == "oversize"
+    assert "plan_sha256" not in details
+    assert module._candidate_has_active_evidence(tmp_path)
+
+
+def test_cleanup_plan_fingerprint_refuses_changed_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    bridge = tmp_path / ".ai-bridge"
+    bridge.mkdir()
+    plan = bridge / "current-plan.md"
+    plan.write_text("initial", encoding="utf-8")
+    expected = plan.lstat()
+    original_open = module.os.open
+
+    def raced_open(path, flags, *args, **kwargs):
+        if path == "current-plan.md":
+            plan.unlink()
+            plan.write_text("replacement", encoding="utf-8")
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "open", raced_open)
+    details = module._candidate_plan_fingerprint(bridge, bridge_stat=bridge.lstat(), plan_stat=expected)
+    assert details["plan_fingerprint_status"] == "unsafe"
+    assert "plan_sha256" not in details
+
+
 def test_cleanup_evidence_diagnostics_plan_only_is_read_only(tmp_path: Path) -> None:
     from examples.mcp_server import candidate_clone as module
 
