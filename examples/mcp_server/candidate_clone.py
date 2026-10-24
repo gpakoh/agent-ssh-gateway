@@ -867,6 +867,77 @@ def _write_cleanup_tombstone(path: Path, data: dict[str, Any]) -> None:
                     pass
 
 
+_PLAN_FINGERPRINT_MAX_BYTES = 1024 * 1024
+
+
+def _candidate_plan_fingerprint(
+    bridge: Path, *, bridge_stat: os.stat_result, plan_stat: os.stat_result
+) -> dict[str, Any]:
+    """Digest a bounded regular plan through nofollow dirfds without exposing text.
+
+    This is diagnostic evidence ONLY: a matching SHA never grants cleanup or
+    claims that a task/lease has terminated.
+    """
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        return {"plan_fingerprint_status": "unavailable"}
+    dir_flags = os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
+    dir_flags |= getattr(os, "O_DIRECTORY", 0)
+    file_flags = os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
+    file_flags |= getattr(os, "O_NONBLOCK", 0)
+    bridge_fd: int | None = None
+    plan_fd: int | None = None
+    try:
+        bridge_fd = os.open(bridge, dir_flags)
+        verified_bridge = os.fstat(bridge_fd)
+        if (
+            not stat.S_ISDIR(verified_bridge.st_mode)
+            or (verified_bridge.st_dev, verified_bridge.st_ino)
+            != (bridge_stat.st_dev, bridge_stat.st_ino)
+        ):
+            return {"plan_fingerprint_status": "unstable"}
+        plan_fd = os.open("current-plan.md", file_flags, dir_fd=bridge_fd)
+        before = os.fstat(plan_fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+            != (plan_stat.st_dev, plan_stat.st_ino, plan_stat.st_size, plan_stat.st_mtime_ns, plan_stat.st_ctime_ns)
+        ):
+            return {"plan_fingerprint_status": "unsafe"}
+        if before.st_size > _PLAN_FINGERPRINT_MAX_BYTES:
+            return {"plan_fingerprint_status": "oversize"}
+        digest = hashlib.sha256()
+        total = 0
+        while total <= _PLAN_FINGERPRINT_MAX_BYTES:
+            chunk = os.read(plan_fd, min(64 * 1024, _PLAN_FINGERPRINT_MAX_BYTES + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            digest.update(chunk)
+        after = os.fstat(plan_fd)
+        if total > _PLAN_FINGERPRINT_MAX_BYTES:
+            return {"plan_fingerprint_status": "oversize"}
+        if (
+            before.st_size != total
+            or (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+            != (after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+        ):
+            return {"plan_fingerprint_status": "unstable"}
+        return {
+            "plan_fingerprint_status": "verified",
+            "plan_sha256": digest.hexdigest(),
+            "plan_size_bytes": total,
+        }
+    except OSError:
+        return {"plan_fingerprint_status": "unavailable"}
+    finally:
+        if plan_fd is not None:
+            os.close(plan_fd)
+        if bridge_fd is not None:
+            os.close(bridge_fd)
+
+
 def _candidate_active_evidence_details(candidate_root: Path) -> dict[str, Any] | None:
     """Explain physical evidence blockers without guessing task or lease state.
 
@@ -935,8 +1006,16 @@ def _candidate_active_evidence_details(candidate_root: Path) -> dict[str, Any] |
 
     if not plan_present and task_type in {"absent", "directory"} and not task_entries and not task_entries_truncated:
         return None
+    plan_fingerprint: dict[str, Any] = {}
+    if plan_present:
+        plan_fingerprint = (
+            _candidate_plan_fingerprint(bridge, bridge_stat=bridge_stat, plan_stat=plan_stat)
+            if plan_type == "regular"
+            else {"plan_fingerprint_status": "unsafe"}
+        )
     return {
         "evidence_root_type": "directory",
+        **plan_fingerprint,
         "plan_present": plan_present,
         "plan_type": plan_type,
         "tasks_type": task_type,
