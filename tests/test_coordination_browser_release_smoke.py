@@ -165,3 +165,15 @@ def test_http_transport_is_localhost_get_only_and_bounded(monkeypatch):
     assert headers["cache-control"] == "no-store"
     assert body == b"Py Coordination"
     assert requests == [("GET", "/coordination", {"Accept": "application/json", "X-API-Key": "fixture-key"})]
+
+def test_ci_web_image_cold_start_keeps_http_readiness_gate():
+    """Busy runners need more time, never a weaker HTTP contract."""
+    workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    mcp, web = workflow.split('echo "Waiting for web-ssh-gateway to answer /health..."', 1)
+    web = web.split('echo "Validating sshd executor image..."', 1)[0]
+    assert "for _ in $(seq 1 30); do" in mcp
+    assert "for _ in $(seq 1 90); do" in web
+    assert "docker inspect --format '{{.State.Running}}' \"$GW_NAME\"" in web
+    assert "urllib.request.urlopen('http://localhost:8085/health', timeout=4)" in web
+    assert 'if [ "$up" != "true" ]; then' in web
+    assert "fail=true" in web
