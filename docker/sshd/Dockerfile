@@ -56,9 +56,11 @@ RUN chown -R mcpuser:mcpuser /home/mcpuser/.ssh && \
     echo "HostKey /etc/ssh/hostkeys/ssh_host_rsa_key" >> /etc/ssh/sshd_config && \
     echo "HostKey /etc/ssh/hostkeys/ssh_host_ecdsa_key" >> /etc/ssh/sshd_config && \
     echo "HostKey /etc/ssh/hostkeys/ssh_host_ed25519_key" >> /etc/ssh/sshd_config && \
-    echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config && \
+    echo "PasswordAuthentication no" >> /etc/ssh/sshd_config && \
+    echo "KbdInteractiveAuthentication no" >> /etc/ssh/sshd_config && \
+    echo "PermitEmptyPasswords no" >> /etc/ssh/sshd_config && \
     echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config && \
-    echo "mcpuser:sshpass123" | chpasswd && \
+    echo "AuthenticationMethods publickey" >> /etc/ssh/sshd_config && \
     git config --system safe.directory '*'
 
 ARG BUILD_SHA=unknown
