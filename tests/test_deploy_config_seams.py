@@ -693,7 +693,7 @@ class TestDeployVerifiesRunningProvenance:
         assert 'PREVIOUS_MCP_BUILD_SHA=$(image_build_sha "$PREVIOUS_MCP_IMAGE")' in text
         assert 'if smoke "$PREVIOUS_DEPLOY_SHA"; then' in text
         assert '[ "$PREVIOUS_DEPLOY_SHA" = "latest" ]' in text
-        assert "'deploy_sha': '''$DEPLOY_TAG'''" in text
+        assert 'python3 "$ROOT/scripts/deploy_state.py" write "$STATE_DIR" "$1" "$2" "$3" "$DEPLOY_TAG"' in text
 
     def test_mcp_oauth_deploy_health_budget_is_extended_and_configurable(self):
         text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
@@ -2636,12 +2636,14 @@ class TestDeploySourceIsolation:
         text = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
         assert "/media/1TB/Python/web_ssh/web-ssh-gateway:/deploy/web-ssh-gateway" not in text
         assert "/docker/.env:/deploy/web-ssh-gateway.env:ro" in text
-        assert "/.state:/deploy/web-ssh-gateway-state" in text
+        assert "ssh-gateway-deploy-state:/deploy/web-ssh-gateway-state" in text
+        assert "/.state:/deploy/web-ssh-gateway-state" not in text
 
     def test_runtime_inputs_are_linked_into_ephemeral_checkout(self):
         text = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
         assert "ln -s /deploy/web-ssh-gateway.env docker/.env" in text
-        assert "ln -s /deploy/web-ssh-gateway-state .state" in text
+        assert "DEPLOY_STATE_DIR: /deploy/web-ssh-gateway-state" in text
+        assert "ln -s /deploy/web-ssh-gateway-state .state" not in text
         assert "bash scripts/deploy-from-registry.sh" in text
 
 class TestAgentExecutorIsPartOfTheDeployPipeline:
