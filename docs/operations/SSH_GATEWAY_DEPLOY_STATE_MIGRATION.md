@@ -14,6 +14,14 @@ gateway/MCP/OAuth, and uses the successful build/deploy/host-smoke #19659
 as independently verified baseline SHA
 b4c6c9c6d268f8db638f22d4c9256832dddcd875. It cannot trust a different
 running release or the historical world-writable receipt. The helper provisions
+ownership via a short-lived root helper container before the non-root deploy
+job runs the attestation bootstrap. The root helper mounts only
+ssh-gateway-deploy-state and changes ownership/mode only if it is completely
+empty, originally root-owned or owned by the effective deploy UID; it leaves
+existing receipts untouched. This split is necessary because a non-root job
+cannot chown the default root-owned Docker volume (as observed in failed
+post-merge CI #19716). An error from either helper is a release stop, not an
+invitation to reuse the world-writable checkout receipt. It then provisions
 the actual effective UID with mode 0700 and writes a verified 0600 atomic
 receipt. Missing/mismatched evidence and unknown volume contents fail before
 deployment. Existing receipts are preflight-checked and never modified.
