@@ -2,9 +2,9 @@
 
 **Reconciled:** 2026-10-25; baseline Gitea `master@9f7baa48760fba85f52c77fe4e055a5f7ac42a34`, merged PR evidence, exact-release CI #19743, Gateway runtime and preserved local intake.
 
-**Open: 36 (P1 10 / P2 17 / P3 9).** One checkbox = one independently closeable outcome; no completed checklist/history retained. A merged partial fix is not sufficient for closeout. OpenCode security remains a live prerequisite, not a green-CI assumption. Completed deploy LKG migration evidence is recorded in `docs/operations/SSH_GATEWAY_DEPLOY_STATE_MIGRATION.md`.
+**Open: 35 (P1 9 / P2 17 / P3 9).** One checkbox = one independently closeable outcome; no completed checklist/history retained. A merged partial fix is not sufficient for closeout. OpenCode security remains a live prerequisite, not a green-CI assumption. Completed deploy LKG migration evidence is recorded in `docs/operations/SSH_GATEWAY_DEPLOY_STATE_MIGRATION.md`.
 
-## P1 — Security, deploy and release blockers (10)
+## P1 — Security, deploy and release blockers (9)
 
 - [ ] **P1-01: Provide canonical and candidate write-plane recovery paths.** (legacy #2)
   Some projects report candidate fallback while task policy requires canonical non-candidate execution. Others have handoff writes failing while archive/task maintenance succeeds. Expose exact write capability for code, Git and handoff surfaces, and return `CANONICAL_WRITE_PLANE_UNAVAILABLE` with safe recovery steps when a clean writeable canonical workspace cannot be provisioned.
@@ -35,9 +35,6 @@
 - [ ] **P1-09: OpenCode scheduled upgrade failure prevents bounded agent jobs before implementation.** (legacy #1)
   <!-- gateway-todo-key: opencode-upgrade-failed --> **Severity:** P1
   **Still blocked:** historical exit 80 / upgrade-blocked job reached zero required checks and zero diff. PR #630 only documented incident, did not fix runtime; new bounded qualified executor canary and Node 22 prerequisite needed. Coordination issues #639 and #642.
-
-- [ ] **P1-12: Require TLS certificate verification by default in Python SDK.** (legacy #2)
-  `sdk/ssh_gateway.py` at current master still sets `session.verify = False` and suppresses TLS warnings. Default to verified HTTPS/hostname, allow explicit trusted CA overrides only and regression-test rejection of untrusted endpoints.
 
 ## P2 — Reliability and engineering throughput (17)
 
