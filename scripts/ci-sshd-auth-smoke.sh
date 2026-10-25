@@ -28,9 +28,9 @@ docker run --rm --network none --entrypoint /usr/local/bin/sshd-entrypoint \
     fi
   done
 
-  # /etc/shadow must not contain an active password hash for mcpuser.
-  grep -Eq "^mcpuser:[!*]" /etc/shadow || {
-    echo "mcpuser must have a locked system password" >&2
+  # Account must be enabled for SSH public keys but have no usable password.
+  grep -Eq "^mcpuser:NP:" /etc/shadow || {
+    echo "mcpuser must have a non-crypt shadow password sentinel" >&2
     exit 1
   }
 

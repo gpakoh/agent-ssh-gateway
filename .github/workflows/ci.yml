@@ -2142,8 +2142,8 @@ jobs:
                 exit 1
               }
             done
-            docker exec "$name" /bin/sh -c 'grep -Eq "^mcpuser:[!*]" /etc/shadow' || {
-              echo "::error::$name has an unlocked mcpuser system password"
+            docker exec "$name" /bin/sh -c 'grep -Eq "^mcpuser:NP:" /etc/shadow' || {
+              echo "::error::$name is missing the non-crypt mcpuser password sentinel"
               exit 1
             }
             echo "$name: effective key-only SSH authentication PASS"

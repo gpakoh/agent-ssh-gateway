@@ -19,6 +19,7 @@ def test_executor_image_has_no_password_auth_or_fixed_password() -> None:
     assert 'echo "AuthenticationMethods publickey"' in dockerfile
     assert 'echo "PubkeyAuthentication yes"' in dockerfile
     assert "chpasswd" not in dockerfile
+    assert "mcpuser:NP:" in dockerfile
     assert "PasswordAuthentication yes" not in dockerfile
 
 
