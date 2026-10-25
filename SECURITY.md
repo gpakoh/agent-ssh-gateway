@@ -77,6 +77,12 @@ Persistent records also store the logical `session_id`, owner token fingerprint,
 - Keep `SSH_KEY_UPLOAD_ENABLED=false` unless you explicitly need the feature.
 - Restrict SSH targets with `ALLOWED_TARGET_CIDRS` and `DENIED_TARGET_CIDRS`.
 - Prefer non-root containers with read-only filesystems and dropped capabilities.
+- SSH executor containers `sshd` and `agent-sshd` accept public-key authentication
+  only. Password and keyboard-interactive authentication are disabled and no
+  static account credential is provisioned. Preserve the approved
+  `authorized_keys` on changes; CI verifies key-based login and rejects
+  password-only SSH attempts against an isolated image, while post-deploy
+  host-smoke verifies effective settings on both live containers.
 - Use firewall rules or private networks to limit access to the gateway port.
 - Review audit logs for failed authentication and denied session ownership attempts.
 - Keep the gateway and its dependencies up to date.

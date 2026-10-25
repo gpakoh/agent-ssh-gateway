@@ -1,5 +1,9 @@
 # Agent SSH Gateway — TODO
 
+> **Public archive copy:** historical links to a private Git server have been
+> replaced with a non-routable example hostname. The original intake is retained
+> in the Git history; this copy is intentionally sanitized for public docs.
+
 Last reconciled: 2026-10-12.
 
 This file is the active backlog only. Completed audit notes, fixed CI blockers,
@@ -911,7 +915,7 @@ Open backlog count after cleanup: **34**
 
    **Acceptance:** 1) Regression fixtures with >500 normal issues/PRs plus coordination issues at early and late pages: coord_inbox/coord_board provide valid scoped entries, accurate count/truncated metadata, no silent loss and predictable bounded cost; separate tested read-only failure classifications from write ambiguity. 2) With >500 history entries, coord_create can create one issue in target agent-ssh-gateway and same-key replay yields the exact same issue; wrong payload conflicts, uncertain network POST is reconciled/no blind repeat, and concurrent creation cannot falsely claim exactly-once. 3) Cross-session end-to-end smoke using registered source/target proves coord_create->coord_board/inbox->coord_accept/reply/update->coord_open, with correct Gitea issue URLs and untrusted content not granting authority. 4) Required CI on exact PR head, merge and post-merge deploy/host-smoke on exact SHA, then actual live coord_board/coord_inbox/coord_create success in the previously failing big repository. 5) Do not edit foreign repos, purge old issues, raise scan caps blindly or overwrite live state. Owner can subsequently move/pin FAQ from temporary engineering-supervisor-service Issue #221 to canonical owner board.
 
-   **Related evidence:** PR #629 merged 6919ccbfda6b, PR #632 merged 89dd22be3f34; post-merge Actions #19113 SUCCESS (2026-10-23). Live health: MCP/Gateway build 89dd22be and ready=true. coord_board request_id=11e3907b-90ba-42c5-be3b-e0c7cb559c19; coord_inbox request_id=28166f76-704e-4846-838b-5407110c5895; blocked FAQ coord_create request_id=fd3b9319-a799-40e5-9810-02804a187652; second-project reproduction kojo-bot-service request_id=7d0928ed-a330-4830-9ea0-045fd0a243d8. Temporary shared FAQ: https://git.xloud.ru/gpakoh/engineering-supervisor-service/issues/221.
+   **Related evidence:** PR #629 merged 6919ccbfda6b, PR #632 merged 89dd22be3f34; post-merge Actions #19113 SUCCESS (2026-10-23). Live health: MCP/Gateway build 89dd22be and ready=true. coord_board request_id=11e3907b-90ba-42c5-be3b-e0c7cb559c19; coord_inbox request_id=28166f76-704e-4846-838b-5407110c5895; blocked FAQ coord_create request_id=fd3b9319-a799-40e5-9810-02804a187652; second-project reproduction kojo-bot-service request_id=7d0928ed-a330-4830-9ea0-045fd0a243d8. Temporary shared FAQ: https://gitea.example.invalid/gpakoh/engineering-supervisor-service/issues/221.
 
 2. ⬜ **Gateway pytest/ruff verifier assumes uv.lock for pip-only repositories.**
    <!-- gateway-todo-key: gateway-run-pytest-ruff-frozen-uv-lock-nonuv-project-20261023 -->
@@ -959,7 +963,7 @@ Open backlog count after cleanup: **34**
 
    **Acceptance:** Add race/timeout tests with CI evidence changing during guarded merge; prove zero mutation for preflight denial; prove post-mutation outcome is reconciled or clearly ambiguous; provide identifiers for concurrent merge vs same-call merge, expected SHA guards, and branch/candidate cleanup provenance. Do not conflate preflight read failures with successful merges.
 
-   **Related evidence:** Father UI PR #48 https://git.xloud.ru/gpakoh/father-ui/pulls/48; exact successful Actions #19264/#19265 on 3cf6d6b29e3cf658a43f620dcdd1cfc61f6ab3cf; merge commit 197cfd2da1c332b739c0252e9a8280b0ecfbf373; post-merge CI #19267. Merge API returned CI_EVIDENCE_INCOMPLETE; later candidate_cleanup tombstone ab7ac2687f173ca755330b6c35e1e8a9600787d58ae8e9209a84ae4ab67b7faa reported already_cleaned=true.
+   **Related evidence:** Father UI PR #48 https://gitea.example.invalid/gpakoh/father-ui/pulls/48; exact successful Actions #19264/#19265 on 3cf6d6b29e3cf658a43f620dcdd1cfc61f6ab3cf; merge commit 197cfd2da1c332b739c0252e9a8280b0ecfbf373; post-merge CI #19267. Merge API returned CI_EVIDENCE_INCOMPLETE; later candidate_cleanup tombstone ab7ac2687f173ca755330b6c35e1e8a9600787d58ae8e9209a84ae4ab67b7faa reported already_cleaned=true.
 
 5. ⬜ **Gateway run_pytest requires uv.lock for pip-only projects; expose supported test runner.**
    <!-- gateway-todo-key: gateway-run-pytest-uv-frozen-missing-lockfile-pip-project-20261023 -->

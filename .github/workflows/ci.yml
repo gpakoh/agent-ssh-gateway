@@ -1663,6 +1663,12 @@ jobs:
           else
             echo "sshd executor OK"
           fi
+          # Run an isolated, real authentication handshake against the exact
+          # built image before pushing or deploying it.
+          if ! bash scripts/ci-sshd-auth-smoke.sh "$CI_SMOKE_SSHD_IMAGE_ID"; then
+            echo "::error::sshd publickey/password isolation smoke failed"
+            fail=true
+          fi
 
           if [ "$fail" = "true" ]; then
             exit 1
@@ -2119,6 +2125,9 @@ jobs:
               exit 1
             fi
           done
+
+      - name: Verify effective key-only SSH auth on both live executors
+        run: bash scripts/ci-sshd-live-auth-check.sh "${{ github.sha }}"
 
       - name: Make host-smoke (full suite)
         run: /media/1TB/Anaconda/bin/uv run make host-smoke

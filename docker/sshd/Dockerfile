@@ -18,9 +18,13 @@ ARG UV_VERSION=0.12.5
 # while fetching an anonymous registry metadata token.
 # ripgrep: OpenCode's repo tools (grep/search) shell out to `rg`; the agent's
 # SSH session needs the binary on PATH to search the executor workspace.
+# OpenSSH rejects a locked shadow account even if it has a valid authorized key.
+# Use a non-crypt NP shadow sentinel: account stays enabled for public-key auth
+# without provisioning an actual password or usable password hash.
 RUN apk add --no-cache openssh-server openssh-client-default git curl bash python3 py3-pip ripgrep && \
     python3 -m pip install --no-cache-dir --break-system-packages "uv==${UV_VERSION}" && \
     adduser -D mcpuser && \
+    sed -i 's/^mcpuser:[^:]*:/mcpuser:NP:/' /etc/shadow && \
     mkdir -p /home/mcpuser/.ssh && \
     chmod 700 /home/mcpuser/.ssh && \
     case "$(uname -m)" in \
@@ -56,9 +60,11 @@ RUN chown -R mcpuser:mcpuser /home/mcpuser/.ssh && \
     echo "HostKey /etc/ssh/hostkeys/ssh_host_rsa_key" >> /etc/ssh/sshd_config && \
     echo "HostKey /etc/ssh/hostkeys/ssh_host_ecdsa_key" >> /etc/ssh/sshd_config && \
     echo "HostKey /etc/ssh/hostkeys/ssh_host_ed25519_key" >> /etc/ssh/sshd_config && \
-    echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config && \
+    echo "PasswordAuthentication no" >> /etc/ssh/sshd_config && \
+    echo "KbdInteractiveAuthentication no" >> /etc/ssh/sshd_config && \
+    echo "PermitEmptyPasswords no" >> /etc/ssh/sshd_config && \
     echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config && \
-    echo "mcpuser:sshpass123" | chpasswd && \
+    echo "AuthenticationMethods publickey" >> /etc/ssh/sshd_config && \
     git config --system safe.directory '*'
 
 ARG BUILD_SHA=unknown
