@@ -1818,6 +1818,10 @@ jobs:
             "$runner_ref" \
             -c 'set -eu; umask 077; tmp=/secret-sources/.registry_token.tmp; trap '\''rm -f "$tmp"'\'' EXIT; cat > "$tmp"; test -s "$tmp"; chown 1000:1000 "$tmp"; chmod 400 "$tmp"; mv -f "$tmp" /secret-sources/registry_token; trap - EXIT' \
             < "$source_file"
+      - name: Bootstrap independently attested initial LKG
+        shell: bash
+        run: |
+          bash scripts/ci-bootstrap-deploy-state.sh
       - name: Deploy, smoke-test, roll back on failure
         # DEPLOY_SHA pins deploy-from-registry.sh to the exact commit that
         # triggered this run (build-and-push already tagged images with

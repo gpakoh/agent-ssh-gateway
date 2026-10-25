@@ -1,8 +1,22 @@
 # SSH Gateway deploy-state trust migration
 
-**Status:** operator prerequisite for adopting the hardened deploy receipt.
-This procedure is not executed automatically by CI, Gateway or the candidate
-test suite. Do not delete/rewrite the existing host receipt during rollout.
+**Status:** one-time exact-release CI bootstrap for the independently verified
+2026-10-25 release, or manual operator qualification for other baselines.
+Do not delete/rewrite the original historical host receipt.
+
+## Exact-release qualified CI bootstrap
+
+Before deploying, CI calls scripts/ci-bootstrap-deploy-state.sh in the actual
+Docker deploy job. Only a completely empty dedicated named volume may be
+initialized. The helper verifies five running containers against three
+immutable image digests, requires healthy status and exact BUILD_SHA for
+gateway/MCP/OAuth, and uses the successful build/deploy/host-smoke #19659
+as independently verified baseline SHA
+b4c6c9c6d268f8db638f22d4c9256832dddcd875. It cannot trust a different
+running release or the historical world-writable receipt. The helper provisions
+the actual effective UID with mode 0700 and writes a verified 0600 atomic
+receipt. Missing/mismatched evidence and unknown volume contents fail before
+deployment. Existing receipts are preflight-checked and never modified.
 
 ## Why the old state cannot be accepted
 
@@ -18,6 +32,9 @@ A healthy running container is not itself proof of the exact Git release SHA.
 
 ## Before the first deploy with the new version
 
+If the exact-release automatic bootstrap does not qualify, use these
+operator-controlled steps instead. Never bypass the failed CI gate by
+unconditionally trusting the current running stack:
 1. Obtain an operator-approved trusted image set: exact SHA, three
    repository-qualified image digests from the registry, and running-container
    evidence. Verify the selected gateway/MCP images against the same release
@@ -63,6 +80,7 @@ system.
 
 This security PR may be reviewed and tested in isolation, but deployment must
 not proceed until the trusted volume is provisioned and the independent
-source-of-truth validation has completed. The current CI red `deploy` run
+source-of-truth validation has completed, either by the exact-release
+CI bootstrap or by the manual operator path. The old red `deploy` run
 #19021 and the published SHA tags must not be reinterpreted as a successful
 host-smoke or authenticated rollback receipt.
