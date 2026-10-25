@@ -2,9 +2,9 @@
 
 **Reconciled:** 2026-10-25; baseline Gitea `master@9f7baa48760fba85f52c77fe4e055a5f7ac42a34`, merged PR evidence, exact-release CI #19743, Gateway runtime and preserved local intake.
 
-**Open: 35 (P1 9 / P2 17 / P3 9).** One checkbox = one independently closeable outcome; no completed checklist/history retained. A merged partial fix is not sufficient for closeout. OpenCode security remains a live prerequisite, not a green-CI assumption. Completed deploy LKG migration evidence is recorded in `docs/operations/SSH_GATEWAY_DEPLOY_STATE_MIGRATION.md`.
+**Open: 34 (P1 8 / P2 17 / P3 9).** One checkbox = one independently closeable outcome; no completed checklist/history retained. A merged partial fix is not sufficient for closeout. OpenCode security remains a live prerequisite, not a green-CI assumption. Completed deploy LKG migration evidence is recorded in `docs/operations/SSH_GATEWAY_DEPLOY_STATE_MIGRATION.md`.
 
-## P1 — Security, deploy and release blockers (9)
+## P1 — Security, deploy and release blockers (8)
 
 - [ ] **P1-01: Provide canonical and candidate write-plane recovery paths.** (legacy #2)
   Some projects report candidate fallback while task policy requires canonical non-candidate execution. Others have handoff writes failing while archive/task maintenance succeeds. Expose exact write capability for code, Git and handoff surfaces, and return `CANONICAL_WRITE_PLANE_UNAVAILABLE` with safe recovery steps when a clean writeable canonical workspace cannot be provisioned.
@@ -22,9 +22,6 @@
 
 - [ ] **P1-05: Add one-shot Compose/Docker execution with secret-safe env inheritance.** (legacy #9)
   Operators need to run migrations, readiness commands and read-only database inventory against Compose-backed services without exposing DSNs or mutating long-running service definitions. Support exact image/service/network guards, inherited env names, `--rm`, timeouts, no port publication by default, and a read-only SQL/catalog mode for Compose PostgreSQL services.
-
-- [ ] **P1-06: Expose guarded repository settings and branch-protection mutations.** (legacy #10)
-  Gateway can read branch protection/default branch state but lacks a typed way to set default branch, required checks, approvals or protection against exact expected current state. Add CAS-style settings updates with audit evidence and post-write verification.
 
 - [ ] **P1-07: Isolate PR Docker jobs from the shared host daemon or document the trust boundary.** (legacy #11)
   PR-controlled Docker build/smoke steps can mutate the shared runner Docker daemon. Prefer disposable per-job daemon/VM isolation; otherwise enforce and document that every same-repo PR writer is intentionally trusted as host admin and prevent untrusted/fork PRs from privileged labels.
