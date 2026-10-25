@@ -97,6 +97,23 @@ platform, a hardened multi-tenant sandbox, or a browser-based SSH client.
 
 See [SECURITY.md](SECURITY.md) for the threat model and deployment checklist.
 
+### Python SDK transport security
+
+`sdk.ssh_gateway.SSHGatewayClient` validates the TLS certificate chain and
+hostname on HTTPS connections by default, without suppressing TLS warnings.
+Deploy a publicly trusted certificate, or provide a locally trusted CA bundle
+for a private gateway:
+
+```python
+from sdk.ssh_gateway import SSHGatewayClient
+
+client = SSHGatewayClient("https://gateway.example.com", ca_bundle="/path/to/trusted-ca.pem")
+```
+
+The SDK refuses plaintext HTTP for remote hosts. `http://localhost` and
+other loopback addresses remain supported for isolated local development.
+There is no supported `verify=False` or global insecure-TLS override.
+
 ## Quickstart
 
 Requirements:

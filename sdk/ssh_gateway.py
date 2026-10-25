@@ -29,11 +29,11 @@ Usage:
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
+from ipaddress import ip_address
+from pathlib import Path
+from urllib.parse import urlsplit
 
 import requests
-import urllib3
-
-urllib3.disable_warnings()
 
 
 @dataclass
@@ -47,12 +47,42 @@ class SSHSession:
 
 
 class SSHGatewayClient:
-    """Python SDK for SSH Gateway API."""
+    """Python SDK for SSH Gateway API with verified HTTPS by default."""
 
-    def __init__(self, base_url: str = "https://gateway.example.com"):
+    def __init__(
+        self,
+        base_url: str = "https://gateway.example.com",
+        *,
+        ca_bundle: str | Path | None = None,
+    ):
         self.base_url = base_url.rstrip("/")
+        endpoint = urlsplit(self.base_url)
+        if not endpoint.hostname or endpoint.username or endpoint.password:
+            raise ValueError("Gateway URL must specify a host without embedded credentials")
+        if endpoint.scheme == "http":
+            # Local integration/tests may use plaintext loopback; remote
+            # credentials and sessions require transport encryption.
+            host = endpoint.hostname
+            try:
+                loopback = ip_address(host).is_loopback
+            except ValueError:
+                loopback = host == "localhost"
+            if not loopback:
+                raise ValueError("Remote Gateway URL must use verified HTTPS")
+        elif endpoint.scheme != "https":
+            raise ValueError("Gateway URL must use HTTPS (or HTTP on loopback)")
+
         self.session = requests.Session()
-        self.session.verify = False
+        if ca_bundle is None:
+            # Requests validates the certificate chain and hostname.
+            self.session.verify = True
+        else:
+            # A specific CA file is the only supported trust override:
+            # never an insecure False switch or global warning suppression.
+            path = Path(ca_bundle).expanduser()
+            if not path.is_file():
+                raise ValueError("ca_bundle must be an existing CA bundle file")
+            self.session.verify = str(path.resolve())
         self._ssh_session: SSHSession | None = None
         self._context_id: str | None = None
 
