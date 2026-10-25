@@ -1599,6 +1599,7 @@ class TestHostSmokeCheckoutIsGiteaLocal:
             "Fail-closed pre-smoke — all three containers must run this commit",
             "OAuth black-box smoke (must be exactly 1 PASS, never SKIP)",
             "Fail-closed post-OAuth — containers still on this commit",
+            "Verify effective key-only SSH auth on both live executors",
             "Make host-smoke (full suite)",
             "Report",
         ]
