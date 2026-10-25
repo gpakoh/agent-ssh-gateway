@@ -36,12 +36,18 @@ docker run --rm --network none --entrypoint /usr/local/bin/sshd-entrypoint \
 
   # Disposable key only in this one-shot test container, never in the image.
   ssh-keygen -q -t ed25519 -N "" -f /tmp/smoke_key
+  # Confirm that the test key really contains a readable signing private key.
+  ssh-keygen -y -f /tmp/smoke_key >/tmp/derived.pub
+  # The .pub line can include an optional comment; compare the key itself.
+  cut -d " " -f 1,2 /tmp/derived.pub >/tmp/derived.normalized
+  cut -d " " -f 1,2 /tmp/smoke_key.pub >/tmp/expected.normalized
+  cmp /tmp/derived.normalized /tmp/expected.normalized
   cat /tmp/smoke_key.pub >> /home/mcpuser/.ssh/authorized_keys
   chown mcpuser:mcpuser /home/mcpuser/.ssh/authorized_keys
   chmod 600 /home/mcpuser/.ssh/authorized_keys
 
-  # Keep debug logs within this isolated ephemeral container; no production logs.
-  /usr/sbin/sshd -D -e -o LogLevel=DEBUG3 -p 2222 >/tmp/sshd.log 2>&1 &
+  # Keep diagnostics bounded and local to this disposable container.
+  /usr/sbin/sshd -D -e -o LogLevel=DEBUG1 -p 2222 >/tmp/sshd.log 2>&1 &
   sshd_pid=$!
   trap "kill $sshd_pid 2>/dev/null || true" EXIT HUP INT TERM
 
@@ -51,7 +57,8 @@ docker run --rm --network none --entrypoint /usr/local/bin/sshd-entrypoint \
   while [ "$n" -lt 8 ]; do
     if ssh -F /dev/null -vv -n \
       -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-      -o IdentitiesOnly=yes -o ConnectTimeout=2 -o BatchMode=yes \
+      -o IdentityAgent=none -o IdentitiesOnly=yes \
+      -o ConnectTimeout=2 -o BatchMode=yes \
       -o PreferredAuthentications=publickey \
       -i /tmp/smoke_key -p 2222 mcpuser@127.0.0.1 true \
       >/tmp/pubkey.log 2>&1; then
@@ -63,8 +70,10 @@ docker run --rm --network none --entrypoint /usr/local/bin/sshd-entrypoint \
   done
   if [ "$connected" != true ]; then
     echo "isolated public-key authentication failed" >&2
-    cat /tmp/pubkey.log >&2
-    cat /tmp/sshd.log >&2
+    echo "--- client diagnostic ---" >&2
+    tail -n 85 /tmp/pubkey.log >&2
+    echo "--- server diagnostic ---" >&2
+    tail -n 85 /tmp/sshd.log >&2
     exit 1
   fi
 
