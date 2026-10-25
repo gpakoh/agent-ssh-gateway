@@ -44,8 +44,14 @@ over credentials, targets, scopes, and execution policy.
 | Jobs and observability | Background jobs, status and result retrieval, output streaming, health checks, metrics, audit events, and event hooks |
 | Project workflows | Scoped file read/search/write, Git inspection, diffs, tests, linting, type checks, preview, hash verification, and patch application |
 | MCP integrations | Gateway tools plus GitHub, Gitea, Docker, PostgreSQL, and Context7 adapters |
-| Agent coordination | Structured task handoff, isolated worktrees, agent status/report artifacts, and controlled runner workflows |
+| Agent coordination | Structured task handoff, isolated worktrees, agent status/report artifacts, controlled runner workflows, and a Gitea-backed cross-project inbox |
 | Access control | Master and short-lived agent tokens, optional SSO login, scopes, access profiles, session ownership, target allowlists, command policies, and confirmation flows |
+
+Py Coordination v1 tools (`coord_inbox`, `coord_board`, `coord_open`, `coord_create`,
+`coord_reply`, `coord_accept`, `coord_update`) and their safety/rollout
+contract are documented in [docs/py-coordination-v1.md](docs/py-coordination-v1.md). Для администратора
+добавлена защищённая read-only доска `/coordination` (после настройки
+`COORDINATION_GITEA_READ_TOKEN`).
 
 Tool visibility depends on the selected MCP mode and access profile. The project
 ships minimal, standard, full, and ChatGPT-oriented modes, including a safe mode

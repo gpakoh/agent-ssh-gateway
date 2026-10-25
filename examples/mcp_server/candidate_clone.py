@@ -867,15 +867,169 @@ def _write_cleanup_tombstone(path: Path, data: dict[str, Any]) -> None:
                     pass
 
 
-def _candidate_has_active_evidence(candidate_root: Path) -> bool:
-    bridge = candidate_root / ".ai-bridge"
-    if (bridge / "current-plan.md").exists():
-        return True
-    tasks = bridge / "tasks"
+_PLAN_FINGERPRINT_MAX_BYTES = 1024 * 1024
+
+
+def _candidate_plan_fingerprint(
+    bridge: Path, *, bridge_stat: os.stat_result, plan_stat: os.stat_result
+) -> dict[str, Any]:
+    """Digest a bounded regular plan through nofollow dirfds without exposing text.
+
+    This is diagnostic evidence ONLY: a matching SHA never grants cleanup or
+    claims that a task/lease has terminated.
+    """
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        return {"plan_fingerprint_status": "unavailable"}
+    dir_flags = os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
+    dir_flags |= getattr(os, "O_DIRECTORY", 0)
+    file_flags = os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
+    file_flags |= getattr(os, "O_NONBLOCK", 0)
+    bridge_fd: int | None = None
+    plan_fd: int | None = None
     try:
-        return tasks.is_dir() and any(tasks.iterdir())
+        bridge_fd = os.open(bridge, dir_flags)
+        verified_bridge = os.fstat(bridge_fd)
+        if (
+            not stat.S_ISDIR(verified_bridge.st_mode)
+            or (verified_bridge.st_dev, verified_bridge.st_ino)
+            != (bridge_stat.st_dev, bridge_stat.st_ino)
+        ):
+            return {"plan_fingerprint_status": "unstable"}
+        plan_fd = os.open("current-plan.md", file_flags, dir_fd=bridge_fd)
+        before = os.fstat(plan_fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+            != (plan_stat.st_dev, plan_stat.st_ino, plan_stat.st_size, plan_stat.st_mtime_ns, plan_stat.st_ctime_ns)
+        ):
+            return {"plan_fingerprint_status": "unsafe"}
+        if before.st_size > _PLAN_FINGERPRINT_MAX_BYTES:
+            return {"plan_fingerprint_status": "oversize"}
+        digest = hashlib.sha256()
+        total = 0
+        while total <= _PLAN_FINGERPRINT_MAX_BYTES:
+            chunk = os.read(plan_fd, min(64 * 1024, _PLAN_FINGERPRINT_MAX_BYTES + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            digest.update(chunk)
+        after = os.fstat(plan_fd)
+        if total > _PLAN_FINGERPRINT_MAX_BYTES:
+            return {"plan_fingerprint_status": "oversize"}
+        if (
+            before.st_size != total
+            or (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+            != (after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+        ):
+            return {"plan_fingerprint_status": "unstable"}
+        return {
+            "plan_fingerprint_status": "verified",
+            "plan_sha256": digest.hexdigest(),
+            "plan_size_bytes": total,
+        }
+    except OSError:
+        return {"plan_fingerprint_status": "unavailable"}
+    finally:
+        if plan_fd is not None:
+            os.close(plan_fd)
+        if bridge_fd is not None:
+            os.close(bridge_fd)
+
+
+def _candidate_active_evidence_details(candidate_root: Path) -> dict[str, Any] | None:
+    """Explain physical evidence blockers without guessing task or lease state.
+
+    Files are never deleted or interpreted as terminal proof. Symlinks and
+    unexpected types are blockers; only bounded safe entry IDs are returned.
+    """
+    bridge = candidate_root / ".ai-bridge"
+    try:
+        bridge_stat = bridge.lstat()
+    except FileNotFoundError:
+        return None
     except OSError as exc:
-        raise _fail("TOOL_EXECUTION_FAILED", "candidate task evidence could not be inspected") from exc
+        raise _fail("TOOL_EXECUTION_FAILED", "candidate evidence root cannot be inspected") from exc
+    if not stat.S_ISDIR(bridge_stat.st_mode):
+        return {"evidence_root_type": "unsafe", "plan_present": False,
+                "task_entries": [], "inspection": "physical_only"}
+
+    plan = bridge / "current-plan.md"
+    try:
+        plan_stat = plan.lstat()
+        plan_present = True
+        plan_type = "regular" if stat.S_ISREG(plan_stat.st_mode) else "unsafe"
+    except FileNotFoundError:
+        plan_present = False
+        plan_type = "absent"
+    except OSError as exc:
+        raise _fail("TOOL_EXECUTION_FAILED", "candidate plan evidence cannot be inspected") from exc
+
+    tasks = bridge / "tasks"
+    task_entries: list[dict[str, str]] = []
+    task_entries_truncated = False
+    try:
+        task_stat = tasks.lstat()
+    except FileNotFoundError:
+        task_type = "absent"
+    except OSError as exc:
+        raise _fail("TOOL_EXECUTION_FAILED", "candidate tasks root cannot be inspected") from exc
+    else:
+        if not stat.S_ISDIR(task_stat.st_mode):
+            task_type = "unsafe"
+        else:
+            task_type = "directory"
+            try:
+                with os.scandir(tasks) as entries:
+                    for index, entry in enumerate(entries):
+                        if index >= 30:
+                            task_entries_truncated = True
+                            break
+                        # Never return path contents or unusual names to callers.
+                        name = entry.name
+                        safe_name = (
+                            name if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", name)
+                            else "opaque-" + hashlib.sha256(name.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+                        )
+                        if entry.is_symlink():
+                            entry_type = "symlink"
+                        elif entry.is_dir(follow_symlinks=False):
+                            entry_type = "directory"
+                        elif entry.is_file(follow_symlinks=False):
+                            entry_type = "file"
+                        else:
+                            entry_type = "other"
+                        task_entries.append({"id": safe_name, "kind": entry_type})
+            except OSError as exc:
+                raise _fail("TOOL_EXECUTION_FAILED", "candidate task evidence could not be inspected") from exc
+
+    if not plan_present and task_type in {"absent", "directory"} and not task_entries and not task_entries_truncated:
+        return None
+    plan_fingerprint: dict[str, Any] = {}
+    if plan_present:
+        plan_fingerprint = (
+            _candidate_plan_fingerprint(bridge, bridge_stat=bridge_stat, plan_stat=plan_stat)
+            if plan_type == "regular"
+            else {"plan_fingerprint_status": "unsafe"}
+        )
+    return {
+        "evidence_root_type": "directory",
+        **plan_fingerprint,
+        "plan_present": plan_present,
+        "plan_type": plan_type,
+        "tasks_type": task_type,
+        "task_entries": task_entries,
+        "task_entries_truncated": task_entries_truncated,
+        "inspection": "physical_only",
+        "task_status": "unverified",
+        "delivery_status": "unverified",
+        "lease_status": "unverified",
+    }
+
+
+def _candidate_has_active_evidence(candidate_root: Path) -> bool:
+    return _candidate_active_evidence_details(candidate_root) is not None
 
 
 def _validate_candidate_root(candidate_root: Path, candidates_root: Path) -> tuple[int, int]:
@@ -945,10 +1099,12 @@ def _verify_candidate_clean(
                 "dirty": dirty,
             },
         )
-    if _candidate_has_active_evidence(candidate_root):
+    evidence = _candidate_active_evidence_details(candidate_root)
+    if evidence is not None:
         raise _fail(
             "WORKSPACE_CONTENDED",
             "candidate clone still has active task or delivery evidence",
+            details={"project_id": project_id, "evidence": evidence},
         )
 
 

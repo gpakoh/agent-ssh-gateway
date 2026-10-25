@@ -1,866 +1,142 @@
 # Agent SSH Gateway — TODO
 
-Last reconciled: 2026-10-21.
-
-This file is the active backlog only. Completed audit notes, fixed CI blockers,
-merged PR evidence, and superseded diagnostics should live in PR history,
-changelogs, or dedicated audit archives — not in TODO.
-
-On 2026-10-12 the active backlog was reconciled against current merged/runtime
-evidence. Eight entries with completed acceptance were removed: #4 (fleet stale
-lease reconciliation), #12 (typed CI merge-policy evidence), #21 (immutable
-Gitea file ref binding), #28 (CI teardown terminalization), #31 (guarded job-level
-Actions rerun), #39 (post-merge heavy-CI fast path), #42 (machine-readable
-Docker inventory scope), and #51 (verified-push ambiguous-outcome reconciliation).
-Partial progress on still-open items remains recorded under those items rather
-than being treated as closure.
-
-On 2026-10-21, #23 (parallel verifier container isolation), #33 (agent
-non-submission envelope), #35 (catalog filters/pagination) and #50 (bounded
-workspace parent creation) met applicable code/tests and, where required,
-live-MCP acceptance. Evidence is maintained in their Git/CI history and PR.
-
-Open backlog count after cleanup: **30**
-
-- **P1 / critical:** 8
-- **P2 / important:** 13
-- **P3 / capability / wishlist:** 9
-
-## P1 / Critical blockers
-
-
-2. ⬜ **Provide canonical and candidate write-plane recovery paths.**
-   Some projects report candidate fallback while task policy requires canonical
-   non-candidate execution. Others have handoff writes failing while archive/task
-   maintenance succeeds. Expose exact write capability for code, Git and handoff
-   surfaces, and return `CANONICAL_WRITE_PLANE_UNAVAILABLE` with safe recovery
-   steps when a clean writeable canonical workspace cannot be provisioned.
-
-   **Candidate lineage recovery — observed during the RAG audit, 2026-10-06:**
-   `prepare_candidate_clone` for `quart-core`, branch
-   `fix/rag-citations-book-delivery-20261007`, returned
-   `CANDIDATE_LINEAGE_SCAN_FAILED` / "candidate lineage metadata is unavailable"
-   because of the older, different-branch candidate
-   `candidate-quart-core-feat-supervisor-read-knowledge-capabilities-20261001`.
-   Request: `b974b196-6532-49af-8b7e-772eb8bc762c`. The diagnostic directs
-   the caller to a guarded cleanup workflow, but no such candidate-record
-   recovery operation was exposed in this caller's callable tool catalog.
-   This blocked an independent branch of the same project; it does not prove
-   that candidate creation is broken for every project.
-
-   Provide a typed inspect/reconcile/remove-record-and-recreate workflow:
-   - Scope lineage lookup to the requested project/branch and isolate unrelated
-     corrupt entries. Quarantine/report an invalid record without treating it as
-     a valid candidate or disabling duplicate/path/ownership checks.
-   - Inspect the exact registry/lineage identity and revision, workspace path,
-     Git state, active jobs/leases and retained artifacts. Missing or corrupt
-     metadata must remain unknown until recovery establishes those facts.
-   - Allow guarded tombstoning/removal of a proven stale or irrecoverable
-     registration/lineage record, with an audit snapshot and CAS/fencing against
-     concurrent use. Preserve the directory, dirty files, commits and agent
-     artifacts; metadata cleanup must not implicitly delete workspace contents.
-     Active or ambiguous ownership requires an explicit fenced recovery decision.
-   - Recreate a fresh registered candidate from a verified exact remote base
-     after reconciliation, using a new directory when the old path is retained.
-     Record predecessor/replacement identities; recover trustworthy metadata
-     where possible instead of blindly fabricating or rewriting it.
-   - Make retries and crash recovery idempotent: no duplicate candidates,
-     orphan registrations, lost work or partially removed registry/lineage pairs.
-     Return the replacement id, exact base/head, recovery receipt and next steps.
-
-   Acceptance: cover missing/truncated/malformed lineage, unrelated stale rows,
-   dirty retained work, live/expired/unknown leases, concurrent prepare/recovery,
-   crash between cleanup and registration, and retry after an ambiguous timeout.
-   An unrelated damaged record must not block a new branch; guarded cleanup and
-   recreation of the damaged candidate must succeed without deleting its code.
-   Exercise the reproducer above through the client-exposed recovery tools.
-
-   **Operator recovery report, 2026-10-07:** no task/lease registry was found;
-   removing the old directory broke
-   `candidate-quart-core-fix-ci-greenlet-test-job-20261001`, whose Git alternates
-   and origin depended on it. The operator restored the dependent clone's
-   objects/remote and reported successful `git fsck` with dirty work preserved.
-   A subsequent exact-base prepare at `main@2bbb8dd` still returned
-   `CANDIDATE_LINEAGE_SCAN_FAILED`, now naming that repaired dependent clone
-   (request `9726cf27-73c4-4f6d-b92a-784d327bc0ac`). Git integrity alone
-   therefore does not establish valid registration/lineage metadata.
-   Cleanup must inspect inbound Git alternates, origin and worktree dependencies
-   before directory removal. Preserve the source or first make dependants
-   self-contained against a trusted source, retaining local-only objects/refs;
-   verify them before deletion. Missing registry/leases is unknown, not proof of
-   inactivity. Add a regression with chained shared clones and unpushed commits:
-   recovery must preserve every dependent HEAD, ref and dirty file and leave
-   `git fsck` clean. Report metadata recovery and directory GC separately.
-
-   **Exact-remote-base drift evidence, 2026-10-09:** authoritative Gitea
-   `gpakoh/infra-quart/main` advanced to `c396301a3a82912d4da87d8902fa2abe3ee028c9`
-   after merged PR #334, while `prepare_candidate_clone(base_ref=main)` still
-   materialized stale `dcec7ad7e5a069024e62fcad42d099a2565f9998`; requesting the exact
-   current SHA returned `SOURCE_REF_NOT_AVAILABLE` repeatedly. The caller failed
-   closed, did not open a stale-base PR, and exact-SHA deleted its temporary
-   remote candidate ref after read-after-write proved a prior ambiguous push had
-   actually succeeded. Acceptance for this item must also cover remote-main-ahead-
-   of-local-source: symbolic `main` and exact current SHA must resolve to the
-   authoritative remote commit or return an explicit refresh/recovery action,
-   never silently create a candidate from stale local state.
-
-   **2026-10-09 deployed stale-source acceptance:** PR #498 merged as
-   `eaeb7d48ad81...`; post-merge run #15202 completed build-and-push, deploy and
-   host-smoke successfully, and live `health` reported Gateway/MCP build SHA
-   `eaeb7d48ad81...`. At acceptance time authoritative `gpakoh/infra-quart/main`
-   was `e8bbef68af3f...`, while the registered source checkout remained at
-   `HEAD=a38021c7890c...` with stale local `gitea/main=981df946b884...`.
-   Calling the deployed `prepare_candidate_clone(project=infra-quart,
-   base_ref=main)` returned typed retryable `SOURCE_REMOTE_STATE_UNKNOWN` with
-   `recovery_action=refresh_or_restore_trusted_remote_access`; it did not create
-   a candidate directory and did not materialize either stale local SHA. This
-   closes the silent-stale-fallback subcase. Item #2 remains open for the broader
-   canonical write-plane and lineage recovery contract described above.
-
-   **2026-10-10 deployed inbound-dependency fence acceptance:** PR #501 merged as
-   `71b1204b82d5...`; post-merge run #15307 completed build-and-push, deploy and
-   host-smoke successfully, and live `health` reported both Gateway and MCP on
-   exact SHA `71b1204b82d5...`. A disposable `/tmp` fixture executed inside that
-   deployed `mcp-server` image created a candidate plus a sibling `git clone
-   --shared`, then invoked the real `candidate_cleanup` core. Cleanup failed
-   closed with non-retryable `WORKSPACE_CONTENDED`, identified the dependant as
-   `candidate-live-shared-dependent` with dependency types `alternates` and
-   `local_origin`, and returned
-   `recovery_action=make_dependants_self_contained_then_retry_cleanup`. The target
-   candidate directory and registry entry remained intact, the dependant HEAD
-   remained readable, and `git fsck --full` returned 0. This closes the unsafe
-   inbound-dependency deletion subcase through the deployed core. The live MCP
-   manifest still exposes `prepare_candidate_clone` but no `candidate_cleanup`
-   operator tool, so item #2 remains open for caller-visible inspect/reconcile/
-   cleanup and dependant-self-containment recovery rather than for this fence.
-
-   **2026-10-10 bundle-backed delivery evidence:** standard
-   `prepare_candidate_clone` candidates in `gpakoh/nod-gateway` use an immutable
-   local bundle as their trusted source. Multiple clean, scoped candidates then
-   failed `gitea_push_verified_commit` before remote mutation during the
-   `clone_bundle` staging phase (`GIT_PUSH_FAILED` / later
-   `CANDIDATE_SOURCE_UNAVAILABLE`); fresh Gitea reads proved the destination refs
-   absent for the definite pre-mutation cases. Fold this into #2 rather than a
-   new P2 item: the candidate Git write plane must reliably materialize exact
-   bundle-backed heads, or return a bounded typed recovery action without
-   requiring candidate reconstruction. The response-lost/timeout ambiguity of
-   the same incident is tracked under existing #51.
-
-   **NOD task/archive identity collision (2026-10-18, fold into #2):**
-   Clean candidate `gpakoh/NOD_gateway@746afde8` matches merged PR #106
-   and post-merge CI #17457, but cleanup failed. Task
-   `web-ui-security-current-audit-20261017` has archived original attempt
-   artifacts and a later live read-only task of the same ID. Agent status:
-   `attempt=null, terminal=false, artifact_incomplete=true`; cancel says
-   missing, archive says already exists, historical job is ambiguous.
-   **Next:** inspect both identities; preserve both artifact sets; implement a
-   fenced CAS/idempotent reconciliation only after independent terminal/owner
-   proof. Regress with colliding different artifacts, stale archived attempts,
-   interrupted retries and concurrent tasks. Unknown ownership fails closed.
-
-   **Merged-PR cleanup after branch deletion (2026-10-18):**
-   `js-chat-engine` PR #54 (`c61c5b9`) and `infra-quart` PR #407
-   (`bf98eff`, head `956e133`) reproduced
-   `CHECK_FAILED/gitea_merged_pull_request`: Gitea rewrites `head.ref`
-   after exact-SHA feature-branch deletion. Explicit
-   `archive/candidate-*` ref recovered js-chat-engine cleanup. Infra-quart
-   then encountered `WORKSPACE_CONTENDED` from an incompatible pre-existing
-   cleanup tombstone when switching preservation modes.
-   **Next:** verify exact merged head and ancestry independent of mutable ref;
-   expose read-only tombstone identity and guarded resume/recovery.
-   Negative regressions: foreign/unmerged PR, wrong SHA, dirty candidate,
-   unknown ancestry and conflicting tombstone. The delivered
-   `abandon_unmodified` mode is not a substitute for merged delivery proof.
-
-   **Exact-base and Git write-plane edge cases (2026-10-17–18):**
-   `clicker_orchestrator` got `SOURCE_REPO_STALE` on exact
-   `main@96f932dc` with dirty/read-only canonical; `infra-quart` snapshot
-   candidate could not fetch newer `main@bf98eff` because its origin
-   was a local bundle (`GIT_REMOTE_NOT_ALLOWED`). Conversely, preparing
-   the Gateway's exact `master@e00c1507` with dirty canonical succeeded.
-   **Next:** test exact trusted remote materialization and forward-port for
-   both restrictive cases; require immutable SHA/identity and no canonical
-   mutation. Separately, js-chat-engine Git preflight claimed metadata fully
-   writable yet `.git/FETCH_HEAD` failed `Permission denied`: extend
-   `git_write_capabilities` to inspect FETCH_HEAD on the actual SSH plane.
-   Preserve dirty work and fail closed on ambiguous refs.
-
-   **Clicker Git metadata recovery blocked by control-plane EACCES
-   (2026-10-18, same write-plane contract):** The live
-   `supervisor_repair_project_git_metadata` on Gateway
-   `master@6b67a8d2b1b1f3e88ae4c519cdee66b1b9667c6b` refused an
-   exact-lease swap of `clicker_orchestrator` from root-owned canonical
-   `main@c96d43c76a5b33ad1dfd940f4f707c166ed4b164` to
-   `main@481a1fe0e14437da9a2ffe9ec9d840c663425dc6`.
-   The replacement `.git.repair-74f608a1` was proven to contain the
-   exact `HEAD` and `origin/main`, with zero tracked worktree changes.
-   Post-merge Clicker Actions #17522 passed on that SHA. The repair
-   returned `TOOL_EXECUTION_FAILED` with
-   `failed_stage=quarantine_sibling`, `os_errno=EACCES`,
-   `mutation_occurred=false`; the original `.git` and replacement
-   were independently verified intact afterward. The SSH execution
-   plane reports the project directory writable (mode 0777) while
-   canonical `.git` is root-owned and read-only to that user; the
-   supervisor's control-plane rename authority is demonstrably
-   different. PR #585 provides an `EXDEV` quarantine fallback, but
-   `EACCES` is not `EXDEV` and must not be treated as one.
-
-   **Required recovery:** surface actual control-plane/SSH-plane
-   permission and mount diagnostics before mutation, with no arbitrary
-   path or credentials exposed; provide an owner-approved bounded
-   same-execution-plane promotion using exact old/new SHA leases,
-   parent/path allowlists, a durable quarantine, idempotent replay,
-   mandatory audit and rollback. Do not work around `EACCES` with
-   generic `chmod/chown/sudo`, raw shell `mv`, or a broader
-   unrestricted execution surface. **Acceptance:** Git metadata can
-   be switched to exact `481a1fe0...` in canonical Clicker, tracked
-   status remains clean, no historical objects/refs are lost, the
-   prior `.git` is recoverable, `origin/main` matches remote, and
-   residual `.git.remote-main` is classified before separate cleanup.
-
-   **Canonical fast-forward partial-worktree failure (2026-10-18):**
-   The `agent-ssh-gateway` canonical `master@2ba0ee654bcab1` was 19
-   entries dirty. The unique evidence was delivered in PR #583, and the original
-   bytes were independently preserved as Git stash `939d2cae2f3e` (19 paths)
-   plus an access-restricted archive with SHA-256
-   `a73521a16dbf94e19c422abe3e69ecc438d7473550fae109339cd4bd5e884682`.
-   After guarded `git_fetch_ref(origin/master)` confirmed exact authoritative
-   `master@5ba215ed99427bbbd686927cc7fa7d3767f0d470`, the clean canonical
-   passed `git_write_capabilities` (index/objects/refs/head writeable).
-   `git_refresh_branch_to_head` failed exit 128 because Git could not create
-   four tracked files inside root-owned `scripts/`:
-   `js_chat_engine_deploy_contract_runner.py`,
-   `site_audit_crm_provisioner.py`,
-   `telegram_storage_deploy_contract_runner.py`,
-   `xloud_deploy_contract_runner.py` (`Permission denied`).
-   The failed operation left 58 dirty entries, including 17 newly created
-   untracked files. All tracked content was safely restored from exact old
-   HEAD and only those 17 operation-created files were removed by explicit
-   path; verified canonical `git status --porcelain` empty at old SHA,
-   stash and archive unchanged, remote `master` unaffected.
-
-   **Next:** extend same-execution-plane `git_write_capabilities` /
-   `git_refresh_branch_to_head` with bounded preflight for writing *new*
-   tracked paths and parent-directory permissions (including root-owned
-   directories); fail before checkout/index mutation with exact blocked paths,
-   preserve the clean old HEAD on error, and return audited recovery guidance.
-   Provide a narrowly scoped, owner-approved permissions repair or immutable
-   clean-checkout promotion, not generic recursive chmod/chown or raw reset.
-   Acceptance: regression reproducing root-owned `scripts/` with four absent
-   new files, verifies no dirty side effects and no HEAD/index drift on failure;
-   successful exact-SHA fast-forward after approved remediation, clean worktree,
-   and continued accessibility of all preserved 19-file evidence.
-
-6. ⬜ **Keep ChatGPT-visible tool schemas in parity with server manifests.**
-   Tools can appear available in `tools_manifest` while missing or having a
-   different callable schema in the ChatGPT resource catalog. PR-A measurement
-   now accepts a bounded client-reported tool list, binds retained attestations to
-   the server-created MCP lifecycle + opaque auth identity + live toolset hash,
-   emits complete server/client diff diagnostics, and keeps incomplete omissions
-   explicitly unknown. Client reports remain unverified and do not gate existing
-   Git mutations. This item stays open until a real external connector submits a
-   complete report and identifies the filtering/caching/allowlist mechanism; do
-   not add a curated catalog workaround before that evidence exists.
-
-   **2026-10-09 external-session evidence:** after PR #489 was merged and
-   post-merge run #14985 completed build-and-push, deploy and host-smoke on
-   `master@0e357599a6aa...`, the authoritative live manifest reported
-   `gitea_rerun_action_job` enabled/available and included it in the server
-   toolset hash. The same already-attached ChatGPT `api_tool` catalog still
-   omitted the tool and still exposed older schemas that omit newer optional
-   arguments such as `closed_unmerged_cleanup_reason` and the client-observation
-   parameters on `tools_manifest`. Supplying those hidden manifest parameters
-   through the transport still succeeded and produced a lifecycle/auth/hash-bound
-   incomplete attestation; because the report was intentionally incomplete, the
-   missing job-rerun guard correctly remained `unknown`, not falsely absent.
-
-   This narrows the remaining investigation to external catalog refresh/filtering
-   rather than FastMCP registration. The same dirty-backlog evidence also covered
-   server-visible/client-hidden `closed_unmerged_cleanup_reason`, `git_fetch_ref`
-   and `docker_deploy_contract`; keep them under this single parity finding rather
-   than opening one ticket per missing schema. Obtain a **complete** external
-   catalog report after refresh/reconnect and identify which client cache/allowlist
-   layer retains the old schema. Keep mutation behavior independent of this
-   diagnostic signal.
-
-   **2026-10-09 divergent closed-unmerged cleanup reproducer:** `infra-quart`
-   still has superseded closed-unmerged branches whose exact heads are proven but
-   whose trees diverge from current default. The live server manifest documents
-   optional `closed_unmerged_cleanup_reason` on `gitea_delete_branch`, while this
-   ChatGPT-facing callable schema still exposes only owner/repo/branch/
-   `expected_head_sha`. An exact-SHA delete therefore fails closed with
-   `POLICY_DENIED` and `mutation_occurred=false`, and the caller cannot supply the
-   audited explicit cleanup reason without a raw-API workaround. Keep this as
-   concrete caller-impact evidence under #6, not as a separate cleanup feature:
-   once external schema parity is restored, re-run one superseded infra-quart
-   branch cleanup and verify exact-SHA deletion plus absent ref while all existing
-   open-PR/protected/default/audit guards remain fail-closed.
-
-   **2026-10-09 terminal reconnect evidence:** PR #491 added fresh-session bearer
-   and public OAuth schema acceptance; its first post-merge deploy #15036 exposed
-   an EOF-SSE parser defect and correctly rolled back. PR #492 fixed that parser,
-   and post-merge #15062 completed successfully. The later workflow change #494
-   then redeployed exact `master@9c4bc3ff677c...`; run #15114 completed
-   build-and-push, deploy and host-smoke successfully, with host-smoke proving
-   `web-ssh-gateway`, `mcp-server` and `mcp-oauth` all running that exact SHA and
-   a fresh public OAuth black-box flow passing. After that full restart/reconnect,
-   authoritative `tools_manifest` still exposes `gitea_rerun_action_job`, while
-   this attached ChatGPT `api_tool.list_resources(..., query="gitea_rerun_action_job")`
-   still does not expose the callable tool. This isolates the remaining defect to
-   the external ChatGPT resource-catalog refresh/filter/cache layer rather than
-   Gateway deployment, FastMCP registration or public MCP/OAuth reconnect behavior.
-
-   **2026-10-10 MCP notification boundary evidence:** PR #504 merged as
-   `4955470c1f8a...`; post-merge run #15403 completed build-and-push, deploy and
-   host-smoke successfully, and live Gateway/MCP health reported exact build SHA
-   `4955470c1f8a...` with 139 registered tools. The deployed `tools_manifest`
-   emitted the standard MCP `notifications/tools/list_changed` signal successfully
-   for toolset hash `sha256:88b62a9a5c4c...`, but the attached ChatGPT
-   `api_tool` catalog still omitted both newly exposed `candidate_cleanup` and
-   the older `gitea_rerun_action_job`. A second `tools_manifest` call again
-   reported `catalog_refresh_signal.status=sent` rather than `already_sent`,
-   proving these tool calls are bound to separate short-lived MCP lifecycles from
-   the external schema-catalog snapshot. Server-side list-change notification is
-   therefore implemented and deployed, but it cannot invalidate this caller's
-   catalog. Keep #6 open at the external client/platform boundary; do not add a
-   Gateway call-by-name bypass. Closure requires the external catalog itself to
-   refresh/rebind (or expose an explicit stale/refresh control) and then prove the
-   real callable schemas for `candidate_cleanup` and `gitea_rerun_action_job`.
-
-   **2026-10-10 closed-unmerged cleanup evidence:** agent-memory-service PR #13
-   and opencode-adapter PRs #82/#84 were independently proven superseded by
-   current-base merged replacements, including byte-identical useful blobs and
-   green post-merge evidence, yet their stale exact-SHA branches could not be
-   driven to terminal cleanup from this caller. The server already advertises
-   the guarded cleanup/create-at-SHA capabilities needed to record supersession,
-   while the attached external catalog hides the relevant callable schema. Fold
-   these reproductions into #6/#45 rather than creating a separate cleanup item;
-   once external schema parity is restored, re-run one proven-superseded branch
-   through the audited exact-SHA cleanup path without force/reset or dummy commit.
-
-   **2026-10-12 fresh-caller progress:** this newly attached caller now exposes
-   `candidate_cleanup`, `gitea_rerun_action_job`, `gitea_create_branch_at_sha`,
-   `gitea_set_default_branch`, guarded deploy tools and Actions-secret provisioning.
-   Live `tools_manifest` reports 147 registered tools and no names missing from the
-   supplied client observation, but the observation remains explicitly incomplete
-   and not independently verified. Keep #6 open for complete schema parity,
-   including optional arguments and a proven long-lived refresh/rebind path.
-
-   **2026-10-14 Site Audit launch reproducer, refreshed after qualified Gateway redeploy:**
-   the previous 151-tool observation is superseded by qualified
-   `master@be682cbd257f2b503fd26832bc346061f283302b`; post-merge push run
-   #16785 completed successfully. The authoritative live `mcp_client_write`
-   manifest now reports **152** registered tools with toolset hash
-   `sha256:0f5ea0615d562bad9520a41fe8062a8fb7ed9db7b80a54b7576430f62369521f`.
-   It includes `docker_site_audit_deploy_status`,
-   `gitea_get_branch_protection`, `gitea_set_branch_protection` and
-   `gitea_delete_branch_protection` as enabled/available, and a fresh
-   `notifications/tools/list_changed` signal was emitted for that current hash.
-   Immediately afterward the attached ChatGPT external resource catalog still
-   returned no callable definition for exact path
-   `SSH_Gateway/docker_site_audit_deploy_status`. This reproduces the parity
-   failure after a new qualified Gateway build and a fresh standard refresh
-   signal, narrowing the remaining blocker to the external ChatGPT/App catalog
-   snapshot rather than Gateway registration, deployment or FastMCP lifecycle.
-
-   The missing reader still blocks Site Audit's final durable accepted-LKG proof
-   for exact release `b5f3ecbac2b36a6510ac5f12b4b7f5fb106bfa07` and therefore
-   intentionally blocks canonical `main` creation/default-branch cutover despite
-   healthy exact-b5 runtime/CI evidence. Closure for #6 must prove a fresh or
-   correctly invalidated external catalog exposes the current callable schema and
-   directly invokes `docker_site_audit_deploy_status` successfully; obtain a
-   complete external catalog report as part of parity acceptance. Do not add a
-   Gateway call-by-name proxy, generic Docker/Git/state-volume bypass, duplicate
-   reader registration, or plugin-version cache-bust workaround.
-
-   Related evidence: Site Audit PR #143 head
-   `e324f310b04aa2ef4dfb56289b00564dd601c2ec` with green exact-head CI;
-   Gateway qualified run #16785 on
-   `be682cbd257f2b503fd26832bc346061f283302b`; current live toolset hash
-   `sha256:0f5ea0615d562bad9520a41fe8062a8fb7ed9db7b80a54b7576430f62369521f`.
-
-7. ⬜ **Reconcile Gitea Actions lifecycle, stranded jobs and cancellable runs.**
-   CI runs/jobs can remain `waiting` / `in_progress` after all useful work is
-   done, after cleanup timeouts, or after old workflow jobs later become runnable.
-   Add exact-run/head cancellation, stale/orphaned container reconciliation,
-   terminalization of false-condition/dependency-blocked jobs, and safe rerun
-   eligibility diagnostics.
-
-   **2026-10-12 progress:** PR #518 merged guarded exact-run cancellation with
-   run/head/attempt fencing, audit-before-mutation and bounded postcondition
-   reconciliation. Keep #7 open for stale/orphaned runner-container cleanup and
-   terminalization/reconciliation of stranded dependency-blocked jobs.
-
-8. ⬜ **Add a repo-owned deploy-script / deploy-contract runner.**
-   Some repositories intentionally encode safety in a reviewed deploy script
-   rather than raw Compose primitives: preflight, locks, immutable image checks,
-   replay-stable snapshots, health smoke, LKG writes and rollback. Gateway needs
-   a controlled runner that binds exact script path/content/ref, image authority,
-   env names and Compose project, while redacting secrets and reconciling
-   ambiguous Docker outcomes.
-
-   **GPT Browser Bridge production evidence, 2026-09-30:** the current green
-   release was published from `main@f28e49763e58d69421a05cc05172870c6a50aede`
-   as image ID
-   `sha256:e8668bd0189c282467f2b8c2986f2600a6887de81dabd6740e708675aa9b2fe3`
-   and registry digest
-   `sha256:c5f6554ab94fc100f41e32f5309412de240d33a723e194e88fcee04447aec223`,
-   while production still ran old digest
-   `sha256:7a543f4be9e12208b17eaef8d2975e57cd993ad02c3a3e284cbee3dc878f72e5`
-   with `RestartCount=25`, Docker health `unhealthy`, and a large failing
-   streak. The repository's official `deploy/deploy-gpt-browser-bridge.sh`
-   owns the required deployment transaction: release-image binding, lock and
-   contract preflight, stale profile-lock cleanup, replay-stable Compose
-   invocation, health smoke, deploy-state/LKG write and rollback. The available
-   execution surfaces could not run that transaction safely: the default SSH
-   session was an ephemeral `/home/mcpuser` environment with no checkout and
-   no `docker`; the managed OpenCode workspace likewise had no Docker or
-   `infra-quart` operator root and hit rootless/userns denial; Docker/Compose
-   primitives could see the production daemon and exact image but did not inherit
-   the operator-owned Compose environment, with raw Compose preflight failing on
-   missing `BROWSER_SERVICE_INTERNAL_API_KEY`. Calling raw
-   `docker_compose_up` / restart would also bypass the repository's LKG/state
-   and rollback contract.
-
-   Extend this item with a guarded `run_deploy_contract`-style capability:
-   accept a registered repository plus exact source/ref, allowlisted deploy
-   script identity/content hash, exact immutable release digest and expected
-   Compose project/service; execute on the Docker-capable operator plane with
-   operator-owned env available only inside the execution boundary; require
-   confirmation for mutation; and return bounded preflight, image identity,
-   health/readiness, restart stability, deploy-state/LKG and rollback evidence.
-   Fail closed when the caller resolves only to an ephemeral non-Docker session,
-   required Compose env cannot be proven, the release digest does not match the
-   published/local artifact, or execution would fall back to raw Docker/Compose
-   outside the declared deploy contract. Acceptance must include the Browser
-   Bridge case above: production rebinds to digest `c5f6554a...`, the deploy
-   state records the new LKG, unrelated services are not recreated, and an
-   induced failed health/readiness gate proves rollback remains available.
-
-   **2026-10-12 progress:** the live callable surface now includes generic
-   `docker_deploy_contract` plus dedicated Site Audit and Content Harvester
-   guarded deploy paths; Content Harvester also has a guarded migration path.
-   Site Audit's candidate Git-trust edge case was fixed by PR #523, merged as
-   `0588fdcfa86f...`; post-merge run #16188 attempt 2 completed successfully.
-   Keep #8 open until guarded Site Audit is re-accepted live after that deploy
-   and the generic rollback contract has final cross-project acceptance rather
-   than capability-presence evidence alone.
-
-9. ⬜ **Add one-shot Compose/Docker execution with secret-safe env inheritance.**
-    Operators need to run migrations, readiness commands and read-only database
-    inventory against Compose-backed services without exposing DSNs or mutating
-    long-running service definitions. Support exact image/service/network guards,
-    inherited env names, `--rm`, timeouts, no port publication by default, and a
-    read-only SQL/catalog mode for Compose PostgreSQL services.
-
-10. ⬜ **Expose guarded repository settings and branch-protection mutations.**
-    Gateway can read branch protection/default branch state but lacks a typed
-    way to set default branch, required checks, approvals or protection against
-    exact expected current state. Add CAS-style settings updates with audit
-    evidence and post-write verification.
-
-    **2026-10-12 progress:** guarded exact-SHA branch creation and leased default-
-    branch mutation are merged and callable as `gitea_create_branch_at_sha` and
-    `gitea_set_default_branch`. Keep #10 open for typed required-checks, approval
-    and branch-protection mutation against exact expected current policy state.
-
-    **2026-10-13 deployed branch-protection progress / external-schema blocker:**
-    PR #538 merged the guarded CAS branch-protection lifecycle as
-    `master@44e05b529e71...` after exact current-base PR run #16427 completed
-    successfully. Post-merge run #16431 then completed build-and-push, deploy and
-    host-smoke successfully on that exact merge SHA; host-smoke proved
-    `web-ssh-gateway`, `mcp-server` and `mcp-oauth` all running
-    `BUILD_SHA=44e05b529e71...`, the OAuth->SSH black-box smoke passed, and live
-    `health` reported both Gateway and MCP ready on the same exact build SHA.
-    The authoritative live `tools_manifest` now reports 151 tools and exposes
-    `gitea_get_branch_protection` plus admin-only
-    `gitea_set_branch_protection`/`gitea_delete_branch_protection` as enabled and
-    available, with toolset hash
-    `sha256:f9ee11f3310547f8f54f192364f55d6b819eb4405178608086444128e2b85f79`.
-    However, this long-lived attached ChatGPT resource catalog still omits all
-    three callable schemas even after the server emitted
-    `notifications/tools/list_changed` and the catalog was queried again. Keep
-    #10 open only for external live create/read/(update)/delete acceptance once
-    #6/#45 refresh/rebind exposes the real schemas; do not bypass the guarded
-    contract with raw Gitea/HTTP mutation.
-
-11. ⬜ **Isolate PR Docker jobs from the shared host daemon or document the trust boundary.**
-    PR-controlled Docker build/smoke steps can mutate the shared runner Docker
-    daemon. Prefer disposable per-job daemon/VM isolation; otherwise enforce and
-    document that every same-repo PR writer is intentionally trusted as host
-    admin and prevent untrusted/fork PRs from privileged labels.
-
-47. ⬜ **Provide redacted secret propagation/provisioning across approved deployment and CI scopes.**
-    Production deploys and cross-repository CI can require an existing root-only
-    credential without any safe way to copy/provision it to the approved target.
-    Browser Service was blocked on `PROXY_REGISTRY_API_KEY`; work-session-service
-    could not pull the private `agent-memory-service` image because its repository
-    `REGISTRY_TOKEN` was absent. Add an audited primitive that accepts only
-    allowlisted source/target identities and variable names, never returns or logs
-    the value, preserves target ownership/mode, and reports presence/equality or
-    opaque hash evidence only. It may either synchronize an approved env/secret
-    target or inject the value only inside one guarded deploy/Actions boundary.
-    Acceptance must prove source/target identity, no plaintext exposure, exact
-    postcondition verification, clean-runner private-image pull, and fail-closed
-    behavior for missing/ambiguous credentials.
-
-    **2026-10-09 agent-memory production evidence:** `agent-memory-service`
-    promotion is integrated and its current-main image `aefd07d016ba...` was
-    published at registry digest `sha256:9c906bdae1d1...`, but no live
-    `agent-memory-service` container exists. The reviewed promotion contract
-    requires operator-owned `AGENT_MEMORY_DATABASE_URL`,
-    `AGENT_MEMORY_INTERNAL_API_KEY`, `AGENT_MEMORY_INFRA_COMPOSE_DIR` and a
-    digest-pinned `AGENT_MEMORY_PSQL_IMAGE`; the active deployment execution
-    plane cannot read the root-owned infra environment and no guarded primitive
-    can consume those values without exposing them. Keep this under the shared
-    secret-propagation finding rather than opening a service-specific blocker.
-    Evidence: agent-memory-service PR #7 merge `e09040ec...`, PR #8 merge
-    `aefd07d01...`, post-merge run #15197 SUCCESS; live inventory still shows no
-    agent-memory-service container.
-
-    **2026-10-09 Actions/private-registry evidence:** `work-session-service`
-    proved that the built-in `GITEA_TOKEN` is non-empty but is not accepted for
-    Docker package-registry authentication: exact-head run #15200 reached
-    `docker login` and failed unauthorized. The branch was corrected back to a
-    fail-closed explicit `REGISTRY_TOKEN` contract at `565cd8a0...`; no callable
-    Actions secret-management primitive can bind an operator-owned read-only PAT
-    to that repository. Closure for this item must therefore cover both guarded
-    deploy-time secret consumption and audited Actions-secret provisioning, with
-    no plaintext returned or logged. Evidence: run #15200 quality/postgres green,
-    agent-memory-e2e failed only at registry login; corrected head
-    `565cd8a0eb77...` retains explicit `REGISTRY_TOKEN`.
-
-    **2026-10-12 progress:** PR #517 merged guarded Actions-secret provisioning
-    for the approved `registry_token` source into `work-session-service` as
-    `REGISTRY_TOKEN`, with source-hash leasing, audit-before-write, redacted
-    results and ambiguous-response reconciliation. Keep #47 open for the second
-    half of the contract: secret-safe deploy-time consumption/injection and its
-    production acceptance without plaintext exposure.
-
-## P2 / Important bugs and reliability gaps
-
-13. ⬜ **Wire the production `astro-sites` named root into `mcp-oauth` after the host path is provisioned.**
-   Named-root registration is now supported, but production still has no
-   `MCP_OAUTH_ASTRO_SITES_ROOT` setting and the intended host directory is not
-   provisioned. Once the operator supplies an existing absolute host path, add
-   the `registry_roots.astro-sites` entry, the explicit writable `mcp-oauth`
-   bind with host-path auto-creation disabled, the documented env contract, and
-   deploy seam coverage. Deploy must fail closed when the configured path is
-   absent; do not silently create an empty root.
-
-
-14. ⬜ **Make verification helpers honor project environments and CI-equivalent toolchains.**
-    `run_pytest`, `run_ruff`, `run_mypy` and verifier containers should not fail
-    falsely on unreadable `.venv`, missing `uv.lock`, unwritable caches, monorepo
-    collection collisions, or verifier/CI tool-version drift. A 2026-10-08 Kojo
-    verified-push attempt additionally proved the trusted verifier image could use
-    `/usr/bin/python` without `pytest`, while the repository verifier could execute
-    the targeted tests. Expose candidate-verifier versus Actions-plane capability
-    provenance explicitly; advertised checks must either run in the selected plane
-    or return a typed environment/bootstrap diagnostic instead of code failure.
-
-   **Update 2026-10-09:**
-   **Observed behavior:** 2026-10-10 NOD gateway_client clean candidate based on main@c4a634b50f2c...: targeted run_pytest for tests/unit/test_vless_subscription_uri.py did not reach collection because the helper selected CPython 3.14.7 musl, attempted a source build of grpcio==1.68.0 and failed because c++ was absent. Targeted run_compileall for only app/bounded/network/vless_uri.py and its test likewise bootstrapped the full uv project environment, attempted grpcio-tools/grpcio builds and failed before syntax checking. In contrast, exact gateway_client main@c4a634b5 post-merge Gitea Actions runs 15292-15295 completed successfully on the repository CI toolchain including full pytest. This makes local helper failure a false product signal and makes the nominally lightweight syntax checker unnecessarily depend on full dependency bootstrap.
-   **Reproduction:** Prepare a clean candidate clone of gpakoh/gateway_client main@c4a634b50f2c...; call run_pytest(target=tests/unit/test_vless_subscription_uri.py) and run_compileall(target=[app/bounded/network/vless_uri.py, tests/unit/test_vless_subscription_uri.py]). Observe uv selecting CPython 3.14.7 musl and build failure on grpcio/grpcio-tools due missing c++, before test collection or compileall. Compare with Gitea Actions runs 15292-15295 on the same main SHA, which are SUCCESS.
-   **Expected behavior:** Verification helpers should honor the project's declared/CI-equivalent Python/toolchain or return a typed bootstrap/toolchain diagnostic distinct from code/test failure. run_compileall should be able to perform a dependency-free stdlib syntax compilation of requested Python files without resolving/installing the entire project dependency graph unless the project explicitly requires that behavior.
-   **Impact:** False red verification blocks supervisor acceptance, encourages unnecessary retries, and makes a cheap syntax check expensive and coupled to unrelated native dependencies. It also creates provenance drift between Gateway helper evidence and authoritative CI evidence.
-   **Acceptance:** Existing item #14 acceptance plus: on gateway_client (or a fixture with pinned native dependency unsupported on a newer interpreter), targeted pytest selects the declared/CI-supported interpreter or reports typed environment incompatibility before test status; targeted compileall compiles requested files without full dependency bootstrap; helper result distinguishes bootstrap/toolchain failure from product code/test failure; returned metadata identifies interpreter/toolchain plane; regression demonstrates CI-equivalent Python 3.11 succeeds while accidental Python 3.14 selection is not reported as a code failure.
-   **Related evidence:** gateway_client main c4a634b50f2c01f3cb8f4f5a69075eaa2a4cd16d; post-merge Gitea runs 15292, 15293, 15294, 15295 SUCCESS. Gateway run_pytest job 01eca165-e930-4c52-ba97-280ca0d33a55; run_compileall job c05f6a3a-ced2-4136-98c5-ace8f9ff9ee6.
-
-   **2026-10-10 registered-subproject evidence:** targeted `run_pytest` for the
-   registered NOD `master_server` service failed before pytest collection because
-   the helper assumed a project-root `pyproject.toml`; targeting the nested test
-   through the parent candidate instead built the parent environment and failed
-   collection on missing service dependency `pydantic`. This is the same #14
-   environment-resolution defect, not a separate roadmap item. Acceptance must
-   cover requirements-based registered subprojects with their configured cwd and
-   dependency contract, and return an explicit unsupported-environment/bootstrap
-   diagnostic rather than a misleading product-test failure when resolution is
-   impossible.
-
-15. ⬜ **Make agent cancellation and submission atomic/reconcilable.**
-    Cancellation can mark a local job ambiguous while the remote runner keeps
-    heartbeating, and rate-limited submission can return failure after a runner
-    has already started unbound. The 2026-10-08 infra-quart pilot reproduced the
-    cancellation side again: the Gateway job became ambiguous while the same
-    remote runner PID continued fresh heartbeats with no terminal artifacts.
-    Preserve a cancellable/fenceable remote handle or prove no runner/proxy
-    acquisition occurred before returning failure; replacement work must remain
-    blocked until the old writer is terminal or fenced.
-
-    **2026-10-10 live split-state evidence:** two independent pilots reproduced
-    the same failure mode. Browser task `port-provider-challenge-currentbase-20261010`
-    became locally `ambiguous` after cancellation while remote runner PID 1498
-    continued fresh heartbeats. Supervisor task `pilot-gateway-dispatch` likewise
-    became locally ambiguous while remote PID 33878 kept heartbeating and was later
-    classified `likely_hung/reasoning_loop`; a second cancellation was rejected
-    solely because the control-plane job was already ambiguous. Both candidate
-    worktrees remained clean, so no late write was observed, but remote termination
-    was not proven. Keep #15 open until an ambiguous local cancellation retains a
-    durable remote stop/fence path and replacement admission is impossible until
-    that remote writer is terminal or fenced.
-
-16. ⬜ **Reconcile agent jobs durably across Gateway restarts/deploys.**
-    Restart/deploy can make returned job ids disappear while artifacts still show
-    stale `running` status. Inspect/status APIs should derive terminal states
-    such as `lost_after_restart`, `orphaned_attempt` or `artifact_incomplete`,
-    including last useful activity and safe recovery guidance.
-
-24. ⬜ **Fail schema validation quickly before slow control-plane work.**
-    Pure local/schema errors such as invalid enum values should return near the
-    API boundary with allowed values and typed diagnostics, not after long router
-    or backend latency.
-
-26. ⬜ **Add retry metadata and coalescing for rate-limit responses.**
-    Rate-limit errors should expose retry-after, bucket identity and lower-cost
-    alternate read guidance. Repeated schema/status reads should be coalesced
-    where possible to avoid making contention worse.
-
-27. ⬜ **Diagnose Docker build read-only path failures precisely.**
-    Docker/Compose build failures should identify whether the read-only path is
-    the compose context, HOME/buildx/cache, builder state or daemon namespace,
-    and offer a sanctioned writable-builder-cache recovery path.
-
-    **Confirmed subcase, 2026-10-19:** cleaning-service image qualification
-    failed with mkdir /run/mcp-docker-config/buildx: read-only file system
-    (receipt a6b0108a-8e1b-4e00-b5ae-4129404eebea). The trusted Compose
-    helper pointed DOCKER_CONFIG at read-only registry auth; Buildx tried
-    to create its default state there.
-
-    **Partial implementation:** fix/compose-buildx-writable-state-20261019
-    supplies a fixed BUILDX_CONFIG=/tmp/mcp-buildx in the existing bounded
-    writable tmpfs, both with and without a registry auth volume. Auth,
-    project and rootfs remain read-only; allowed roots, image pin and network
-    isolation remain unchanged. Two new regressions failed before the fix;
-    all 106 DockerClient tests and Ruff pass afterward. Independent review
-    found no blockers. See docs/operations/COMPOSE_RUNNER_BUILDX_STATE.md.
-
-    **Still open:** this is one path-specific correction, not closure of
-    all #27 diagnostics/recovery work. Deployment of the new helper and real
-    image build remain unverified. Owner: agent-ssh-gateway; before resuming
-    blocked image qualification. Never-started helper cleanup after command
-    timeout is a separate lifecycle issue, not fixed here.
-
-30. ⬜ **Add Gitea Actions artifact listing and bounded download.**
-    Operators can inspect runs/jobs/logs, but need first-class artifact metadata
-    and safe archive/file retrieval with run/head provenance, size limits,
-    checksum where available, path traversal protection and expiry diagnostics.
-
-34. ⬜ **Support managed read-only agent tasks over non-Git workspaces.**
-    Non-Git registered script/config/data workspaces need immutable snapshot
-    source contracts for read-only analysis tasks, with explicit delivery/mutation
-    disabled unless a separate trusted write contract exists.
-
-43. ⬜ **Expose command-plane degradation state separately from connector/auth failure.**
-    Long-lived agent sessions can temporarily lose callable tools during gateway
-    restart, image boot, host overload or session expiry. Today these distinct
-    states can all look like "connector gone" and provoke unnecessary re-auth or
-    duplicate retries. Expose a cheap bounded plane status such as
-    `ready|starting|overloaded|session_expired` with optional `retry_after_s`,
-    build identity and start time; document expected transient gaps across deploys.
-
-44. ⬜ **Prevent candidate worktree drift after verified delivery.**
-    A verified candidate must remain byte-for-byte consistent with its Git HEAD
-    unless an explicit write operation mutates it. In a JS Chat Engine delivery,
-    remote exact head `ac66a850673cc0383163298e337fe2e3f0b96ec1` retained
-    `_MIGRATION_LOCK_WAIT_SECONDS = 5.0`, while the registered candidate later
-    showed that tracked line deleted without a session write call, producing false
-    local test failures until restored. Add post-delivery worktree==HEAD proof,
-    identify/remove the mutation path, and fail closed with attributed evidence if
-    drift is detected.
-
-48. ⬜ **Fail project-scoped Compose mutations before confirmation when allowed roots are not configured.**
-    A registered `docker_compose_up` can return `confirmation_required`, but the
-    subsequent `confirm_operation` then fails before Docker execution when
-    `MCP_ALLOWED_PROJECT_ROOTS` is unset. Availability/preflight must reject this
-    configuration before creating a one-time pending action, or safely resolve
-    the registered project root without requiring callers to know host paths.
-    Acceptance covers unset-root fail-fast behavior, successful registered-root
-    execution, and proves confirmations are not consumed by impossible actions.
-
-49. ⬜ **Expose bounded destructive-audit health and recovery evidence.**
-    Guarded Gitea close/delete correctly fail closed with `AUDIT_UNAVAILABLE`
-    before mutation, but callers cannot distinguish transient audit transport or
-    storage outage from malformed cleanup input. Add a safe read-only audit
-    subsystem status/recovery signal with retryability and correlation metadata;
-    keep destructive mutations impossible unless intent persistence succeeds.
-    Acceptance covers zero mutation during outage and exactly-once audited success
-    after recovery for both PR close and exact-SHA branch deletion.
-
-## P3 / Capability and ergonomics wishlist
-
-36. ⬜ **Make candidate preparation observable and cancellable.**
-    Slow `prepare_candidate_clone` calls should support async mode, progress
-    phases, cancellation before registration, and idempotent retry while keeping
-    the current synchronous path for small clones.
-
-37. ⬜ **Expose first-class bounded health and HTTP smoke probes.**
-    Add internal and public HTTP/TCP probes with allowlisted method/host/path,
-    bounded response bytes, timeout, provenance, redirect/status/body metadata,
-    and clear DNS/refused/timeout/non-2xx diagnostics.
-
-38. ⬜ **Bridge frontend/Astro delivery to the existing builder/runtime path.**
-    Frontend repos need typed build/smoke/deploy adapters that detect package
-    manager/lockfile/service identity, use the approved Astro/builder substrate
-    or bounded Node container, and return build/up/smoke evidence without raw
-    `npm` or ad-hoc deploy scripts.
-
-    **Zalesskiy SUP evidence, 2026-10-04:** two independent prerequisites
-    remain. The live Gateway build `b9ffe1f5c4d71d9d352fa2a2d885f34ee1600568`
-    advertises `docker_deploy_contract` as enabled/available in
-    `mcp_client_write` with `mcp:docker:admin`, but this ChatGPT session's
-    callable tool registry has no matching tool. An authorized read-only
-    `docker_exec` plus `confirm_operation` succeeds, so this is not evidence
-    of a general Docker-admin access failure. Track client exposure under
-    existing item 6; PR #446 measures parity and explicitly leaves external
-    exposure unverified. Separately, `_DEPLOY_CONTRACTS` in
-    `examples/mcp_server/mcp_infra/adapters/docker.py` at Gateway
-    `c63fda43604fb49afdc8b8bca62c2cd3243d31f9` allowlists only
-    `gpt-browser-bridge`. Exposing that schema alone will not authorize Astra.
-
-    Scope the frontend adapter to the existing reviewed `gpakoh/astra`
-    `deploy.sh astro` transaction (item 8), not a generic shell runner.
-    Bind both infrastructure HEAD and the independent
-    `gpakoh/zalesskiy-sup` source HEAD, reviewed script/Compose content and
-    build inputs; revalidate them at confirmation and capture the resulting
-    immutable image ID. Preserve the script's lock, clean/main/remote-SHA
-    gates, Directus read-only preflight, cache-busted build, frontend-only
-    `up --no-deps --no-build --wait`, stability window and image rollback.
-    Use the Docker-capable operator plane and keep operator secrets inside it;
-    the frontend Compose path must not acquire the full stack's
-    `LICENSE_KEY` requirement. Never use `--remove-orphans`.
-
-    Acceptance: a client-invokable preflight and confirmation publish only
-    Astro; exact source/build/runtime evidence agrees; Directus, PostgreSQL,
-    Redis, Lana and Minio container IDs/StartedAt stay unchanged; public smoke
-    and isolated health-failure rollback pass. Reconcile ambiguous execution
-    before retry. The completed local-agent publication is reference evidence,
-    not a Gateway deploy smoke: Astra `ad26f77`, site merge `c231ffa`
-    (post-merge CI 13784 success), runtime image
-    `sha256:1c029fc24639258d51a493c777237de00158675bc3981b06f98636de908e5356`,
-    running/healthy with zero restarts. A Gateway read-only public probe
-    independently confirmed the Yandex verification file returned HTTP 200,
-    162 bytes and the expected verification body. Do not redeploy that release
-    merely to collect evidence.
-
-40. ⬜ **Model agent roles and authoritative closeout explicitly.**
-    Agent reports may say implementation/review/checks are complete, but should
-    not self-close findings or mark a project ready. Gateway should preserve
-    role, scope, exact source/diff/check evidence and allow multiple isolated
-    implementer/reviewer/adversarial lanes without workspace/proxy collisions.
-
-41. ⬜ **Improve operator-safe command-plane recovery helpers.**
-    Provide typed local branch switch/sync, safe scratch cleanup, project-level
-    Docker/build diagnostics and policy-denial guidance so operators do not need
-    raw shell fallbacks for common recovery actions.
-
-45. ⬜ **Add session-scoped tool-schema caching with explicit invalidation.**
-    Long-lived clients currently rediscover callable tool schemas repeatedly, and
-    a partial catalog during gateway boot can look like a permanent capability
-    loss. Define an etag/build-id based cache contract so schemas may be reused
-    while the plane is stable and are invalidated on build or plane-state change;
-    do not weaken authentication or server-side authorization checks.
-
-    **2026-10-09 reproducer:** after master `0e357599a6aa...` completed
-    build-and-push, deploy and host-smoke in run #14985, the live server
-    `tools_manifest` advertised `gitea_rerun_action_job` as enabled/available
-    and emitted toolset hash `sha256:c88900df0e1e...`, while this same long-lived
-    ChatGPT session's external `api_tool` resource catalog still exposed the
-    pre-deploy surface and omitted that tool. The server can accept bounded,
-    lifecycle/auth/toolset-hash-bound `client_visible_tool_names` attestations,
-    but the external catalog also hides those optional `tools_manifest`
-    parameters from its callable schema. This proves a real cache/filtering
-    invalidation gap outside the authoritative FastMCP tool manager, not a
-    missing server registration.
-
-    Acceptance should include a long-lived client attached before a deploy:
-    once the server toolset hash/build identity changes, its next schema lookup
-    must refresh to the new `mcp.tools/list` surface (including optional argument
-    additions), or return an explicit stale-catalog state with a bounded refresh
-    action. A successful server deploy must not leave the old callable catalog
-    indefinitely authoritative in that session.
-
-    **2026-10-09 isolation evidence:** post-merge #15114 redeployed
-    `master@9c4bc3ff677c...` successfully. Fresh public OAuth host-smoke passed and
-    all three live application containers reported that exact BUILD_SHA, proving
-    the Gateway/public MCP reconnect path is current after restart. Yet the same
-    attached ChatGPT catalog still omits `gitea_rerun_action_job` while live
-    `tools_manifest` exposes it. The remaining invalidation responsibility is
-    therefore outside the Gateway process/session implementation: close this item
-    only when the external resource catalog either refreshes on server build/toolset
-    change or surfaces an explicit stale state plus bounded refresh action.
-
-    **2026-10-10 notification/lifecycle isolation evidence:** PR #504 deployed
-    exact `master@4955470c1f8a...` in successful post-merge run #15403. The live
-    server toolset hash changed to `sha256:88b62a9a5c4c...`; invoking the already
-    caller-visible `tools_manifest` twice caused two successful standard
-    `notifications/tools/list_changed` emissions, but each call reported
-    `status=sent` rather than the second reporting `already_sent`. The attached
-    `api_tool` catalog remained unchanged after both emissions and still omitted
-    `candidate_cleanup` and `gitea_rerun_action_job`. This proves the schema
-    snapshot is not scoped to, or revalidated by, the MCP lifecycle that executes
-    tools. A Gateway session-cache change cannot close #45 by itself: acceptance
-    requires the external catalog owner to bind cache identity/invalidation to
-    connector/build/toolset identity or expose an explicit refresh/reconnect
-    action whose postcondition is a freshly fetched `tools/list`.
-
-    **2026-10-10 typed refresh-contract progress:** PR #507 merged to
-    `master@7044f0e96054...`; post-merge run #15518 completed successfully. The
-    server now exposes a typed catalog state plus bounded `tools/list` refresh
-    guidance keyed to the live server toolset hash. This satisfies the Gateway
-    side of explicit stale-catalog diagnostics, but does not close #45: the
-    external ChatGPT resource catalog still owns its separate schema snapshot and
-    must prove that it consumes the refresh/rebind contract and fetches the new
-    callable schema in a long-lived caller.
-
-    **2026-10-12 fresh-attachment evidence:** a newly attached caller now exposes
-    the previously missing guarded schemas, including `candidate_cleanup` and
-    `gitea_rerun_action_job`, against live toolset hash
-    `sha256:50b7ce5e8ea37ad31d68e3bafce99df230342b5c2d9a82c206f3dffa5a26be4b`.
-    This proves fresh attachment can converge, but not the required in-place
-    invalidation of a client that remained attached across a toolset/build change;
-    keep #45 open for that long-lived acceptance only.
-
-    **2026-10-13 in-place optional-argument reproducer:** PR #533 deployed exact
-    `master@0cf0c0b651ce...`; live MCP toolset hash changed to
-    `sha256:f250b44e2878a8de141b5b6d8da773c02c4a42315d0d7ba5008377f6d2e724ef`,
-    and authoritative `tools_manifest` immediately documented the new optional
-    `create_parents` argument on `workspace_file_write`. The same long-lived
-    attached external catalog still returned the pre-deploy schema without that
-    argument. `tools_manifest` emitted `notifications/tools/list_changed` with the
-    new hash and explicitly instructed an MCP `tools/list` refresh; querying the
-    external resource catalog again still returned the stale schema. This is a
-    direct argument-level (not merely tool-name) acceptance failure for #45/#6
-    and currently blocks external `create_parents=true` acceptance for #50.
-
-52. ⬜ **Expose guarded Gitea issue-state mutation.**
-    The external surface can list/read Gitea issues but cannot reconcile an issue
-    to closed after its fix is independently proven. Add a same-repository
-    issue-state mutation with fresh expected-state/version fencing, narrow field
-    allowlisting, audit evidence and post-write verification. Acceptance covers
-    close success, already-closed idempotence, concurrent-state mismatch, missing
-    issue and remote failure with zero unintended mutation.
-
-53. ⬜ **Add guarded bulk tree / multi-file candidate bootstrap.**
-    Greenfield packages currently require many sequential single-file workspace
-    writes and pre-created directories. Add a bounded `workspace_apply_tree` or
-    equivalent patchset/materialization primitive with file-count/byte limits,
-    project-relative path validation, parent creation under policy, aggregate and
-    per-file hashes, dry-run support and atomic/fail-closed semantics. Acceptance
-    includes a ≥10-file bootstrap plus traversal/oversize/partial-failure tests.
-
-54. ⬜ **Recover and review the local Selenium session reaper before worktree cleanup.**
-   <!-- gateway-todo-key: local-selenium-session-reaper-unreviewed -->
-   **Severity:** P3
-
-   **Observed behavior:** A clean local-only historical worktree `/media/ssd120/tmp/opencode/asg-selenium-reaper` at `fix/selenium-session-reaper-20261003@4fc863ef` is reported to contain one unique commit touching only `examples/mcp_server/candidate_clone.py` and `tests/test_candidate_clone.py` (+236/-1). Current authoritative master has no `selenium`/`reap` match in `candidate_clone.py` and no Selenium match in `tests/test_candidate_clone.py`, so the change is not obviously absorbed. The historical worktree is outside the currently registered/allowlisted Gateway project root, so the supervisor cannot yet inspect its exact diff through the guarded project surface.
-
-   **Reproduction:** Read current `gpakoh/agent-ssh-gateway` master and search `examples/mcp_server/candidate_clone.py` for `selenium` and `reap`, and `tests/test_candidate_clone.py` for `selenium`; observe zero matches. Attempt read-only registration of the historical `/media/ssd120/tmp/opencode/asg-selenium-reaper` worktree through the current Gateway project root; observe that the external path is not available through the safe relative-root contract.
-
-   **Expected behavior:** Before any historical-worktree cleanup, make the exact `4fc863ef` patch available through a trusted read-only inspection path or otherwise preserve it immutably, review it against current master, and make an explicit evidence-backed decision to port, supersede, or reject it. Do not delete or mutate the original worktree while that decision is unresolved.
-
-   **Impact:** Without an explicit preservation/review step, a local-only reliability patch may be silently lost during workspace cleanup. Conversely, blindly cherry-picking it could reintroduce stale October assumptions into a substantially newer candidate/session implementation.
-
-   **Acceptance:** Obtain and hash the exact `4fc863ef` diff; verify its parent/base and changed-file scope; compare each behavioral hunk with current `candidate_clone.py` and current regression coverage; if still applicable, reimplement or port it on a fresh exact-current-master candidate with focused tests and normal PR/CI delivery; if superseded or invalid, record concrete current-master evidence proving why. Only after one of those terminal outcomes may the historical worktree be considered safe for deletion.
-
-   **Related evidence:** Historical local candidate: `asg-selenium-reaper`, branch `fix/selenium-session-reaper-20261003`, HEAD `4fc863ef`; reported unique scope `examples/mcp_server/candidate_clone.py` +81 and `tests/test_candidate_clone.py` +156. Current master at review start: `6bbcee7cac283868a61691674c48598010d75e4b`; current `candidate_clone.py` last-change blob `8a980c8ad3bc0a9d845b760c62e261508d08cf21`; guarded searches returned zero Selenium/reap matches on the cited current files.
+**Reconciled:** 2026-10-25; baseline Gitea `master@94f4d85d86601e0a153689b505e90bc01a5beaff`, merged PR evidence, Gateway runtime and preserved local intake.
+
+**Open: 38 (P1 12 / P2 17 / P3 9).** One checkbox = one independently closeable outcome; no completed checklist/history retained. A merged partial fix is not sufficient for closeout. OpenCode security and deploy migration remain live prerequisites, not green-CI assumptions.
+
+## P1 — Security, deploy and release blockers (12)
+
+- [ ] **P1-01: Provide canonical and candidate write-plane recovery paths.** (legacy #2)
+  Some projects report candidate fallback while task policy requires canonical non-candidate execution. Others have handoff writes failing while archive/task maintenance succeeds. Expose exact write capability for code, Git and handoff surfaces, and return `CANONICAL_WRITE_PLANE_UNAVAILABLE` with safe recovery steps when a clean writeable canonical workspace cannot be provisioned.
+  **Remaining acceptance:** typed canonical vs candidate Git/handoff capability; safe recovery of missing/corrupt lineage; fenced terminal-evidence candidate cleanup with preserved artifacts. `WORKSPACE_CONTENDED` case #634, cleanup #640; PR #643 diagnostic fingerprint is not clearance.
+
+- [ ] **P1-02: Keep ChatGPT-visible tool schemas in parity with server manifests.** (legacy #6)
+  Tools can appear available in `tools_manifest` while missing or having a different callable schema in the ChatGPT resource catalog. PR-A measurement now accepts a bounded client-reported tool list, binds retained attestations to the server-created MCP lifecycle + opaque auth identity + live toolset hash, emits complete server/client diff diagnostics, and keeps incomplete omissions explicitly unknown. Client reports remain unverified and do not gate existing Git mutations. This item stays open until a real external connector submits a complete report and identifies the filtering/caching/allowlist mechanism; do not add a curated catalog workaround before that evidence exists.
+  **Remaining acceptance:** exact external callable manifest parity/lease and invalidation. Fold in the `write_agent_task.source_mode` incident: callable schema must enumerate `committed_head` and `dirty_worktree_snapshot`; runtime-only validation is insufficient.
+
+- [ ] **P1-03: Reconcile Gitea Actions lifecycle, stranded jobs and cancellable runs.** (legacy #7)
+  CI runs/jobs can remain `waiting` / `in_progress` after all useful work is done, after cleanup timeouts, or after old workflow jobs later become runnable. Add exact-run/head cancellation, stale/orphaned container reconciliation, terminalization of false-condition/dependency-blocked jobs, and safe rerun eligibility diagnostics.
+
+- [ ] **P1-04: Add a repo-owned deploy-script / deploy-contract runner.** (legacy #8)
+  Some repositories intentionally encode safety in a reviewed deploy script rather than raw Compose primitives: preflight, locks, immutable image checks, replay-stable snapshots, health smoke, LKG writes and rollback. Gateway needs a controlled runner that binds exact script path/content/ref, image authority, env names and Compose project, while redacting secrets and reconciling ambiguous Docker outcomes.
+
+- [ ] **P1-05: Add one-shot Compose/Docker execution with secret-safe env inheritance.** (legacy #9)
+  Operators need to run migrations, readiness commands and read-only database inventory against Compose-backed services without exposing DSNs or mutating long-running service definitions. Support exact image/service/network guards, inherited env names, `--rm`, timeouts, no port publication by default, and a read-only SQL/catalog mode for Compose PostgreSQL services.
+
+- [ ] **P1-06: Expose guarded repository settings and branch-protection mutations.** (legacy #10)
+  Gateway can read branch protection/default branch state but lacks a typed way to set default branch, required checks, approvals or protection against exact expected current state. Add CAS-style settings updates with audit evidence and post-write verification.
+
+- [ ] **P1-07: Isolate PR Docker jobs from the shared host daemon or document the trust boundary.** (legacy #11)
+  PR-controlled Docker build/smoke steps can mutate the shared runner Docker daemon. Prefer disposable per-job daemon/VM isolation; otherwise enforce and document that every same-repo PR writer is intentionally trusted as host admin and prevent untrusted/fork PRs from privileged labels.
+
+- [ ] **P1-08: Provide redacted secret propagation/provisioning across approved deployment and CI scopes.** (legacy #47)
+  Production deploys and cross-repository CI can require an existing root-only credential without any safe way to copy/provision it to the approved target. Browser Service was blocked on `PROXY_REGISTRY_API_KEY`; work-session-service could not pull the private `agent-memory-service` image because its repository `REGISTRY_TOKEN` was absent. Add an audited primitive that accepts only allowlisted source/target identities and variable names, never returns or logs the value, preserves target ownership/mode, and reports presence/equality or opaque hash evidence only. It may either synchronize an approved env/secret target or inject the value only inside one guarded deploy/Actions boundary. Acceptance must prove source/target identity, no plaintext exposure, exact postcondition verification, clean-runner private-image pull, and fail-closed behavior for missing/ambiguous credentials.
+
+- [ ] **P1-09: OpenCode scheduled upgrade failure prevents bounded agent jobs before implementation.** (legacy #1)
+  <!-- gateway-todo-key: opencode-upgrade-failed --> **Severity:** P1
+  **Still blocked:** historical exit 80 / upgrade-blocked job reached zero required checks and zero diff. PR #630 only documented incident, did not fix runtime; new bounded qualified executor canary and Node 22 prerequisite needed. Coordination issues #639 and #642.
+
+- [ ] **P1-10: Protect deploy LKG state and qualify trusted migration (PR #631)**
+  Security PR #631 adds fail-closed private atomic deploy-state receipt, but remains OPEN and 17 commits behind the release base. Before merge, operator must independently validate current release SHA and all three registry digest refs, provision volume `ssh-gateway-deploy-state` owned by effective deploy UID with 0700/0600 permissions, and seed a trusted receipt. Preserve old untrusted 0777/0666 state for audit. After branch rebase and exact-head CI, require build/deploy/host-smoke and actual digest/BUILD_SHA reconciliation; never auto-trust legacy receipt. Separate CI #19021 deploy failure remains unqualified.
+
+- [ ] **P1-11: Disable password-based SSH login and eliminate fixed credential in executor image.** (legacy #1)
+  `docker/sshd/Dockerfile` at current master still enables `PasswordAuthentication yes` and provisions static password. Remove both, verify effective sshd runtime settings for both images and require isolated negative password-auth tests.
+
+- [ ] **P1-12: Require TLS certificate verification by default in Python SDK.** (legacy #2)
+  `sdk/ssh_gateway.py` at current master still sets `session.verify = False` and suppresses TLS warnings. Default to verified HTTPS/hostname, allow explicit trusted CA overrides only and regression-test rejection of untrusted endpoints.
+
+## P2 — Reliability and engineering throughput (17)
+
+- [ ] **P2-01: Wire the production `astro-sites` named root into `mcp-oauth` after the host path is provisioned.** (legacy #13)
+  Named-root registration is now supported, but production still has no `MCP_OAUTH_ASTRO_SITES_ROOT` setting and the intended host directory is not provisioned. Once the operator supplies an existing absolute host path, add the `registry_roots.astro-sites` entry, the explicit writable `mcp-oauth` bind with host-path auto-creation disabled, the documented env contract, and deploy seam coverage. Deploy must fail closed when the configured path is absent; do not silently create an empty root.
+
+- [ ] **P2-02: Make verification helpers honor project environments and CI-equivalent toolchains.** (legacy #14)
+  `run_pytest`, `run_ruff`, `run_mypy` and verifier containers should not fail falsely on unreadable `.venv`, missing `uv.lock`, unwritable caches, monorepo collection collisions, or verifier/CI tool-version drift. A 2026-10-08 Kojo verified-push attempt additionally proved the trusted verifier image could use `/usr/bin/python` without `pytest`, while the repository verifier could execute the targeted tests. Expose candidate-verifier versus Actions-plane capability provenance explicitly; advertised checks must either run in the selected plane or return a typed environment/bootstrap diagnostic instead of code failure.
+  **New confirmed cases:** two `deep-researcher` pip-only candidates fail `run_pytest`/`run_ruff` on mandatory `uv --frozen` with missing `uv.lock`; treat as *one* contract alongside existing env/cache/interpreter parity, with pip/requirements support and CI-equivalent checks.
+
+- [ ] **P2-03: Make agent cancellation and submission atomic/reconcilable.** (legacy #15)
+  Cancellation can mark a local job ambiguous while the remote runner keeps heartbeating, and rate-limited submission can return failure after a runner has already started unbound. The 2026-10-08 infra-quart pilot reproduced the cancellation side again: the Gateway job became ambiguous while the same remote runner PID continued fresh heartbeats with no terminal artifacts. Preserve a cancellable/fenceable remote handle or prove no runner/proxy acquisition occurred before returning failure; replacement work must remain blocked until the old writer is terminal or fenced.
+
+- [ ] **P2-04: Reconcile agent jobs durably across Gateway restarts/deploys.** (legacy #16)
+  Restart/deploy can make returned job ids disappear while artifacts still show stale `running` status. Inspect/status APIs should derive terminal states such as `lost_after_restart`, `orphaned_attempt` or `artifact_incomplete`, including last useful activity and safe recovery guidance.
+  **Observed:** preserved agent_events/fleet outcome can prove failed terminal state despite transient API `JOB_NOT_FOUND`; do not conflate.
+
+- [ ] **P2-05: Fail schema validation quickly before slow control-plane work.** (legacy #24)
+  Pure local/schema errors such as invalid enum values should return near the API boundary with allowed values and typed diagnostics, not after long router or backend latency.
+
+- [ ] **P2-06: Add retry metadata and coalescing for rate-limit responses.** (legacy #26)
+  Rate-limit errors should expose retry-after, bucket identity and lower-cost alternate read guidance. Repeated schema/status reads should be coalesced where possible to avoid making contention worse.
+
+- [ ] **P2-07: Diagnose Docker build read-only path failures precisely.** (legacy #27)
+  Docker/Compose build failures should identify whether the read-only path is the compose context, HOME/buildx/cache, builder state or daemon namespace, and offer a sanctioned writable-builder-cache recovery path.
+
+- [ ] **P2-08: Add Gitea Actions artifact listing and bounded download.** (legacy #30)
+  Operators can inspect runs/jobs/logs, but need first-class artifact metadata and safe archive/file retrieval with run/head provenance, size limits, checksum where available, path traversal protection and expiry diagnostics.
+
+- [ ] **P2-09: Support managed read-only agent tasks over non-Git workspaces.** (legacy #34)
+  Non-Git registered script/config/data workspaces need immutable snapshot source contracts for read-only analysis tasks, with explicit delivery/mutation disabled unless a separate trusted write contract exists.
+
+- [ ] **P2-10: Expose command-plane degradation state separately from connector/auth failure.** (legacy #43)
+  Long-lived agent sessions can temporarily lose callable tools during gateway restart, image boot, host overload or session expiry. Today these distinct states can all look like "connector gone" and provoke unnecessary re-auth or duplicate retries. Expose a cheap bounded plane status such as `ready|starting|overloaded|session_expired` with optional `retry_after_s`, build identity and start time; document expected transient gaps across deploys.
+
+- [ ] **P2-11: Prevent candidate worktree drift after verified delivery.** (legacy #44)
+  A verified candidate must remain byte-for-byte consistent with its Git HEAD unless an explicit write operation mutates it. In a JS Chat Engine delivery, remote exact head `ac66a850673cc0383163298e337fe2e3f0b96ec1` retained `_MIGRATION_LOCK_WAIT_SECONDS = 5.0`, while the registered candidate later showed that tracked line deleted without a session write call, producing false local test failures until restored. Add post-delivery worktree==HEAD proof, identify/remove the mutation path, and fail closed with attributed evidence if drift is detected.
+  **Acceptance:** exact HEAD/worktree integrity across process boundaries; unexpected tracked edits block delivery/cleanup and get audit provenance.
+
+- [ ] **P2-12: Fail project-scoped Compose mutations before confirmation when allowed roots are not configured.** (legacy #48)
+  A registered `docker_compose_up` can return `confirmation_required`, but the subsequent `confirm_operation` then fails before Docker execution when `MCP_ALLOWED_PROJECT_ROOTS` is unset. Availability/preflight must reject this configuration before creating a one-time pending action, or safely resolve the registered project root without requiring callers to know host paths. Acceptance covers unset-root fail-fast behavior, successful registered-root execution, and proves confirmations are not consumed by impossible actions.
+
+- [ ] **P2-13: Expose bounded destructive-audit health and recovery evidence.** (legacy #49)
+  Guarded Gitea close/delete correctly fail closed with `AUDIT_UNAVAILABLE` before mutation, but callers cannot distinguish transient audit transport or storage outage from malformed cleanup input. Add a safe read-only audit subsystem status/recovery signal with retryability and correlation metadata; keep destructive mutations impossible unless intent persistence succeeds. Acceptance covers zero mutation during outage and exactly-once audited success after recovery for both PR close and exact-SHA branch deletion.
+
+- [ ] **P2-14: Git write-capability preflight misses FETCH_HEAD permission denial.** (legacy #1)
+  A previous `git_write_capabilities=fully_writeable` contradicted real `git_fetch_ref` failing `.git/FETCH_HEAD` Permission denied. Include FETCH_HEAD in read-only capability preflight and prove matching failure classification.
+
+- [ ] **P2-15: Docker inventory omits inspectable running container and its image; expose completeness clearly.** (legacy #2)
+  `docker_inspect(opencode-adapter)` showed RUNNING/HEALTHY while bounded `docker_ps` and `docker_images` omitted it. Inventory must carry accurate completeness/paging and never infer absence from partial scans.
+
+- [ ] **P2-16: Registered candidate cannot fetch new main when updating stale PR.** (legacy #3)
+  Registered candidate with trusted exact main SHA was denied `git_fetch_ref` and lacked local `main` for merge; implement guarded verified same-repo fetch/merge without loosening host-key or lineage policy.
+
+- [ ] **P2-17: Reconcile ambiguous merge attempts when CI evidence read fails but PR becomes merged.** (legacy #4)
+  Father UI PR #48 returned `CI_EVIDENCE_INCOMPLETE` while later observed merged; resolve stale/ambiguous responses by exact post-state/head/base/job audit before retries.
+
+## P3 — Optional capabilities and ergonomics (9)
+
+- [ ] **P3-01: Make candidate preparation observable and cancellable.** (legacy #36)
+  Slow `prepare_candidate_clone` calls should support async mode, progress phases, cancellation before registration, and idempotent retry while keeping the current synchronous path for small clones.
+
+- [ ] **P3-02: Expose first-class bounded health and HTTP smoke probes.** (legacy #37)
+  Add internal and public HTTP/TCP probes with allowlisted method/host/path, bounded response bytes, timeout, provenance, redirect/status/body metadata, and clear DNS/refused/timeout/non-2xx diagnostics.
+
+- [ ] **P3-03: Bridge frontend/Astro delivery to the existing builder/runtime path.** (legacy #38)
+  Frontend repos need typed build/smoke/deploy adapters that detect package manager/lockfile/service identity, use the approved Astro/builder substrate or bounded Node container, and return build/up/smoke evidence without raw `npm` or ad-hoc deploy scripts.
+
+- [ ] **P3-04: Model agent roles and authoritative closeout explicitly.** (legacy #40)
+  Agent reports may say implementation/review/checks are complete, but should not self-close findings or mark a project ready. Gateway should preserve role, scope, exact source/diff/check evidence and allow multiple isolated implementer/reviewer/adversarial lanes without workspace/proxy collisions.
+
+- [ ] **P3-05: Improve operator-safe command-plane recovery helpers.** (legacy #41)
+  Provide typed local branch switch/sync, safe scratch cleanup, project-level Docker/build diagnostics and policy-denial guidance so operators do not need raw shell fallbacks for common recovery actions.
+
+- [ ] **P3-06: Add session-scoped tool-schema caching with explicit invalidation.** (legacy #45)
+  Long-lived clients currently rediscover callable tool schemas repeatedly, and a partial catalog during gateway boot can look like a permanent capability loss. Define an etag/build-id based cache contract so schemas may be reused while the plane is stable and are invalidated on build or plane-state change; do not weaken authentication or server-side authorization checks.
+
+- [ ] **P3-07: Expose guarded Gitea issue-state mutation.** (legacy #52)
+  The external surface can list/read Gitea issues but cannot reconcile an issue to closed after its fix is independently proven. Add a same-repository issue-state mutation with fresh expected-state/version fencing, narrow field allowlisting, audit evidence and post-write verification. Acceptance covers close success, already-closed idempotence, concurrent-state mismatch, missing issue and remote failure with zero unintended mutation.
+
+- [ ] **P3-08: Add guarded bulk tree / multi-file candidate bootstrap.** (legacy #53)
+  Greenfield packages currently require many sequential single-file workspace writes and pre-created directories. Add a bounded `workspace_apply_tree` or equivalent patchset/materialization primitive with file-count/byte limits, project-relative path validation, parent creation under policy, aggregate and per-file hashes, dry-run support and atomic/fail-closed semantics. Acceptance includes a ≥10-file bootstrap plus traversal/oversize/partial-failure tests.
+
+- [ ] **P3-09: Recover and review the local Selenium session reaper before worktree cleanup.** (legacy #54)
+  <!-- gateway-todo-key: local-selenium-session-reaper-unreviewed --> **Severity:** P3
+  **Acceptance:** determine if retained local unique commit `4fc863ef` is safe and still applicable; qualify isolated regressions and deliver via reviewed PR or preserve/archive it with provenance before guarded cleanup.
+
+## External tracking (not counted twice)
+
+- Coordination browser [#636](https://git.xloud.ru/gpakoh/agent-ssh-gateway/issues/636): MCP board/inbox already released; operator-only read-only PAT and live browser acceptance are outstanding. Former 500+ Issues blanket read failure was addressed by merged PR #633; do not restore the closed intake.
+- Candidate terminal clearance: [#634](https://git.xloud.ru/gpakoh/agent-ssh-gateway/issues/634), [#640](https://git.xloud.ru/gpakoh/agent-ssh-gateway/issues/640), PR #643 — covered by P1-01; diagnostic-only PR is not cleanup approval.
+- Executor: [#639](https://git.xloud.ru/gpakoh/agent-ssh-gateway/issues/639), [#642](https://git.xloud.ru/gpakoh/agent-ssh-gateway/issues/642) — covered by P1-09; failed historical canary must not be rerun blindly.
+
+**Reconciled/omitted as already closed on master:** local stale former #23 (candidate-verifier concurrency), #33 (agent envelope), #35 (project catalog), #46 (`info` command), #50 (guarded parent creation), old coordination 500-row blanket issue. Two pip-only verifier reports were merged into former #14; `source_mode` callable enum into former #6. No user source files or other repositories are modified by this TODO update.
+
+**Closure rule:** Remove an item only with exact-revision acceptance evidence in PR/Issue history and, for deploy/security behavior, verified running-state evidence. Keep historical test logs and finished steps out of the active TODO.

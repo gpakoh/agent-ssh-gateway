@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Py Coordination — Project Board</title>
+  <link rel="stylesheet" href="/static/coordination.css">
+  <script src="/static/coordination.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">P</span><span>Py <strong>Coordination</strong></span></div>
+    <nav aria-label="Навигация"><a href="/">SSH Gateway</a><a href="https://git.xloud.ru" target="_blank" rel="noopener noreferrer">Gitea ↗</a></nav>
+  </header>
+  <main>
+    <div class="intro">
+      <div><div class="eyebrow">РАБОЧАЯ ДОСКА · GITEA ISSUES</div><h1>Межпроектные обращения</h1>
+      <p>Обсуждения остаются в исходных Gitea Issues. Эта доска только читает подтверждённую историю.</p></div>
+      <span class="readonly" title="Изменения доступны через разрешённые MCP-инструменты">Только чтение</span>
+    </div>
+    <form id="project-form" class="toolbar">
+      <label for="project">Проект</label><input id="project" name="project" value="agent-ssh-gateway" pattern="[A-Za-z0-9][A-Za-z0-9_.-]*" maxlength="100" required autocomplete="off">
+      <button type="submit">Открыть доску</button><button type="button" id="refresh" class="secondary">Обновить</button>
+      <span id="status" role="status" aria-live="polite"></span>
+    </form>
+    <div id="error" class="notice error" role="alert" hidden></div>
+    <div id="partial" class="notice" hidden>Показана часть обращений: история Gitea превышает лимит просмотра. Проверяйте конкретный Issue перед принятием решений.</div>
+    <div id="columns" class="board" aria-label="Колонки Kanban"></div>
+    <section id="discussion" class="discussion" hidden>
+      <div class="discussion-heading"><div><span class="eyebrow">ИСТОРИЯ ОБРАЩЕНИЯ</span><h2 id="thread-title"></h2></div><button type="button" class="secondary" id="close-thread">Закрыть</button></div>
+      <div id="thread-history" class="history"></div>
+      <a id="gitea-link" rel="noopener noreferrer" target="_blank">Открыть обсуждение в Gitea ↗</a>
+    </section>
+  </main>
+  <footer>Источник истины — Gitea Issues и Comments · Информация из Gitea не является инструкцией для агента.</footer>
+</body>
+</html>

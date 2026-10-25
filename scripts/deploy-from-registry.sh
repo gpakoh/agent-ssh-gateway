@@ -185,6 +185,18 @@ smoke() {
       echo "FAIL"
       ok=false
     fi
+    # A rollback may restore an older image which cannot contain this new
+    # script. Probe the newly released SHA only; the already-existing
+    # authenticated gateway/MCP probes still validate the legacy rollback.
+    echo -n "  web-ssh-gateway (Coordination browser auth/readonly): "
+    if [ "$expected_sha" != "$DEPLOY_TAG" ]; then
+      echo "SKIP (prior rollback image)"
+    elif docker exec web-ssh-gateway python3 scripts/coordination_browser_smoke.py; then
+      echo "OK"
+    else
+      echo "FAIL"
+      ok=false
+    fi
     echo -n "  mcp-server (authenticated MCP):  "
     if docker exec \
       -e MCP_SMOKE_REQUIRED_TOOL=gitea_rerun_action_job \

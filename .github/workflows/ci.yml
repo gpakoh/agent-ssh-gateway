@@ -1631,9 +1631,13 @@ jobs:
           # regardless of where this script itself runs, avoiding the
           # curl-from-sibling-container problem without needing the
           # stricter Health.Status signal at all.
+          # On busy CI runners the independent web image may spend over a minute
+          # initializing the auth database before its HTTP endpoint is ready.
+          # Keep the exact HTTP 200 readiness gate, but allow a bounded 90-probe
+          # cold-start window; do not use standalone Docker health status here.
           echo "Waiting for web-ssh-gateway to answer /health..."
           up=false
-          for _ in $(seq 1 30); do
+          for _ in $(seq 1 90); do
             if ! docker inspect --format '{{.State.Running}}' "$GW_NAME" 2>/dev/null | grep -q true; then
               echo "::error::web-ssh-gateway container exited early"
               break

@@ -39,6 +39,7 @@ from app.models import (
 from app.project_analytics import ProjectAnalytics
 from app.redis_queue import RedisJobQueue
 from app.routers.auth import router as auth_identity_router
+from app.routers.coordination import router as coordination_router
 from app.routers.oauth import router as oauth_router
 from app.search_replace import GlobalSearchReplace
 from app.security import (
@@ -1383,6 +1384,7 @@ from app.routers.workspace import router as workspace_router  # noqa: E402
 app.include_router(batch_router)
 app.include_router(diagnostics_router)
 app.include_router(code_router)
+app.include_router(coordination_router)
 app.include_router(project_inspection_router)
 app.include_router(ssh_router)
 app.include_router(files_router)

@@ -608,6 +608,7 @@ async def _gateway_tools_manifest_protocol(
 from examples.mcp_server.mcp_infra.adapters import (  # noqa: E402
     agent,
     context7,
+    coordination_adapter,
     docker,
     gateway,
     postgres,
@@ -625,6 +626,14 @@ gateway_workspace_preview_edit = workspace.gateway_workspace_preview_edit
 gateway_workspace_preview_patch = workspace.gateway_workspace_preview_patch
 gateway_workspace_verify = workspace.gateway_workspace_verify
 gateway_todo_backlog_upsert = workspace.gateway_todo_backlog_upsert
+
+coord_inbox = coordination_adapter.coord_inbox
+coord_board = coordination_adapter.coord_board
+coord_open = coordination_adapter.coord_open
+coord_create = coordination_adapter.coord_create
+coord_reply = coordination_adapter.coord_reply
+coord_accept = coordination_adapter.coord_accept
+coord_update = coordination_adapter.coord_update
 
 gitea_get_repo = remote.gitea_get_repo
 gitea_list_branches = remote.gitea_list_branches
@@ -673,6 +682,7 @@ gateway_run_agent = agent.gateway_run_agent
 
 agent.register_all()
 context7.register_all()
+coordination_adapter.register_all()
 workspace.register_all()
 docker.register_all()
 gateway.register_all()
