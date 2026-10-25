@@ -1,7 +1,7 @@
 # SSH Gateway deploy-state trust migration
 
-**Status:** one-time exact-release CI bootstrap for the independently verified
-2026-10-25 release, or manual operator qualification for other baselines.
+**Status:** production migration qualified on 2026-10-25 by exact-master
+CI #19743. One-time bootstrap remains restricted to the attested baseline.
 Do not delete/rewrite the original historical host receipt.
 
 ## Exact-release qualified CI bootstrap
@@ -86,9 +86,21 @@ system.
 
 ## Delivery gate
 
-This security PR may be reviewed and tested in isolation, but deployment must
-not proceed until the trusted volume is provisioned and the independent
-source-of-truth validation has completed, either by the exact-release
-CI bootstrap or by the manual operator path. The old red `deploy` run
-#19021 and the published SHA tags must not be reinterpreted as a successful
-host-smoke or authenticated rollback receipt.
+**Accepted production evidence, 2026-10-25:** PRs #631 (fail-closed atomic
+receipt), #661 (dedicated-volume ownership) and #662 (Python 3.10 support)
+were merged and their branches removed. Gitea Actions run #19743 completed
+SUCCESS at master SHA `9f7baa48760fba85f52c77fe4e055a5f7ac42a34`,
+with `build-and-push`, `deploy`, and `host-smoke` all SUCCESS. The deploy job
+first logged `Seeded trusted baseline LKG for attested release
+b4c6c9c6d268f8db638f22d4c9256832dddcd875` (previous successful
+build/deploy/host-smoke #19659), then `Deploy OK — recorded as last known
+good.` The host-smoke verified exact `BUILD_SHA` for gateway/MCP/OAuth
+and completed 16 selected tests (16 passed; 1 collection skip). Independently
+inspected five live healthy containers (zero restarts) and verified immutable
+refs for gateway `sha256:7599a69010161431931d1638853761023aaab7687e524bc567c0be9d3965902d`,
+MCP/OAuth `sha256:4c7ec7ad668c86820a70b94bf95c5e691ec70f67f4dff1b74d540426cee57d8e`,
+and SSHD `sha256:4a4bd538003b4bc80e9e40380f01852d84d63c2ef26b58d28d308bdae387123f`.
+This qualifies the initial trusted migration and release, not an exercised
+disaster-recovery rollback. Retain fail-closed behavior and independent
+qualification requirements for any new baseline. Historical failed deploys
+#19021, #19716, and #19730 remain failures, not alternative evidence.
