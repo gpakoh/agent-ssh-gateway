@@ -39,6 +39,7 @@ def test_isolated_smoke_checks_effective_config_and_real_authentication() -> Non
     assert "sha256:" in script
     assert "sshd -T -C user=mcpuser,host=localhost,addr=127.0.0.1" in script
     assert "grep -Eq" in script and "/etc/shadow" in script
+    assert 'chmod 600 /tmp/smoke_key' in script
     assert "PreferredAuthentications=publickey" in script
     assert "PreferredAuthentications=password" in script
     assert "pubkeyauthentication yes" in script

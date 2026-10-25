@@ -36,6 +36,9 @@ docker run --rm --network none --entrypoint /usr/local/bin/sshd-entrypoint \
 
   # Disposable key only in this one-shot test container, never in the image.
   ssh-keygen -q -t ed25519 -N "" -f /tmp/smoke_key
+  # CI containers may use a permissive inherited umask: OpenSSH refuses
+  # private keys with group/other access even when the server accepts the key.
+  chmod 600 /tmp/smoke_key
   # Confirm that the test key really contains a readable signing private key.
   ssh-keygen -y -f /tmp/smoke_key >/tmp/derived.pub
   # The .pub line can include an optional comment; compare the key itself.
