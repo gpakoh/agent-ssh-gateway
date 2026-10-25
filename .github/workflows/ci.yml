@@ -2127,27 +2127,7 @@ jobs:
           done
 
       - name: Verify effective key-only SSH auth on both live executors
-        run: |
-          set -euo pipefail
-          for name in ssh-gateway-sshd ssh-gateway-agent-sshd; do
-            effective="$(docker exec "$name" sshd -T -C user=mcpuser,host=localhost,addr=127.0.0.1)"
-            for setting in \
-              "passwordauthentication no" \
-              "kbdinteractiveauthentication no" \
-              "permitemptypasswords no" \
-              "pubkeyauthentication yes" \
-              "authenticationmethods publickey"; do
-              printf '%s\n' "$effective" | grep -Fqx "$setting" || {
-                echo "::error::$name is missing effective SSH setting: $setting"
-                exit 1
-              }
-            done
-            docker exec "$name" /bin/sh -c 'grep -Eq "^mcpuser:NP:" /etc/shadow' || {
-              echo "::error::$name is missing the non-crypt mcpuser password sentinel"
-              exit 1
-            }
-            echo "$name: effective key-only SSH authentication PASS"
-          done
+        run: bash scripts/ci-sshd-live-auth-check.sh "${{ github.sha }}"
 
       - name: Make host-smoke (full suite)
         run: /media/1TB/Anaconda/bin/uv run make host-smoke

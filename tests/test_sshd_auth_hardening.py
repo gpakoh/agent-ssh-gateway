@@ -53,11 +53,18 @@ def test_premerge_ci_checks_exact_built_image_before_push() -> None:
     smoke = 'bash scripts/ci-sshd-auth-smoke.sh "$CI_SMOKE_SSHD_IMAGE_ID"'
     assert smoke in ci
     assert ci.index(smoke) < ci.index("- name: Push web-ssh-gateway image")
-    # Both real runtime services must be validated after rollout.
+    # Live validation is a separate script; the workflow only orchestrates it.
+    assert 'bash scripts/ci-sshd-live-auth-check.sh "${{ github.sha }}"' in ci
     verify = "- name: Verify effective key-only SSH auth on both live executors"
-    assert verify in ci
-    check = ci[ci.index(verify) : ci.index("- name: Make host-smoke (full suite)")]
-    assert "ssh-gateway-sshd ssh-gateway-agent-sshd" in check
-    assert "sshd -T -C user=mcpuser" in check
-    assert "/etc/shadow" in check
-    assert "authenticationmethods publickey" in check
+    assert ci.index(verify) < ci.index("- name: Make host-smoke (full suite)")
+
+
+def test_postdeploy_verifier_has_single_scoped_responsibility() -> None:
+    script = (ROOT / "scripts/ci-sshd-live-auth-check.sh").read_text(encoding="utf-8")
+    assert "verify_live_executor ssh-gateway-sshd" in script
+    assert "verify_live_executor ssh-gateway-agent-sshd" in script
+    assert 'running_sha="$(docker exec "$name" printenv BUILD_SHA)"' in script
+    assert "sshd -T -C user=mcpuser,host=localhost,addr=127.0.0.1" in script
+    assert "authenticationmethods publickey" in script
+    assert 'grep -Eq "^mcpuser:NP:" /etc/shadow' in script
+    assert "docker run" not in script

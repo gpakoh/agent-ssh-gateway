@@ -40,7 +40,8 @@ docker run --rm --network none --entrypoint /usr/local/bin/sshd-entrypoint \
   chown mcpuser:mcpuser /home/mcpuser/.ssh/authorized_keys
   chmod 600 /home/mcpuser/.ssh/authorized_keys
 
-  /usr/sbin/sshd -D -p 2222 >/tmp/sshd.log 2>&1 &
+  # Keep debug logs within this isolated ephemeral container; no production logs.
+  /usr/sbin/sshd -D -e -o LogLevel=DEBUG3 -p 2222 >/tmp/sshd.log 2>&1 &
   sshd_pid=$!
   trap "kill $sshd_pid 2>/dev/null || true" EXIT HUP INT TERM
 
@@ -48,7 +49,7 @@ docker run --rm --network none --entrypoint /usr/local/bin/sshd-entrypoint \
   connected=false
   n=0
   while [ "$n" -lt 8 ]; do
-    if ssh -F /dev/null -n \
+    if ssh -F /dev/null -vv -n \
       -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
       -o IdentitiesOnly=yes -o ConnectTimeout=2 -o BatchMode=yes \
       -o PreferredAuthentications=publickey \
