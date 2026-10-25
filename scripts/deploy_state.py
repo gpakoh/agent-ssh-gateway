@@ -142,7 +142,8 @@ def main(argv: list[str]) -> None:
                 "mcp_server_image": mcp,
                 "sshd_image": sshd,
                 "deploy_sha": sha,
-                "deployed_at": dt.datetime.now(dt.UTC).isoformat(),
+                # CI deploy runner may run Python 3.10 (datetime.UTC requires 3.11).
+                "deployed_at": dt.datetime.now(dt.timezone.utc).isoformat(),  # noqa: UP017
             }
             _write(fd, document)
     finally:

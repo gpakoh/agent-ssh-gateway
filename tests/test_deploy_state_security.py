@@ -56,6 +56,21 @@ def test_private_state_write_is_atomic_and_readable(tmp_path: Path) -> None:
     assert {x.name for x in directory.iterdir()} == {FILENAME}
 
 
+def test_write_on_python_without_datetime_utc_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deploy runner may use Python 3.10: datetime.UTC arrived in 3.11."""
+    from scripts import deploy_state
+
+    directory = private_directory(tmp_path)
+    monkeypatch.delattr(deploy_state.dt, "UTC", raising=False)
+    deploy_state.main(["write", str(directory), GW, MCP, SSHD, SHA])
+    doc = json.loads((directory / FILENAME).read_text())
+    when = deploy_state.dt.datetime.fromisoformat(doc["deployed_at"])
+    assert when.utcoffset() == deploy_state.dt.timedelta(0)
+    assert doc["deploy_sha"] == SHA
+
+
 @pytest.mark.parametrize("mode", [0o777, 0o755, 0o770])
 def test_rejects_nonprivate_directory_before_writing(tmp_path: Path, mode: int) -> None:
     directory = private_directory(tmp_path)
