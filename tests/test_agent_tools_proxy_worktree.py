@@ -31,6 +31,7 @@ from examples.mcp_server.agent_tools import (
     _isolated_worktree_error,
     _parent_prerun_snapshot_script_lines,
     _proxy_report_script_lines,
+    _proxy_startup_cooldown_script_lines,
     _read_task_json,
     _runner_artifact_io_script_lines,
     _supervisor_postrun_script_lines,
@@ -155,6 +156,58 @@ class TestProxyReportScriptLines:
             timeout=5,
         )
         assert proc.returncode == expected
+
+
+    @pytest.mark.parametrize(
+        ("http_status", "should_report_failure"), [(200, False), (503, True)]
+    )
+    def test_startup_cooldown_report_is_best_effort_but_observable(
+        self, tmp_path: Path, http_status: int, should_report_failure: bool
+    ):
+        """A rejected cooldown never fails OpenCode and never leaks the proxy."""
+        captured: list[dict[str, object]] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                captured.append(json.loads(body))
+                self.send_response(http_status)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, fmt, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            secret_proxy = "http://redacted-proxy.invalid:2468"
+            report_url = f"http://127.0.0.1:{server.server_port}/proxy?format=provider"
+            script = "\n".join(
+                [
+                    f"td={shlex.quote(str(tmp_path))}",
+                    f"OPENCODE_PROXY_URL={shlex.quote(secret_proxy)}",
+                    "runner_artifact_append_line() { printf '%s\\n' \"$2\" >> \"$1\"; }",
+                    *_proxy_startup_cooldown_script_lines(report_url, "2"),
+                    "printf 'runner-continues\\n'",
+                ]
+            )
+            result = subprocess.run(
+                ["sh", "-eu"], input=script, text=True,
+                capture_output=True, timeout=10,
+            )
+            assert result.returncode == 0, result.stderr
+            assert result.stdout.strip() == "runner-continues"
+            assert captured == [{"proxy": secret_proxy, "retry_after_seconds": 300}]
+            status_file = tmp_path / "agent-status.md"
+            status = status_file.read_text() if status_file.exists() else ""
+            assert ("Proxy startup cooldown report not acknowledged" in status) is should_report_failure
+            assert secret_proxy not in status + result.stdout + result.stderr
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
 
 class TestBuildOpencodeScriptProxy:
