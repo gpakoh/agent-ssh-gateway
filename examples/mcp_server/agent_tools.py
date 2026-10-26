@@ -2099,6 +2099,54 @@ def atomic_json(path, payload):
         tmp.unlink(missing_ok=True)
 
 
+def run_bounded_upgrade(upgrade_home, upgrade_env, expected_sha256):
+    # A zero exit code does not mean the CLI obtained a release decision.
+    # Retry only an explicit update-discovery failure with no binary writes.
+    deadline = time.monotonic() + timeout
+    staged = upgrade_home / ".opencode" / "bin" / "opencode"
+    for attempt in range(2):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            fail("upgrade_check_unavailable", "upgrade retry budget exhausted")
+        try:
+            result = subprocess.run(
+                [str(managed), "upgrade", "--method", "curl"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=remaining,
+                check=False,
+                env=upgrade_env,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            fail("upgrade_command_failed", exc)
+        normalized_output = " ".join(result.stdout.lower().split())
+        unavailable = any(
+            phrase in normalized_output
+            for phrase in (
+                "couldn't check for updates",
+                "could not check for updates",
+                "unable to check for updates",
+            )
+        )
+        if not unavailable:
+            return result
+        if (
+            attempt == 1
+            or result.returncode != 0
+            or staged.exists()
+            or staged.is_symlink()
+            or digest_file(managed) != expected_sha256
+            or deadline - time.monotonic() <= 1
+        ):
+            fail("upgrade_check_unavailable", f"attempt={attempt + 1}: {result.stdout}")
+        time.sleep(1)
+    fail("upgrade_check_unavailable", "upgrade retry budget exhausted")
+
+
 if interval <= 0 or timeout <= 0:
     fail("invalid_config", "interval and timeout must be positive")
 if re.fullmatch(r"\\d+\\.\\d+\\.\\d+", minimum_version) is None:
@@ -2209,21 +2257,7 @@ with os.fdopen(lock_fd, "a+") as lock_handle:
     upgrade_env["HOME"] = str(upgrade_home)
     upgrade_env["OPENCODE_INSTALL_DIR"] = str(managed.parent)
     try:
-        try:
-            upgraded = subprocess.run(
-                [str(managed), "upgrade", "--method", "curl"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout,
-                check=False,
-                env=upgrade_env,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            fail("upgrade_command_failed", exc)
+        upgraded = run_bounded_upgrade(upgrade_home, upgrade_env, current_digest)
         if upgraded.returncode != 0:
             fail("upgrade_command_failed", upgraded.stdout)
 
