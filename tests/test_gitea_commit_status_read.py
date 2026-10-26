@@ -20,6 +20,14 @@ from examples.mcp_server.mcp_infra.adapters import remote
 SHA = "a" * 40
 
 
+def test_commit_status_read_is_available_in_both_mcp_client_modes():
+    from examples.mcp_server.tool_modes import tools_for_mode
+
+    for mode in ("mcp_client", "mcp_client_write"):
+        assert "gitea_list_commit_statuses" in tools_for_mode(mode)
+    assert "gitea_list_commit_statuses" not in tools_for_mode("standard")
+
+
 @pytest.mark.asyncio
 async def test_statuses_exact_endpoint_bounded_and_minimized(monkeypatch):
     get = AsyncMock(return_value=[
