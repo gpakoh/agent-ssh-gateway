@@ -1,7 +1,9 @@
-FROM alpine:3.19
+FROM alpine:3.22.7
 
 ARG OPENCODE_VERSION=1.18.16
 ARG UV_VERSION=0.12.5
+ARG NODEJS_APK_VERSION=22.23.4-r0
+ARG NPM_APK_VERSION=11.6.4-r0
 
 # python3: the generated agent script (agent_tools.py) runs python3 heredocs
 # on the SSH target for proxy lease (fetch) and limit reporting (report).
@@ -18,10 +20,17 @@ ARG UV_VERSION=0.12.5
 # while fetching an anonymous registry metadata token.
 # ripgrep: OpenCode's repo tools (grep/search) shell out to `rg`; the agent's
 # SSH session needs the binary on PATH to search the executor workspace.
+# nodejs/npm: the identical SHA-pinned SSHD image is used for both OpenCode
+# execution and trusted candidate verification (MCP_VERIFIER_IMAGE). Pin the
+# Alpine 3.22 Node 22/npm package versions and assert the major at build time;
+# JS/Astro checks must not fail because either trusted execution plane lacks npm.
 # OpenSSH rejects a locked shadow account even if it has a valid authorized key.
 # Use a non-crypt NP shadow sentinel: account stays enabled for public-key auth
 # without provisioning an actual password or usable password hash.
-RUN apk add --no-cache openssh-server openssh-client-default git curl bash python3 py3-pip ripgrep && \
+RUN apk add --no-cache openssh-server openssh-client-default git curl bash python3 py3-pip ripgrep \
+        "nodejs=${NODEJS_APK_VERSION}" "npm=${NPM_APK_VERSION}" && \
+    test "$(node -p 'process.versions.node.split(".")[0]')" = "22" && \
+    node --version && npm --version && \
     python3 -m pip install --no-cache-dir --break-system-packages "uv==${UV_VERSION}" && \
     adduser -D mcpuser && \
     sed -i 's/^mcpuser:[^:]*:/mcpuser:NP:/' /etc/shadow && \
