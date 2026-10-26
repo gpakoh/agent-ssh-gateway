@@ -2307,6 +2307,16 @@ def _agent_startup_diagnostics(
     proxy_sidecar_observed = bool(
         proxy_status.get("exists") and proxy_status.get("valid")
     )
+    # The runner overwrites the status/log tail after a successful retry.
+    # Its final attempt number still proves how many proxies were rotated.
+    sidecar_rotations = (
+        proxy_attempt - 1
+        if proxy_sidecar_observed
+        and type(proxy_attempt) is int
+        and type(proxy_max_attempts) is int
+        and 1 <= proxy_attempt <= proxy_max_attempts
+        else 0
+    )
     proxy_outcome = proxy_status.get("final_outcome")
     # Merely acquiring a proxy is normal startup, not evidence of a stall.
     # Treat only explicit runner-owned rotation/exhaustion evidence as stalled;
@@ -2373,7 +2383,7 @@ def _agent_startup_diagnostics(
                 if isinstance(proxy_max_attempts, int)
                 else (max(max_attempts) if max_attempts else None)
             ),
-            "count": len(rotation_matches),
+            "count": max(len(rotation_matches), sidecar_rotations),
             "sidecar": proxy_sidecar_observed,
         },
         "useful_agent_activity_seen": useful_agent_activity_seen,
