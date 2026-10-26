@@ -209,6 +209,80 @@ class TestProxyReportScriptLines:
             server.server_close()
             thread.join(timeout=5)
 
+    @pytest.mark.parametrize("report_kind", ["startup", "rate_limit"])
+    def test_provider_cooldown_bypasses_failed_worker_proxy(
+        self, tmp_path: Path, report_kind: str
+    ):
+        """Control-plane reporting must not traverse the leased worker proxy."""
+        captured: list[dict[str, object]] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                captured.append(json.loads(body))
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, fmt, *args):
+                pass
+
+        # 127.0.0.2 is reachable directly on Linux, but deliberately absent
+        # from NO_PROXY so a normal urllib opener hits the broken HTTP_PROXY.
+        server = ThreadingHTTPServer(("127.0.0.2", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            report_url = f"http://127.0.0.2:{server.server_port}/proxy?format=provider"
+            secret_proxy = "http://worker-proxy.invalid:2468"
+            log = tmp_path / "worker.log"
+            log.write_text("Error: quota exceeded\n", encoding="utf-8")
+            script_lines = [
+                f"td={shlex.quote(str(tmp_path))}",
+                f"OPENCODE_PROXY_URL={shlex.quote(secret_proxy)}",
+                f"RUNNER_OUTPUT_LOG={shlex.quote(str(log))}",
+                "RC=1",
+                "RATE_LIMITED=0",
+                "runner_artifact_append_line() { printf '%s\\n' \"$2\" >> \"$1\"; }",
+            ]
+            if report_kind == "startup":
+                script_lines.extend(_proxy_startup_cooldown_script_lines(report_url, "2"))
+            else:
+                script_lines.extend(_proxy_report_script_lines(report_url, "2"))
+            env = os.environ.copy()
+            env.update(
+                {
+                    "HTTP_PROXY": "http://127.0.0.1:1",
+                    "HTTPS_PROXY": "http://127.0.0.1:1",
+                    "ALL_PROXY": "http://127.0.0.1:1",
+                    "http_proxy": "http://127.0.0.1:1",
+                    "https_proxy": "http://127.0.0.1:1",
+                    "all_proxy": "http://127.0.0.1:1",
+                    "NO_PROXY": "localhost,127.0.0.1",
+                    "no_proxy": "localhost,127.0.0.1",
+                }
+            )
+            result = subprocess.run(
+                ["sh", "-eu"],
+                input="\n".join(script_lines),
+                text=True,
+                capture_output=True,
+                timeout=10,
+                env=env,
+            )
+            assert result.returncode == 0, result.stderr
+            assert captured == [{"proxy": secret_proxy, "retry_after_seconds": 300}]
+            assert secret_proxy not in result.stdout + result.stderr
+            status_file = tmp_path / "agent-status.md"
+            status = (
+                status_file.read_text(encoding="utf-8") if status_file.exists() else ""
+            )
+            assert "not acknowledged" not in status
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
 
 class TestBuildOpencodeScriptProxy:
     def test_fetch_and_report_wired_when_env_set(self, monkeypatch):
