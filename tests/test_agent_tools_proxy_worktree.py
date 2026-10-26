@@ -104,6 +104,58 @@ class TestProxyReportScriptLines:
         lines = "\n".join(_proxy_report_script_lines(PROVIDER, "5"))
         assert "RETRY_AFTER=300" in lines
 
+    @pytest.mark.parametrize(
+        ("worker_rc", "output"),
+        [
+            (0, "HTTP 429: quota exceeded"),
+            (1, "ValueError: No closing quotation"),
+            (1, "Explaining a quoted argument, not a provider limit problem"),
+        ],
+    )
+    def test_success_or_non_limit_words_do_not_cooldown_proxy(
+        self, tmp_path: Path, worker_rc: int, output: str
+    ):
+        """Real shell guard and grep: no false proxy cooldown or exit 77."""
+        log = tmp_path / "worker.log"
+        log.write_text(output + "\n")
+        script = "\n".join(
+            [
+                f"RC={worker_rc}",
+                "RATE_LIMITED=0",
+                f"RUNNER_OUTPUT_LOG={shlex.quote(str(log))}",
+                "OPENCODE_PROXY_URL=http://127.0.0.1:1",
+                "td=/tmp",
+                "runner_artifact_append_line() { :; }",
+                *_proxy_report_script_lines("http://127.0.0.1:1/proxy?format=provider", "1"),
+                'test "$RATE_LIMITED" -eq 0',
+            ]
+        )
+        proc = subprocess.run(
+            ["sh", "-eu"], input=script, text=True, capture_output=True, timeout=10
+        )
+        assert proc.returncode == 0, proc.stderr
+
+    @pytest.mark.parametrize(
+        ("message", "expected"),
+        [
+            ("Error: quota exceeded", 0),
+            ("Too many requests, retry later", 0),
+            ("ValueError: No closing quotation", 1),
+            ("Parsing quoted argument", 1),
+        ],
+    )
+    def test_limit_marker_matches_standalone_quota_not_quotation(
+        self, message: str, expected: int
+    ):
+        proc = subprocess.run(
+            ["grep", "-Eqi", "|".join(PROXY_LIMIT_MARKERS)],
+            input=message + "\n",
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+        assert proc.returncode == expected
+
 
 class TestBuildOpencodeScriptProxy:
     def test_fetch_and_report_wired_when_env_set(self, monkeypatch):
@@ -159,6 +211,8 @@ class TestBuildOpencodeScriptProxy:
         script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
         assert 'runner_artifact_write_line "$td/agent-status.md" "Status: rate-limited"' in script
         assert "FINAL_RC=77" in script
+        assert 'if [ "${RATE_LIMITED:-0}" = "1" ] && [ "$RC" -ne 0 ]' in script
+        assert 'if [ "${RC:-0}" -ne 0 ] && [ -n "$OPENCODE_PROXY_URL" ]' in script
         assert 'runner_artifact_write_line "$td/agent-status.md" "Status: startup-timeout"' in script
         assert 'runner_artifact_write_line "$td/agent-status.md" "Status: run-timeout"' in script
         assert '${FAILURE_REASON:-}' in script
