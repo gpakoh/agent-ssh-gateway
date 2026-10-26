@@ -20,6 +20,14 @@ from examples.mcp_server.mcp_infra.adapters import remote
 SHA = "a" * 40
 
 
+def test_commit_status_read_uses_repo_scope_without_admin():
+    from examples.mcp_server.tool_scopes import get_required_scopes, has_required_scope
+
+    assert get_required_scopes("gitea_list_commit_statuses") == ["mcp:repo"]
+    assert has_required_scope(["mcp:repo"], "gitea_list_commit_statuses")
+    assert not has_required_scope(["mcp:read"], "gitea_list_commit_statuses")
+
+
 def test_commit_status_read_is_available_in_both_mcp_client_modes():
     from examples.mcp_server.tool_modes import tools_for_mode
 

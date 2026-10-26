@@ -156,6 +156,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "gitea_get_repo": ["mcp:repo"],
     "gitea_list_branches": ["mcp:repo"],
     "gitea_list_commits": ["mcp:repo"],
+    "gitea_list_commit_statuses": ["mcp:repo"],
     "gitea_get_file": ["mcp:repo"],
     "gitea_list_issues": ["mcp:repo"],
     "gitea_get_issue": ["mcp:repo"],
