@@ -27,6 +27,7 @@ from tool_results import tool_error, tool_success, validate_pagination
 
 from examples.mcp_client_remote.fleet.gitea_client import (
     GiteaActionRunResponseError,
+    GiteaCommitStatusResponseError,
     GiteaMutationOutcomeUnknown,
 )
 from examples.mcp_client_remote.fleet.github_client import (
@@ -1031,6 +1032,43 @@ async def gitea_list_commits(
     except Exception as exc:
         return _remote_api_error("gitea_list_commits", "gitea", exc)
     return tool_success("gitea_list_commits", result=data, source="gitea")
+
+
+async def gitea_list_commit_statuses(
+    owner: str, repo: str, sha: str, page: int = 1, limit: int = 30
+) -> dict[str, Any]:
+    """Read one page of exact-SHA status contexts; never assert merged CI readiness."""
+    tool = "gitea_list_commit_statuses"
+    if not isinstance(sha, str) or len(sha) != 40 or any(ch not in "0123456789abcdef" for ch in sha):
+        return tool_error(
+            tool=tool, code="INVALID_INPUT",
+            message="sha must be an exact lowercase 40-character commit SHA", source="gitea",
+        )
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return tool_error(tool=tool, code="DEPENDENCY_MISSING", message="GITEA_TOKEN not configured", source="gitea")
+    try:
+        async with _server_gitea_client()(token) as client:
+            statuses = await client.list_commit_statuses(owner, repo, sha, page=page, limit=limit)
+    except GiteaCommitStatusResponseError as exc:
+        return tool_error(tool=tool, code="REMOTE_RESPONSE_INVALID", message=str(exc), source="gitea")
+    except Exception as exc:
+        return _remote_api_error(tool, "gitea", exc)
+    count = len(statuses)
+    return tool_success(
+        tool,
+        result={
+            "owner": owner, "repo": repo, "sha": sha,
+            "binding": "gitea_exact_sha_status_endpoint",
+            "page": page, "limit": limit, "count": count,
+            "statuses": statuses,
+            "absent": page == 1 and count == 0,
+            "complete": page == 1 and count < limit,
+            "more_pages_possible": count == limit,
+            "note": "Historical statuses, not deduplicated required checks; skipped/pending do not mean success.",
+        },
+        source="gitea",
+    )
 
 
 async def gitea_get_file(
@@ -6417,6 +6455,7 @@ def register_all() -> None:
     register_tool("gitea_get_repo")(gitea_get_repo)
     register_tool("gitea_list_branches")(gitea_list_branches)
     register_tool("gitea_list_commits")(gitea_list_commits)
+    register_tool("gitea_list_commit_statuses")(gitea_list_commit_statuses)
     register_tool("gitea_get_file")(gitea_get_file)
     register_tool("gitea_list_issues")(gitea_list_issues)
     register_tool("gitea_get_issue")(gitea_get_issue)

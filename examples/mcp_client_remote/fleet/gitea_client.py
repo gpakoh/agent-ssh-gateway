@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 
@@ -55,6 +55,7 @@ ALLOWED_ENDPOINTS = frozenset(
         "/repos/{owner}/{repo}/branches/{branch}",
         "/repos/{owner}/{repo}/branch_protections/{name}",
         "/repos/{owner}/{repo}/commits",
+        "/repos/{owner}/{repo}/statuses/{sha}",
         "/repos/{owner}/{repo}/compare/{basehead}",
         "/repos/{owner}/{repo}/contents",
         "/repos/{owner}/{repo}/contents/{path}",
@@ -149,6 +150,10 @@ class GiteaMutationOutcomeUnknown(RuntimeError):
 
 class GiteaActionRunResponseError(ValueError):
     pass
+
+
+class GiteaCommitStatusResponseError(ValueError):
+    """Malformed upstream status data must never count as passing checks."""
 
 
 def _validate_branch_name(value: str, label: str) -> str:
@@ -1006,6 +1011,69 @@ class GiteaClient:
             owner=owner,
             repo=repo,
         )
+
+    async def list_commit_statuses(
+        self, owner: str, repo: str, sha: str, *, page: int = 1, limit: int = 30
+    ) -> list[dict[str, Any]]:
+        """Read one page of statuses bound to an exact commit, never a branch."""
+        if not isinstance(sha, str) or _SHA1_RE.fullmatch(sha) is None:
+            raise ValueError("sha must be an exact lowercase 40-character commit SHA")
+        page = _validate_positive_int(page, "page")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_LIMIT:
+            raise ValueError(f"limit must be an integer from 1 to {MAX_LIMIT}")
+        data = await self._get(
+            "/repos/{owner}/{repo}/statuses/{sha}",
+            params={"page": page, "limit": limit},
+            owner=owner, repo=repo, sha=sha,
+        )
+        if not isinstance(data, list) or len(data) > limit:
+            raise GiteaCommitStatusResponseError("commit status page is malformed or exceeds limit")
+        statuses = []
+        for row in data:
+            if not isinstance(row, dict):
+                raise GiteaCommitStatusResponseError("commit status entry must be an object")
+            context, state = row.get("context"), row.get("status")
+            if not isinstance(context, str) or not context.strip() or len(context) > 255:
+                raise GiteaCommitStatusResponseError("commit status context is missing or malformed")
+            if state not in {"pending", "success", "error", "failure", "warning", "skipped"}:
+                raise GiteaCommitStatusResponseError("commit status state is unknown")
+            if "sha" in row and row["sha"] != sha:
+                raise GiteaCommitStatusResponseError("status entry references a different commit")
+            creator = row.get("creator")
+            if creator is not None and not isinstance(creator, dict):
+                raise GiteaCommitStatusResponseError("commit status creator is malformed")
+            login = creator.get("login") if creator else None
+            if login is not None and not isinstance(login, str):
+                raise GiteaCommitStatusResponseError("commit status creator login is malformed")
+            target_url = row.get("target_url")
+            if isinstance(target_url, str) and len(target_url) <= 2048:
+                try:
+                    url = urlsplit(target_url)
+                except ValueError:
+                    target_url = None
+                else:
+                    if (
+                        url.scheme not in {"https", "http"} or not url.hostname
+                        or url.username is not None or url.password is not None
+                        or url.query or url.fragment
+                    ):
+                        target_url = None
+            else:
+                target_url = None
+            status_id = row.get("id")
+            if isinstance(status_id, bool) or not isinstance(status_id, int) or status_id <= 0:
+                status_id = None
+            statuses.append({
+                "id": status_id,
+                "context": context,
+                "state": state,
+                "conclusion": None,  # The Gitea CommitStatus API has no conclusion field.
+                "target_url": target_url,
+                "creator": {"login": login} if login else None,
+                "created_at": row.get("created_at") if isinstance(row.get("created_at"), str) else None,
+                "updated_at": row.get("updated_at") if isinstance(row.get("updated_at"), str) else None,
+            })
+        return statuses
 
     async def compare_commits(
         self,
