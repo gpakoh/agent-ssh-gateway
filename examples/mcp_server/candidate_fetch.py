@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote
 
-from tool_results import tool_error, tool_success
+from tool_results import build_command_result, tool_error, tool_success
 
 
 class FetchRefError(RuntimeError):
@@ -249,10 +249,7 @@ def fetch_managed_candidate_base(
             return tool_success(
                 tool="git_fetch_ref",
                 result={
-                    "outcome": "passed",
-                    "exit_code": 0,
-                    "stdout": "",
-                    "stderr": "",
+                    **build_command_result(outcome="passed", exit_code=0, stdout="", stderr=""),
                     "project": project,
                     "remote": remote,
                     "branch": branch,

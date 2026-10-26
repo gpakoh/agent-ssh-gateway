@@ -148,6 +148,8 @@ def test_import_exact_main_preserves_existing_feature_and_origin(managed):
     result = fetch(m)
     assert result["ok"], result
     receipt = result["result"]
+    assert receipt["job_id"] is None
+    assert receipt["execution_duration_ms"] is None
     assert receipt["feature_head"] == m.head
     assert receipt["source_project"] == "source-project"
     assert receipt["owner"] == "owner" and receipt["repo"] == "repo"
