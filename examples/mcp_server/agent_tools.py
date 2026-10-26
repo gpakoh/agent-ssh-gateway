@@ -866,7 +866,7 @@ def _proxy_startup_cooldown_script_lines(provider_url: str, timeout: str) -> lis
     report_url = f"{base.scheme}://{base.netloc}/proxy/report"
     return [
         'if [ -n "${OPENCODE_PROXY_URL:-}" ]; then',
-        '  python3 - "$OPENCODE_PROXY_URL" <<\'PROXYSTARTUPREPORT_EOF\'',
+        '  if ! python3 - "$OPENCODE_PROXY_URL" <<\'PROXYSTARTUPREPORT_EOF\'',
         "import json, sys, urllib.request",
         "proxy_url = sys.argv[1]",
         f"report_url = {report_url!r}",
@@ -876,10 +876,14 @@ def _proxy_startup_cooldown_script_lines(provider_url: str, timeout: str) -> lis
         "        data=json.dumps({'proxy': proxy_url, 'retry_after_seconds': 300}).encode(),",
         "        headers={'Content-Type': 'application/json'},",
         "    )",
-        f"    urllib.request.urlopen(req, timeout={timeout})",
+        f"    with urllib.request.urlopen(req, timeout={timeout}):",
+        "        pass",
         "except Exception:",
-        "    pass",
+        "    sys.exit(1)",
         "PROXYSTARTUPREPORT_EOF",
+        "  then",
+        '    runner_artifact_append_line "$td/agent-status.md" "Proxy startup cooldown report not acknowledged"',
+        "  fi",
         "fi",
     ]
 
