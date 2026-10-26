@@ -68,6 +68,38 @@ Persistent records also store the logical `session_id`, owner token fingerprint,
 - Public Internet exposure without additional controls — a reverse proxy, TLS, and network restrictions are required.
 - Protection from malicious administrators — anyone with host-level access can bypass gateway controls.
 
+## Self-hosted CI Docker trust boundary
+
+The Gitea runner labels `docker-e2e-ci` and the Docker-backed paths in
+`ubuntu-latest` have access to a **shared host Docker daemon**. A Docker
+socket grants host-administrator-equivalent control: it is **not** an
+untrusted-PR sandbox. The build job also has a host-mounted registry credential
+path in its job container, even though its registry login and publish steps
+only execute on `master` pushes. Never treat a PR's lack of registry push as
+proof that its code cannot reach the credential or host. **Same-repository
+PR writers are therefore part of the host-admin trust boundary.**
+
+The checked-in CI workflow now requires an unambiguous same-repository
+`pull_request.head.repo.full_name` and `base.repo.full_name` before the
+`scope` job can start. All other jobs depend on that gate, and jobs that
+use Docker (`fleet-postgres`, `e2e`, `build-and-push`) also apply an
+explicit repository-origin condition. Missing origin metadata fails closed
+(skips the PR workflow, never starts Docker jobs). A protected `master`
+push is still permitted; an ordinary same-repository PR runs the usual
+checks and does not deploy.
+
+**This workflow guard is defense in depth, not a security boundary against
+an attacker who can edit workflow YAML.** An untrusted fork must never be
+able to select privileged host Docker runner labels through its own workflow
+or a modified event. Operators must separately enforce this in Gitea/runner
+configuration, restrict same-repository write access to trusted host admins,
+review runner labels and repository permissions, and ensure fork and external
+contributor workflows cannot access the shared Docker socket, host volumes,
+registry credential, or deployment secrets. Prefer ephemeral VM/daemon-per-job
+isolation if untrusted contributions need Docker tests. Do not close P1-07
+without verifying those **out-of-repository runner admission controls**
+independently of this repo-owned workflow.
+
 ## Deployment hardening checklist
 
 - Run behind TLS. Do not expose the service directly to the public Internet.

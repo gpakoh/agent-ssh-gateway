@@ -26,6 +26,10 @@ concurrency:
 
 jobs:
   scope:
+    # PRs from forks or with missing/ambiguous head-repository identity must
+    # never reach a job that can use the self-hosted Docker daemon. A skipped
+    # scope job blocks all dependent jobs, including build-and-push and E2E.
+    if: github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)
     name: Change scope
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -841,7 +845,7 @@ jobs:
 
   fleet-postgres:
     needs: [scope]
-    if: github.event_name == 'pull_request' && needs.scope.outputs.full_ci == 'true' && github.server_url != 'https://github.com'
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && needs.scope.outputs.full_ci == 'true' && github.server_url != 'https://github.com'
     name: Fleet PostgreSQL
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1063,6 +1067,7 @@ jobs:
     # namespace. The tests boot their own loopback uvicorn server and need no
     # host-specific nginx/SSH/media infrastructure.
     needs: [test]
+    if: github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)
     name: E2E (Selenium)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1440,7 +1445,7 @@ jobs:
     # deploy's container an explicit image (nod-ci-docker-e2e, the same
     # job image the Gitea runner's label already uses).
     needs: [scope]
-    if: needs.scope.outputs.full_ci == 'true' && github.server_url != 'https://github.com' && (github.event_name == 'pull_request' || (github.ref_name == 'master' && github.event_name == 'push'))
+    if: needs.scope.outputs.full_ci == 'true' && github.server_url != 'https://github.com' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository) || (github.ref_name == 'master' && github.event_name == 'push'))
     runs-on: docker-e2e-ci
     timeout-minutes: 20
     env:
