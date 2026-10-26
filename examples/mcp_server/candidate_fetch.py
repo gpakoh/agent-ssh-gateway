@@ -126,16 +126,27 @@ def _remote_lease(
     return owner, repo, heads[1]
 
 
+def _is_symbolic_ref(root: Path, ref: str) -> bool:
+    from examples.mcp_server import control_plane_git as git
+
+    result = git._run_git(["git", "symbolic-ref", "--quiet", ref], cwd=root)
+    if result.returncode not in {0, 1}:
+        raise FetchRefError("GIT_OPERATION_FAILED")
+    return result.returncode == 0
+
+
 def _publish(
     root: Path, feature: str, head: str, tracking: str, target: str, previous: str | None
 ) -> bool:
     """Atomically verify the feature ref and CAS the tracking ref only."""
+    if _is_symbolic_ref(root, tracking):
+        return False
     transaction = (
         f"start\nverify refs/heads/{feature} {head}\n"
         f"update {tracking} {target} {previous or '0' * len(target)}\nprepare\ncommit\n"
     )
     result = subprocess.run(
-        ["git", "-c", f"safe.directory={root}", "update-ref", "--stdin"],
+        ["git", "-c", f"safe.directory={root}", "update-ref", "--no-deref", "--stdin"],
         cwd=root,
         env={
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -160,7 +171,7 @@ def _staging_ref(root: Path, ref: str):
     try:
         yield
     finally:
-        result = git._run_git(["git", "update-ref", "-d", ref], cwd=root)
+        result = git._run_git(["git", "update-ref", "--no-deref", "-d", ref], cwd=root)
         if result.returncode != 0:
             raise FetchRefError("WORKSPACE_VERIFICATION_FAILED")
 
@@ -198,6 +209,8 @@ def fetch_managed_candidate_base(
             lease = _remote_lease(source, feature, branch, expected, token)
             if lease[2] != head:
                 raise FetchRefError("HEAD_MISMATCH")
+            if _is_symbolic_ref(root, tracking):
+                raise FetchRefError("WORKSPACE_CONTENDED")
             previous = git._read_ref(root, tracking)
             with tempfile.TemporaryDirectory(prefix="mcp-candidate-base-") as scratch:
                 bundle = Path(scratch) / "source.bundle"
@@ -240,11 +253,12 @@ def fetch_managed_candidate_base(
             except FetchRefError:
                 # Restore only our exact write; never replace a concurrent writer.
                 rollback = (
-                    ["git", "update-ref", tracking, previous, expected]
+                    ["git", "update-ref", "--no-deref", tracking, previous, expected]
                     if previous
-                    else ["git", "update-ref", "-d", tracking, expected]
+                    else ["git", "update-ref", "--no-deref", "-d", tracking, expected]
                 )
-                git._run_git(rollback, cwd=root)
+                if not _is_symbolic_ref(root, tracking):
+                    git._run_git(rollback, cwd=root)
                 raise
             return tool_success(
                 tool="git_fetch_ref",

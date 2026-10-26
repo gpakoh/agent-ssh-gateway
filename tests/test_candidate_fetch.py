@@ -403,3 +403,101 @@ def test_candidate_git_receives_no_transport_credentials_and_keeps_indexes(manag
     assert (m.root / ".git/index").read_bytes() == candidate_index
     assert (m.source / ".git/index").read_bytes() == source_index
     assert_preserved(m)
+
+
+@pytest.mark.parametrize("race", [False, True])
+def test_symbolic_tracking_ref_never_updates_a_local_branch(managed, monkeypatch, race):
+    from examples.mcp_server import candidate_fetch as fetcher
+
+    m = managed
+    other = "refs/heads/independent-work"
+    tracking = "refs/remotes/origin/main"
+    run(m.root, "update-ref", other, m.base)
+    if race:
+        original = fetcher._publish
+
+        def aliased(*args):
+            run(m.root, "symbolic-ref", tracking, other)
+            return original(*args)
+
+        monkeypatch.setattr(fetcher, "_publish", aliased)
+    else:
+        run(m.root, "symbolic-ref", tracking, other)
+    result = fetch(m)
+    assert run(m.root, "rev-parse", other) == m.base
+    assert not result["ok"]
+    assert run(m.root, "rev-parse", "HEAD") == m.head
+
+
+def test_temporary_ref_cleanup_does_not_delete_a_symbolic_target(managed, monkeypatch):
+    m = managed
+    other = "refs/heads/independent-work"
+    original = git._run_git
+
+    def aliased(argv, *, cwd, env=None, timeout=60):
+        result = original(argv, cwd=cwd, env=env, timeout=timeout)
+        if len(argv) > 1 and argv[1] == "fetch":
+            staging = argv[-1].split(":", 1)[1]
+            run(m.root, "update-ref", other, m.target)
+            run(m.root, "symbolic-ref", staging, other)
+        return result
+
+    monkeypatch.setattr(git, "_run_git", aliased)
+    assert fetch(m)["ok"]
+    assert run(m.root, "rev-parse", other) == m.target
+    assert run(m.root, "for-each-ref", "refs/mcp-fetch") == ""
+
+
+def test_rollback_preserves_a_concurrent_symbolic_tracking_ref(managed, monkeypatch):
+    from examples.mcp_server import candidate_fetch as fetcher
+
+    m = managed
+    original = fetcher._publish
+    other = "refs/heads/independent-work"
+    tracking = "refs/remotes/origin/main"
+
+    def aliased(*args):
+        result = original(*args)
+        assert result
+        run(m.root, "update-ref", other, m.target)
+        run(m.root, "symbolic-ref", tracking, other)
+        (m.root / "unfinished.txt").write_text("external work")
+        return result
+
+    monkeypatch.setattr(fetcher, "_publish", aliased)
+    assert not fetch(m)["ok"]
+    assert run(m.root, "rev-parse", other) == m.target
+    assert run(m.root, "symbolic-ref", tracking) == other
+
+
+@pytest.mark.parametrize("postpublish_race", [False, True])
+def test_import_missing_tracking_ref_and_exact_rollback(managed, monkeypatch, postpublish_race):
+    from examples.mcp_server import candidate_fetch as fetcher
+
+    m = managed
+    tracking = "refs/remotes/origin/main"
+    run(m.root, "update-ref", "refs/remotes/origin/source", m.base)
+    run(m.root, "update-ref", "-d", tracking)
+    assert git._read_ref(m.root, tracking) is None
+    if postpublish_race:
+        original = fetcher._publish
+
+        def dirty(*args):
+            result = original(*args)
+            assert result
+            (m.root / "external.txt").write_text("preserve external work")
+            return result
+
+        monkeypatch.setattr(fetcher, "_publish", dirty)
+    result = fetch(m)
+    if postpublish_race:
+        assert not result["ok"], result
+        assert git._read_ref(m.root, tracking) is None
+        assert (m.root / "external.txt").read_text() == "preserve external work"
+    else:
+        assert result["ok"], result
+        assert result["result"]["previous_head"] is None
+        assert git._read_ref(m.root, tracking) == m.target
+    assert git._read_ref(m.root, "refs/remotes/origin/source") == m.base
+    assert run(m.root, "rev-parse", "HEAD") == m.head
+    assert run(m.root, "for-each-ref", "refs/mcp-fetch") == ""

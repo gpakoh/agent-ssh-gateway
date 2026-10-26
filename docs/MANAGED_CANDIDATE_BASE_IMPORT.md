@@ -6,6 +6,8 @@ The bundle fallback accepts only a registered candidate with its original determ
 
 The existing trusted source publisher fetches into private staging, with credentials confined to that publisher. A self-contained exact-commit bundle is imported locally without credentials or FETCH_HEAD changes. The candidate's feature ref is verified in the same Git transaction that compare-and-swaps its remote-tracking ref. Source files/objects/refs, candidate worktree, index, feature history and origin are not rewritten. Candidate lineage locking also serializes preparation/cleanup, and temporary refs are removed before releasing that lock.
 
+Symbolic tracking references are refused. Publication, rollback and temporary-ref cleanup use no-deref operations so a symbolic alias cannot redirect writes or deletions into a local branch.
+
 The result records source/repository identity, observed feature SHA, previous and imported base SHA. It imports a base only: subsequently call `git_update_branch_by_merge` with the expected feature HEAD, review conflicts, rerun checks and push without force. Import success is not merge, CI or deployment success.
 
 Changed/missing lineage, non-default branches, missing exact base, dirty/unpushed work, SHA drift and tracking-ref races fail closed. A failed postverification restores only the exact tracking value written by this operation; a different concurrent value is preserved. If ref cleanup or storage fails after publication, the typed failure reports that a tracking update was attempted: inspect state before retrying. Immutable imported objects can remain after a rejected import, as with ordinary Git fetch.
