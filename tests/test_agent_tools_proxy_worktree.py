@@ -2601,6 +2601,120 @@ class TestScheduledOpenCodeUpgradeGate:
         monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "false")
         monkeypatch.setenv("OPENCODE_STARTUP_RESERVE_BYTES", "0")
 
+    @pytest.mark.parametrize("stage_binary", [False, True])
+    def test_unverified_upgrade_check_fails_closed(self, tmp_path, stage_binary):
+        seed = tmp_path / "opencode"
+        stage_script = (
+            '    target="$HOME/.opencode/bin/opencode"\n'
+            '    mkdir -p "$(dirname "$target")"\n'
+            "    cat > \"$target\" <<'UPGRADED'\n"
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            '  --version) echo "1.19.4"; exit 0 ;;\n'
+            '  run) echo "  --auto"; exit 0 ;;\n'
+            '  *) exit 2 ;;\n'
+            'esac\n'
+            "UPGRADED\n"
+            '    chmod 755 "$target"\n'
+            if stage_binary
+            else ""
+        )
+        seed.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            '  --version) echo "1.18.16"; exit 0 ;;\n'
+            '  upgrade)\n'
+            + stage_script
+            + '    echo "Couldn\'t check for updates"\n'
+            '    exit 0 ;;\n'
+            '  run) echo "  --auto"; exit 0 ;;\n'
+            '  *) exit 2 ;;\n'
+            'esac\n',
+            encoding="utf-8",
+        )
+        seed.chmod(0o755)
+        managed = tmp_path / "managed" / "opencode"
+        state = tmp_path / "state" / "upgrade.json"
+
+        result = subprocess.run(
+            [
+                "python3",
+                "-c",
+                _OPENCODE_UPGRADE_GATE_PY,
+                str(seed),
+                str(managed),
+                str(state),
+                "86400",
+                "10",
+                "1.18.16",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+
+        assert result.returncode == 1
+        failure = json.loads(result.stdout)
+        assert failure["reason"] == "upgrade_check_unavailable"
+        assert failure["rollback_status"] == "restored"
+        assert not state.exists()
+        assert subprocess.run(
+            [str(managed), "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip() == "1.18.16"
+
+    def test_transient_update_check_recovers_within_bounded_attempts(self, tmp_path):
+        seed = tmp_path / "opencode"
+        calls = tmp_path / "upgrade-calls"
+        seed.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            '  --version) echo "1.18.16"; exit 0 ;;\n'
+            '  upgrade)\n'
+            '    echo attempt >> "$UPGRADE_CALLS"\n'
+            '    if [ "$(wc -l < "$UPGRADE_CALLS")" = "1" ]; then\n'
+            '      echo "Couldn\'t check for updates"; exit 0\n'
+            '    fi\n'
+            '    echo "opencode upgrade skipped: 1.18.16 is already installed"\n'
+            '    exit 0 ;;\n'
+            '  run) echo "  --auto"; exit 0 ;;\n'
+            '  *) exit 2 ;;\n'
+            'esac\n',
+            encoding="utf-8",
+        )
+        seed.chmod(0o755)
+        env = os.environ.copy()
+        env["UPGRADE_CALLS"] = str(calls)
+
+        result = subprocess.run(
+            [
+                "python3",
+                "-c",
+                _OPENCODE_UPGRADE_GATE_PY,
+                str(seed),
+                str(tmp_path / "managed" / "opencode"),
+                str(tmp_path / "state" / "upgrade.json"),
+                "86400",
+                "10",
+                "1.18.16",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+
+        assert result.returncode == 0, result.stdout
+        assert json.loads(result.stdout)["gate_status"] == "checked"
+        assert calls.read_text(encoding="utf-8").splitlines() == [
+            "attempt",
+            "attempt",
+        ]
+
     def test_upgrade_runs_once_before_two_agent_launches(self, tmp_path, monkeypatch):
         source = tmp_path / "upgrade-source"
         source.mkdir()
