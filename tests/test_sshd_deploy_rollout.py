@@ -13,6 +13,26 @@ def _extract_bash_function(text: str, name: str) -> str:
     return f"{name}() {{\n" + text.split(f"{name}() {{", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
 
 
+def test_sshd_and_candidate_verifier_share_pinned_node22_toolchain() -> None:
+    compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+    services = compose["services"]
+    image = "${SSH_GATEWAY_SSHD_IMAGE:-web-ssh-gateway-sshd:latest}"
+    assert services["sshd"]["image"] == image
+    assert services["agent-sshd"]["image"] == image
+    assert f"MCP_VERIFIER_IMAGE={image}" in services["mcp-oauth"]["environment"]
+
+    dockerfile = (ROOT / "docker" / "sshd" / "Dockerfile").read_text(
+        encoding="utf-8"
+    )
+    assert dockerfile.splitlines()[0] == "FROM alpine:3.22.7"
+    assert "ARG NODEJS_APK_VERSION=22.23.4-r0" in dockerfile
+    assert "ARG NPM_APK_VERSION=11.6.4-r0" in dockerfile
+    assert '"nodejs=${NODEJS_APK_VERSION}"' in dockerfile
+    assert '"npm=${NPM_APK_VERSION}"' in dockerfile
+    assert """test "$(node -p 'process.versions.node.split(".")[0]')" = "22" """ in dockerfile
+    assert "npm --version" in dockerfile
+
+
 def test_sshd_executor_is_a_versioned_deploy_artifact() -> None:
     compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
     sshd = compose["services"]["sshd"]
