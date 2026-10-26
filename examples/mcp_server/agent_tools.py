@@ -57,7 +57,7 @@ TASKS_REL_DIR = ".ai-bridge/tasks"
 PROXY_LIMIT_MARKERS = (
     "rate limit",
     "too many requests",
-    "quota",
+    "(^|[^[:alnum:]_])quota([^[:alnum:]_]|$)",
     "credits",
     "payment required",
     "free tier",
@@ -808,7 +808,7 @@ def _proxy_report_script_lines(provider_url: str, timeout: str) -> list[str]:
     return [
         "",
         "# Give a rate-limited proxy back to the provider (POST /proxy/report)",
-        'if [ -n "$OPENCODE_PROXY_URL" ] && [ -f "$RUNNER_OUTPUT_LOG" ]; then',
+        'if [ "${RC:-0}" -ne 0 ] && [ -n "$OPENCODE_PROXY_URL" ] && [ -f "$RUNNER_OUTPUT_LOG" ]; then',
         f"  if grep -Eqi {_shell_escape(marker_pattern)} \"$RUNNER_OUTPUT_LOG\"; then",
         "    RATE_LIMITED=1",
         '    RETRY_AFTER=$(python3 - "$RUNNER_OUTPUT_LOG" <<\'PROXYRETRY_EOF\'',
@@ -2979,7 +2979,7 @@ def _build_opencode_script(
             # 76-79 are wrapper-owned terminal codes. Normalize a raw CLI
             # collision before exposing the code through the public API.
             'if [ "$FINAL_RC" -eq 76 ] && [ "$PROXY_BLOCKED" -ne 1 ]; then FINAL_RC=1; fi',
-            'if [ "${RATE_LIMITED:-0}" = "1" ] && [ "$PARENT_RC" -eq 0 ] && [ "$EVIDENCE_RC" -eq 0 ] && [ "$SCOPE_RC" -eq 0 ] && [ "$CHECKS_RC" -eq 0 ]; then FINAL_RC=77; fi',
+            'if [ "${RATE_LIMITED:-0}" = "1" ] && [ "$RC" -ne 0 ] && [ "$PARENT_RC" -eq 0 ] && [ "$EVIDENCE_RC" -eq 0 ] && [ "$SCOPE_RC" -eq 0 ] && [ "$CHECKS_RC" -eq 0 ]; then FINAL_RC=77; fi',
             'if [ "$FINAL_RC" -eq 77 ] && [ "${RATE_LIMITED:-0}" != "1" ]; then FINAL_RC=1; fi',
             'if [ "$FINAL_RC" -eq 78 ] && [ "${FAILURE_REASON:-}" != "opencode-startup-timeout" ]; then FINAL_RC=1; fi',
             'if [ "$FINAL_RC" -eq 79 ] && [ "${FAILURE_REASON:-}" != "opencode-run-timeout" ] && [ "${FAILURE_REASON:-}" != "opencode-run-idle-timeout" ]; then FINAL_RC=1; fi',
