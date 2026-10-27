@@ -639,6 +639,7 @@ coord_close = coordination_adapter.coord_close
 gitea_get_repo = remote.gitea_get_repo
 gitea_list_branches = remote.gitea_list_branches
 gitea_list_commits = remote.gitea_list_commits
+gitea_list_commit_statuses = remote.gitea_list_commit_statuses
 gitea_get_file = remote.gitea_get_file
 gitea_list_issues = remote.gitea_list_issues
 gitea_get_issue = remote.gitea_get_issue
