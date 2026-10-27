@@ -158,6 +158,17 @@ class TestValidateRequiredChecks:
         for entry in legit:
             validate_required_checks([entry])
 
+    def test_rejects_mixed_check_and_prose_as_separate_shell_statement(self):
+        with pytest.raises(ValueError, match="one command per line"):
+            validate_required_checks(["git status --short; focused pytest if feasible"])
+
+    def test_semicolon_inside_quoted_argument_is_not_a_statement_separator(self):
+        validate_required_checks(["python -c 'print(1; 2)'"])
+
+    def test_rejects_trailing_semicolon_in_check(self):
+        with pytest.raises(ValueError, match="one command per line"):
+            validate_required_checks(["pytest -q;"])
+
     def test_rejects_non_string_and_empty_entries(self):
         for bad in [None, "", "   ", "   \n\t", 42, ["nested"]]:
             with pytest.raises((TypeError, ValueError)):
