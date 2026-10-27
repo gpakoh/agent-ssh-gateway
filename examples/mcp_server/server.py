@@ -634,6 +634,7 @@ coord_create = coordination_adapter.coord_create
 coord_reply = coordination_adapter.coord_reply
 coord_accept = coordination_adapter.coord_accept
 coord_update = coordination_adapter.coord_update
+coord_close = coordination_adapter.coord_close
 
 gitea_get_repo = remote.gitea_get_repo
 gitea_list_branches = remote.gitea_list_branches

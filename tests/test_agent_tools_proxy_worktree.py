@@ -31,6 +31,7 @@ from examples.mcp_server.agent_tools import (
     _isolated_worktree_error,
     _parent_prerun_snapshot_script_lines,
     _proxy_report_script_lines,
+    _proxy_startup_cooldown_script_lines,
     _read_task_json,
     _runner_artifact_io_script_lines,
     _supervisor_postrun_script_lines,
@@ -104,6 +105,245 @@ class TestProxyReportScriptLines:
         lines = "\n".join(_proxy_report_script_lines(PROVIDER, "5"))
         assert "RETRY_AFTER=300" in lines
 
+    @pytest.mark.parametrize(
+        ("worker_rc", "output"),
+        [
+            (0, "HTTP 429: quota exceeded"),
+            (1, "ValueError: No closing quotation"),
+            (1, "Explaining a quoted argument, not a provider limit problem"),
+        ],
+    )
+    def test_success_or_non_limit_words_do_not_cooldown_proxy(
+        self, tmp_path: Path, worker_rc: int, output: str
+    ):
+        """Real shell guard and grep: no false proxy cooldown or exit 77."""
+        log = tmp_path / "worker.log"
+        log.write_text(output + "\n")
+        script = "\n".join(
+            [
+                f"RC={worker_rc}",
+                "RATE_LIMITED=0",
+                f"RUNNER_OUTPUT_LOG={shlex.quote(str(log))}",
+                "OPENCODE_PROXY_URL=http://127.0.0.1:1",
+                "td=/tmp",
+                "runner_artifact_append_line() { :; }",
+                *_proxy_report_script_lines("http://127.0.0.1:1/proxy?format=provider", "1"),
+                'test "$RATE_LIMITED" -eq 0',
+            ]
+        )
+        proc = subprocess.run(
+            ["sh", "-eu"], input=script, text=True, capture_output=True, timeout=10
+        )
+        assert proc.returncode == 0, proc.stderr
+
+    @pytest.mark.parametrize(
+        ("message", "expected"),
+        [
+            ("Error: quota exceeded", 0),
+            ("Too many requests, retry later", 0),
+            ("ValueError: No closing quotation", 1),
+            ("Parsing quoted argument", 1),
+        ],
+    )
+    def test_limit_marker_matches_standalone_quota_not_quotation(
+        self, message: str, expected: int
+    ):
+        proc = subprocess.run(
+            ["grep", "-Eqi", "|".join(PROXY_LIMIT_MARKERS)],
+            input=message + "\n",
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+        assert proc.returncode == expected
+
+
+    @pytest.mark.parametrize(
+        ("http_status", "should_report_failure"), [(200, False), (503, True)]
+    )
+    def test_startup_cooldown_report_is_best_effort_but_observable(
+        self, tmp_path: Path, http_status: int, should_report_failure: bool
+    ):
+        """A rejected cooldown never fails OpenCode and never leaks the proxy."""
+        captured: list[dict[str, object]] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                captured.append(json.loads(body))
+                self.send_response(http_status)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, fmt, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            secret_proxy = "http://redacted-proxy.invalid:2468"
+            report_url = f"http://127.0.0.1:{server.server_port}/proxy?format=provider"
+            script = "\n".join(
+                [
+                    f"td={shlex.quote(str(tmp_path))}",
+                    f"OPENCODE_PROXY_URL={shlex.quote(secret_proxy)}",
+                    "runner_artifact_append_line() { printf '%s\\n' \"$2\" >> \"$1\"; }",
+                    *_proxy_startup_cooldown_script_lines(report_url, "2"),
+                    "printf 'runner-continues\\n'",
+                ]
+            )
+            result = subprocess.run(
+                ["sh", "-eu"], input=script, text=True,
+                capture_output=True, timeout=10,
+            )
+            assert result.returncode == 0, result.stderr
+            assert result.stdout.strip() == "runner-continues"
+            assert captured == [{"proxy": secret_proxy, "retry_after_seconds": 300}]
+            status_file = tmp_path / "agent-status.md"
+            status = status_file.read_text() if status_file.exists() else ""
+            assert ("Proxy startup cooldown report not acknowledged" in status) is should_report_failure
+            assert secret_proxy not in status + result.stdout + result.stderr
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    @pytest.mark.parametrize("http_status", [200, 503])
+    def test_rate_limit_report_does_not_claim_failed_http_ack(
+        self, tmp_path: Path, http_status: int
+    ):
+        """An HTTP rejection must be visible without changing rate-limit classification."""
+        captured: list[dict[str, object]] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                captured.append(
+                    json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                )
+                self.send_response(http_status)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, fmt, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            secret_proxy = "http://secret-worker.invalid:2468"
+            provider_url = f"http://127.0.0.1:{server.server_port}/proxy?format=provider"
+            log = tmp_path / "worker.log"
+            log.write_text("Error: rate limit exceeded\\n", encoding="utf-8")
+            script = "\n".join(
+                [
+                    f"td={shlex.quote(str(tmp_path))}",
+                    f"RUNNER_OUTPUT_LOG={shlex.quote(str(log))}",
+                    f"OPENCODE_PROXY_URL={shlex.quote(secret_proxy)}",
+                    "RC=1",
+                    "RATE_LIMITED=0",
+                    'runner_artifact_append_line() { printf "%s\\n" "$2" >> "$1"; }',
+                    *_proxy_report_script_lines(provider_url, "2"),
+                    'test "$RATE_LIMITED" -eq 1',
+                    "printf 'runner-continues\\n'",
+                ]
+            )
+            result = subprocess.run(
+                ["sh", "-eu"],
+                input=script,
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+            assert result.returncode == 0, result.stderr
+            assert result.stdout.strip() == "runner-continues"
+            assert captured == [{"proxy": secret_proxy, "retry_after_seconds": 300}]
+            status = (tmp_path / "agent-status.md").read_text(encoding="utf-8")
+            success = "Rate limited via leased proxy — reported to provider"
+            failure = "Rate-limit cooldown report not acknowledged"
+            assert (success in status) is (http_status == 200)
+            assert (failure in status) is (http_status == 503)
+            assert secret_proxy not in status + result.stdout + result.stderr
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    @pytest.mark.parametrize("report_kind", ["startup", "rate_limit"])
+    def test_provider_cooldown_bypasses_failed_worker_proxy(
+        self, tmp_path: Path, report_kind: str
+    ):
+        """Control-plane reporting must not traverse the leased worker proxy."""
+        captured: list[dict[str, object]] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                captured.append(json.loads(body))
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, fmt, *args):
+                pass
+
+        # 127.0.0.2 is reachable directly on Linux, but deliberately absent
+        # from NO_PROXY so a normal urllib opener hits the broken HTTP_PROXY.
+        server = ThreadingHTTPServer(("127.0.0.2", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            report_url = f"http://127.0.0.2:{server.server_port}/proxy?format=provider"
+            secret_proxy = "http://worker-proxy.invalid:2468"
+            log = tmp_path / "worker.log"
+            log.write_text("Error: quota exceeded\n", encoding="utf-8")
+            script_lines = [
+                f"td={shlex.quote(str(tmp_path))}",
+                f"OPENCODE_PROXY_URL={shlex.quote(secret_proxy)}",
+                f"RUNNER_OUTPUT_LOG={shlex.quote(str(log))}",
+                "RC=1",
+                "RATE_LIMITED=0",
+                "runner_artifact_append_line() { printf '%s\\n' \"$2\" >> \"$1\"; }",
+            ]
+            if report_kind == "startup":
+                script_lines.extend(_proxy_startup_cooldown_script_lines(report_url, "2"))
+            else:
+                script_lines.extend(_proxy_report_script_lines(report_url, "2"))
+            env = os.environ.copy()
+            env.update(
+                {
+                    "HTTP_PROXY": "http://127.0.0.1:1",
+                    "HTTPS_PROXY": "http://127.0.0.1:1",
+                    "ALL_PROXY": "http://127.0.0.1:1",
+                    "http_proxy": "http://127.0.0.1:1",
+                    "https_proxy": "http://127.0.0.1:1",
+                    "all_proxy": "http://127.0.0.1:1",
+                    "NO_PROXY": "localhost,127.0.0.1",
+                    "no_proxy": "localhost,127.0.0.1",
+                }
+            )
+            result = subprocess.run(
+                ["sh", "-eu"],
+                input="\n".join(script_lines),
+                text=True,
+                capture_output=True,
+                timeout=10,
+                env=env,
+            )
+            assert result.returncode == 0, result.stderr
+            assert captured == [{"proxy": secret_proxy, "retry_after_seconds": 300}]
+            assert secret_proxy not in result.stdout + result.stderr
+            status_file = tmp_path / "agent-status.md"
+            status = (
+                status_file.read_text(encoding="utf-8") if status_file.exists() else ""
+            )
+            assert "not acknowledged" not in status
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
 
 class TestBuildOpencodeScriptProxy:
     def test_fetch_and_report_wired_when_env_set(self, monkeypatch):
@@ -159,6 +399,8 @@ class TestBuildOpencodeScriptProxy:
         script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
         assert 'runner_artifact_write_line "$td/agent-status.md" "Status: rate-limited"' in script
         assert "FINAL_RC=77" in script
+        assert 'if [ "${RATE_LIMITED:-0}" = "1" ] && [ "$RC" -ne 0 ]' in script
+        assert 'if [ "${RC:-0}" -ne 0 ] && [ -n "$OPENCODE_PROXY_URL" ]' in script
         assert 'runner_artifact_write_line "$td/agent-status.md" "Status: startup-timeout"' in script
         assert 'runner_artifact_write_line "$td/agent-status.md" "Status: run-timeout"' in script
         assert '${FAILURE_REASON:-}' in script

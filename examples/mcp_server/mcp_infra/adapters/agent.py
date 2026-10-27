@@ -54,6 +54,8 @@ from agent_tasks import (
 from agent_tasks import (
     read_agent_task_file as _read_agent_task_file,
 )
+from agent_tasks import validate_required_checks as _validate_required_checks
+from agent_tasks import validate_scope_contract as _validate_scope_contract
 from agent_tasks import (
     validate_source_mode as _validate_source_mode,
 )
@@ -449,9 +451,29 @@ def gateway_write_agent_task(
     source_mode: str | None = None,
     workflow_phase: str | None = None,
 ) -> dict[str, Any]:
-    """Write task.json + current-plan.md to .ai-bridge/tasks/<task_id>/."""
+    """Create an OpenCode task; only project, task_id, agent and task are required.
+
+    For standalone OpenCode use agent='opencode'; omit source_mode for the
+    committed HEAD (or set 'committed_head'). base_ref, when supplied, must be
+    an exact full commit SHA, never 'master' or 'HEAD'.
+
+    required_checks is optional: one *executable* verification command per
+    line, e.g. 'uv run --extra dev pytest -q tests/test_example.py'. Do NOT
+    write prose like 'run tests if feasible' there: put it in task or
+    acceptance_criteria. Omit required_checks if no exact command is known.
+    No Supervisor service is needed to create or execute this task.
+    """
 
     def _fn() -> dict[str, Any]:
+        # Reject bad task contracts before expensive source publication or
+        # record_task_delivery_contract can cause any persistent side effect.
+        _validate_task_id(task_id)
+        parsed_allowed = _split_scope_patterns(allowed_files) or []
+        parsed_forbidden = _split_scope_patterns(forbidden_files) or []
+        parsed_checks = _split_lines(required_checks) or []
+        _validate_scope_contract(parsed_allowed, parsed_forbidden)
+        _validate_required_checks(parsed_checks)
+
         # Publish exact committed source in the trusted control plane before
         # the task becomes runnable. The executor only consumes this root RO.
         #
@@ -485,9 +507,6 @@ def gateway_write_agent_task(
         else:
             publication = ensure_managed_source_bundle(project, base_ref)
             managed_source_sha256 = publication.sha256 if publication else None
-        parsed_allowed = _split_scope_patterns(allowed_files) or []
-        parsed_forbidden = _split_scope_patterns(forbidden_files) or []
-        parsed_checks = _split_lines(required_checks) or []
         if base_ref:
             record_task_delivery_contract(
                 project=project,
@@ -1057,9 +1076,11 @@ _OPENCODE_HELP = {
         "State the exact finding/invariant, allowed and forbidden files, acceptance criteria, "
         "required checks, and where the agent must stop."
     ),
-    "supervisor_rule": (
-        "The agent may implement and test; the supervisor decides whether a finding is closed or the project is ready. "
-        "If the agent appears to exceed scope, reread the exact task prompt before blaming agent initiative."
+    "review_rule": (
+        "OpenCode executes independently inside Gateway; the authorized caller or project reviewer "
+        "decides whether a finding is closed or a release is ready. Review is not a prerequisite "
+        "for task execution or result retrieval. Recheck the exact task scope before attributing "
+        "an out-of-scope action to agent initiative."
     ),
 }
 

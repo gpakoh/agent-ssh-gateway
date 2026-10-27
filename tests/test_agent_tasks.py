@@ -158,6 +158,17 @@ class TestValidateRequiredChecks:
         for entry in legit:
             validate_required_checks([entry])
 
+    def test_rejects_mixed_check_and_prose_as_separate_shell_statement(self):
+        with pytest.raises(ValueError, match="one command per line"):
+            validate_required_checks(["git status --short; focused pytest if feasible"])
+
+    def test_semicolon_inside_quoted_argument_is_not_a_statement_separator(self):
+        validate_required_checks(["python -c 'print(1; 2)'"])
+
+    def test_rejects_trailing_semicolon_in_check(self):
+        with pytest.raises(ValueError, match="one command per line"):
+            validate_required_checks(["pytest -q;"])
+
     def test_rejects_non_string_and_empty_entries(self):
         for bad in [None, "", "   ", "   \n\t", 42, ["nested"]]:
             with pytest.raises((TypeError, ValueError)):
@@ -2013,6 +2024,26 @@ class TestAgentStartupDiagnostics:
             proxy_status=proxy_status or {"exists": False},
         )
 
+    @pytest.mark.parametrize(
+        ("attempt", "max_attempts", "expected"),
+        [(1, 6, 0), (3, 6, 2), (5, 6, 4), (7, 6, 0), (True, 6, 0)],
+    )
+    def test_final_proxy_attempt_preserves_completed_run_rotations(
+        self, attempt, max_attempts, expected
+    ):
+        # The last runner status and log contain no earlier rotation lines.
+        result = self._diagnose(
+            proxy_status={
+                "exists": True,
+                "valid": True,
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "final_outcome": "completed",
+            }
+        )
+        assert result["proxy_rotation"]["count"] == expected
+        assert result["opencode_startup_stalled"] is False
+
     def test_acquired_proxy_is_not_itself_a_startup_stall(self):
         result = self._diagnose(
             proxy_status={
@@ -2768,7 +2799,7 @@ class TestInspectAgentTask:
             "observed": True,
             "attempt": 4,
             "max_attempts": 5,
-            "count": 0,
+            "count": 3,
             "sidecar": True,
         }
         assert result["proxy_status"]["redacted_fields"] == ["access_token", "proxy_url"]

@@ -320,6 +320,12 @@ def git_fetch_ref_control_plane(
     try:
         project_root = _resolve_project_root(project)
         remote_url = _remote_url(project_root, remote)
+        if not remote_url.startswith(("git@", "ssh://", "http://", "https://")):
+            from examples.mcp_server.candidate_fetch import fetch_managed_candidate_base
+
+            return fetch_managed_candidate_base(
+                project, project_root, remote, branch, expected_remote_head, token=token
+            )
         _host, owner, repo = _parse_gitea_remote(remote_url)
         username, clone_url = _repo_https_target(owner, repo, token=token)
         branch_data = _gitea_get(

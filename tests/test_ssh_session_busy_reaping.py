@@ -202,9 +202,7 @@ async def test_execute_argv_busy_session_is_not_reaped_until_cancelled(
         raise AssertionError("unreachable")
 
     monkeypatch.setattr(manager, "_drain_command_streams", blocked_drain)
-    task = asyncio.create_task(
-        manager.execute_argv(record.session_id, "sleep 30", b"", timeout=30)
-    )
+    task = asyncio.create_task(manager.execute_argv(record.session_id, "sleep 30", b"", timeout=30))
     await asyncio.wait_for(entered.wait(), timeout=1)
     assert record.active_operations == 1
 
@@ -229,7 +227,9 @@ async def test_execute_stream_cancellation_releases_busy_counter(
     manager = _manager()
     record = _record()
     manager._sessions[record.session_id] = record
-    _stdin, stdout, stderr = _command_streams(record)
+    stdin, stdout, stderr = _command_streams(record)
+    channel_ready = asyncio.Event()
+    stdin.channel.shutdown_write.side_effect = channel_ready.set
     stdout.channel.exit_status_ready.return_value = False
     stdout.channel.recv_ready.return_value = False
     stderr.channel.recv_stderr_ready.return_value = False
@@ -240,9 +240,9 @@ async def test_execute_stream_cancellation_releases_busy_counter(
             pass
 
     task = asyncio.create_task(consume())
-    deadline = asyncio.get_running_loop().time() + 1
-    while record.active_operations != 1 and asyncio.get_running_loop().time() < deadline:
-        await asyncio.sleep(0.01)
+    # The busy counter is acquired before the executor opens a channel.
+    # Wait until its result is consumed before asserting channel cleanup.
+    await asyncio.wait_for(channel_ready.wait(), timeout=5)
     assert record.active_operations == 1
 
     task.cancel()
@@ -250,3 +250,38 @@ async def test_execute_stream_cancellation_releases_busy_counter(
         await task
     assert record.active_operations == 0
     stdout.channel.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_execute_stream_cancel_before_executor_starts_has_no_channel_to_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _manager()
+    record = _record()
+    manager._sessions[record.session_id] = record
+    _stdin, stdout, _stderr = _command_streams(record)
+    monkeypatch.setattr("app.ssh_manager._emit", lambda *_args, **_kwargs: None)
+    loop = asyncio.get_running_loop()
+    queued = loop.create_future()
+    submitted = asyncio.Event()
+
+    def enqueue(_executor: Any, _callback: Any) -> asyncio.Future[Any]:
+        submitted.set()
+        return queued
+
+    monkeypatch.setattr(loop, "run_in_executor", enqueue)
+
+    async def consume() -> None:
+        async for _item in manager.execute_stream(record.session_id, "sleep 30", timeout=30):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(submitted.wait(), timeout=5)
+    assert record.active_operations == 1
+    record.client.exec_command.assert_not_called()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert record.active_operations == 0
+    assert queued.cancelled()
+    stdout.channel.close.assert_not_called()

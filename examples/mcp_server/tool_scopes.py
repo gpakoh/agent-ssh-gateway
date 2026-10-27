@@ -153,6 +153,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "coord_reply": ["mcp:repo"],
     "coord_accept": ["mcp:repo"],
     "coord_update": ["mcp:repo"],
+    "coord_close": ["mcp:repo", "mcp:admin"],
     "gitea_get_repo": ["mcp:repo"],
     "gitea_list_branches": ["mcp:repo"],
     "gitea_list_commits": ["mcp:repo"],

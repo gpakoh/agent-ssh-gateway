@@ -1255,6 +1255,29 @@ class GiteaClient:
             owner=owner, repo=repo, number=number,
         )
 
+    async def close_coord_issue(self, owner: str, repo: str, number: int) -> dict[str, Any]:
+        """Dedicated Issue close; no generic PATCH allowlist expansion or retry.
+
+        Caller must validate the coordination report, permission, state lease
+        and durable operation intent before invoking this narrow transport.
+        """
+        validate_repo_owner_or_name(owner, label="owner")
+        validate_repo_owner_or_name(repo, label="repo")
+        number = _validate_positive_int(number, "number")
+        response = await self._client.patch(
+            f"/repos/{owner}/{repo}/issues/{number}", json={"state": "closed"},
+        )
+        if response.status_code in (401, 403):
+            raise PermissionError("Gitea Issue close is not authorized")
+        response.raise_for_status()
+        try:
+            result = response.json()
+        except ValueError as exc:
+            raise GiteaMutationOutcomeUnknown("Gitea Issue close response is unreadable") from exc
+        if not isinstance(result, dict):
+            raise GiteaMutationOutcomeUnknown("Gitea Issue close response is invalid")
+        return result
+
     async def list_pull_requests(
         self,
         owner: str,
