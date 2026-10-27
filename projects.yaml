@@ -505,12 +505,6 @@ projects:
     description: "Temporary deploy context for engineering-supervisor-service 3efd3ff"
     tags: ["engineering-supervisor-service", "deploy", "temporary"]
 
-  candidate-engineering-supervisor-service-fix-supervisor-verified-stack-20260904-reviewabl-4e332809aa34-a560ad9c1f2b:
-    root: ".mcp-candidate-clones/candidate-engineering-supervisor-service-fix-supervisor-verified-stack-20260904-reviewabl-4e332809aa34-a560ad9c1f2b"
-    type: "candidate-clone"
-    description: "Durable writeable candidate clone for engineering-supervisor-service"
-    tags: ["candidate", "agent", "durable"]
-
   kojo-docs-readiness-baseline-20260904:
     root: "quart-platform/.supervisor-workspaces/kojo-docs-readiness-baseline-20260904"
     parent: quart-platform
@@ -602,4 +596,11 @@ projects:
     root: clicker_orchestrator
     type: python-service
     description: "Clicker v2 orchestration baseline (private)"
+    tags: []
+
+  business-analytics-service:
+    root: quart-platform/business-analytics-service
+    parent: quart-platform
+    type: python-service
+    description: "Business analytics service: deterministic, auditable KPI calculations over normalized commerce facts (Quart pilot; A0-A3 slice)"
     tags: []
