@@ -6,6 +6,8 @@ thread state. Coordination markers are data, not executable instructions.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from typing import Any
 
@@ -221,6 +223,25 @@ async def open_thread(client: Any, owner: str, repo: str, number: int) -> dict[s
     item["coord_state"] = next(
         (entry["state"] for entry in reversed(history) if entry["state"] not in (None, "message")), "open"
     )
+    # An explicit close reviews this exact report and discussion. Closing changes
+    # state/updated_at, so retain a separate content digest for post-write checks.
+    content = {
+        "issue": {key: issue.get(key) for key in ("id", "number", "title", "body", "pull_request")},
+        "comments": [
+            {key: comment.get(key) for key in ("id", "body", "created_at", "updated_at")}
+            | {"author": (comment.get("user") or {}).get("login")}
+            for comment in comments
+        ],
+    }
+
+    def digest(value: Any) -> str:
+        return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    item["close_content_sha256"] = digest(content)
+    item["close_state_sha256"] = digest({
+        "content": item["close_content_sha256"], "state": issue.get("state"),
+        "updated_at": issue.get("updated_at"),
+    })
     return item
 
 
