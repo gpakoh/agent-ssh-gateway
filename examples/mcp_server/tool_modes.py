@@ -94,6 +94,7 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "gitea_get_repo",
         "gitea_list_branches",
         "gitea_list_commits",
+        "gitea_list_commit_statuses",
         "gitea_get_file",
         "gitea_list_issues",
         "gitea_get_issue",

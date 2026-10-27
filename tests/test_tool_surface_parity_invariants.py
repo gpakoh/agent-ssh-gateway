@@ -107,6 +107,7 @@ class TestLiveServerToolSurface:
     """Fresh-session contract against the real registration paths."""
 
     TARGETS = {
+        "gitea_list_commit_statuses": ["owner", "repo", "sha"],
         "gitea_create_branch_at_sha": ["owner", "repo", "branch", "expected_head_sha"],
         "gitea_set_default_branch": [
             "owner",
