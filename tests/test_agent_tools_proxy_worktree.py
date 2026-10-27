@@ -209,6 +209,67 @@ class TestProxyReportScriptLines:
             server.server_close()
             thread.join(timeout=5)
 
+    @pytest.mark.parametrize("http_status", [200, 503])
+    def test_rate_limit_report_does_not_claim_failed_http_ack(
+        self, tmp_path: Path, http_status: int
+    ):
+        """An HTTP rejection must be visible without changing rate-limit classification."""
+        captured: list[dict[str, object]] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                captured.append(
+                    json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                )
+                self.send_response(http_status)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, fmt, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            secret_proxy = "http://secret-worker.invalid:2468"
+            provider_url = f"http://127.0.0.1:{server.server_port}/proxy?format=provider"
+            log = tmp_path / "worker.log"
+            log.write_text("Error: rate limit exceeded\\n", encoding="utf-8")
+            script = "\n".join(
+                [
+                    f"td={shlex.quote(str(tmp_path))}",
+                    f"RUNNER_OUTPUT_LOG={shlex.quote(str(log))}",
+                    f"OPENCODE_PROXY_URL={shlex.quote(secret_proxy)}",
+                    "RC=1",
+                    "RATE_LIMITED=0",
+                    'runner_artifact_append_line() { printf "%s\\n" "$2" >> "$1"; }',
+                    *_proxy_report_script_lines(provider_url, "2"),
+                    'test "$RATE_LIMITED" -eq 1',
+                    "printf 'runner-continues\\n'",
+                ]
+            )
+            result = subprocess.run(
+                ["sh", "-eu"],
+                input=script,
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+            assert result.returncode == 0, result.stderr
+            assert result.stdout.strip() == "runner-continues"
+            assert captured == [{"proxy": secret_proxy, "retry_after_seconds": 300}]
+            status = (tmp_path / "agent-status.md").read_text(encoding="utf-8")
+            success = "Rate limited via leased proxy — reported to provider"
+            failure = "Rate-limit cooldown report not acknowledged"
+            assert (success in status) is (http_status == 200)
+            assert (failure in status) is (http_status == 503)
+            assert secret_proxy not in status + result.stdout + result.stderr
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
     @pytest.mark.parametrize("report_kind", ["startup", "rate_limit"])
     def test_provider_cooldown_bypasses_failed_worker_proxy(
         self, tmp_path: Path, report_kind: str

@@ -281,6 +281,7 @@ MCP_CLIENT_WRITE_BLOCKED_TOOLS: frozenset[str] = frozenset()
 # one of them to the broad mcp_client literal above. They are introduced below
 # only through the explicit mcp_client_write mode.
 MCP_CLIENT_WRITE_ONLY_GITEA_TOOLS: frozenset[str] = frozenset({
+    "coord_close",
     "coord_create",
     "coord_reply",
     "coord_accept",
@@ -307,6 +308,7 @@ TOOL_NAMES_BY_MODE["mcp_client"] -= MCP_CLIENT_WRITE_ONLY_GITEA_TOOLS
 TOOL_NAMES_BY_MODE["mcp_client_write"] = (
     TOOL_NAMES_BY_MODE["mcp_client"] - MCP_CLIENT_WRITE_BLOCKED_TOOLS
 ) | {
+    "coord_close",
     "execute_argv",
     "job_cancel",
     "cancel_agent_task",

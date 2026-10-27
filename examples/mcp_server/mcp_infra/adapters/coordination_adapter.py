@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import os
+from pathlib import Path
 from typing import Any
 
+from pydantic import StrictInt
 from tool_results import tool_error, tool_success
 
+from app.coordination_close import CloseRefused, close_thread
 from examples.mcp_server.coordination import (
     CoordinationOutcomeUnknown,
     board_from_threads,
@@ -189,6 +192,68 @@ async def coord_update(
     return await _mutate("coord_update", project, issue_number, message, request_key, state)
 
 
+async def coord_close(
+    project: str, issue_number: StrictInt, resolution_event_id: StrictInt,
+    expected_state_sha256: str, request_key: str, reason: str,
+) -> dict[str, Any]:
+    """Explicitly close one reviewed, resolved coordination Issue.
+
+    Requires repo+admin scope and an existing trusted resolved report. Read
+    coord_open.close_state_sha256, review the report/discussion, then supply
+    that exact lease and resolution_event_id. reason records the operator's
+    explicit close decision. No automatic close follows merge or resolved.
+
+    Existing comments are retained without duplication. Attempts are journaled
+    under the configured audit directory; retries after dispatch are read-only.
+    Reopened/changed Issues are never automatically closed again. Gitea lacks
+    Issue CAS here: pre/post reads detect drift but cannot prevent remote edits
+    in the HTTP window. Unknown outcomes require read-only reconciliation.
+    """
+    tool = "coord_close"
+
+    def audit(phase: str, why: str, metadata: dict[str, Any]) -> None:
+        from examples.mcp_server.mcp_audit import McpAuditEvent
+
+        logger = remote._get_gitea_audit_logger()
+        event = McpAuditEvent(
+            event_type="mcp.gitea_destructive_" + phase, tool=tool,
+            action="close_coordination_issue", decision="allow", reason=why,
+            metadata=metadata,
+        )
+        if phase == "intent":
+            try:
+                logger.append_required(event)
+            except Exception as exc:
+                raise CloseRefused("AUDIT_UNAVAILABLE", "Audit unavailable; Issue close refused") from exc
+        else:
+            logger.append(event)
+
+    try:
+        owner, repo = await _connection(tool, project, write=True)
+        async with server_attr("GiteaClient")(os.environ["GITEA_TOKEN"]) as client:
+            meta = await client.get_repo(owner, repo)
+            if meta.get("full_name") != f"{owner}/{repo}" or (meta.get("permissions") or {}).get("push") is not True:
+                raise PermissionError("Repository write permission or identity not verified")
+            outcome = await close_thread(
+                client, owner, repo, issue_number, resolution_event_id=resolution_event_id,
+                expected_state_sha256=expected_state_sha256, request_key=request_key,
+                reason=reason, actor=_principal() or "",
+                journal_dir=Path(os.environ.get("MCP_AUDIT_LOG_PATH", "logs/mcp_audit.jsonl")).parent / "coordination-close",
+                audit=audit,
+            )
+    except CloseRefused as exc:
+        return tool_error(tool=tool, code=exc.code, message=str(exc), source="gitea")
+    except CoordinationOutcomeUnknown as exc:
+        return _fail(tool, exc)
+    except PermissionError:
+        return tool_error(tool=tool, code="AUTH_ERROR", message="Caller or repository write permission denied", source="gitea")
+    except ValueError:
+        return tool_error(tool=tool, code="INVALID_INPUT", message="Invalid close request or coordination thread", source="gitea")
+    except Exception:
+        return tool_error(tool=tool, code="CLOSE_UNAVAILABLE", message="Issue close is unavailable; inspect the thread before retrying", source="gitea")
+    return tool_success(tool, result={"project": repo, **outcome}, source="gitea")
+
+
 def register_all() -> None:
     register_tool("coord_inbox")(coord_inbox)
     register_tool("coord_board")(coord_board)
@@ -197,3 +262,4 @@ def register_all() -> None:
     register_tool("coord_reply")(coord_reply)
     register_tool("coord_accept")(coord_accept)
     register_tool("coord_update")(coord_update)
+    register_tool("coord_close")(coord_close)
