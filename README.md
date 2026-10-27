@@ -232,6 +232,13 @@ Start with:
 
 ## Agent handoff
 
+**Execution ownership:** Gateway is a caller-neutral execution plane (the
+"hands"). Any authorized GPT, operator or automation may submit tasks and
+use Gateway's **own** OpenCode CLI executor without Engineering Supervisor,
+OpenCode Adapter, or a browser/architect service. External brains/eyes may
+request work but never become a prerequisite for Gateway execution or result
+retrieval. See [execution ownership ADR](docs/architecture/ADR-2026-10-27-gateway-execution-ownership.md).
+
 Agent Handoff provides a file-based lifecycle for delegating independent tasks
 to coding agents:
 

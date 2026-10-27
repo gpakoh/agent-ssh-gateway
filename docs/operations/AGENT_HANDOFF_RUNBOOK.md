@@ -2,7 +2,20 @@
 
 ## Overview
 
-Agent Handoff v2 allows ChatGPT to coordinate multiple AI agents (OpenCode, Mimo) through the Gateway MCP endpoint. Each agent receives a structured task contract (`task.json` + `current-plan.md`) and produces `agent-status.md`, `agent-report.md`, and `implementation-diff.patch`.
+Agent Handoff v2 allows **any authorized caller** (ChatGPT, an operator, CI or
+a Gateway-local procedure) to run Gateway-owned coding agents through the MCP
+endpoint. It requires neither Engineering Supervisor nor OpenCode Adapter nor
+a browser service. The separate Engineering Supervisor may call these public
+capabilities but is not part of Gateway's agent lifecycle. See the
+[execution ownership ADR](../architecture/ADR-2026-10-27-gateway-execution-ownership.md).
+
+Each task receives a structured contract (`task.json` + `current-plan.md`)
+and produces `agent-status.md`, `agent-report.md` and
+`implementation-diff.patch`. A successful worker run is not an acceptance or
+deployment decision; the initiating caller or authorized project reviewer owns
+that decision. Legacy statuses such as `pending_supervisor` and
+`needs_supervisor` are historical compatibility names for external review,
+**not** prerequisites to run or collect an OpenCode task.
 
 ## Prerequisites
 
@@ -17,7 +30,7 @@ Agent Handoff v2 allows ChatGPT to coordinate multiple AI agents (OpenCode, Mimo
 ```
 1. write_agent_task        → .ai-bridge/tasks/<id>/task.json + current-plan.md
 2. git worktree add ...    → disposable worktree (Mimo only)
-3. project_run_opencode    → OpenCode executes in main project
+3. run_opencode / project_run_opencode → Gateway starts its own OpenCode worker
    project_run_mimo        → Mimo executes in worktree (11 guards)
 4. read_agent_status       → verify agent-status.md
 5. read_agent_report       → review agent-report.md

@@ -1057,9 +1057,11 @@ _OPENCODE_HELP = {
         "State the exact finding/invariant, allowed and forbidden files, acceptance criteria, "
         "required checks, and where the agent must stop."
     ),
-    "supervisor_rule": (
-        "The agent may implement and test; the supervisor decides whether a finding is closed or the project is ready. "
-        "If the agent appears to exceed scope, reread the exact task prompt before blaming agent initiative."
+    "review_rule": (
+        "OpenCode executes independently inside Gateway; the authorized caller or project reviewer "
+        "decides whether a finding is closed or a release is ready. Review is not a prerequisite "
+        "for task execution or result retrieval. Recheck the exact task scope before attributing "
+        "an out-of-scope action to agent initiative."
     ),
 }
 
