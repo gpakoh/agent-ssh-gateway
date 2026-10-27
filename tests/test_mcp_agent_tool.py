@@ -980,6 +980,30 @@ class TestGatewayWriteAgentTaskScriptTransport:
         assert contract["base_ref"] == sha
         assert self._decoded_payload(script, "base-ref.txt") == sha
 
+    def test_mixed_shell_and_prose_check_fails_before_source_publication(self, monkeypatch):
+        import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+        import examples.mcp_server.server as server_mod
+
+        client = MagicMock()
+        monkeypatch.setattr(server_mod, "client", client)
+        publication = MagicMock(side_effect=AssertionError("source publication must not run"))
+        delivery = MagicMock(side_effect=AssertionError("delivery contract must not persist"))
+        monkeypatch.setattr(agent_adapter, "ensure_managed_source_bundle", publication)
+        monkeypatch.setattr(agent_adapter, "record_task_delivery_contract", delivery)
+
+        result = agent_adapter.gateway_write_agent_task(
+            project="test", task_id=TASK_ID, agent="opencode", task="Inspect the source",
+            base_ref="a" * 40,
+            required_checks="git status --short; focused pytest if feasible",
+        )
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "INVALID_INPUT"
+        assert "one command per line" in result["error"]["message"]
+        publication.assert_not_called()
+        delivery.assert_not_called()
+        client.execute_project_script.assert_not_called()
+
     def test_rejects_invalid_base_ref_before_script(self, monkeypatch):
         import examples.mcp_server.server as server_mod
         from examples.mcp_server.mcp_infra.adapters.agent import gateway_write_agent_task

@@ -238,6 +238,14 @@ def _is_valid_shell_command(entry: str) -> bool:
     return result.returncode == 0
 
 
+def _has_unquoted_semicolon(entry: str) -> bool:
+    """Catch shell statement separators without rejecting semicolons in quoted arguments."""
+    lexer = shlex.shlex(entry, posix=True, punctuation_chars=";")
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    return any(token in {";", ";;"} for token in lexer)
+
+
 def _has_command_shape(tokens: list[str]) -> bool:
     """Return True if any token looks command-like."""
     for tok in tokens:
@@ -279,6 +287,12 @@ def validate_required_checks(required_checks: list[str] | None) -> None:
             raise ValueError(
                 f"{label} looks like acceptance prose, not a shell command: {check!r}. "
                 "Put descriptive acceptance criteria in acceptance_criteria, not required_checks."
+            )
+        if _has_unquoted_semicolon(stripped):
+            raise ValueError(
+                f"{label} contains a shell ';' separator: {check!r}. "
+                "Use one command per line in required_checks; put human instructions "
+                "in task or acceptance_criteria. Example: 'uv run --extra dev pytest -q'."
             )
 
 
