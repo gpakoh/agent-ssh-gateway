@@ -1691,7 +1691,9 @@ class TestGatewayRunAgents:
         project_run.assert_called_once()
         assert project_run.call_args.kwargs["before_gateway_dispatch"] is None
         assert result["help"]["recommended_model"] == "big-pickle"
-        assert "finding is closed" in result["help"]["supervisor_rule"]
+        assert "finding is closed" in result["help"]["review_rule"]
+        assert "independently inside Gateway" in result["help"]["review_rule"]
+        assert "supervisor_rule" not in result["help"]
         assert "glm" not in repr(result["help"]).lower()
 
     @pytest.mark.asyncio
