@@ -504,6 +504,21 @@ def gateway_project_list(
         result["offset"] = offset
         result["limit"] = limit
     result["projects"] = page
+    if project_id is not None or query is not None:
+        # Unavailable source/runtime registrations are still reserved IDs.
+        # Never include them as usable projects or silently call them absent.
+        diagnostic = getattr(registry, "list_unavailable_projects", None)
+        if callable(diagnostic):
+            unavailable = [
+                row for row in diagnostic()
+                if _project_row_matches(
+                    row, project_id=project_id, query=query,
+                    project_type=project_type, tags=tags, parent=parent,
+                )
+            ]
+            if unavailable:
+                result["unavailable_projects"] = unavailable
+                result["unavailable_count"] = len(unavailable)
     result["candidate_store"] = _candidate_store_status()
     return tool_success(
         tool="project_list",
