@@ -363,6 +363,117 @@ def list_pagination_meta(count: int, per_page: int) -> dict[str, Any]:
     }
 
 
+# A full provider page may contain PRs on misconfigured/older servers.
+# Never treat a mixed first page as evidence that no Issues exist.
+GITEA_ISSUE_SCAN_MAX_PAGES = 8
+
+
+def classify_gitea_issue(data: Any, *, typed_list: bool = False) -> str:
+    """Classify Gitea's Issue-shaped objects using structural API evidence.
+
+    A list requested with type=issues carries an authoritative server-side
+    discriminator even when the Issue omits the optional pull_request field.
+    A singular GET has no such guarantee: absent evidence is UNKNOWN.
+    """
+    if not isinstance(data, dict):
+        return "unknown"
+    pr = data.get("pull_request")
+    if isinstance(pr, dict):
+        return "pull_request"
+    if "pull_request" in data and pr is not None:
+        return "unknown"
+    if isinstance(data.get("head"), dict) and isinstance(data.get("base"), dict):
+        return "pull_request"
+    if ("head" in data) != ("base" in data):
+        return "unknown"
+    if "pull_request" in data:
+        return "issue"
+    return "issue" if typed_list else "unknown"
+
+
+async def list_confirmed_gitea_issues(
+    client: Any, owner: str, repo: str, *, state: str, limit: int
+) -> dict[str, Any]:
+    """List typed Issues with bounded pagination and honest completeness.
+
+    GiteaClient.list_issues sends the documented type=issues filter BEFORE
+    pagination. If an upstream implementation ignores that filter, continue
+    bounded scanning instead of silently dropping a full page of PRs.
+    """
+    if type(limit) is not int or not 1 <= limit <= 50:
+        raise ValueError("limit must be a positive integer <= 50")
+    page_size = min(limit, 50)
+    items: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    skipped_prs = 0
+    unknown = 0
+    duplicate = 0
+    pages = 0
+    exhausted = False
+    page_error: str | None = None
+
+    for page in range(1, GITEA_ISSUE_SCAN_MAX_PAGES + 1):
+        try:
+            raw = await client.list_issues(owner, repo, state=state, limit=page_size, page=page)
+            if not isinstance(raw, list) or len(raw) > page_size:
+                raise ValueError("Gitea issues page violates list/limit contract")
+        except Exception as exc:
+            if page == 1:
+                raise
+            page_error = type(exc).__name__
+            break
+        pages += 1
+        for entry in raw:
+            kind = classify_gitea_issue(entry, typed_list=True)
+            if kind == "pull_request":
+                skipped_prs += 1
+                continue
+            if kind != "issue":
+                unknown += 1
+                continue
+            number = entry.get("number")
+            if (
+                type(number) is not int or number < 1
+                or not isinstance(entry.get("title"), str) or not entry["title"]
+                or entry.get("state") not in {"open", "closed"}
+            ):
+                unknown += 1
+                continue
+            if number in seen:
+                duplicate += 1
+                continue
+            seen.add(number)
+            item = minimize_issue_payload(entry, provider="gitea")
+            item["item_type"] = "issue"
+            items.append(item)
+            if len(items) == limit:
+                break
+        if len(raw) < page_size:
+            exhausted = True
+            break
+        if len(items) == limit:
+            break
+
+    more_pages_possible = not exhausted
+    partial = bool(unknown or duplicate or page_error or (more_pages_possible and len(items) < limit))
+    result = normalize_list_response(
+        items,
+        meta={
+            "page": 1, "per_page": limit,
+            "truncated": more_pages_possible,
+            "more_pages_possible": more_pages_possible,
+            "partial": partial,
+            "pages_scanned": pages,
+            "filtered_pull_requests": skipped_prs,
+            "unknown_items": unknown,
+            "duplicate_items": duplicate,
+        },
+    )
+    if page_error:
+        result["partial_error_class"] = page_error
+    return result
+
+
 def resolve_docker_host(hostname: str, network: str = "internal_net") -> str:
     """Resolve a Docker container name to its current IP on a given network.
 

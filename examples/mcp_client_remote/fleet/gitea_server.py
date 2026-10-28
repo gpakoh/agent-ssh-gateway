@@ -16,8 +16,10 @@ from starlette.routing import Route
 
 from .gitea_client import DEFAULT_ACTION_JOB_LOG_MAX_BYTES, GiteaClient
 from .shared import (
+    classify_gitea_issue,
     extract_auth_token,
     get_fleet_env,
+    list_confirmed_gitea_issues,
     list_pagination_meta,
     minimize_issue_payload,
     minimize_repo_payload,
@@ -108,14 +110,10 @@ async def gitea_list_issues(
     state: str = "open",
     limit: int = 30,
 ) -> dict[str, Any]:
-    """List issues in a repository. State: open, closed, all."""
+    """List actual Gitea Issues (not PRs). State: open, closed, all."""
     try:
         async with _get_client() as client:
-            raw = await client.list_issues(owner, repo, state=state, limit=limit)
-            data = normalize_list_response(
-                [minimize_issue_payload(i, provider="gitea") for i in raw],
-                meta=list_pagination_meta(len(raw), limit),
-            )
+            data = await list_confirmed_gitea_issues(client, owner, repo, state=state, limit=limit)
     except Exception as exc:
         return remote_api_error("gitea_list_issues", "gitea", exc)
     return tool_success("gitea_list_issues", data, source="gitea")
@@ -132,6 +130,7 @@ async def gitea_get_issue(
         async with _get_client() as client:
             raw = await client.get_issue(owner, repo, issue_number)
             data = minimize_issue_payload(raw, provider="gitea")
+            data["item_type"] = classify_gitea_issue(raw)
     except Exception as exc:
         return remote_api_error("gitea_get_issue", "gitea", exc)
     return tool_success("gitea_get_issue", data, source="gitea")
