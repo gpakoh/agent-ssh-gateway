@@ -1473,8 +1473,8 @@ exec(compile(raw, path, "exec"), {"__name__": "__main__", "__file__": path, "__p
             raise ValueError("source_revision must be an exact lowercase 40-hex SHA")
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", secret_fingerprint):
             raise ValueError("secret_fingerprint must be sha256:64hex")
-        if mode not in {"preflight", "deploy", "recover"}:
-            raise ValueError("mode must be preflight, deploy or recover")
+        if mode not in {"inspect", "preflight", "deploy", "recover"}:
+            raise ValueError("mode must be inspect, preflight, deploy or recover")
         if stability_seconds < 90 or stability_seconds > 900:
             raise ValueError("stability_seconds must be between 90 and 900")
         timeout = max(120, min(timeout, 900))
@@ -1485,7 +1485,7 @@ exec(compile(raw, path, "exec"), {"__name__": "__main__", "__file__": path, "__p
             "run",
             "--rm",
             "--network",
-            "host",
+            "none" if mode == "inspect" else "host",
             "--user",
             "0:0",
             "--cap-drop",
@@ -1497,14 +1497,13 @@ exec(compile(raw, path, "exec"), {"__name__": "__main__", "__file__": path, "__p
             "--read-only",
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,nodev,size=64m",
-            "--mount",
-            "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock",
+            *([] if mode == "inspect" else ["--mount", "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock"]),
             "--mount",
             f"type=bind,src={candidate_root},dst={candidate_root},readonly",
             "--mount",
             f"type=bind,src={operator_root},dst={operator_root},readonly",
             "--mount",
-            f"type=volume,src={state_volume},dst={state_root}",
+            f"type=volume,src={state_volume},dst={state_root}" + (",readonly" if mode == "inspect" else ""),
             "--env",
             "GIT_CONFIG_COUNT=1",
             "--env",

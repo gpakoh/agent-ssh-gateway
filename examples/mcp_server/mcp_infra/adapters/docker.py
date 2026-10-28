@@ -4281,6 +4281,345 @@ async def _verify_xloud_recovery(
     return {"outcome": "previous_generation_restored", "targets": live}
 
 
+# A recovery contract is an allowlisted policy adapter, never a user-supplied
+# executable or container path. Adding a service means registering its typed
+# inputs and its reviewed prepare/execute handlers, not adding a new MCP tool.
+_DEPLOYMENT_RECOVERY_CONTRACTS: dict[str, dict[str, Any]] = {
+    "xloud": {
+        "description": "Recover an unfinished XLOUD legacy site rollout without deploying a new version",
+        "parameters": (
+            "candidate_project",
+            "expected_head_sha",
+            "expected_script_blob_sha",
+            "expected_script_sha256",
+            "source_revision",
+            "image_namespace",
+        ),
+        "scope": "mcp:docker:admin",
+        "confirmation": "high",
+        "mode": "pending-legacy-rollback",
+    },
+}
+
+
+def _recovery_contract_parameters(
+    contract: str, parameters: dict[str, str]
+) -> dict[str, str]:
+    if contract not in _DEPLOYMENT_RECOVERY_CONTRACTS:
+        raise ValueError("Unsupported deployment recovery contract")
+    if not isinstance(parameters, dict):
+        raise ValueError("Recovery parameters must be a dictionary")
+    expected = set(_DEPLOYMENT_RECOVERY_CONTRACTS[contract]["parameters"])
+    if set(parameters) != expected or any(
+        not isinstance(value, str) or not value or len(value) > 512
+        for value in parameters.values()
+    ):
+        raise ValueError("Recovery parameter names/values differ from registered contract")
+    return dict(parameters)
+
+
+def _recovery_contract_handlers() -> dict[str, tuple[Any, Any]]:
+    # Registration is deliberately bound to reviewed functions, not strings,
+    # shell fragments, or paths. A new service registers only here and above.
+    return {"xloud": (_prepare_xloud_recovery, _docker_recover_xloud_impl)}
+
+
+async def docker_recovery_catalog() -> dict[str, Any]:
+    """Describe available governed recovery contracts without touching Docker."""
+    return tool_success(
+        "docker_recovery_catalog",
+        result={
+            "contracts": [
+                {"id": contract, **details}
+                for contract, details in sorted(_DEPLOYMENT_RECOVERY_CONTRACTS.items())
+            ]
+        },
+        source="docker",
+    )
+
+
+async def docker_recover_deployment(
+    contract: str, parameters: dict[str, str], timeout: int = 300
+) -> dict[str, Any]:
+    """Prepare the selected recovery contract; mutation requires confirmation."""
+    timeout = max(120, min(timeout, 480))
+    try:
+        params = _recovery_contract_parameters(contract, parameters)
+        prepare, _execute = _recovery_contract_handlers()[contract]
+        plan = await prepare(**params)
+    except ValueError as exc:
+        return tool_error(
+            tool="docker_recover_deployment", code="INVALID_INPUT",
+            message=str(exc), source="docker", retryable=False,
+        )
+    except RuntimeError as exc:
+        return tool_error(
+            tool="docker_recover_deployment",
+            code="DEPLOY_CONTRACT_PRECONDITION_FAILED",
+            message=str(exc), source="docker", retryable=False, redacted=True,
+        )
+    pins = {
+        key: plan[key]
+        for key in (
+            "pending_fingerprint", "live", "state_volume_fingerprint",
+            "network_fingerprints", "audit_snapshot", "secret_fingerprint",
+            "helper_image_id",
+        )
+    }
+    action = _confirm_store().create_action(
+        "docker_recover_deployment",
+        {"contract": contract, "parameters": params, "pins": pins, "timeout": timeout},
+        f"Recover {contract} unfinished rollout at {params['source_revision'][:12]}",
+        risk="high", required_scope="mcp:docker:admin",
+    )
+    response = _confirmation_response(action)
+    response["result"]["recovery_contract"] = contract
+    response["result"]["pending_fingerprint"] = plan["pending_fingerprint"]
+    return response
+
+
+async def _docker_recover_deployment_impl(
+    contract: str, parameters: dict[str, str], pins: dict[str, Any], timeout: int = 300
+) -> dict[str, Any]:
+    try:
+        params = _recovery_contract_parameters(contract, parameters)
+        _, execute = _recovery_contract_handlers()[contract]
+        required = {
+            "pending_fingerprint", "live", "state_volume_fingerprint",
+            "network_fingerprints", "audit_snapshot", "secret_fingerprint",
+            "helper_image_id",
+        }
+        if not isinstance(pins, dict) or set(pins) != required:
+            raise ValueError("Incomplete recovery confirmation pins")
+    except ValueError as exc:
+        return tool_error(
+            tool="docker_recover_deployment", code="INVALID_INPUT",
+            message=str(exc), source="docker", retryable=False,
+        )
+    return await execute(**params, **pins, timeout=timeout)
+
+
+def _xloud_recovery_helper_kwargs(plan: dict[str, Any], *, timeout: int) -> dict[str, Any]:
+    return {
+        "helper_image_id": plan["helper_image_id"],
+        "candidate_root": plan["candidate_root"],
+        "operator_root": plan["operator_root"],
+        "script_path": plan["script_path"],
+        "env_file": plan["env_file"],
+        "state_volume": plan["state_volume"],
+        "site_image": plan["target_images"]["site"]["image"],
+        "intake_image": plan["target_images"]["intake"]["image"],
+        "site_image_id": plan["image_ids"]["site"],
+        "intake_image_id": plan["image_ids"]["intake"],
+        "source_revision": plan["source_revision"],
+        "secret_fingerprint": plan["secret_fingerprint"],
+        "stability_seconds": 90,
+        "timeout": timeout,
+    }
+
+
+async def _xloud_legacy_recovery_live(
+    client: Any, *, pending: dict[str, str], plan: dict[str, Any], intake_present: bool
+) -> dict[str, Any]:
+    """Only the observed legacy site + known failed-generation intake is in scope."""
+    site = _single_inspect(await client.inspect("xloud-site", max_lines=10))
+    state = site.get("State")
+    config = site.get("Config")
+    expected_id = pending["PREVIOUS_SITE_IMAGE_ID"]
+    expected_ref = pending["PREVIOUS_SITE_REF"]
+    if not isinstance(state, dict) or not isinstance(config, dict):
+        raise RuntimeError("XLOUD legacy site inspection is incomplete")
+    if site.get("Image") != expected_id or config.get("Image") != expected_ref:
+        raise RuntimeError("XLOUD legacy site differs from pending historical image")
+    if state.get("Running") is not True or state.get("Health", {}).get("Status") != "healthy":
+        raise RuntimeError("XLOUD legacy site must be healthy before recovery")
+    if site.get("RestartCount") != 0:
+        raise RuntimeError("XLOUD legacy site restarted")
+    site_networks = await client.container_network_snapshot("xloud-site")
+    if (site_networks.get("proxmox_macvlan") != "10.10.10.149"
+        or not site_networks.get("xloud_default")):
+        raise RuntimeError("XLOUD legacy site public/default network identity is invalid")
+    snapshot = {
+        "site_container_id": site.get("Id"),
+        "site_started_at": state.get("StartedAt"),
+        "site_image_id": expected_id,
+        "site_image_ref": expected_ref,
+        "site_networks": site_networks,
+        "intake_present": intake_present,
+    }
+    if intake_present:
+        intake = _single_inspect(await client.inspect("xloud-intake", max_lines=10))
+        runtime = intake.get("State")
+        conf = intake.get("Config")
+        if not isinstance(runtime, dict) or not isinstance(conf, dict):
+            raise RuntimeError("XLOUD intake inspection is incomplete")
+        if (intake.get("Image") != plan["image_ids"]["intake"]
+            or conf.get("Image") != plan["target_images"]["intake"]["image"]
+            or intake.get("RestartCount") != 0
+            or runtime.get("Running") is not True
+            or runtime.get("Health", {}).get("Status") != "healthy"):
+            raise RuntimeError("XLOUD intake is not the healthy failed-generation sidecar")
+        networks = await client.container_network_snapshot("xloud-intake")
+        if not networks.get("xloud_default") or not networks.get("site-audit-control"):
+            raise RuntimeError("XLOUD intake network topology is invalid")
+        snapshot["intake_container_id"] = intake.get("Id")
+        snapshot["intake_started_at"] = runtime.get("StartedAt")
+        snapshot["intake_networks"] = networks
+    elif await client.container_exists("xloud-intake"):
+        raise RuntimeError("XLOUD intake appeared while verifying recovery")
+    return snapshot
+
+
+async def _prepare_xloud_recovery(
+    *, candidate_project: str, expected_head_sha: str,
+    expected_script_blob_sha: str, expected_script_sha256: str,
+    source_revision: str, image_namespace: str,
+) -> dict[str, Any]:
+    # Same exact source, images, operator credential and resource pins as deploy.
+    # Unlike deployment preflight, the unfinished topology is permitted.
+    plan = await _prepare_xloud_deploy(
+        candidate_project=candidate_project,
+        expected_head_sha=expected_head_sha,
+        expected_script_blob_sha=expected_script_blob_sha,
+        expected_script_sha256=expected_script_sha256,
+        source_revision=source_revision,
+        image_namespace=image_namespace,
+        require_stable_topology=False,
+    )
+    client = _docker_client()
+    run = await client.run_xloud_deploy_contract_helper(
+        **_xloud_recovery_helper_kwargs(plan, timeout=120), mode="inspect"
+    )
+    payload, _tail = _xloud_helper_payload(client, run)
+    if (run.exit_code != 0 or not isinstance(payload, dict)
+        or payload.get("mode") != "inspect"
+        or payload.get("exit_code") != 0
+        or payload.get("pending_exists") is not True):
+        raise RuntimeError("XLOUD has no readable, unfinished pending deployment")
+    pending = payload.get("pending")
+    if not isinstance(pending, dict):
+        raise RuntimeError("XLOUD pending journal is malformed")
+    required = {
+        "STATE_VERSION": "1",
+        "SOURCE_REVISION": source_revision,
+        "SITE_IMAGE": plan["target_images"]["site"]["image"],
+        "INTAKE_IMAGE": plan["target_images"]["intake"]["image"],
+        "SITE_IMAGE_ID": plan["image_ids"]["site"],
+        "INTAKE_IMAGE_ID": plan["image_ids"]["intake"],
+        "PREVIOUS_INTAKE_CID": "absent",
+        "PREVIOUS_INTAKE_REF": "absent",
+        "PREVIOUS_INTAKE_IMAGE_ID": "absent",
+    }
+    if any(pending.get(key) != value for key, value in required.items()):
+        raise RuntimeError("XLOUD pending evidence does not match legacy rollback scope")
+    if (not re.fullmatch(r"[0-9a-f]{12,64}", pending.get("PREVIOUS_SITE_CID", ""))
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", pending.get("PREVIOUS_SITE_IMAGE_ID", ""))
+        or not isinstance(pending.get("PREVIOUS_SITE_REF"), str)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}",
+                            pending["PREVIOUS_SITE_REF"])):
+        raise RuntimeError("XLOUD pending previous site identity is malformed")
+    if payload.get("lkg_exists") is True:
+        # Do not overwrite a possibly accepted generation with a legacy rollback.
+        raise RuntimeError("XLOUD has an LKG journal; recovery needs explicit reconciliation")
+    await _verify_xloud_guard_resources(client, plan)
+    live = await _xloud_legacy_recovery_live(
+        client, pending=pending, plan=plan, intake_present=True
+    )
+    plan["pending"] = pending
+    plan["pending_fingerprint"] = "sha256:" + hashlib.sha256(
+        json.dumps(pending, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    plan["live"] = live
+    return plan
+
+
+async def _docker_recover_xloud_impl(
+    candidate_project: str,
+    expected_head_sha: str,
+    expected_script_blob_sha: str,
+    expected_script_sha256: str,
+    source_revision: str,
+    image_namespace: str,
+    pending_fingerprint: str,
+    live: dict[str, Any],
+    state_volume_fingerprint: str,
+    network_fingerprints: dict[str, str],
+    audit_snapshot: dict[str, str],
+    secret_fingerprint: str,
+    helper_image_id: str,
+    timeout: int = 300,
+) -> dict[str, Any]:
+    try:
+        plan = await _prepare_xloud_recovery(
+            candidate_project=candidate_project,
+            expected_head_sha=expected_head_sha,
+            expected_script_blob_sha=expected_script_blob_sha,
+            expected_script_sha256=expected_script_sha256,
+            source_revision=source_revision,
+            image_namespace=image_namespace,
+        )
+        for key, expected in (
+            ("pending_fingerprint", pending_fingerprint),
+            ("live", live),
+            ("state_volume_fingerprint", state_volume_fingerprint),
+            ("network_fingerprints", network_fingerprints),
+            ("audit_snapshot", audit_snapshot),
+            ("secret_fingerprint", secret_fingerprint),
+            ("helper_image_id", helper_image_id),
+        ):
+            if plan[key] != expected:
+                raise RuntimeError("XLOUD recovery confirmation changed: " + key)
+    except (ValueError, RuntimeError) as exc:
+        return tool_error(
+            tool="docker_recover_deployment", code="DEPLOY_CONTRACT_PRECONDITION_FAILED",
+            message=str(exc), source="docker", retryable=False, redacted=True
+        )
+    client = _docker_client()
+    run = await client.run_xloud_deploy_contract_helper(
+        **_xloud_recovery_helper_kwargs(plan, timeout=timeout), mode="recover"
+    )
+    payload, output_tail = _xloud_helper_payload(client, run)
+    if (run.exit_code != 0 or not isinstance(payload, dict)
+        or payload.get("mode") != "recover"
+        or payload.get("exit_code") != 0
+        or payload.get("timed_out") is not False
+        or payload.get("pending_exists") is not False
+        or payload.get("failed_exists") is not True
+        or payload.get("failed") != plan["pending"]):
+        return tool_error(
+            tool="docker_recover_deployment", code="DEPLOY_CONTRACT_OUTCOME_AMBIGUOUS",
+            message="XLOUD recovery did not provide complete historical failure evidence",
+            result={"output_tail": output_tail}, source="docker",
+            retryable=False, redacted=True,
+            hint="Inspect the durable volume and running topology; do not retry blindly.",
+        )
+    try:
+        await _verify_xloud_guard_resources(client, plan)
+        first = await _xloud_legacy_recovery_live(
+            client, pending=plan["pending"], plan=plan, intake_present=False
+        )
+        await asyncio.sleep(_XLOUD_VERIFY_STABILITY_SECONDS)
+        await _verify_xloud_guard_resources(client, plan)
+        second = await _xloud_legacy_recovery_live(
+            client, pending=plan["pending"], plan=plan, intake_present=False
+        )
+        if first != second:
+            raise RuntimeError("XLOUD legacy site changed during recovery stability window")
+    except RuntimeError as exc:
+        return tool_error(
+            tool="docker_recover_deployment", code="DEPLOY_CONTRACT_VERIFICATION_FAILED",
+            message=str(exc), source="docker", retryable=False, redacted=True
+        )
+    return tool_success(
+        "docker_recover_deployment",
+        result={"status": "recovered", "source_revision": source_revision,
+                "pending_cleared": True, "historical_failure_preserved": True,
+                "legacy_site": {"image_id": second["site_image_id"],
+                                "health": "healthy"}, "intake_removed": True},
+        source="docker", dangerous=True, redacted=True,
+    )
+
+
 async def docker_deploy_xloud(
     candidate_project: str,
     expected_head_sha: str,
@@ -5946,6 +6285,7 @@ _CONFIRM_HANDLERS: dict[str, Callable[..., Any]] = {
     "docker_deploy_site_audit": _docker_deploy_site_audit_impl,
     "docker_provision_site_audit_crm": _docker_provision_site_audit_crm_impl,
     "docker_deploy_xloud": _docker_deploy_xloud_impl,
+    "docker_recover_deployment": _docker_recover_deployment_impl,
     "docker_deploy_content_harvester": _docker_deploy_content_harvester_impl,
     "docker_migrate_content_harvester": _docker_migrate_content_harvester_impl,
 }
@@ -6634,6 +6974,8 @@ def register_all() -> None:
         "docker_deploy_site_audit",
         "docker_provision_site_audit_crm",
         "docker_deploy_xloud",
+        "docker_recover_deployment",
+        "docker_recovery_catalog",
         "docker_deploy_content_harvester",
         "docker_migrate_content_harvester",
         "confirm_operation",

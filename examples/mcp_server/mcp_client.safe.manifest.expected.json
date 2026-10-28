@@ -1,9 +1,9 @@
 {
   "mode": "mcp_client",
   "safe_mode": true,
-  "expected_safe_count": 89,
-  "expected_blocked_count": 37,
-  "expected_mcp_client_full_count": 121,
+  "expected_safe_count": 90,
+  "expected_blocked_count": 38,
+  "expected_mcp_client_full_count": 123,
   "must_include": [
     "docker_site_audit_crm_ingress_readiness",
     "docker_site_audit_deploy_status",
@@ -17,7 +17,8 @@
     "tools_manifest",
     "coord_inbox",
     "coord_open",
-    "coord_board"
+    "coord_board",
+    "docker_recovery_catalog"
   ],
   "must_exclude": [
     "docker_compose_up",
@@ -36,6 +37,7 @@
     "coord_reply",
     "coord_accept",
     "coord_update",
-    "coord_close"
+    "coord_close",
+    "docker_recover_deployment"
   ]
 }

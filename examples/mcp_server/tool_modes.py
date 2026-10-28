@@ -174,6 +174,8 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "docker_deploy_site_audit",
         "docker_provision_site_audit_crm",
         "docker_deploy_xloud",
+        "docker_recover_deployment",
+        "docker_recovery_catalog",
         "docker_deploy_content_harvester",
         "docker_migrate_content_harvester",
         "postgres_health",
@@ -253,6 +255,7 @@ MCP_CLIENT_BLOCKED_TOOLS: frozenset[str] = frozenset({
     "docker_deploy_site_audit",
     "docker_provision_site_audit_crm",
     "docker_deploy_xloud",
+    "docker_recover_deployment",
     "docker_deploy_content_harvester",
     "docker_migrate_content_harvester",
     # Agent task write
