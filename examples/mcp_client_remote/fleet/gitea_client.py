@@ -49,6 +49,7 @@ GITEA_FORWARDED_PROTO = os.environ.get("GITEA_FORWARDED_PROTO", "https")
 
 ALLOWED_ENDPOINTS = frozenset(
     {
+        "/version",
         "/user",
         "/repos/{owner}/{repo}",
         "/repos/{owner}/{repo}/branches",
@@ -71,6 +72,7 @@ ALLOWED_ENDPOINTS = frozenset(
         "/repos/{owner}/{repo}/actions/jobs/{job_id}",
         "/repos/{owner}/{repo}/actions/jobs/{job_id}/logs",
         "/repos/{owner}/{repo}/actions/workflows",
+        "/repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs",
         "/repos/{owner}/{repo}/actions/secrets",
     }
 )
@@ -98,7 +100,8 @@ ALLOWED_CLOSE_ENDPOINTS = frozenset(
     }
 )
 # Actions writes are isolated from PR writes: only rerunning one exact existing
-# workflow run is allowed, never workflow dispatch/edit/delete or a generic POST.
+# workflow run is allowed here. Dispatch has its own typed method and cannot
+# be reached through this lifecycle POST allowlist.
 ALLOWED_ACTION_WRITE_ENDPOINTS = frozenset(
     {
         "/repos/{owner}/{repo}/actions/runs/{run_id}/rerun",
@@ -399,6 +402,10 @@ class GiteaClient:
             validate_repo_owner_or_name(path_params["repo"], label="repo")
         if "path" in path_params:
             validate_repo_path(path_params["path"])
+        if "workflow_id" in path_params:
+            workflow_id = path_params["workflow_id"]
+            if not isinstance(workflow_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*\.ya?ml", workflow_id) or ".." in workflow_id:
+                raise ValueError("Invalid workflow file name")
         if "branch" in path_params or "basehead" in path_params:
             path_params = dict(path_params)
         if "branch" in path_params:
@@ -465,6 +472,56 @@ class GiteaClient:
 
     async def get_user(self) -> dict[str, Any]:
         return await self._get("/user")
+
+    async def get_version(self) -> dict[str, Any]:
+        return await self._get("/version")
+
+    async def list_workflow_runs(self, owner: str, repo: str, workflow_id: str) -> dict[str, Any]:
+        """Read only this workflow's bounded run list; no generic endpoint input."""
+        data = await self._get(
+            "/repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs",
+            params={"page": 1, "limit": 50, "event": "workflow_dispatch"},
+            owner=owner, repo=repo, workflow_id=workflow_id,
+        )
+        if not isinstance(data, dict) or not isinstance(data.get("workflow_runs"), list):
+            raise ValueError("Invalid workflow run list")
+        return {"workflow_runs": [minimize_action_run_payload(r) for r in data["workflow_runs"]]}
+
+    async def dispatch_workflow(
+        self, owner: str, repo: str, workflow_id: str, ref: str, inputs: dict[str, str],
+    ) -> dict[str, Any]:
+        """One explicit dispatch POST, without retry or generic write access.
+
+        Input types/schema and immutable source are checked by the journalled
+        adapter before this method. Values are never included in errors.
+        """
+        validate_repo_owner_or_name(owner, label="owner")
+        validate_repo_owner_or_name(repo, label="repo")
+        if not isinstance(workflow_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*\.ya?ml", workflow_id) or ".." in workflow_id:
+            raise ValueError("Invalid workflow file name")
+        if not isinstance(ref, str) or not ref.startswith("refs/heads/"):
+            raise ValueError("Expected an explicit workflow branch ref")
+        _validate_branch_name(ref.removeprefix("refs/heads/"), "workflow")
+        if not isinstance(inputs, dict) or len(inputs) > 25 or any(type(k) is not str or type(v) is not str for k, v in inputs.items()):
+            raise ValueError("Expected validated string workflow inputs")
+        path = f"/repos/{owner}/{repo}/actions/workflows/{quote(workflow_id, safe='')}/dispatches"
+        response = await self._client.post(
+            path, params={"return_run_details": "true"}, json={"ref": ref, "inputs": inputs},
+        )
+        if response.status_code == 204:
+            return {"run_id": None}
+        if not response.is_success:
+            raise httpx.HTTPStatusError(
+                "Gitea workflow dispatch returned HTTP " + str(response.status_code),
+                request=response.request, response=response,
+            )
+        try:
+            data = response.json()
+            if response.status_code != 200 or not isinstance(data, dict) or type(data.get("workflow_run_id")) is not int or data["workflow_run_id"] < 1:
+                raise ValueError
+            return {"run_id": data["workflow_run_id"]}
+        except ValueError as exc:
+            raise GiteaMutationOutcomeUnknown("Workflow dispatch returned an unreadable success response") from exc
 
     async def _post(
         self,

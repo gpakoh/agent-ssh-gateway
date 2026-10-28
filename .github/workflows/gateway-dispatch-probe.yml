@@ -1,0 +1,36 @@
+name: Gateway manual dispatch qualification
+run-name: Gateway dispatch probe ${{ inputs.probe_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      approved:
+        description: Explicitly approve this harmless qualification job
+        type: boolean
+        required: true
+        default: false
+      probe_id:
+        description: Non-secret qualification operation identifier
+        type: string
+        required: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    container:
+      image: nikolaik/python-nodejs:python3.12-nodejs24
+    steps:
+      - name: Verify typed inputs without production effects
+        env:
+          PROBE_APPROVED: ${{ inputs.approved }}
+          PROBE_ID: ${{ inputs.probe_id }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+
+          assert os.environ["PROBE_APPROVED"].lower() == "true"
+          probe_id = os.environ["PROBE_ID"]
+          assert re.fullmatch(r"[a-z0-9][a-z0-9._-]{7,63}", probe_id)
+          print(json.dumps({"qualification": "gateway676", "probe_id": probe_id, "ok": True}))
+          PY

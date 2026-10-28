@@ -614,6 +614,7 @@ from examples.mcp_server.mcp_infra.adapters import (  # noqa: E402
     postgres,
     remote,
     supervisor,
+    workflow_dispatch,
     workspace,
 )
 
@@ -660,6 +661,8 @@ gitea_list_action_run_jobs = remote.gitea_list_action_run_jobs
 gitea_list_action_jobs = remote.gitea_list_action_jobs
 gitea_get_action_job_logs = remote.gitea_get_action_job_logs
 gitea_list_workflows = remote.gitea_list_workflows
+gitea_dispatch_workflow = workflow_dispatch.gitea_dispatch_workflow
+gitea_workflow_dispatch_status = workflow_dispatch.gitea_workflow_dispatch_status
 github_get_repo = remote.github_get_repo
 github_list_branches = remote.github_list_branches
 github_list_commits = remote.github_list_commits
@@ -689,6 +692,7 @@ workspace.register_all()
 docker.register_all()
 gateway.register_all()
 remote.register_all()
+workflow_dispatch.register_all()
 postgres.register_all()
 supervisor.register_all()
 
