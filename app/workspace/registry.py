@@ -197,6 +197,7 @@ def _add_project_entries(
     registry_roots: dict[str, Path],
     *,
     source: str,
+    unavailable: dict[str, dict[str, str]] | None = None,
 ) -> None:
     for pid, cfg in projects_raw.items():
         if pid in projects:
@@ -218,8 +219,17 @@ def _add_project_entries(
             )
             continue
         root = _resolve(registry_roots[root_selector], relative_root)
-        if not root.exists():
-            logger.warning("Skipping project %s from %s: root does not exist", pid, source)
+        if not root.is_dir():
+            reason = "root_missing" if not root.exists() else "root_not_directory"
+            logger.warning("Skipping project %s from %s: %s", pid, source, reason)
+            if unavailable is not None:
+                unavailable[pid] = {
+                    "project_id": pid,
+                    "root": str(relative_root),
+                    "type": str(cfg.get("type", "unknown")),
+                    "source": source,
+                    "reason": reason,
+                }
             continue
 
         projects[pid] = ProjectInfo(
@@ -230,9 +240,15 @@ def _add_project_entries(
             tags=list(cfg.get("tags", [])),
             parent=cfg.get("parent"),
         )
+        if unavailable is not None:
+            unavailable.pop(pid, None)
 
 
-def load_registry(path: str | Path) -> tuple[dict[str, ProjectInfo], Path]:
+def load_registry(
+    path: str | Path,
+    *,
+    unavailable: dict[str, dict[str, str]] | None = None,
+) -> tuple[dict[str, ProjectInfo], Path]:
     """Load project registry from a YAML file plus optional runtime overlay.
 
     Returns (projects dict, registry_root).
@@ -258,7 +274,10 @@ def load_registry(path: str | Path) -> tuple[dict[str, ProjectInfo], Path]:
         raise WorkspacePolicyError("Registry file must contain a 'projects' mapping")
 
     projects: dict[str, ProjectInfo] = {}
-    _add_project_entries(projects, projects_raw, registry_roots, source="source registry")
+    _add_project_entries(
+        projects, projects_raw, registry_roots,
+        source="source_registry", unavailable=unavailable,
+    )
 
     runtime_path = resolve_runtime_registry_path(path)
     if runtime_path is not None and runtime_path.exists():
@@ -274,7 +293,10 @@ def load_registry(path: str | Path) -> tuple[dict[str, ProjectInfo], Path]:
             overlay_projects = {}
         if not isinstance(overlay_projects, dict):
             raise WorkspacePolicyError("Runtime registry overlay must contain a 'projects' mapping")
-        _add_project_entries(projects, overlay_projects, registry_roots, source="runtime overlay")
+        _add_project_entries(
+            projects, overlay_projects, registry_roots,
+            source="runtime_overlay", unavailable=unavailable,
+        )
 
     return projects, registry_root
 
@@ -297,9 +319,11 @@ class WorkspaceRegistry:
         projects: dict[str, ProjectInfo],
         allowed_roots: list[Path],
         granted_scopes: set[str] | None = None,
+        unavailable_projects: dict[str, dict[str, str]] | None = None,
     ):
         self._projects = projects
         self._allowed_roots = allowed_roots
+        self._unavailable_projects = dict(unavailable_projects or {})
 
         project_roots_raw: dict[str, Path] = {
             pid: info.root for pid, info in projects.items()
@@ -321,10 +345,11 @@ class WorkspaceRegistry:
 
         If allowed_roots is None, the registry_root from the YAML file is used.
         """
-        projects, _yaml_registry_root = load_registry(registry_path)
+        unavailable: dict[str, dict[str, str]] = {}
+        projects, _yaml_registry_root = load_registry(registry_path, unavailable=unavailable)
         if allowed_roots is None:
             allowed_roots = list(load_registry_roots(registry_path).values())
-        return cls(projects, allowed_roots, granted_scopes)
+        return cls(projects, allowed_roots, granted_scopes, unavailable_projects=unavailable)
 
     def _display_project_root(self, root: Path) -> str:
         """Return a registry-relative project root without exposing host paths."""
@@ -353,6 +378,14 @@ class WorkspaceRegistry:
                 row["parent"] = info.parent
             result.append(row)
         return result
+
+    def list_unavailable_projects(self) -> list[dict[str, str]]:
+        """Expose configured but inaccessible roots as read-only diagnostics.
+
+        These entries are NOT active workspaces and may not authorize writes.
+        Paths are registry-relative, never resolved host-absolute paths.
+        """
+        return [dict(self._unavailable_projects[pid]) for pid in sorted(self._unavailable_projects)]
 
     def project_info(self, project_id: str) -> dict[str, Any]:
         """Return detailed metadata for a single project."""

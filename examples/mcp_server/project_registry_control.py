@@ -271,6 +271,25 @@ def _validate_against_registry(
 ) -> None:
     projects = data["projects"]
     if project_id in projects:
+        existing_cfg = projects[project_id]
+        if not isinstance(existing_cfg, dict):
+            raise _error("WORKSPACE_CONTENDED", "project_id is reserved by malformed registry entry.")
+        existing_root = existing_cfg.get("root")
+        existing_selector = existing_cfg.get("root_selector", "default")
+        if not isinstance(existing_root, str) or not isinstance(existing_selector, str):
+            raise _error("WORKSPACE_CONTENDED", "project_id is reserved by malformed registry entry.")
+        try:
+            _resolve_existing_root(
+                workspace_roots, existing_root,
+                root_selector=existing_selector, require_existing=True,
+            )
+        except ProjectRegistrationError:
+            raise _error(
+                "WORKSPACE_CONTENDED",
+                "project_id is reserved by an unavailable registry entry; "
+                "inspect project_list unavailable_projects and use guarded "
+                "unregistration or source repair before retrying.",
+            ) from None
         raise _error("ALREADY_EXISTS", "project_id is already registered.")
 
     workspace_root = workspace_roots.get(root_selector)
