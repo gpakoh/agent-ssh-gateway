@@ -251,7 +251,7 @@ async def test_lowlevel_client_issue_pagination_is_exact_and_validated(monkeypat
         await client.list_issues("gpakoh", "agent-ssh-gateway", state="all", limit=50, page=3)
         get.assert_awaited_once_with(
             "/repos/{owner}/{repo}/issues",
-            params={"state": "all", "limit": 50, "page": 3},
+            params={"state": "all", "type": "issues", "limit": 50, "page": 3},
             owner="gpakoh", repo="agent-ssh-gateway",
         )
         with pytest.raises(ValueError, match="positive integer"):
