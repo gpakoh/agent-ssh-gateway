@@ -594,7 +594,7 @@ class TestGiteaListIssuesStatePreflight:
         _assert_envelope(result)
         client_factory.assert_called_once()
         list_issues.assert_awaited_once_with(
-            "gpakoh", "web-ssh-gateway", state=expected_state, limit=30
+            "gpakoh", "web-ssh-gateway", state=expected_state, limit=30, page=1
         )
         assert result["result"]["items"][0]["number"] == 42
 
