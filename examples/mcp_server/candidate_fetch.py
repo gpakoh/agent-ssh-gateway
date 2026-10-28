@@ -21,6 +21,26 @@ class FetchRefError(RuntimeError):
     pass
 
 
+def _recorded_staging_origin(root: Path, metadata: dict, origin: str, base: str) -> bool:
+    """Accept only the factory's recorded disposable bundle origin.
+
+    The staging directory may already be gone. Its path is an identity marker,
+    never a file to read or a remote to fetch. Old clones without this creation
+    receipt must use guarded cleanup rather than retroactive origin adoption.
+    """
+    path = Path(origin)
+    return (
+        metadata.get("clone_origin") == origin
+        and metadata.get("head") == base
+        and metadata.get("status_entries") == 0
+        and path.is_absolute()
+        and path.name == "source.bundle"
+        and path.parent.parent == root.parent
+        and path.parent.name.startswith((".registered-source-", ".candidate-remote-"))
+        and ".." not in path.parts
+    )
+
+
 def _identity(project: str, root: Path, remote: str) -> dict:
     from app.workspace.policy import WorkspacePolicyError
     from app.workspace.registry import get_registry
@@ -67,7 +87,8 @@ def _identity(project: str, root: Path, remote: str) -> dict:
         raise FetchRefError("GIT_REMOTE_NOT_ALLOWED")
     git._validate_name(feature, "feature_branch")
     expected_origin = managed_source_bundle_path(source_project, base)
-    if not expected_origin or git._remote_url(root, remote) != expected_origin:
+    origin = git._remote_url(root, remote)
+    if origin != expected_origin and not _recorded_staging_origin(root, metadata, origin, base):
         raise FetchRefError("GIT_REMOTE_NOT_ALLOWED")
     try:
         source_info = registry.project_info(source_project)
@@ -81,7 +102,7 @@ def _identity(project: str, root: Path, remote: str) -> dict:
         "source_root": source,
         "feature_branch": feature,
         "base_sha": base,
-        "origin": expected_origin,
+        "origin": origin,
     }
 
 
@@ -195,9 +216,11 @@ def fetch_managed_candidate_base(
     tracking = f"refs/remotes/{remote}/{branch}"
     staging = f"refs/mcp-fetch/{uuid.uuid4().hex}"
     update_attempted = False
+    stage = "input_validation"
     try:
         if not expected:
             raise FetchRefError("INVALID_INPUT")
+        stage = "candidate_identity"
         identity = _identity(project, root, remote)
         feature = identity["feature_branch"]
         source = identity["source_root"]
@@ -205,7 +228,9 @@ def fetch_managed_candidate_base(
             _lineage_lock(root.parent.parent, identity["source_project"], feature),
             _staging_ref(root, staging),
         ):
+            stage = "candidate_state"
             head = _clean_head(root, feature)
+            stage = "remote_lease"
             lease = _remote_lease(source, feature, branch, expected, token)
             if lease[2] != head:
                 raise FetchRefError("HEAD_MISMATCH")
@@ -214,11 +239,13 @@ def fetch_managed_candidate_base(
             previous = git._read_ref(root, tracking)
             with tempfile.TemporaryDirectory(prefix="mcp-candidate-base-") as scratch:
                 bundle = Path(scratch) / "source.bundle"
+                stage = "source_publication"
                 publication = materialize_trusted_remote_bundle(source, expected, bundle)
                 # The publisher proves the exact commit and self-contained bundle.
                 # No auth environment is forwarded to this candidate Git command.
                 if Path(publication.path) != bundle:
                     raise FetchRefError("WORKSPACE_VERIFICATION_FAILED")
+                stage = "bundle_import"
                 result = git._run_git(
                     [
                         "git",
@@ -235,18 +262,22 @@ def fetch_managed_candidate_base(
                     raise FetchRefError("GIT_OPERATION_FAILED")
                 if git._read_ref(root, staging) != expected:
                     raise FetchRefError("HEAD_MISMATCH")
+                stage = "identity_recheck"
                 if (
                     _identity(project, root, remote) != identity
                     or _clean_head(root, feature) != head
                 ):
                     raise FetchRefError("WORKSPACE_CONTENDED")
+                stage = "remote_lease_recheck"
                 if _remote_lease(source, feature, branch, expected, token) != lease:
                     raise FetchRefError("HEAD_MISMATCH")
                 if _clean_head(root, feature) != head:
                     raise FetchRefError("WORKSPACE_CONTENDED")
+                stage = "tracking_publication"
                 update_attempted = True
                 if not _publish(root, feature, head, tracking, expected, previous):
                     raise FetchRefError("WORKSPACE_CONTENDED")
+            stage = "postverification"
             try:
                 if git._read_ref(root, tracking) != expected or _clean_head(root, feature) != head:
                     raise FetchRefError("WORKSPACE_VERIFICATION_FAILED")
@@ -311,7 +342,12 @@ def fetch_managed_candidate_base(
         return tool_error(
             tool="git_fetch_ref",
             code=code,
-            message="Managed candidate default-branch import did not complete; inspect the leases before retrying.",
+            message=(
+                "Managed candidate identity/origin proof is missing or mismatched; "
+                "a never-modified legacy clone can use guarded abandon_unmodified cleanup."
+                if stage == "candidate_identity"
+                else "Managed candidate default-branch import did not complete; inspect the reported stage and leases before retrying."
+            ),
             retryable=code in {"HEAD_MISMATCH", "WORKSPACE_CONTENDED", "GIT_REMOTE_UNAVAILABLE"},
             details={
                 "project": project,
@@ -319,6 +355,7 @@ def fetch_managed_candidate_base(
                 "branch": branch,
                 "local_ref": tracking,
                 "tracking_ref_update_attempted": update_attempted,
+                "stage": stage,
             },
             source="gitea",
         )
