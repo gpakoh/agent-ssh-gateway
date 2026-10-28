@@ -465,6 +465,20 @@ def _probe_remote_default_head(source_root: Path) -> RemoteDefaultHeadProbe:
     )
 
 
+def _remote_tracking_target(ref: str) -> str | None:
+    """Resolve the supported origin aliases against the trusted repository.
+
+    ``refs/heads/origin/main`` remains an explicit remote branch name; an
+    origin tracking alias must never silently select stale local objects.
+    """
+    for prefix in ("refs/remotes/origin/", "origin/"):
+        if ref.startswith(prefix):
+            branch = ref[len(prefix) :]
+            if branch and branch != "HEAD":
+                return f"refs/heads/{branch}"
+    return None
+
+
 def _probe_remote_ref(source_root: Path, ref: str) -> RemoteRefProbe:
     """Resolve one ref through the trusted remote with strict outcomes.
 
@@ -1120,8 +1134,10 @@ def _require_unmodified_abandonment(candidate_root: Path, *, expected_head_sha: 
         metadata.get("version") != 1
         or metadata.get("base_sha") != expected_head_sha
         or metadata.get("head") != expected_head_sha
-        or not re.fullmatch(r"[0-9a-f]{40}", str(metadata.get("base_ref", "")))
-        or metadata.get("base_ref") != expected_head_sha
+        or not re.fullmatch(r"[0-9a-f]{40}", expected_head_sha)
+        or not isinstance(metadata.get("source_project"), str)
+        or _project_id(metadata["source_project"], expected_branch, expected_head_sha)
+        != candidate_root.name
     ):
         raise _fail(
             "WORKSPACE_CONTENDED",
@@ -2037,6 +2053,23 @@ def _prepare_candidate_locked(
         "status_sha256": status_sha,
         "status_entries": status_entries,
     }
+    # Record only an origin observed during creation. Never manufacture this
+    # provenance when recovering a legacy clone from its current Git config.
+    if not recovered:
+        metadata["clone_origin"] = _run_git(
+            candidate_root,
+            ["remote", "get-url", "origin"],
+            operation="record candidate clone origin",
+        )
+    else:
+        previous_metadata = _read_metadata(candidate_root)
+        if any(
+            previous_metadata.get(key) != metadata[key]
+            for key in ("version", "project_id", "source_project", "branch", "base_sha", "head", "root")
+        ):
+            raise _fail("WORKSPACE_CONTENDED", "recovered candidate creation identity does not match")
+        if "clone_origin" in previous_metadata:
+            metadata["clone_origin"] = previous_metadata["clone_origin"]
     _write_metadata(_metadata_path(candidate_root), metadata)
     return CandidateCloneReceipt(
         project_id=project_id,
@@ -2103,8 +2136,21 @@ def prepare_candidate_clone(
         requested_ref = default_probe.branch
         remote_probe = RemoteRefProbe(RemoteRefStatus.FOUND, default_probe.sha)
     elif base_ref is not None:
-        remote_probe = _probe_remote_ref(source_root, requested_ref)
+        remote_probe = _probe_remote_ref(
+            source_root, _remote_tracking_target(requested_ref) or requested_ref
+        )
 
+    if (
+        _remote_tracking_target(requested_ref) is not None
+        and remote_probe is not None
+        and remote_probe.status is RemoteRefStatus.ABSENT
+    ):
+        raise _fail(
+            "SOURCE_REF_NOT_AVAILABLE",
+            "trusted remote tracking target is absent; refusing stale local ref fallback",
+            retryable=False,
+            details={"base_ref": requested_ref},
+        )
     local_sha = _local_commit_or_none(source_root, requested_ref)
     remote_sha = (
         remote_probe.sha
@@ -2121,7 +2167,10 @@ def prepare_candidate_clone(
         and remote_probe is not None
         and remote_probe.status is RemoteRefStatus.UNKNOWN
         and not exact_local_ref
-        and _source_has_configured_remote(source_root)
+        and (
+            _remote_tracking_target(requested_ref) is not None
+            or _source_has_configured_remote(source_root)
+        )
     ):
         raise _fail(
             "SOURCE_REMOTE_STATE_UNKNOWN",
