@@ -4436,7 +4436,7 @@ async def _xloud_legacy_recovery_live(
     if site.get("RestartCount") != 0:
         raise RuntimeError("XLOUD legacy site restarted")
     site_networks = await client.container_network_snapshot("xloud-site")
-    if (site_networks.get("proxmox_macvlan") != "10.10.10.149"
+    if (site_networks.get("proxmox_macvlan") != plan["expected_site_ipv4"]
         or not site_networks.get("xloud_default")):
         raise RuntimeError("XLOUD legacy site public/default network identity is invalid")
     snapshot = {
@@ -4470,6 +4470,18 @@ async def _xloud_legacy_recovery_live(
     return snapshot
 
 
+def _verified_xloud_site_ipv4(script_path: str) -> str:
+    """Read site IP only from the exact Git/SHA-pinned XLOUD rollout script."""
+    source = Path(script_path).read_text(encoding="utf-8")
+    matches = re.findall(
+        r'^SITE_IPV4="((?:[0-9]{1,3}\.){3}[0-9]{1,3})"$',
+        source, flags=re.MULTILINE,
+    )
+    if len(matches) != 1:
+        raise ValueError("XLOUD reviewed rollout script must declare one SITE_IPV4")
+    return str(ipaddress.IPv4Address(matches[0]))
+
+
 async def _prepare_xloud_recovery(
     *, candidate_project: str, expected_head_sha: str,
     expected_script_blob_sha: str, expected_script_sha256: str,
@@ -4486,6 +4498,7 @@ async def _prepare_xloud_recovery(
         image_namespace=image_namespace,
         require_stable_topology=False,
     )
+    plan["expected_site_ipv4"] = _verified_xloud_site_ipv4(plan["script_path"])
     client = _docker_client()
     run = await client.run_xloud_deploy_contract_helper(
         **_xloud_recovery_helper_kwargs(plan, timeout=120), mode="inspect"

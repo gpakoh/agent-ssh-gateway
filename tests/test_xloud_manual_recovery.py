@@ -58,6 +58,7 @@ def base_plan() -> dict:
         "candidate_root": "/candidate/xloud",
         "operator_root": "/operator/site-audit",
         "script_path": "/candidate/xloud/deploy-xloud.sh",
+        "expected_site_ipv4": "192.0.2.149",
         "env_file": "/operator/site-audit/.env",
         "state_volume": adapter._XLOUD_STATE_VOLUME,
         "state_volume_fingerprint": "sha256:" + "8" * 64,
@@ -135,7 +136,7 @@ class Client:
 
     async def container_network_snapshot(self, name):
         if name == "xloud-site":
-            return {"proxmox_macvlan": "10.10.10.149", "xloud_default": "172.30.0.2"}
+            return {"proxmox_macvlan": "192.0.2.149", "xloud_default": "172.30.0.2"}
         if name == "xloud-intake":
             return {"site-audit-control": "172.31.0.8", "xloud_default": "172.30.0.3"}
         raise AssertionError(name)
@@ -154,6 +155,7 @@ def setup(monkeypatch):
     monkeypatch.setattr(adapter, "_docker_client", lambda: client)
     monkeypatch.setattr(adapter, "_prepare_xloud_deploy", AsyncMock(return_value=base_plan()))
     monkeypatch.setattr(adapter, "_verify_xloud_guard_resources", AsyncMock())
+    monkeypatch.setattr(adapter, "_verified_xloud_site_ipv4", lambda _path: "192.0.2.149")
     return client
 
 
@@ -357,3 +359,18 @@ async def test_generic_confirm_dispatch_uses_only_registered_handler(setup, monk
     assert result["ok"] is True
     assert result["tool"] == "docker_recover_deployment"
     assert [call["mode"] for call in setup.calls] == ["inspect", "inspect", "recover"]
+
+def test_pinned_site_address_is_parsed_from_script_and_must_be_unambiguous(tmp_path):
+    script = tmp_path / "verified-deploy.sh"
+    script.write_text('SITE_IPV4="192.0.2.149"\n', encoding="utf-8")
+    assert adapter._verified_xloud_site_ipv4(str(script)) == "192.0.2.149"
+    for invalid in (
+        'SITE_IPV4="192.0.2.149"\nSITE_IPV4="192.0.2.150"\n',
+        'SITE_IPV4="invalid"\n',
+        'SITE_IPV4="999.0.2.149"\n',
+        'SITE_IPV4="192.0.2.149" # unreviewed suffix\n',
+        "",
+    ):
+        script.write_text(invalid, encoding="utf-8")
+        with pytest.raises(ValueError):
+            adapter._verified_xloud_site_ipv4(str(script))
