@@ -330,6 +330,7 @@ async def test_generic_catalog_exposes_reviewed_contract_only():
     entries = catalog["result"]["contracts"]
     assert any(item["id"] == "static-site-legacy-v1" for item in entries)
     assert all(item["scope"] == "mcp:docker:admin" for item in entries)
+    assert all(item["requires_operator_configuration"] is True for item in entries)
     assert all("parameters" in item and "confirmation" in item for item in entries)
 
 
