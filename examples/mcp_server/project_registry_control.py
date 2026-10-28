@@ -274,6 +274,19 @@ def _validate_against_registry(
         existing_cfg = projects[project_id]
         if not isinstance(existing_cfg, dict):
             raise _error("WORKSPACE_CONTENDED", "project_id is reserved by malformed registry entry.")
+        if existing_cfg.get("type") == "coordination-only":
+            repo = existing_cfg.get("gitea_repo")
+            if (
+                not existing_cfg.get("root")
+                and not existing_cfg.get("parent")
+                and isinstance(repo, str)
+                and repo.rsplit("/", 1)[-1] == project_id
+                and repo.count("/") == 1
+                and repo.split("/", 1)[0] == os.environ.get("MCP_COORD_GITEA_OWNER", "gpakoh").strip()
+                and repo.split("/", 1)[0] == os.environ.get("MCP_COORD_GITEA_OWNER", "gpakoh").strip()
+            ):
+                raise _error("ALREADY_EXISTS", "project_id is already registered.")
+            raise _error("WORKSPACE_CONTENDED", "project_id is reserved by invalid coordination-only mapping.")
         existing_root = existing_cfg.get("root")
         existing_selector = existing_cfg.get("root_selector", "default")
         if not isinstance(existing_root, str) or not isinstance(existing_selector, str):

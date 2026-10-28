@@ -289,7 +289,7 @@ async def test_adapter_cross_project_round_trip_uses_same_gitea_thread(monkeypat
 
     async def get_repo(owner, repo):
         assert owner == "gpakoh" and repo == "agent-ssh-gateway"
-        return {"permissions": {"push": True}}
+        return {"full_name": f"{owner}/{repo}", "permissions": {"push": True}}
 
     client.get_repo = get_repo
     monkeypatch.setattr(FakeClient, "__aenter__", _fake_aenter, raising=False)

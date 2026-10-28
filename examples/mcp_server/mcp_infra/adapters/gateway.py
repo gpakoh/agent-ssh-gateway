@@ -1059,9 +1059,27 @@ def gateway_working_directory(project: str) -> dict[str, Any]:
 
 
 def gateway_info(project: str) -> dict[str, Any]:
-    """Return resolved project metadata for a configured project name.
-    Read-only. Does not execute user-provided shell commands.
-    """
+    """Return workspace info, or explicit metadata for Gitea-only projects."""
+    try:
+        metadata = _server_workspace_registry().project_info(project)
+    except Exception:
+        metadata = None
+    if isinstance(metadata, dict) and metadata.get("type") == "coordination-only":
+        # A Gitea-only registration is not a checkout. Never invent a
+        # directory or make a remote shell call for its info response.
+        return tool_success(
+            tool="info",
+            result={
+                "project": project,
+                "type": "coordination-only",
+                "gitea_repo": metadata["gitea_repo"],
+                "workspace_available": False,
+                "is_git_repo": False,
+                "note": "Gitea coordination only; no local source checkout or workspace operations.",
+            },
+            source="gateway",
+            read_only=True,
+        )
     return _run_gateway(
         tool="info",
         fn=lambda: info(_server_client(), project),
