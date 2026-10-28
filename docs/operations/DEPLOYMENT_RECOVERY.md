@@ -29,8 +29,10 @@ The bundled compatibility adapter currently exposes the contract
 preconfigured deployment**, consisting of a web container and a companion
 intake container. It is *not* a generic rollback command for other sites.
 
-The catalog describes six required parameters. The following illustrates
-their shape; values are **placeholders**, not valid live release identifiers:
+The catalog describes six required parameters; its entry indicates that
+operator configuration is required. A listed contract does not prove that a
+matching deployment or recovery journal exists in a fresh installation.
+The following example illustrates the parameters' shape; values are **placeholders**, not valid live release identifiers:
 
 ```json
 {
