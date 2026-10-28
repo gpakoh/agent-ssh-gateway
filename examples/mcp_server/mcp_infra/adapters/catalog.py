@@ -10,6 +10,7 @@ from tool_results import tool_error, tool_success
 
 from app.skill_pack import SkillPackError, read_skill
 from examples.mcp_server.gateway_catalog import build_catalog
+from examples.mcp_server.mcp_infra._server_ref import server_attr
 
 
 def _read_result(tool: str, fn: Callable[[], dict[str, Any]]) -> dict[str, Any]:
@@ -43,7 +44,6 @@ def gateway_catalog(
     Read an advertised skill with gateway_skill. Catalog visibility is server
     registration, not a grant of caller scopes or a client catalog refresh.
     """
-    from examples.mcp_server import server
     from examples.mcp_server.mcp_infra import runtime
 
     return _read_result(
@@ -57,7 +57,7 @@ def gateway_catalog(
             role=role,
             offset=offset,
             limit=limit,
-            unavailable=server._unavailable_tool_reasons(),
+            unavailable=server_attr("_unavailable_tool_reasons")(),
         ),
     )
 

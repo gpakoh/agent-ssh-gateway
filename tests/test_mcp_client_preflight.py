@@ -305,10 +305,15 @@ class TestChatGPTExpectedManifest:
     def test_manifest_counts_match_code(self):
         import sys
         sys.path.insert(0, str(ROOT / "examples" / "mcp_server"))
-        from tool_modes import MCP_CLIENT_BLOCKED_TOOLS, get_mcp_client_safe_tools
+        from tool_modes import (
+            MCP_CLIENT_BLOCKED_TOOLS,
+            TOOL_NAMES_BY_MODE,
+            get_mcp_client_safe_tools,
+        )
         m = self._load_manifest()
         assert m["expected_safe_count"] == len(get_mcp_client_safe_tools())
         assert m["expected_blocked_count"] == len(MCP_CLIENT_BLOCKED_TOOLS)
+        assert m["expected_mcp_client_full_count"] == len(TOOL_NAMES_BY_MODE["mcp_client"])
 
     def test_manifest_must_include_present_in_safe(self):
         import sys

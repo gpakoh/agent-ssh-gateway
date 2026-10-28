@@ -1,9 +1,9 @@
 {
   "mode": "mcp_client",
   "safe_mode": true,
-  "expected_safe_count": 89,
+  "expected_safe_count": 91,
   "expected_blocked_count": 37,
-  "expected_mcp_client_full_count": 121,
+  "expected_mcp_client_full_count": 127,
   "must_include": [
     "docker_site_audit_crm_ingress_readiness",
     "docker_site_audit_deploy_status",
@@ -17,7 +17,9 @@
     "tools_manifest",
     "coord_inbox",
     "coord_open",
-    "coord_board"
+    "coord_board",
+    "gateway_catalog",
+    "gateway_skill"
   ],
   "must_exclude": [
     "docker_compose_up",
