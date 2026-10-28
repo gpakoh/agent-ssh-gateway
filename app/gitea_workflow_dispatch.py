@@ -484,7 +484,7 @@ async def dispatch_workflow(
             "id"
         ) != expected_ref_sha:
             raise DispatchRefused("REF_DRIFT", "Workflow ref changed during preflight")
-        receipt = {
+        receipt: dict[str, Any] = {
             "version": 1,
             "phase": "dispatched",
             "actor": actor,
