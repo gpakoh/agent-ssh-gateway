@@ -4285,8 +4285,8 @@ async def _verify_xloud_recovery(
 # executable or container path. Adding a service means registering its typed
 # inputs and its reviewed prepare/execute handlers, not adding a new MCP tool.
 _DEPLOYMENT_RECOVERY_CONTRACTS: dict[str, dict[str, Any]] = {
-    "xloud": {
-        "description": "Recover an unfinished XLOUD legacy site rollout without deploying a new version",
+    "static-site-legacy-v1": {
+        "description": "Recover a pending two-service website rollout after restoring the previous web container",
         "parameters": (
             "candidate_project",
             "expected_head_sha",
@@ -4321,7 +4321,7 @@ def _recovery_contract_parameters(
 def _recovery_contract_handlers() -> dict[str, tuple[Any, Any]]:
     # Registration is deliberately bound to reviewed functions, not strings,
     # shell fragments, or paths. A new service registers only here and above.
-    return {"xloud": (_prepare_xloud_recovery, _docker_recover_xloud_impl)}
+    return {"static-site-legacy-v1": (_prepare_xloud_recovery, _docker_recover_xloud_impl)}
 
 
 async def docker_recovery_catalog() -> dict[str, Any]:

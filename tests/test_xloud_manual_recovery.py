@@ -200,7 +200,7 @@ async def test_preflight_refuses_untrusted_or_completed_journal(setup, change):
 async def test_public_tool_requires_high_risk_confirmation(setup):
     import examples.mcp_server.server as srv
 
-    result = await adapter.docker_recover_deployment(contract="xloud", parameters=KWARGS)
+    result = await adapter.docker_recover_deployment(contract="static-site-legacy-v1", parameters=KWARGS)
     assert result["ok"] is True
     action, _ = srv._confirm_store.peek_action_id(result["result"]["action_id"])
     assert action is not None and action.tool == "docker_recover_deployment"
@@ -328,7 +328,7 @@ async def test_generic_catalog_exposes_reviewed_contract_only():
     catalog = await adapter.docker_recovery_catalog()
     assert catalog["ok"]
     entries = catalog["result"]["contracts"]
-    assert any(item["id"] == "xloud" for item in entries)
+    assert any(item["id"] == "static-site-legacy-v1" for item in entries)
     assert all(item["scope"] == "mcp:docker:admin" for item in entries)
     assert all("parameters" in item and "confirmation" in item for item in entries)
 
@@ -336,8 +336,8 @@ async def test_generic_catalog_exposes_reviewed_contract_only():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("contract,parameters", [
     ("arbitrary-shell", KWARGS),
-    ("xloud", {**KWARGS, "command": "docker rm -f all"}),
-    ("xloud", {key: value for key, value in KWARGS.items() if key != "source_revision"}),
+    ("static-site-legacy-v1", {**KWARGS, "command": "docker rm -f all"}),
+    ("static-site-legacy-v1", {key: value for key, value in KWARGS.items() if key != "source_revision"}),
 ])
 async def test_generic_recovery_rejects_unregistered_or_extra_parameters(setup, contract, parameters):
     result = await adapter.docker_recover_deployment(contract=contract, parameters=parameters)
@@ -349,11 +349,11 @@ async def test_generic_recovery_rejects_unregistered_or_extra_parameters(setup, 
 @pytest.mark.asyncio
 async def test_generic_confirm_dispatch_uses_only_registered_handler(setup, monkeypatch):
     import examples.mcp_server.server as srv
-    prepared = await adapter.docker_recover_deployment(contract="xloud", parameters=KWARGS)
+    prepared = await adapter.docker_recover_deployment(contract="static-site-legacy-v1", parameters=KWARGS)
     assert prepared["ok"] is True
     action, _ = srv._confirm_store.peek_action_id(prepared["result"]["action_id"])
     assert action.tool == "docker_recover_deployment"
-    assert action.kwargs["contract"] == "xloud"
+    assert action.kwargs["contract"] == "static-site-legacy-v1"
     monkeypatch.setattr(adapter.asyncio, "sleep", AsyncMock())
     result = await adapter._docker_recover_deployment_impl(**action.kwargs)
     assert result["ok"] is True

@@ -1,79 +1,104 @@
 # Governed deployment recovery
 
-Recovering an incomplete deploy is a **separate workflow** from deploying the
-next revision. Never retry a rollout merely because the previous attempt
-timed out: its source image, durable state, and live topology may have changed.
+Deployment recovery is a separate operation from deploying a new revision.
+After a deployment fails or times out, the previous application's image, its
+durable journal, and the running containers may no longer match. Retrying
+deployment or deleting the journal is **not** a safe recovery strategy.
 
-## Two tools, not one tool per website
+This feature provides a common MCP interface for registered, operator-reviewed
+recovery procedures. The gateway is an infrastructure control plane; it does
+not automatically know how to roll back every application that uses Docker.
 
-- `docker_recovery_catalog()`: read-only discovery. Returns registered recovery
-  contract IDs, expected parameter names, scope, and confirmation requirement.
-- `docker_recover_deployment(contract, parameters, timeout=300)`: prepares
-  the chosen contract using **only** an allowlisted, reviewed handler. The
-  response contains a high-risk confirmation action. The user must confirm it
-  through the existing `confirm_operation` workflow. The confirmation is
-  single-use and short-lived.
+## Common tools
 
-The public API stays unchanged when more projects add recovery contracts.
-Registry entries specify a fixed contract ID, typed parameter names, a
-server-controlled preparation function, a server-controlled executor, and
-the required scope. A user cannot provide an executable, shell command,
-container name, host path, or script path through this interface.
+| Tool | What it does | Privilege |
+| --- | --- | --- |
+| `docker_recovery_catalog` | Lists supported contract IDs, expected parameters, and confirmation policy. Never modifies Docker. | `mcp:docker` |
+| `docker_recover_deployment` | Validates one allowlisted contract against the current state and creates a high-risk confirmation action. | `mcp:docker:admin` |
+| `confirm_operation` | After explicit approval, rechecks state and executes the contract's pinned recovery routine. | Existing privileged confirmation policy |
 
-### First supported contract: `xloud`
+These tools are independent of application branding. Clients should call the
+catalog before choosing a contract; they must not assume a particular contract
+is installed. The returned contract IDs describe **specific registered
+recovery procedures**, not arbitrary Docker image names or shell scripts.
 
-The adapter expects these parameters:
+## Example: recover a previous version of a two-service website
+
+The bundled compatibility adapter currently exposes the contract
+`static-site-legacy-v1`. It is deliberately restricted to **one
+preconfigured deployment**, consisting of a web container and a companion
+intake container. It is *not* a generic rollback command for other sites.
+
+The catalog describes six required parameters. The following illustrates
+their shape; values are **placeholders**, not valid live release identifiers:
 
 ```json
 {
-  "contract": "xloud",
+  "contract": "static-site-legacy-v1",
   "parameters": {
-    "candidate_project": "candidate-xloud-<verified-release>",
-    "expected_head_sha": "<40-lowercase-hex>",
-    "expected_script_blob_sha": "<40-lowercase-hex>",
-    "expected_script_sha256": "<64-lowercase-hex>",
-    "source_revision": "<same-40-lowercase-hex-as-head>",
-    "image_namespace": "<trusted-registry-namespace>"
-  }
+    "candidate_project": "<registered-release-candidate>",
+    "expected_head_sha": "<git-commit-sha40>",
+    "expected_script_blob_sha": "<git-blob-sha40>",
+    "expected_script_sha256": "<script-sha256-hex64>",
+    "source_revision": "<same-git-commit-sha40>",
+    "image_namespace": "<trusted-container-registry>"
+  },
+  "timeout": 300
 }
 ```
 
-Pass values taken from the exact verified release candidate. The gateway
-verifies source ownership, branch/tree cleanliness, script blob/bytes, pinned
-two-image revisions, state volume, operator secret fingerprint, fixed network
-metadata, Site Audit API identity, and the healthy legacy site.
+The caller supplies references **only**. The gateway resolves the registered
+candidate and verifies its Git tree, approved deployment script, OCI image
+identities, private journal volume, networks, and operator credentials.
+Neither a custom command nor an arbitrary filesystem path is accepted.
 
-**Prepare is non-mutating.** Its `inspect` helper mounts the deployment
-journal volume read-only and never executes a deploy shell script. The old
-site must be healthy and still use the exact historical image reference; the
-failed-generation intake must match the originally pinned image and networks.
-The legacy-only contract refuses a mixed accepted generation, a missing
-pending journal, a prior intake, or foreign sidecars.
+The preparation step mounts the journal volume **read-only**, with no network
+and no Docker socket. It checks for an unfinished deployment and verifies
+that the previous web container is healthy and the companion container
+matches the failed revision. It refuses missing or contradictory journal
+evidence, unexpected containers, an accepted generation, or changed images.
 
-Before confirming, the gateway re-reads the journal and repeats identity
-checks. Only then may the fixed repository-owned `deploy-xloud.sh recover`
-execute. Success requires a cleared pending journal, preserved
-`last-failed.state`, removed failed-generation intake, and stable/healthy
-legacy site after a second observation. On timeout or ambiguous evidence,
-**do not retry automatically**; inspect and reconcile the durable evidence.
-Neither operation deploys a new version or claims that the application is
-already released.
+After user confirmation, the gateway performs the same checks **again**,
+including a fingerprint of the pending journal and the live topology, before
+calling the fixed repository-owned recovery routine. Success must establish
+a stable healthy previous site, removal of the failed companion container,
+a cleared pending journal, and preserved historical failure evidence.
+An ambiguous result is reported as such; it is never retried automatically.
 
-### Adding the next site
+## Registering a recovery procedure for another application
 
-Add an entry to `_DEPLOYMENT_RECOVERY_CONTRACTS` and two reviewed handlers to
-`_recovery_contract_handlers()` in the Docker adapter. Bind the handler to
-its own canonical project, immutable script and images, volumes, service
-identities, and expected recovery evidence. Add negative tests for foreign
-projects, changed confirmation pins, missing pending state, and uncertain
-outcomes. Do not widen the existing XLOUD adapter to accept arbitrary paths or
-services; that would turn a recovery operation into unrestricted remote
-execution.
+Operators and developers should treat each recovery contract as a
+**versioned policy**, not a reusable shell endpoint:
 
-## Non-goals and deployment caveat
+1. Define a descriptive contract ID and exact, typed parameter names in
+   `_DEPLOYMENT_RECOVERY_CONTRACTS`.
+2. Register reviewed `prepare` and `execute` functions in
+   `_recovery_contract_handlers()`. The preparation handler must read only
+   bounded state; the execution handler must check confirmation-pinned state
+   again before any mutation.
+3. Bind the contract to canonical projects, immutable source and image
+   digests, bounded service identities, private state, and explicit success
+   evidence. Never take untrusted container names, scripts, paths, or shell
+   commands from callers.
+4. Add negative tests for mismatched revisions, missing state, foreign
+   containers, confirmation races, partial rollback, timeouts, and failure
+   evidence preservation.
+5. Verify the external MCP tool schema and update the published catalog.
+   No new MCP tool is necessary; clients still use the two common operations.
 
-Merging the Gateway PR does **not** automatically activate the tool in an
-already running Gateway container: its own verified release and MCP schema
-reload are separate. XLOUD `PR #34` (Nginx config / rollback fixes) and a
-later XLOUD image rollout remain independent. No production data or
-container is modified by this code change.
+A fleet can register multiple recovery policies without a separate public
+MCP function for each website. A future declarative profile mechanism could
+share common strategies across many deployments, but a profile must not
+silently inherit authority over unrelated Docker resources.
+
+## Operational boundaries
+
+Merging changes to the gateway repository does not install them into an
+already-running gateway service; an independently verified gateway release
+is necessary. The recovery tool also does **not** publish a new application
+version. Once the old state has been reconciled, any new application rollout
+must pass its own separate build, tests, approvals, and health checks.
+
+An operator should consult a contract's own runbook for site-specific
+implementation details and credentials. No private infrastructure address
+or project-specific release incident is required to understand this API.
