@@ -15,11 +15,10 @@ projects:
     tags: [nod, platform]
 
   nod-shared:
-    root: NOD_gateway/nod-shared
-    parent: nod-gateway
-    type: python-library
-    description: "NOD Gateway shared utilities (ESA crypto, auth signatures)"
-    tags: [nod, shared, crypto]
+    type: coordination-only
+    gitea_repo: gpakoh/nod-shared
+    description: "Standalone NOD shared contracts repository (Gitea-only coordination)"
+    tags: [nod, shared, coordination]
 
   quart-platform:
     root: quart-platform

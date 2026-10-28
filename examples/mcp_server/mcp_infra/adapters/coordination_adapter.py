@@ -38,6 +38,14 @@ def _registered(project: str) -> str:
         raise ValueError("project is not registered in SSH Gateway") from exc
     if not isinstance(metadata, dict) or metadata.get("type") == "candidate-clone":
         raise ValueError("coordination requires a registered source project")
+    if metadata.get("type") == "coordination-only":
+        # No filesystem checkout is implied. Bind only the exact trusted
+        # Gitea owner/repo configured in the source-controlled registry.
+        if (
+            "root" in metadata
+            or metadata.get("gitea_repo") != f"{_owner()}/{name}"
+        ):
+            raise ValueError("Gitea-only coordination repo mapping is not verified")
     return name
 
 
@@ -141,8 +149,11 @@ async def coord_create(
         owner, target = await _connection(tool, target_project, write=True)
         async with server_attr("GiteaClient")(os.environ["GITEA_TOKEN"]) as client:
             repo = await client.get_repo(owner, target)
-            if not (repo.get("permissions") or {}).get("push"):
-                raise PermissionError("Gitea identity lacks target repository write access")
+            if (
+                repo.get("full_name") != f"{owner}/{target}"
+                or (repo.get("permissions") or {}).get("push") is not True
+            ):
+                raise PermissionError("Gitea target repository identity or write access is unverified")
             outcome = await create_thread(
                 client, owner, target,
                 source_project=source, title=title, body=message, request_key=request_key,
@@ -161,8 +172,11 @@ async def _mutate(
         owner, repo = await _connection(tool, project, write=True)
         async with server_attr("GiteaClient")(os.environ["GITEA_TOKEN"]) as client:
             meta = await client.get_repo(owner, repo)
-            if not (meta.get("permissions") or {}).get("push"):
-                raise PermissionError("Gitea identity lacks target repository write access")
+            if (
+                meta.get("full_name") != f"{owner}/{repo}"
+                or (meta.get("permissions") or {}).get("push") is not True
+            ):
+                raise PermissionError("Gitea target repository identity or write access is unverified")
             outcome = await write_event(
                 client, owner, repo, issue_number,
                 text=message, request_key=request_key, state=state,
