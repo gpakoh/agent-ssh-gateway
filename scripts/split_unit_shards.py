@@ -75,7 +75,7 @@ def collect_unit_files() -> dict[str, int]:
             resolved = (repo_root / path).resolve()
             resolved.relative_to(repo_root.resolve())
         except (OSError, ValueError):
-            raise SystemExit(f"collected node outside repo tree: {path}")
+            raise SystemExit(f"collected node outside repo tree: {path}") from None
         if resolved.suffix != ".py":
             raise SystemExit(f"collected node is not a .py file: {path}")
     return dict(counts)

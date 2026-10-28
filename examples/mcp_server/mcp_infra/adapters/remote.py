@@ -34,6 +34,8 @@ from examples.mcp_client_remote.fleet.github_client import (
     normalize_list_response,
 )
 from examples.mcp_client_remote.fleet.shared import (
+    classify_gitea_issue,
+    list_confirmed_gitea_issues,
     list_pagination_meta,
     minimize_issue_payload,
 )
@@ -1131,7 +1133,7 @@ _GITEA_ISSUE_STATE_FILTERS = frozenset({"open", "closed", "all"})
 async def gitea_list_issues(
     owner: str, repo: str, state: str = "open", limit: int = 30
 ) -> dict[str, Any]:
-    """List issues in a Gitea repository. State: open, closed, all."""
+    """List actual Gitea Issues (not PRs). State: open, closed, all."""
     if not isinstance(state, str) or state not in _GITEA_ISSUE_STATE_FILTERS:
         allowed = ", ".join(sorted(_GITEA_ISSUE_STATE_FILTERS))
         return tool_error(
@@ -1157,11 +1159,7 @@ async def gitea_list_issues(
     try:
         validate_pagination(limit, "limit")
         async with _server_gitea_client()(token) as client:
-            raw = await client.list_issues(owner, repo, state=state, limit=limit)
-            data = normalize_list_response(
-                [minimize_issue_payload(i, provider="gitea") for i in raw],
-                meta=list_pagination_meta(len(raw), limit),
-            )
+            data = await list_confirmed_gitea_issues(client, owner, repo, state=state, limit=limit)
     except Exception as exc:
         return _remote_api_error("gitea_list_issues", "gitea", exc)
     return tool_success("gitea_list_issues", result=data, source="gitea")
@@ -1181,6 +1179,7 @@ async def gitea_get_issue(owner: str, repo: str, issue_number: int) -> dict[str,
         async with _server_gitea_client()(token) as client:
             raw = await client.get_issue(owner, repo, issue_number)
             data = minimize_issue_payload(raw, provider="gitea")
+            data["item_type"] = classify_gitea_issue(raw)
     except Exception as exc:
         return _remote_api_error("gitea_get_issue", "gitea", exc)
     return tool_success("gitea_get_issue", result=data, source="gitea")

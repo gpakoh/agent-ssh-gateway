@@ -1270,7 +1270,9 @@ class GiteaClient:
         page = _validate_positive_int(page, "page")
         return await self._get(
             "/repos/{owner}/{repo}/issues",
-            params={"state": state, "limit": limit, "page": page},
+            # Filter BEFORE pagination: Gitea includes PRs in the Issues API
+            # without this documented type discriminator.
+            params={"state": state, "type": "issues", "limit": limit, "page": page},
             owner=owner,
             repo=repo,
         )
