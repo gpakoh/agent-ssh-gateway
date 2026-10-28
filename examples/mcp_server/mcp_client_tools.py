@@ -30,6 +30,8 @@ def _resolve_project(project_name: str) -> Path:
         from app.workspace_policy import WorkspacePolicyError
 
         info = get_registry().project_info(project_name)
+        if info.get("type") == "coordination-only":
+            raise WorkspacePolicyError("Gitea-only project has no local workspace")
         return Path(info["root"])
     except WorkspacePolicyError as exc:
         body = {"detail": {"code": "PROJECT_NOT_FOUND", "retryable": False}}

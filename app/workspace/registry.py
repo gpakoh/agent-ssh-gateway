@@ -198,13 +198,53 @@ def _add_project_entries(
     *,
     source: str,
     unavailable: dict[str, dict[str, str]] | None = None,
+    coordination_only: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     for pid, cfg in projects_raw.items():
-        if pid in projects:
+        if (
+            pid in projects
+            or (coordination_only is not None and pid in coordination_only)
+            or (
+                source == "runtime_overlay" and unavailable is not None
+                and unavailable.get(pid, {}).get("reason") == "invalid_coordination_mapping"
+            )
+        ):
             logger.warning("Skipping project %s from %s: duplicate project id", pid, source)
             continue
         if not isinstance(cfg, dict):
             logger.warning("Skipping project %s from %s: config must be a mapping", pid, source)
+            continue
+        if cfg.get("type") == "coordination-only":
+            repo = cfg.get("gitea_repo")
+            valid = (
+                source == "source_registry"
+                and isinstance(pid, str)
+                and isinstance(repo, str)
+                and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*", repo)
+                and repo.split("/", 1)[1] == pid
+                and repo.split("/", 1)[0] == os.environ.get("MCP_COORD_GITEA_OWNER", "gpakoh").strip()
+                and not cfg.get("root")
+                and not cfg.get("parent")
+            )
+            if valid and coordination_only is not None:
+                coordination_only[pid] = {
+                    "project_id": pid,
+                    "type": "coordination-only",
+                    "gitea_repo": repo,
+                    "description": str(cfg.get("description", "")),
+                    "tags": list(cfg.get("tags", [])),
+                }
+                if unavailable is not None:
+                    unavailable.pop(pid, None)
+            else:
+                logger.warning("Skipping project %s from %s: invalid Gitea-only mapping", pid, source)
+                if unavailable is not None:
+                    unavailable[pid] = {
+                        "project_id": str(pid),
+                        "type": "coordination-only",
+                        "source": source,
+                        "reason": "invalid_coordination_mapping",
+                    }
             continue
         relative_root = cfg.get("root", "")
         if not relative_root:
@@ -248,6 +288,7 @@ def load_registry(
     path: str | Path,
     *,
     unavailable: dict[str, dict[str, str]] | None = None,
+    coordination_only: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, ProjectInfo], Path]:
     """Load project registry from a YAML file plus optional runtime overlay.
 
@@ -277,6 +318,7 @@ def load_registry(
     _add_project_entries(
         projects, projects_raw, registry_roots,
         source="source_registry", unavailable=unavailable,
+        coordination_only=coordination_only,
     )
 
     runtime_path = resolve_runtime_registry_path(path)
@@ -296,6 +338,7 @@ def load_registry(
         _add_project_entries(
             projects, overlay_projects, registry_roots,
             source="runtime_overlay", unavailable=unavailable,
+            coordination_only=coordination_only,
         )
 
     return projects, registry_root
@@ -320,8 +363,10 @@ class WorkspaceRegistry:
         allowed_roots: list[Path],
         granted_scopes: set[str] | None = None,
         unavailable_projects: dict[str, dict[str, str]] | None = None,
+        coordination_projects: dict[str, dict[str, Any]] | None = None,
     ):
         self._projects = projects
+        self._coordination_projects = dict(coordination_projects or {})
         self._allowed_roots = allowed_roots
         self._unavailable_projects = dict(unavailable_projects or {})
 
@@ -346,10 +391,16 @@ class WorkspaceRegistry:
         If allowed_roots is None, the registry_root from the YAML file is used.
         """
         unavailable: dict[str, dict[str, str]] = {}
-        projects, _yaml_registry_root = load_registry(registry_path, unavailable=unavailable)
+        coordination: dict[str, dict[str, Any]] = {}
+        projects, _yaml_registry_root = load_registry(
+            registry_path, unavailable=unavailable, coordination_only=coordination,
+        )
         if allowed_roots is None:
             allowed_roots = list(load_registry_roots(registry_path).values())
-        return cls(projects, allowed_roots, granted_scopes, unavailable_projects=unavailable)
+        return cls(
+            projects, allowed_roots, granted_scopes,
+            unavailable_projects=unavailable, coordination_projects=coordination,
+        )
 
     def _display_project_root(self, root: Path) -> str:
         """Return a registry-relative project root without exposing host paths."""
@@ -377,7 +428,8 @@ class WorkspaceRegistry:
             if info.parent:
                 row["parent"] = info.parent
             result.append(row)
-        return result
+        result.extend(dict(info) for _, info in sorted(self._coordination_projects.items()))
+        return sorted(result, key=lambda row: row["project_id"])
 
     def list_unavailable_projects(self) -> list[dict[str, str]]:
         """Expose configured but inaccessible roots as read-only diagnostics.
@@ -391,6 +443,9 @@ class WorkspaceRegistry:
         """Return detailed metadata for a single project."""
         info = self._projects.get(project_id)
         if info is None:
+            coordination = self._coordination_projects.get(project_id)
+            if coordination is not None:
+                return dict(coordination)
             raise WorkspacePolicyError(f"Unknown project: {project_id}")
         result: dict[str, Any] = {
             "project_id": info.project_id,
