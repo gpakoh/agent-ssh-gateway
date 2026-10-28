@@ -13,6 +13,8 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
     "minimal": {
         "health",
         "tools_manifest",
+        "gateway_catalog",
+        "gateway_skill",
         "project_list",
         "scan_command",
         "session_health",
@@ -23,6 +25,8 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
     "standard": {
         "health",
         "tools_manifest",
+        "gateway_catalog",
+        "gateway_skill",
         "project_list",
         "scan_command",
         "list_sessions",
@@ -48,6 +52,8 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
     "full": {
         "health",
         "tools_manifest",
+        "gateway_catalog",
+        "gateway_skill",
         "project_list",
         "scan_command",
         "list_sessions",
@@ -77,6 +83,8 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "scan_command",
         "health",
         "tools_manifest",
+        "gateway_catalog",
+        "gateway_skill",
         "session_health",
         "job_status",
         "job_result",

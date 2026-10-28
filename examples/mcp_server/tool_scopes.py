@@ -59,6 +59,8 @@ TOOL_SCOPES: dict[str, list[str]] = {
     # ops — mcp:read / mcp:execute
     "health": ["mcp:read"],
     "tools_manifest": ["mcp:read"],
+    "gateway_catalog": ["mcp:read"],
+    "gateway_skill": ["mcp:read"],
     "project_list": ["mcp:read"],
     "scan_command": ["mcp:read", "mcp:project"],
     "scan_file": ["mcp:read", "mcp:project"],
