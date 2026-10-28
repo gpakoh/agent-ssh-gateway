@@ -4298,6 +4298,7 @@ _DEPLOYMENT_RECOVERY_CONTRACTS: dict[str, dict[str, Any]] = {
         "scope": "mcp:docker:admin",
         "confirmation": "high",
         "mode": "pending-legacy-rollback",
+        "requires_operator_configuration": True,
     },
 }
 

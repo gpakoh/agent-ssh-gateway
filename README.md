@@ -44,6 +44,7 @@ over credentials, targets, scopes, and execution policy.
 | Jobs and observability | Background jobs, status and result retrieval, output streaming, health checks, metrics, audit events, and event hooks |
 | Project workflows | Scoped file read/search/write, Git inspection, diffs, tests, linting, type checks, preview, hash verification, and patch application |
 | MCP integrations | Gateway tools plus GitHub, Gitea, Docker, PostgreSQL, and Context7 adapters |
+| Deployment recovery | Discover registered recovery procedures and safely reconcile failed Docker deployments using read-only preparation, explicit approval, and audited execution. See [Deployment recovery](docs/operations/DEPLOYMENT_RECOVERY.md). |
 | Agent coordination | Structured task handoff, isolated worktrees, agent status/report artifacts, controlled runner workflows, and a Gitea-backed cross-project inbox |
 | Access control | Master and short-lived agent tokens, optional SSO login, scopes, access profiles, session ownership, target allowlists, command policies, and confirmation flows |
 
