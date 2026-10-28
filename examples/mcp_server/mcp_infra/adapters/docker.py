@@ -4295,6 +4295,13 @@ _DEPLOYMENT_RECOVERY_CONTRACTS: dict[str, dict[str, Any]] = {
             "source_revision",
             "image_namespace",
         ),
+        "pins": (
+            "pending_fingerprint", "live", "state_volume_fingerprint",
+            "network_fingerprints", "audit_snapshot", "secret_fingerprint",
+            "helper_image_id",
+        ),
+        "label_parameter": "source_revision",
+        "evidence_parameter": "pending_fingerprint",
         "scope": "mcp:docker:admin",
         "confirmation": "high",
         "mode": "pending-legacy-rollback",
@@ -4358,23 +4365,17 @@ async def docker_recover_deployment(
             code="DEPLOY_CONTRACT_PRECONDITION_FAILED",
             message=str(exc), source="docker", retryable=False, redacted=True,
         )
-    pins = {
-        key: plan[key]
-        for key in (
-            "pending_fingerprint", "live", "state_volume_fingerprint",
-            "network_fingerprints", "audit_snapshot", "secret_fingerprint",
-            "helper_image_id",
-        )
-    }
+    spec = _DEPLOYMENT_RECOVERY_CONTRACTS[contract]
+    pins = {key: plan[key] for key in spec["pins"]}
     action = _confirm_store().create_action(
         "docker_recover_deployment",
         {"contract": contract, "parameters": params, "pins": pins, "timeout": timeout},
-        f"Recover {contract} unfinished rollout at {params['source_revision'][:12]}",
+        f"Recover {contract} using {str(params.get(spec['label_parameter'], contract))[:12]}",
         risk="high", required_scope="mcp:docker:admin",
     )
     response = _confirmation_response(action)
     response["result"]["recovery_contract"] = contract
-    response["result"]["pending_fingerprint"] = plan["pending_fingerprint"]
+    response["result"]["evidence_fingerprint"] = pins.get(spec["evidence_parameter"])
     return response
 
 
@@ -4384,11 +4385,7 @@ async def _docker_recover_deployment_impl(
     try:
         params = _recovery_contract_parameters(contract, parameters)
         _, execute = _recovery_contract_handlers()[contract]
-        required = {
-            "pending_fingerprint", "live", "state_volume_fingerprint",
-            "network_fingerprints", "audit_snapshot", "secret_fingerprint",
-            "helper_image_id",
-        }
+        required = set(_DEPLOYMENT_RECOVERY_CONTRACTS[contract]["pins"])
         if not isinstance(pins, dict) or set(pins) != required:
             raise ValueError("Incomplete recovery confirmation pins")
     except ValueError as exc:

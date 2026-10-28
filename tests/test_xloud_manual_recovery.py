@@ -357,3 +357,38 @@ async def test_generic_confirm_dispatch_uses_only_registered_handler(setup, monk
     assert result["ok"] is True
     assert result["tool"] == "docker_recover_deployment"
     assert [call["mode"] for call in setup.calls] == ["inspect", "inspect", "recover"]
+
+@pytest.mark.asyncio
+async def test_generic_contract_supports_other_parameter_and_evidence_shapes(monkeypatch):
+    import examples.mcp_server.server as srv
+
+    contract = {
+        "description": "Fixture recovery",
+        "parameters": ("ticket",),
+        "pins": ("lease",),
+        "label_parameter": "ticket",
+        "evidence_parameter": "lease",
+        "scope": "mcp:docker:admin",
+        "confirmation": "high",
+        "mode": "fixture",
+    }
+    monkeypatch.setitem(adapter._DEPLOYMENT_RECOVERY_CONTRACTS, "fixture", contract)
+    prepare = AsyncMock(return_value={"lease": "sha256:" + "f" * 64})
+    execute = AsyncMock(return_value={
+        "ok": True, "tool": "docker_recover_deployment", "result": {"status": "recovered"}
+    })
+    original = adapter._recovery_contract_handlers
+    monkeypatch.setattr(adapter, "_recovery_contract_handlers",
+                        lambda: {**original(), "fixture": (prepare, execute)})
+    catalog = await adapter.docker_recovery_catalog()
+    assert any(row["id"] == "fixture" for row in catalog["result"]["contracts"])
+    prepared = await adapter.docker_recover_deployment("fixture", {"ticket": "T-17"})
+    assert prepared["ok"]
+    assert prepared["result"]["evidence_fingerprint"] == "sha256:" + "f" * 64
+    action, _ = srv._confirm_store.peek_action_id(prepared["result"]["action_id"])
+    assert action is not None
+    assert action.kwargs["parameters"] == {"ticket": "T-17"}
+    assert action.kwargs["pins"] == {"lease": "sha256:" + "f" * 64}
+    result = await adapter._docker_recover_deployment_impl(**action.kwargs)
+    assert result["ok"] is True
+    execute.assert_awaited_once_with(ticket="T-17", lease="sha256:" + "f" * 64, timeout=300)
