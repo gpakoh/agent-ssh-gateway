@@ -27,6 +27,22 @@ def main() -> None:
             assert decoded.size == image.size
             assert decoded.format == codec.upper()
 
+    # Indexed PNG (P mode) stores alpha in tRNS; preserve this for logos
+    # instead of silently converting transparent pixels to opaque RGB.
+    palette = Image.new("P", (32, 24), 0)
+    palette.putpalette([0, 0, 0, 245, 44, 28] + [0, 0, 0] * 254)
+    palette.info["transparency"] = 0
+    for x in range(8, 24):
+        for y in range(6, 18):
+            palette.putpixel((x, y), 1)
+    transparent_bytes = io.BytesIO()
+    palette.save(transparent_bytes, format="PNG")
+    preserved = convert(transparent_bytes.getvalue(), codec="webp", quality=100, min_psnr=36)
+    with Image.open(io.BytesIO(preserved.content)) as check:
+        rgba = check.convert("RGBA")
+        assert rgba.getpixel((0, 0))[3] == 0
+        assert rgba.getpixel((12, 12))[3] == 255
+
     # Production-like 1983x793 synthetic tile edges: a tiny image alone
     # cannot catch libaom encoder profiles that stall on real-sized banners.
     large = Image.new("RGB", (1983, 793), (15, 50, 89))

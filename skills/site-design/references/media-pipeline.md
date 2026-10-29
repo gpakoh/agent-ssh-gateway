@@ -34,7 +34,8 @@ with bounded encoding speed 9, WebP quality 100 (lossless) using encoder
 method 3, full 1983 × 793 native dimensions;
 visual acceptance against the supplied original remains mandatory. Do not
 vectorize the mosaic hero; SVG is suitable only for genuine vector artwork.
-The encoder strips EXIF by default and preserves bounded ICC profiles.
+The encoder strips EXIF by default, preserves bounded ICC profiles and
+retains alpha from indexed (P-mode) PNG transparency.
 
 ## Isolated worker boundary
 

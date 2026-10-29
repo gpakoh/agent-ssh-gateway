@@ -81,7 +81,10 @@ def convert(
                 icc = None
             image = ImageOps.exif_transpose(decoded)
             image.load()
-            image = image.convert("RGBA" if "A" in image.getbands() else "RGB")
+            # Paletted PNG transparency lives in the tRNS metadata, not in
+            # the image bands; converting it to RGB would destroy icons.
+            has_alpha = "A" in image.getbands() or "transparency" in decoded.info
+            image = image.convert("RGBA" if has_alpha else "RGB")
     except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as exc:
         if isinstance(exc, MediaError):
             raise
