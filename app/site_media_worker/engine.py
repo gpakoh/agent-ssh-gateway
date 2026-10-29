@@ -96,9 +96,9 @@ def convert(
     if icc:
         options["icc_profile"] = icc
     if codec == "webp":
-        options.update(format="WEBP", lossless=(quality == 100), quality=quality, method=6)
+        options.update(format="WEBP", lossless=(quality == 100), quality=quality, method=3)
     elif codec == "avif":
-        options.update(format="AVIF", quality=quality, subsampling="4:4:4", speed=6, max_threads=2)
+        options.update(format="AVIF", quality=quality, subsampling="4:4:4", speed=9, max_threads=2)
     else:
         options.update(format="PNG", optimize=True)
     if codec == "avif" and image.mode == "RGBA" and image.getchannel("A").getextrema() == (255, 255):

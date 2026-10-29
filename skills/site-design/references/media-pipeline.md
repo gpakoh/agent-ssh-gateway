@@ -29,13 +29,19 @@ and no automatic commit, merge or deployment. Decoded pixels never return
 to MCP or get written by Gateway. A failed quality gate or missing worker
 returns a typed error and leaves the candidate untouched.
 
-**High-fidelity XLOUD defaults:** source PNG kept, AVIF quality 95 in 4:4:4,
-WebP quality 100 (lossless) fallback, full 1983 × 793 native dimensions;
+**High-fidelity XLOUD defaults:** source PNG kept, AVIF quality 95 in 4:4:4
+with bounded encoding speed 9, WebP quality 100 (lossless) using encoder
+method 3, full 1983 × 793 native dimensions;
 visual acceptance against the supplied original remains mandatory. Do not
 vectorize the mosaic hero; SVG is suitable only for genuine vector artwork.
 The encoder strips EXIF by default and preserves bounded ICC profiles.
 
 ## Isolated worker boundary
+
+The image build runs both a small and a synthetic 1983 × 793 tiled sample.
+Each full-size conversion must stay under 50 seconds of CPU time: on the
+original XLOUD PNG, slower AVIF speed 6 and lossless WebP method 6 exceeded
+practical timeouts, while AVIF speed 9 and WebP method 3 preserved quality.
 
 A separate optional media worker image is defined by
 `docker/Dockerfile.site-media-worker`, with a real build-time PNG→WebP
