@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 from pathlib import Path
 
+import pytest
 from git_write_capabilities import probe_git_write_capabilities
-from mcp_client_tools import git_add, git_commit, git_create_branch, git_update_branch_by_merge
+from mcp_client_tools import (
+    _git_runtime_permission_components,
+    git_add,
+    git_commit,
+    git_create_branch,
+    git_fetch_ref,
+    git_update_branch_by_merge,
+)
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -56,6 +65,7 @@ def _repo_metadata_snapshot(repo: Path) -> dict[str, object]:
     index = git_dir / "index"
     return {
         "head": (git_dir / "HEAD").read_bytes(),
+        "fetch_head": (git_dir / "FETCH_HEAD").read_bytes() if (git_dir / "FETCH_HEAD").exists() else None,
         "index_sha256": hashlib.sha256(index.read_bytes()).hexdigest(),
         "refs": refs,
         "objects": objects,
@@ -92,6 +102,7 @@ def _probe_stdout(
     objects: bool = True,
     refs: bool = True,
     head: bool = True,
+    fetch_head: bool = True,
     detached: bool = False,
 ) -> str:
     return (
@@ -100,6 +111,7 @@ def _probe_stdout(
         f"objects={int(objects)}\n"
         f"refs={int(refs)}\n"
         f"head={int(head)}\n"
+        f"fetch_head={int(fetch_head)}\n"
         f"detached={int(detached)}\n"
     )
 
@@ -139,9 +151,58 @@ def test_probe_is_non_mutating_on_real_repository(tmp_path: Path) -> None:
         "objects": {"writeable": True},
         "refs": {"writeable": True},
         "head": {"writeable": True},
+        "fetch_head": {"writeable": True},
     }
     assert after == before
 
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses chmod-based write denial")
+def test_existing_unwriteable_fetch_head_is_reported_before_git_fetch(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    fetch_head = repo / ".git" / "FETCH_HEAD"
+    fetch_head.write_text("previous fetch evidence\n", encoding="utf-8")
+    fetch_head.chmod(0o400)
+    before = _repo_metadata_snapshot(repo)
+    try:
+        result = probe_git_write_capabilities(_LocalScriptClient(repo), "demo")
+        assert _repo_metadata_snapshot(repo) == before
+    finally:
+        fetch_head.chmod(0o600)
+    assert result["available"] is True
+    assert result["components"]["fetch_head"] == {"writeable": False}
+    assert result["components"]["refs"] == {"writeable": True}
+    assert result["blocked_components"] == ["fetch_head"]
+    assert result["fully_writeable"] is False
+
+
+def test_fetch_head_symlink_refused_without_mutating_repository(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    fetch_head = repo / ".git" / "FETCH_HEAD"
+    fetch_head.symlink_to(repo / "file.txt")
+    before = _repo_metadata_snapshot(repo)
+    result = probe_git_write_capabilities(_LocalScriptClient(repo), "demo")
+    assert _repo_metadata_snapshot(repo) == before
+    assert result["components"]["fetch_head"] == {"writeable": False}
+    assert result["blocked_components"] == ["fetch_head"]
+
+
+def test_git_fetch_preflight_blocks_unwriteable_fetch_head_before_remote_access() -> None:
+    client = _CapabilityClient(_probe_stdout(fetch_head=False))
+    result = git_fetch_ref(client, "demo", remote="origin", branch="main")
+    assert result["ok"] is False
+    assert result["error"]["code"] == "GIT_WRITE_CAPABILITY_BLOCKED"
+    assert result["error"]["details"]["required_components"] == ["objects", "refs", "fetch_head"]
+    assert result["error"]["details"]["blocked_components"] == ["fetch_head"]
+    assert result["error"]["details"]["mutation_occurred"] is False
+    assert client.commands == []
+    assert client.probe_calls == 1
+
+
+def test_fetch_head_permission_drift_classified_without_host_path_leak() -> None:
+    assert _git_runtime_permission_components(
+        "fatal: cannot open '.git/FETCH_HEAD': Permission denied"
+    ) == ["fetch_head"]
 
 def test_git_create_branch_blocks_refs_before_any_git_mutation() -> None:
     client = _CapabilityClient(_probe_stdout(refs=False))

@@ -2189,7 +2189,7 @@ def git_write_capabilities(
     client: GatewayClient,
     project: str,
 ) -> dict[str, Any]:
-    """Probe index/objects/refs/HEAD writeability on the Git mutation plane."""
+    """Probe index/objects/refs/HEAD/FETCH_HEAD writeability on the Git mutation plane."""
     _validate_project(project)
     return probe_git_write_capabilities(client, project)
 
@@ -2296,6 +2296,8 @@ def _git_runtime_permission_components(stderr: str) -> list[str]:
         components.append("refs")
     if "head.lock" in text or "ref 'head'" in text:
         components.append("head")
+    if "fetch_head" in text:
+        components.append("fetch_head")
     return list(dict.fromkeys(components))
 
 
@@ -2807,7 +2809,7 @@ def git_fetch_ref(
         project,
         tool_name="git_fetch_ref",
         action="fetch_guarded_remote_ref",
-        required_components=("objects", "refs"),
+        required_components=("objects", "refs", "fetch_head"),
     )
     if preflight_error is not None:
         return preflight_error

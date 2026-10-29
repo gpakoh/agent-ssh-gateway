@@ -769,7 +769,7 @@ class TestProjectGitStateGuards:
                 if "MCP_GIT_GUARD" not in script:
                     return {
                         "exit_code": 0,
-                        "stdout": "available=1\nindex=1\nobjects=1\nrefs=1\nhead=1\ndetached=0\n",
+                        "stdout": "available=1\nindex=1\nobjects=1\nrefs=1\nhead=1\nfetch_head=1\ndetached=0\n",
                         "stderr": "",
                     }
                 completed = subprocess.run(
@@ -904,7 +904,7 @@ class TestProjectGitStateGuards:
                     self.preflight_mutated = True
                     return {
                         "exit_code": 0,
-                        "stdout": "available=1\nindex=1\nobjects=1\nrefs=1\nhead=1\ndetached=0\n",
+                        "stdout": "available=1\nindex=1\nobjects=1\nrefs=1\nhead=1\nfetch_head=1\ndetached=0\n",
                         "stderr": "",
                     }
                 completed = subprocess.run(
@@ -980,7 +980,7 @@ class TestProjectGitStateGuards:
                 if "MCP_GIT_GUARD" not in script:
                     return {
                         "exit_code": 0,
-                        "stdout": "available=1\nindex=1\nobjects=1\nrefs=1\nhead=1\ndetached=0\n",
+                        "stdout": "available=1\nindex=1\nobjects=1\nrefs=1\nhead=1\nfetch_head=1\ndetached=0\n",
                         "stderr": "",
                     }
                 completed = subprocess.run(

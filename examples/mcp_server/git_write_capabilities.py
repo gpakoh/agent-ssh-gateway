@@ -14,7 +14,7 @@ import re
 import shlex
 from typing import Any
 
-_COMPONENTS = ("index", "objects", "refs", "head")
+_COMPONENTS = ("index", "objects", "refs", "head", "fetch_head")
 _GIT_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 
 # The wrapper used by GatewayClient.execute_project_script() creates and removes
@@ -50,6 +50,7 @@ fi
 index_path=$(git rev-parse --git-path index)
 objects_path=$(git rev-parse --git-path objects)
 head_path=$(git rev-parse --git-path HEAD)
+fetch_head_path=$(git rev-parse --git-path FETCH_HEAD)
 branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf 'HEAD')
 
 if [ -n "$target_ref" ]; then
@@ -64,6 +65,7 @@ index_ok=0
 objects_ok=0
 refs_ok=0
 head_ok=0
+fetch_head_ok=0
 
 if lock_parent_writeable "$index_path"; then
     index_ok=1
@@ -93,6 +95,18 @@ if lock_parent_writeable "$head_path"; then
     head_ok=1
 fi
 
+# Git fetch writes to an existing FETCH_HEAD even if its parent is writable.
+# A read-only file or symlink must fail closed without creating any probe file.
+if [ -L "$fetch_head_path" ]; then
+    :
+elif [ -e "$fetch_head_path" ]; then
+    if [ -f "$fetch_head_path" ] && [ -w "$fetch_head_path" ]; then
+        fetch_head_ok=1
+    fi
+elif lock_parent_writeable "$fetch_head_path"; then
+    fetch_head_ok=1
+fi
+
 if [ "$branch" = "HEAD" ]; then
     detached=1
 else
@@ -104,6 +118,7 @@ printf 'index=%s\n' "$index_ok"
 printf 'objects=%s\n' "$objects_ok"
 printf 'refs=%s\n' "$refs_ok"
 printf 'head=%s\n' "$head_ok"
+printf 'fetch_head=%s\n' "$fetch_head_ok"
 printf 'detached=%s\n' "$detached"
 """.strip()
 
