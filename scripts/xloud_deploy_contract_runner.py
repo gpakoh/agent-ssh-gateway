@@ -132,7 +132,7 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
         raise ValueError("site and intake image IDs must differ")
     if not FINGERPRINT_RE.fullmatch(args.secret_fingerprint):
         raise ValueError("secret fingerprint is invalid")
-    if args.mode not in {"preflight", "deploy", "recover"}:
+    if args.mode not in {"inspect", "preflight", "deploy", "recover"}:
         raise ValueError("mode is invalid")
 
     secret = _read_env_value(env_file, "AUDIT_CONTROL_API_KEY")
@@ -152,6 +152,22 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
             "XLOUD_AUDIT_CONTROL_API_KEY": secret,
         }
     )
+    # Inspect is read-only: no shell script, Docker or Compose invocation.
+    if args.mode == "inspect":
+        return {
+            "version": 1,
+            "mode": "inspect",
+            "exit_code": 0,
+            "timed_out": False,
+            "pending_exists": (state_dir / "pending.state").exists(),
+            "lkg_exists": (state_dir / "lkg.state").exists(),
+            "failed_exists": (state_dir / "last-failed.state").exists(),
+            "pending": _parse_state(state_dir / "pending.state"),
+            "lkg": {},
+            "failed": {},
+            "stdout_tail": [],
+            "stderr_tail": [],
+        }
     timeout = max(30, min(int(args.timeout), 900))
     timed_out = False
     try:

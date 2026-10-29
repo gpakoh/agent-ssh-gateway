@@ -230,6 +230,8 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "docker_deploy_site_audit": ["mcp:docker:admin"],
     "docker_provision_site_audit_crm": ["mcp:docker:admin"],
     "docker_deploy_xloud": ["mcp:docker:admin"],
+    "docker_recover_deployment": ["mcp:docker:admin"],
+    "docker_recovery_catalog": ["mcp:docker"],
     "docker_deploy_content_harvester": ["mcp:docker:admin"],
     "docker_migrate_content_harvester": ["mcp:docker:admin"],
     # postgres — mcp:postgres
