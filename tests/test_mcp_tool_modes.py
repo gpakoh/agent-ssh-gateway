@@ -244,6 +244,17 @@ class TestChatGPTSafeMode:
         monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client_write")
         assert should_register_tool(name)
 
+    def test_legacy_cleanup_abort_admin_only_and_write_mode(self, monkeypatch: pytest.MonkeyPatch):
+        name = "candidate_cleanup_abort_legacy_prepared"
+        assert name in TOOL_NAMES_BY_MODE["mcp_client_write"]
+        assert name not in get_mcp_client_safe_tools()
+        assert get_required_scopes(name) == ["mcp:admin"]
+        for mode, names in TOOL_NAMES_BY_MODE.items():
+            if mode != "mcp_client_write":
+                assert name not in names, mode
+        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client_write")
+        assert should_register_tool(name)
+
     @pytest.mark.parametrize("name", ["candidate_cleanup", "candidate_orphan_finalize"])
     def test_candidate_cleanup_tools_write_mode_only_and_admin_repo_scoped(
         self, monkeypatch: pytest.MonkeyPatch, name: str
