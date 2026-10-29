@@ -80,8 +80,6 @@ def test_pack_failure_is_diagnostic_and_does_not_leak_paths(monkeypatch):
 
 @pytest.mark.parametrize("identity", ["server", "examples.mcp_server.server"])
 def test_catalog_reads_availability_from_active_server_identity(monkeypatch, identity):
-    from examples.mcp_server.mcp_infra import runtime
-
     active = ModuleType(identity)
     active._unavailable_tool_reasons = lambda: {"health": "current-backend-offline"}
     for name in ("server", "examples.mcp_server.server"):
@@ -94,7 +92,7 @@ def test_catalog_reads_availability_from_active_server_identity(monkeypatch, ide
         return "ok"
 
     mcp.add_tool(health)
-    monkeypatch.setattr(runtime, "get_mcp", lambda: mcp)
+    active.mcp = mcp
     row = catalog.gateway_catalog(tool_name="health")["result"]["tools"][0]
     assert row["available"] is False
     assert row["unavailable_reason"] == "current-backend-offline"

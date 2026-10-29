@@ -44,12 +44,10 @@ def gateway_catalog(
     Read an advertised skill with gateway_skill. Catalog visibility is server
     registration, not a grant of caller scopes or a client catalog refresh.
     """
-    from examples.mcp_server.mcp_infra import runtime
-
     return _read_result(
         "gateway_catalog",
         fn=lambda: build_catalog(
-            runtime.get_mcp()._tool_manager.list_tools(),
+            server_attr("mcp")._tool_manager.list_tools(),
             group=group,
             query=query,
             tool_name=tool_name,
