@@ -198,17 +198,30 @@ class FakeClient:
     async def network_metadata(self, name: str) -> dict:
         return _network(name)
 
+    async def compose_service_container_id(self, project: str, service: str) -> str | None:
+        assert project == "xloud"
+        row = self.inspect_rows.get(service)
+        return row["Id"] if row is not None else None
+
     async def inspect(self, name: str, max_lines: int = 10):
         assert max_lines == 10
-        return [self.inspect_rows[name]]
+        if name == docker_adapter._XLOUD_AUDIT_API_CONTAINER:
+            return [self.inspect_rows[name]]
+        return [
+            next(
+                row
+                for role, row in self.inspect_rows.items()
+                if role in ("xloud-site", "xloud-intake") and row["Id"] == name
+            )
+        ]
 
     async def container_network_snapshot(self, name: str) -> dict[str, str]:
-        if name == "xloud-site":
+        if name == self.inspect_rows.get("xloud-site", {}).get("Id"):
             return {
                 "xloud_default": "172.30.0.2",
                 "proxmox_macvlan": TEST_SITE_IPV4,
             }
-        if name == "xloud-intake":
+        if name == self.inspect_rows.get("xloud-intake", {}).get("Id"):
             return {
                 "xloud_default": "172.30.0.3",
                 "site-audit-control": "172.31.0.8",
@@ -581,3 +594,41 @@ def test_xloud_tool_mode_scope_and_compose_state_volume_wiring():
     )
     assert "xloud_deploy_state:/var/lib/xloud-deploy-state" in compose
     assert "name: ssh-gateway-xloud-deploy-state" in compose
+
+
+@pytest.mark.asyncio
+async def test_deploy_verifier_fails_closed_for_missing_compose_target():
+    client = FakeClient()
+    client.inspect_rows.pop("xloud-site")
+    with pytest.raises(RuntimeError, match="Compose target is absent"):
+        await docker_adapter._verify_xloud_live(
+            client, state=_lkg(), source_revision=HEAD,
+            target_images=_targets(), image_ids={"site": SITE_ID, "intake": INTAKE_ID},
+        )
+
+
+@pytest.mark.asyncio
+async def test_deploy_verifier_rejects_container_changed_after_compose_lookup():
+    client = FakeClient()
+    original = client.inspect
+
+    async def swapped_inspect(name: str, max_lines: int = 10):
+        rows = await original(name, max_lines=max_lines)
+        if name == "1" * 64:
+            return [{**rows[0], "Id": "f" * 64}]
+        return rows
+
+    client.inspect = swapped_inspect
+    with pytest.raises(RuntimeError, match="Compose target identity changed"):
+        await docker_adapter._verify_xloud_live(
+            client, state=_lkg(), source_revision=HEAD,
+            target_images=_targets(), image_ids={"site": SITE_ID, "intake": INTAKE_ID},
+        )
+
+
+@pytest.mark.asyncio
+async def test_topology_fingerprint_refuses_partial_compose_services():
+    client = FakeClient()
+    client.inspect_rows.pop("xloud-intake")
+    with pytest.raises(RuntimeError, match="partial prior XLOUD topology"):
+        await docker_adapter._xloud_topology_fingerprint(client)

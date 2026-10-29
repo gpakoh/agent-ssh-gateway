@@ -1051,10 +1051,11 @@ def _xloud_resource_fingerprint(metadata: dict[str, Any]) -> str:
 
 
 async def _xloud_topology_fingerprint(client: Any) -> tuple[str, str]:
-    existing: list[str] = []
+    existing: dict[str, str] = {}
     for _role, container, _image_name in _XLOUD_TARGETS:
-        if await client.container_exists(container):
-            existing.append(container)
+        cid = await client.compose_service_container_id("xloud", container)
+        if cid is not None:
+            existing[container] = cid
     if not existing:
         return "absent", "sha256:" + hashlib.sha256(b"absent").hexdigest()
     if len(existing) != len(_XLOUD_TARGETS):
@@ -1062,7 +1063,10 @@ async def _xloud_topology_fingerprint(client: Any) -> tuple[str, str]:
 
     evidence: list[dict[str, Any]] = []
     for _role, container, _image_name in _XLOUD_TARGETS:
-        inspected = _single_inspect(await client.inspect(container, max_lines=10))
+        cid = existing[container]
+        inspected = _single_inspect(await client.inspect(cid, max_lines=10))
+        if inspected.get("Id") != cid:
+            raise RuntimeError("prior XLOUD Compose container identity changed")
         runtime = inspected.get("State")
         config = inspected.get("Config")
         if not isinstance(runtime, dict) or not isinstance(config, dict):
@@ -1158,12 +1162,17 @@ async def _verify_xloud_live(
     live: dict[str, dict[str, Any]] = {}
     for role, container, _image_name in _XLOUD_TARGETS:
         prefix = role.upper()
-        inspected = _single_inspect(await client.inspect(container, max_lines=10))
+        cid = await client.compose_service_container_id("xloud", container)
+        if not cid:
+            raise RuntimeError("XLOUD Compose target is absent")
+        inspected = _single_inspect(await client.inspect(cid, max_lines=10))
+        if inspected.get("Id") != cid:
+            raise RuntimeError("XLOUD Compose target identity changed during verification")
         runtime = inspected.get("State")
         config = inspected.get("Config")
         if not isinstance(runtime, dict) or not isinstance(config, dict):
             raise RuntimeError("XLOUD target metadata is incomplete")
-        networks = await client.container_network_snapshot(container)
+        networks = await client.container_network_snapshot(cid)
         health = runtime.get("Health")
         labels = config.get("Labels")
         if inspected.get("Id") != state[f"{prefix}_CONTAINER_ID"]:
@@ -4237,7 +4246,7 @@ async def _verify_xloud_recovery(
     }
     if previous_cids == {"site": "absent", "intake": "absent"}:
         for _role, container, _image_name in _XLOUD_TARGETS:
-            if await client.container_exists(container):
+            if await client.compose_service_container_id("xloud", container):
                 raise RuntimeError("XLOUD bootstrap recovery left a target container")
         await _verify_xloud_guard_resources(client, plan)
         return {"outcome": "bootstrap_absent_restored"}
@@ -4249,6 +4258,9 @@ async def _verify_xloud_recovery(
     live: dict[str, dict[str, Any]] = {}
     for role, container, _image_name in _XLOUD_TARGETS:
         prefix = role.upper()
+        cid = await client.compose_service_container_id("xloud", container)
+        if not cid:
+            raise RuntimeError("XLOUD recovered Compose service is absent")
         expected_id = failed.get(f"PREVIOUS_{prefix}_IMAGE_ID")
         expected_ref = failed.get(f"PREVIOUS_{prefix}_REF")
         if not isinstance(expected_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_id):
@@ -4257,7 +4269,9 @@ async def _verify_xloud_recovery(
             ch in expected_ref for ch in ("\x00", "\n", "\r", "\t")
         ):
             raise RuntimeError("XLOUD recovery previous image reference is malformed")
-        inspected = _single_inspect(await client.inspect(container, max_lines=10))
+        inspected = _single_inspect(await client.inspect(cid, max_lines=10))
+        if inspected.get("Id") != cid:
+            raise RuntimeError("XLOUD recovered Compose service identity changed")
         runtime = inspected.get("State")
         config = inspected.get("Config")
         if not isinstance(runtime, dict) or not isinstance(config, dict):
