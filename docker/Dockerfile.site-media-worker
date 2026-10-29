@@ -1,0 +1,20 @@
+# Untrusted image codecs run OUTSIDE the Gateway/MCP processes.
+# Build and deploy only via an explicit reviewed media overlay; no workspace
+# bind mount, no Docker socket, and no external network.
+FROM python:3.12-slim-bookworm
+LABEL description="isolated site media encoder"
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+RUN python -m pip install --no-cache-dir "Pillow==12.3.0" \
+    && groupadd -r -g 1201 media \
+    && useradd -r -u 1201 -g media -d /app -s /usr/sbin/nologin media
+WORKDIR /app
+COPY app/site_media_worker/ /app/app/site_media_worker/
+RUN touch /app/app/__init__.py /app/app/site_media_worker/__init__.py \
+    && chown -R media:media /app
+# A release cannot pass image build if its actual encoders are missing.
+RUN python -m app.site_media_worker.selftest
+USER media
+EXPOSE 8091
+HEALTHCHECK --interval=30s --timeout=4s --retries=3 \
+ CMD python -c "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8091/healthz',timeout=3).read()==b'ok'"
+CMD ["python", "-m", "app.site_media_worker.server"]

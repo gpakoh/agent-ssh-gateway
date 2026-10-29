@@ -28,7 +28,7 @@ GROUPS = {
 
 
 def group_for(name: str) -> str:
-    if name == "site_asset_transfer":
+    if name in {"site_asset_transfer", "site_media_pipeline"}:
         return "sites"
     if name in {"health", "tools_manifest", "gateway_catalog", "gateway_skill", "self_test"}:
         return "discovery"

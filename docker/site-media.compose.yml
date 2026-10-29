@@ -1,0 +1,34 @@
+# Optional, operator-enabled media worker. Core Gateway release does not
+# apply this overlay: no new production networks or service recreation by default.
+# Deploy after image qualification with:
+# docker compose -f docker-compose.yml -f site-media.compose.yml --profile media ...
+services:
+  mcp-oauth:
+    networks:
+      media_net: {}
+    environment:
+      SITE_MEDIA_WORKER_TOKEN: ${SITE_MEDIA_WORKER_TOKEN:?operator media secret required}
+  site-media-worker:
+    profiles: ["media"]
+    image: ${SITE_MEDIA_WORKER_IMAGE:?approved media image digest required}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.site-media-worker
+    environment:
+      SITE_MEDIA_WORKER_TOKEN: ${SITE_MEDIA_WORKER_TOKEN:-}
+    networks:
+      media_net: {}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    user: "1201:1201"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    mem_limit: 512m
+    cpus: 1
+    pids_limit: 64
+    restart: unless-stopped
+networks:
+  media_net:
+    internal: true

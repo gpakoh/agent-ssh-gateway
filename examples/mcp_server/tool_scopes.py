@@ -249,6 +249,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "query_docs": ["mcp:docs"],
     # workspace write — mcp:project
     "site_asset_transfer": ["mcp:project"],
+    "site_media_pipeline": ["mcp:project"],
     "workspace_file_write": ["mcp:project"],
     "workspace_file_edit": ["mcp:project"],
     "workspace_apply_patch": ["mcp:project"],

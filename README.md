@@ -43,7 +43,7 @@ over credentials, targets, scopes, and execution policy.
 | Remote operations | Persistent SSH sessions, structured command execution, argv-safe execution, WebSocket terminal, file transfer, and server profiles |
 | Jobs and observability | Background jobs, status and result retrieval, output streaming, health checks, metrics, audit events, and event hooks |
 | Project workflows | Scoped file read/search/write, Git inspection, diffs, tests, linting, type checks, preview, hash verification, and patch application |
-| Website assets | Candidate-only raw-byte REST + one grouped `site_asset_transfer` MCP tool for chunked SHA-verified image/font upload, inspect and readback, advertised by the `site-design` skill |
+| Website assets | Candidate-only raw-byte REST, grouped `site_asset_transfer` upload/readback and opt-in `site_media_pipeline` isolated image conversion (AVIF/WebP/PNG, PSNR gates). Codecs run only in a separate, private worker; not in Gateway. |
 | MCP integrations | Gateway tools plus GitHub, Gitea, Docker, PostgreSQL, and Context7 adapters |
 | Deployment recovery | Discover registered recovery procedures and safely reconcile failed Docker deployments using read-only preparation, explicit approval, and audited execution. See [Deployment recovery](docs/operations/DEPLOYMENT_RECOVERY.md). |
 | Agent coordination | Structured task handoff, isolated worktrees, agent status/report artifacts, controlled runner workflows, and a Gitea-backed cross-project inbox |
