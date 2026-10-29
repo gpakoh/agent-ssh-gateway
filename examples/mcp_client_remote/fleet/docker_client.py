@@ -1038,6 +1038,30 @@ class DockerClient:
             raise RuntimeError("docker image OCI revision label is missing or invalid")
         return revision
 
+    async def compose_service_container_id(self, project: str, service: str) -> str | None:
+        """Resolve one managed Compose service by its two trusted Docker labels.
+
+        A service name is NOT a Docker container name. No matching container
+        means absent, and duplicate matches fail closed rather than guessing.
+        This is internal verification, not an unrestricted public Docker query.
+        """
+        for value, label in ((project, "project"), (service, "service")):
+            if not isinstance(value, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", value):
+                raise ValueError(f"invalid Compose {label}")
+        raw = await self._run(
+            [
+                DOCKER_BIN, "container", "ls", "-a", "--no-trunc",
+                "--filter", f"label=com.docker.compose.project={project}",
+                "--filter", f"label=com.docker.compose.service={service}",
+                "--format", "{{.ID}}",
+            ],
+            timeout=30.0,
+        )
+        ids = [entry.strip() for entry in raw.splitlines() if entry.strip()]
+        if len(ids) > 1 or any(not re.fullmatch(r"[0-9a-f]{64}", item) for item in ids):
+            raise RuntimeError("Compose service container identity is ambiguous or invalid")
+        return ids[0] if ids else None
+
     async def container_exists(self, container: str) -> bool:
         """Return False only for a proven Docker 'no such container/object' result."""
         self._validate_container_name(container)

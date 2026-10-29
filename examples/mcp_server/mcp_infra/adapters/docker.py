@@ -4420,7 +4420,12 @@ async def _xloud_legacy_recovery_live(
     client: Any, *, pending: dict[str, str], plan: dict[str, Any], intake_present: bool
 ) -> dict[str, Any]:
     """Only the observed legacy site + known failed-generation intake is in scope."""
-    site = _single_inspect(await client.inspect("xloud-site", max_lines=10))
+    site_cid = await client.compose_service_container_id("xloud", "xloud-site")
+    if not site_cid:
+        raise RuntimeError("XLOUD legacy Compose site is absent")
+    site = _single_inspect(await client.inspect(site_cid, max_lines=10))
+    if site.get("Id") != site_cid:
+        raise RuntimeError("XLOUD legacy Compose site identity changed during inspection")
     state = site.get("State")
     config = site.get("Config")
     expected_id = pending["PREVIOUS_SITE_IMAGE_ID"]
@@ -4433,7 +4438,7 @@ async def _xloud_legacy_recovery_live(
         raise RuntimeError("XLOUD legacy site must be healthy before recovery")
     if site.get("RestartCount") != 0:
         raise RuntimeError("XLOUD legacy site restarted")
-    site_networks = await client.container_network_snapshot("xloud-site")
+    site_networks = await client.container_network_snapshot(site_cid)
     if (site_networks.get("proxmox_macvlan") != plan["expected_site_ipv4"]
         or not site_networks.get("xloud_default")):
         raise RuntimeError("XLOUD legacy site public/default network identity is invalid")
@@ -4446,7 +4451,12 @@ async def _xloud_legacy_recovery_live(
         "intake_present": intake_present,
     }
     if intake_present:
-        intake = _single_inspect(await client.inspect("xloud-intake", max_lines=10))
+        intake_cid = await client.compose_service_container_id("xloud", "xloud-intake")
+        if not intake_cid:
+            raise RuntimeError("XLOUD failed-generation Compose intake is absent")
+        intake = _single_inspect(await client.inspect(intake_cid, max_lines=10))
+        if intake.get("Id") != intake_cid:
+            raise RuntimeError("XLOUD Compose intake identity changed during inspection")
         runtime = intake.get("State")
         conf = intake.get("Config")
         if not isinstance(runtime, dict) or not isinstance(conf, dict):
@@ -4457,13 +4467,13 @@ async def _xloud_legacy_recovery_live(
             or runtime.get("Running") is not True
             or runtime.get("Health", {}).get("Status") != "healthy"):
             raise RuntimeError("XLOUD intake is not the healthy failed-generation sidecar")
-        networks = await client.container_network_snapshot("xloud-intake")
+        networks = await client.container_network_snapshot(intake_cid)
         if not networks.get("xloud_default") or not networks.get("site-audit-control"):
             raise RuntimeError("XLOUD intake network topology is invalid")
         snapshot["intake_container_id"] = intake.get("Id")
         snapshot["intake_started_at"] = runtime.get("StartedAt")
         snapshot["intake_networks"] = networks
-    elif await client.container_exists("xloud-intake"):
+    elif await client.compose_service_container_id("xloud", "xloud-intake"):
         raise RuntimeError("XLOUD intake appeared while verifying recovery")
     return snapshot
 

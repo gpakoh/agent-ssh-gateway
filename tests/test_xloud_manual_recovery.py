@@ -96,7 +96,7 @@ class Client:
         self.calls = []
         self.rows = {
             "xloud-site": {
-                "Id": "old-site-live",
+                "Id": "5" * 64,
                 "Image": OLD_SITE_ID,
                 "RestartCount": 0,
                 "Config": {"Image": "xloud-site:local"},
@@ -107,7 +107,7 @@ class Client:
                 },
             },
             "xloud-intake": {
-                "Id": "new-intake-live",
+                "Id": "6" * 64,
                 "Image": INTAKE_ID,
                 "RestartCount": 0,
                 "Config": {"Image": TARGETS["intake"]["image"]},
@@ -130,14 +130,22 @@ class Client:
             return self.recover_payload
         raise AssertionError("unexpected mode")
 
+    async def compose_service_container_id(self, project, service):
+        assert project == "xloud"
+        if service == "xloud-site":
+            return self.rows["xloud-site"]["Id"]
+        if service == "xloud-intake":
+            return self.rows["xloud-intake"]["Id"] if self.intake else None
+        raise AssertionError(service)
+
     async def inspect(self, name, max_lines=10):
         assert max_lines == 10
-        return [self.rows[name]]
+        return [next(row for row in self.rows.values() if row["Id"] == name)]
 
     async def container_network_snapshot(self, name):
-        if name == "xloud-site":
+        if name == self.rows["xloud-site"]["Id"]:
             return {"proxmox_macvlan": "192.0.2.149", "xloud_default": "172.30.0.2"}
-        if name == "xloud-intake":
+        if name == self.rows["xloud-intake"]["Id"]:
             return {"site-audit-control": "172.31.0.8", "xloud_default": "172.30.0.3"}
         raise AssertionError(name)
 
@@ -410,3 +418,58 @@ def test_pinned_site_address_is_parsed_from_script_and_must_be_unambiguous(tmp_p
         script.write_text(invalid, encoding="utf-8")
         with pytest.raises(ValueError):
             adapter._verified_xloud_site_ipv4(str(script))
+
+@pytest.mark.asyncio
+async def test_compose_container_resolver_uses_exact_project_and_service_labels(monkeypatch):
+    from examples.mcp_client_remote.fleet.docker_client import DockerClient
+
+    client = DockerClient()
+    docker_run = AsyncMock(return_value="5" * 64 + "\n")
+    monkeypatch.setattr(client, "_run", docker_run)
+    assert await client.compose_service_container_id("xloud", "xloud-site") == "5" * 64
+    argv = docker_run.await_args.args[0]
+    assert argv[0].endswith("/docker")
+    assert argv[1:5] == ["container", "ls", "-a", "--no-trunc"]
+    assert "label=com.docker.compose.project=xloud" in argv
+    assert "label=com.docker.compose.service=xloud-site" in argv
+    assert "--format" in argv and "{{.ID}}" in argv
+    assert "docker inspect xloud-site" not in " ".join(argv)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("output", ["5" * 64 + "\n" + "6" * 64 + "\n", "not-a-container-id\n"])
+async def test_compose_container_resolver_refuses_duplicate_or_invalid_id(monkeypatch, output):
+    from examples.mcp_client_remote.fleet.docker_client import DockerClient
+
+    client = DockerClient()
+    monkeypatch.setattr(client, "_run", AsyncMock(return_value=output))
+    with pytest.raises(RuntimeError, match="ambiguous or invalid"):
+        await client.compose_service_container_id("xloud", "xloud-site")
+
+
+@pytest.mark.asyncio
+async def test_compose_container_resolver_proves_absence_and_rejects_untrusted_label(monkeypatch):
+    from examples.mcp_client_remote.fleet.docker_client import DockerClient
+
+    client = DockerClient()
+    docker_run = AsyncMock(return_value="")
+    monkeypatch.setattr(client, "_run", docker_run)
+    assert await client.compose_service_container_id("xloud", "xloud-intake") is None
+    with pytest.raises(ValueError):
+        await client.compose_service_container_id("xloud", "xloud-intake; rm -rf /")
+    assert docker_run.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_compose_recovery_disallows_wrong_site_identity_after_label_resolution(setup):
+    setup.rows["xloud-site"]["Id"] = "5" * 64
+    original_inspect = setup.inspect
+
+    async def different_inspect(name, max_lines=10):
+        rows = await original_inspect(name, max_lines=max_lines)
+        return [{**rows[0], "Id": "7" * 64}]
+
+    setup.inspect = different_inspect
+    with pytest.raises(RuntimeError, match="identity changed"):
+        await adapter._prepare_xloud_recovery(**KWARGS)
+    assert [call["mode"] for call in setup.calls] == ["inspect"]
