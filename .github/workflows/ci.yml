@@ -1694,6 +1694,68 @@ jobs:
         run: |
           bash scripts/ci-docker-push-pinned.sh "$CI_SMOKE_SSHD_IMAGE_ID" "$REGISTRY/gpakoh/ssh-gateway-sshd" "${{ github.sha }}"
 
+
+  media-worker-qualify:
+    # Independent from the 20-minute core image build budget. No production
+    # deployment and no image push from an unmerged PR.
+    needs: [scope]
+    if: needs.scope.outputs.full_ci == 'true' && github.server_url != 'https://github.com' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository) || (github.ref_name == 'master' && github.event_name == 'push'))
+    name: Media worker codec qualification
+    runs-on: docker-e2e-ci
+    timeout-minutes: 15
+    env:
+      REGISTRY: 192.168.1.103:3005
+      DOCKER_HTTP_PROXY: ${{ vars.CI_DOCKER_HTTP_PROXY }}
+      DOCKER_HTTPS_PROXY: ${{ vars.CI_DOCKER_HTTPS_PROXY }}
+      DOCKER_NO_PROXY: ${{ vars.CI_DOCKER_NO_PROXY }}
+    container:
+      volumes:
+        - /media/1TB/Python/quart-platform/infra-quart/secrets/registry.token:/deploy/secrets/registry.token:ro
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build actual Pillow codec image with AVIF/WebP self-test
+        run: |
+          set -euo pipefail
+          bash scripts/ci-docker-build-retry.sh -f docker/Dockerfile.site-media-worker \
+            --build-arg http_proxy="$DOCKER_HTTP_PROXY" \
+            --build-arg https_proxy="$DOCKER_HTTPS_PROXY" \
+            --build-arg no_proxy="$DOCKER_NO_PROXY" \
+            --build-arg HTTP_PROXY="$DOCKER_HTTP_PROXY" \
+            --build-arg HTTPS_PROXY="$DOCKER_HTTPS_PROXY" \
+            --build-arg NO_PROXY="$DOCKER_NO_PROXY" \
+            -t "$REGISTRY/gpakoh/site-media-worker:${{ github.sha }}" \
+            .
+          MEDIA_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$REGISTRY/gpakoh/site-media-worker:${{ github.sha }}")"
+          printf '%s\n' "$MEDIA_IMAGE_ID" | grep -Eq '^sha256:[0-9a-f]{64}$' || exit 1
+          echo "CI_SMOKE_MEDIA_IMAGE_ID=$MEDIA_IMAGE_ID" >> "$GITHUB_ENV"
+      - name: Probe the isolated image without host network or project mounts
+        run: |
+          set -euo pipefail
+          name="ci-media-worker-${{ github.run_id }}"
+          trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          docker run -d --name "$name" --network none --read-only \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --memory 512m --cpus 1 --pids-limit 64 \
+            --tmpfs /tmp:rw,noexec,nosuid,size=32m \
+            -e SITE_MEDIA_WORKER_TOKEN=ci-only-0000000000000000000000000000000000000000 \
+            "$CI_SMOKE_MEDIA_IMAGE_ID"
+          ready=0
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if docker exec "$name" python -c \
+              "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8091/healthz',timeout=2).read()==b'ok'"; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" -eq 1
+      - name: Publish qualified exact-SHA media artifact (not deploy)
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$(cat /deploy/secrets/registry.token)" | bash scripts/ci-docker-login-retry.sh "$REGISTRY" gpakoh
+          bash scripts/ci-docker-push-pinned.sh "$CI_SMOKE_MEDIA_IMAGE_ID" "$REGISTRY/gpakoh/site-media-worker" "${{ github.sha }}"
+
   deploy:
     # Runs right after real images are pushed — pulls them, redeploys
     # web-ssh-gateway + mcp-server, smoke-tests, and rolls back to the

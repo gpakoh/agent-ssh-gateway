@@ -373,6 +373,7 @@ TOOL_NAMES_BY_MODE["mcp_client_write"] = (
     "fleet_status",
     "fleet_reconcile_unbound",
     "site_asset_transfer",  # One grouped sites workflow; write-mode only.
+    "site_media_pipeline",  # Isolated image conversion; write-mode only.
 }
 
 
