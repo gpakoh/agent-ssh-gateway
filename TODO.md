@@ -2,7 +2,7 @@
 
 **Reconciled:** 2026-10-25; baseline Gitea `master@9f7baa48760fba85f52c77fe4e055a5f7ac42a34`, merged PR evidence, exact-release CI #19743, Gateway runtime and preserved local intake.
 
-**Open: 34 (P1 8 / P2 17 / P3 9).** One checkbox = one independently closeable outcome; no completed checklist/history retained. A merged partial fix is not sufficient for closeout. OpenCode security remains a live prerequisite, not a green-CI assumption. Completed deploy LKG migration evidence is recorded in `docs/operations/SSH_GATEWAY_DEPLOY_STATE_MIGRATION.md`.
+**Open: 33 (P1 8 / P2 16 / P3 9).** One checkbox = one independently closeable outcome; no completed checklist/history retained. A merged partial fix is not sufficient for closeout. OpenCode security remains a live prerequisite, not a green-CI assumption. Completed deploy LKG migration evidence is recorded in `docs/operations/SSH_GATEWAY_DEPLOY_STATE_MIGRATION.md`.
 
 ## P1 — Security, deploy and release blockers (8)
 
@@ -33,7 +33,7 @@
   <!-- gateway-todo-key: opencode-upgrade-failed --> **Severity:** P1
   **Still blocked:** historical exit 80 / upgrade-blocked job reached zero required checks and zero diff. PR #630 only documented incident, did not fix runtime; new bounded qualified executor canary and Node 22 prerequisite needed. Coordination issues #639 and #642.
 
-## P2 — Reliability and engineering throughput (17)
+## P2 — Reliability and engineering throughput (16)
 
 - [ ] **P2-01: Wire the production `astro-sites` named root into `mcp-oauth` after the host path is provisioned.** (legacy #13)
   Named-root registration is now supported, but production still has no `MCP_OAUTH_ASTRO_SITES_ROOT` setting and the intended host directory is not provisioned. Once the operator supplies an existing absolute host path, add the `registry_roots.astro-sites` entry, the explicit writable `mcp-oauth` bind with host-path auto-creation disabled, the documented env contract, and deploy seam coverage. Deploy must fail closed when the configured path is absent; do not silently create an empty root.
@@ -76,9 +76,6 @@
 
 - [ ] **P2-13: Expose bounded destructive-audit health and recovery evidence.** (legacy #49)
   Guarded Gitea close/delete correctly fail closed with `AUDIT_UNAVAILABLE` before mutation, but callers cannot distinguish transient audit transport or storage outage from malformed cleanup input. Add a safe read-only audit subsystem status/recovery signal with retryability and correlation metadata; keep destructive mutations impossible unless intent persistence succeeds. Acceptance covers zero mutation during outage and exactly-once audited success after recovery for both PR close and exact-SHA branch deletion.
-
-- [ ] **P2-14: Git write-capability preflight misses FETCH_HEAD permission denial.** (legacy #1)
-  A previous `git_write_capabilities=fully_writeable` contradicted real `git_fetch_ref` failing `.git/FETCH_HEAD` Permission denied. Include FETCH_HEAD in read-only capability preflight and prove matching failure classification.
 
 - [ ] **P2-15: Docker inventory omits inspectable running container and its image; expose completeness clearly.** (legacy #2)
   `docker_inspect(opencode-adapter)` showed RUNNING/HEALTHY while bounded `docker_ps` and `docker_images` omitted it. Inventory must carry accurate completeness/paging and never infer absence from partial scans.
