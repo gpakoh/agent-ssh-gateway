@@ -22,12 +22,14 @@ GROUPS = {
     "docker": ("Контейнеры", "Docker/Compose: диагностика и защищённые операции."),
     "database": ("База данных", "Разрешённые операции PostgreSQL."),
     "documentation": ("Документация", "Поиск библиотек и чтение технической документации."),
-    "sites": ("Сайты и дизайн", "Skills для сайтов, доступности и анимации из видео."),
+    "sites": ("Сайты и дизайн", "Ассеты, предпросмотр, доступность и анимация сайтов."),
     "other": ("Дополнительные возможности", "Остальные зарегистрированные инструменты."),
 }
 
 
 def group_for(name: str) -> str:
+    if name == "site_asset_transfer":
+        return "sites"
     if name in {"health", "tools_manifest", "gateway_catalog", "gateway_skill", "self_test"}:
         return "discovery"
     if name.startswith("coord_"):

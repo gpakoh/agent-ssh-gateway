@@ -1,9 +1,42 @@
-# Site asset workflow — raw bytes, no extra MCP tools
+# Site asset workflow — MCP chunks and raw-byte REST
 
 This workflow belongs to the **sites** skill in `gateway_catalog`/`gateway_skill`
-and to the HTTP/OpenAPI `workspace-assets` group. It deliberately DOES NOT
-register an extra flat MCP tool. The REST control plane accepts binary streams
-directly; `workspace_file_write` remains limited to UTF-8 text.
+and to the HTTP/OpenAPI `workspace-assets` group. The single **`site_asset_transfer`**
+MCP capability is discoverable in the `sites` catalog group and available only
+in the explicitly enabled `mcp_client_write` mode. Existing text tools remain
+UTF-8-only, and the REST endpoint continues to accept binary streams directly.
+
+## Upload through the MCP site-assets capability
+
+When the MCP client has **the original bytes**, use `site_asset_transfer` with
+`project_id` from `prepare_candidate_clone`, and a permitted project-relative
+path such as `public/visuals/banner.png`. No generic SSH command is needed.
+
+1. `action=begin` with `sha256` (full file, lowercase hex), `total_bytes`
+   (maximum 8 MiB), and optionally `previous_sha256` when replacing an existing
+   file. Save returned unpredictable `upload_id`.
+2. Split the original bytes into at most 65,536-byte chunks. For each chunk,
+   call `action=chunk` with `upload_id`, `offset`, RFC4648 `chunk_b64` and
+   the chunk's own `chunk_sha256`. Use the returned `next_offset` for the next
+   chunk. Replaying the identical chunk at the same offset is idempotent.
+3. `action=status` reports progress after an ambiguous response. `action=finish`
+   verifies all bytes, format, full SHA-256 and exact old revision, then writes
+   atomically using the existing workspace policy. `action=abort` discards a
+   partial transfer.
+4. Verify with `action=inspect` and, where necessary, `action=read` using
+   exact SHA and offset. `read` returns a base64 chunk plus chunk digest; it
+   cannot silently mix versions of the asset.
+
+Staging is bounded to four concurrent uploads and expires after 15 minutes
+without traffic. A Gateway MCP restart drops incomplete transfers; begin
+again, or inspect the destination if the result of `finish` was uncertain.
+
+**Attachment boundary:** this protocol accepts real base64 bytes provided by
+an MCP client. The ChatGPT tool layer does *not* automatically inject uploaded
+ChatGPT Files content or resolve `sandbox:/` paths into MCP arguments. Do not
+claim a ChatGPT attachment has been delivered until a client has supplied its
+bytes, all parts have been accepted, and `finish` returns verified metadata.
+A native attachment binding in the client is a separate capability from MCP.
 
 ## Upload an existing image without changing a pixel
 
@@ -70,13 +103,9 @@ original before committing.
 
 ## Transport boundaries
 
-The upload API needs an HTTP client with access to the local asset bytes and
-the authenticated private Gateway endpoint. A ChatGPT attachment visible
-only in the ChatGPT sandbox is *not* automatically mounted inside Gateway.
-Do not claim that a gateway path such as `/mnt/data/banner.png` is available
-on the remote host. A future attachment-to-HTTP bridge must explicitly
-transfer the bytes through this API, with the same SHA and candidate guards.
-
-There is no server-side arbitrary URL importer and no general-purpose remote
-file write. Asset inspection is not a production image preview or a visual
-browser acceptance.
+The MCP tool and raw-byte REST endpoint share the same checked candidate-write
+contract; neither imports arbitrary URLs or assumes ChatGPT sandbox files are
+mounted on the Gateway host. ChatGPT Files are not exposed to the MCP server
+unless the client actively transmits their content through tool arguments.
+The server cannot access a private user attachment by a string file ID alone.
+Asset inspection is not a browser screenshot or proof of production delivery.
