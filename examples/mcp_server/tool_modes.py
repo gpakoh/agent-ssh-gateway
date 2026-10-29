@@ -372,6 +372,7 @@ TOOL_NAMES_BY_MODE["mcp_client_write"] = (
     "candidate_orphan_finalize",
     "fleet_status",
     "fleet_reconcile_unbound",
+    "site_asset_transfer",  # One grouped sites workflow; write-mode only.
 }
 
 
