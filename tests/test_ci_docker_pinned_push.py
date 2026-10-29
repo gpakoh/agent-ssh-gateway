@@ -175,11 +175,12 @@ def test_invalid_inputs_fail_before_calling_docker(tmp_path: Path) -> None:
 
 def test_all_ci_release_images_use_pinned_push_after_smoke() -> None:
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-    assert workflow.count("bash scripts/ci-docker-push-pinned.sh") == 3
+    assert workflow.count("bash scripts/ci-docker-push-pinned.sh") == 4
     for image_id, repository in (
         ("CI_SMOKE_GW_IMAGE_ID", "agent-ssh-gateway"),
         ("CI_SMOKE_MCP_IMAGE_ID", "mcp-server"),
         ("CI_SMOKE_SSHD_IMAGE_ID", "ssh-gateway-sshd"),
+        ("CI_SMOKE_MEDIA_IMAGE_ID", "site-media-worker"),
     ):
         assert (
             f'bash scripts/ci-docker-push-pinned.sh "${image_id}" '
