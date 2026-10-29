@@ -2684,6 +2684,168 @@ def adopt_candidate_lineage(
         )
 
 
+def abort_legacy_prepared_cleanup(
+    *,
+    project_id: str,
+    expected_head_sha: str,
+    expected_branch: str,
+    expected_source_project: str,
+    expected_legacy_root: str,
+    config_dir: Path,
+    journal_root: Path,
+    expected_tombstone_sha256: str | None = None,
+    apply: bool = False,
+    reason: str | None = None,
+    reference_guard: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    """Archive ONLY a stranded pre-CAS legacy cleanup journal, never source data.
+
+    Inspection is read-only. An explicit hash lease, operator reason and audit
+    guard are mandatory for the archival action. Other cleanup phases, managed
+    candidates, changed registry identities and missing legacy roots fail closed.
+    """
+    if not isinstance(project_id, str) or not _PROJECT_ID_RE.fullmatch(project_id):
+        raise _fail("INVALID_INPUT", "project_id has an invalid format")
+    head = _validate_full_sha(expected_head_sha, field="expected_head_sha")
+    branch = _validate_branch(expected_branch)
+    if not isinstance(expected_source_project, str) or not expected_source_project.strip():
+        raise _fail("INVALID_INPUT", "expected_source_project must be non-empty")
+    source_project = expected_source_project.strip()
+    if not isinstance(expected_legacy_root, str):
+        raise _fail("INVALID_INPUT", "expected_legacy_root must be a safe relative path")
+    root_parts = Path(expected_legacy_root).parts
+    if (
+        len(root_parts) < 2
+        or root_parts[-2:] != (".candidates", project_id)
+        or any(part in ("", ".", "..") for part in root_parts)
+        or Path(expected_legacy_root).is_absolute()
+        or "\\" in expected_legacy_root
+    ):
+        raise _fail("INVALID_INPUT", "expected_legacy_root must name one legacy .candidates project")
+    if type(apply) is not bool:
+        raise _fail("INVALID_INPUT", "apply must be boolean")
+    if apply and (
+        not isinstance(expected_tombstone_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", expected_tombstone_sha256)
+        or not isinstance(reason, str)
+        or not (20 <= len(reason.strip()) <= 400)
+        or not callable(reference_guard)
+    ):
+        raise _fail("INVALID_INPUT", "archival requires exact journal SHA, operator reason and audit guard")
+    config_dir = config_dir.resolve()
+    journal_root = journal_root.resolve()
+    workspace_root = _workspace_root(config_dir)
+    candidate_path = _candidate_clones_root(workspace_root) / project_id
+    tombstone_path, tombstone_id = _cleanup_tombstone_path(journal_root, project_id)
+
+    with _lineage_lock(workspace_root, source_project, branch):
+        with project_registry_mutation_lock(journal_root):
+            if candidate_path.exists() or candidate_path.is_symlink():
+                raise _fail("WORKSPACE_CONTENDED", "managed candidate path exists; legacy abort refused")
+            # Reject symlinked legacy paths, including any parent component.
+            current = workspace_root
+            for part in root_parts:
+                current = current / part
+                try:
+                    metadata = current.lstat()
+                except OSError as exc:
+                    raise _fail("WORKSPACE_CONTENDED", "legacy source root unavailable") from exc
+                if not stat.S_ISDIR(metadata.st_mode):
+                    raise _fail("WORKSPACE_CONTENDED", "legacy source path is not a physical directory")
+            seen = 0
+            for store in _registry_store_paths(config_dir):
+                if not store.exists():
+                    continue
+                try:
+                    data = yaml.safe_load(store.read_text(encoding="utf-8"))
+                except (OSError, UnicodeError, yaml.YAMLError) as exc:
+                    raise _fail("WORKSPACE_CONTENDED", "legacy registry cannot be verified") from exc
+                if not isinstance(data, dict) or not isinstance(data.get("projects"), dict):
+                    raise _fail("WORKSPACE_CONTENDED", "legacy registry is malformed")
+                entry = data["projects"].get(project_id)
+                if entry is not None:
+                    seen += 1
+                    if (
+                        not isinstance(entry, dict)
+                        or entry.get("root") != expected_legacy_root
+                        or entry.get("type") != "git-source"
+                        or entry.get("root_selector", "default") != "default"
+                    ):
+                        raise _fail("WORKSPACE_CONTENDED", "legacy registry identity differs from lease")
+            if seen != 1:
+                raise _fail("WORKSPACE_CONTENDED", "legacy registry entry must exist in exactly one store")
+
+            tombstone = _read_cleanup_tombstone(tombstone_path)
+            if tombstone is None:
+                raise _fail("PROJECT_NOT_FOUND", "legacy cleanup journal is absent")
+            required = {
+                "version": 1,
+                "project_id": project_id,
+                "source_project": source_project,
+                "branch": branch,
+                "head": head,
+                "registry_root": f".mcp-candidate-clones/{project_id}",
+                "phase": "prepared",
+            }
+            if (
+                set(tombstone) != set(required) | {"preserved_ref"}
+                or tombstone.get("preserved_ref") is not None
+                or any(tombstone.get(k) != v for k, v in required.items())
+            ):
+                raise _fail("WORKSPACE_CONTENDED", "legacy journal is not a pre-CAS prepared transaction")
+            # The journal writer persists sorted, indented JSON with a trailing LF.
+            canonical = (json.dumps(tombstone, indent=2, sort_keys=True) + "\n").encode("utf-8")
+            digest = hashlib.sha256(canonical).hexdigest()
+            receipt: dict[str, Any] = {
+                "project_id": project_id,
+                "source_project": source_project,
+                "tombstone_id": tombstone_id,
+                "tombstone_sha256": digest,
+                "outcome": "eligible",
+                "journal_removed": False,
+                "registry_mutated": False,
+                "legacy_files_mutated": False,
+            }
+            if not apply:
+                return receipt
+            if digest != expected_tombstone_sha256:
+                raise _fail("WORKSPACE_CONTENDED", "legacy journal fingerprint changed")
+            assert reference_guard is not None
+            reference_guard()
+            with _cleanup_journal_dir(tombstone_path, create=False) as journal_fd:
+                if journal_fd is None:
+                    raise _fail("WORKSPACE_CONTENDED", "legacy journal disappeared")
+                flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+                try:
+                    fd = os.open(tombstone_path.name, flags, dir_fd=journal_fd)
+                except OSError as exc:
+                    raise _fail("WORKSPACE_CONTENDED", "legacy journal cannot be leased") from exc
+                try:
+                    meta = os.fstat(fd)
+                    if not stat.S_ISREG(meta.st_mode) or meta.st_nlink != 1 or meta.st_size != len(canonical):
+                        raise _fail("WORKSPACE_CONTENDED", "legacy journal inode changed")
+                    raw = os.read(fd, len(canonical) + 1)
+                    if raw != canonical:
+                        raise _fail("WORKSPACE_CONTENDED", "legacy journal contents changed")
+                finally:
+                    os.close(fd)
+                last = os.stat(tombstone_path.name, dir_fd=journal_fd, follow_symlinks=False)
+                if last.st_dev != meta.st_dev or last.st_ino != meta.st_ino:
+                    raise _fail("WORKSPACE_CONTENDED", "legacy journal inode changed")
+                # A unique audit archive, same directory and filesystem: no delete
+                # of the legacy Git source, its registry entry, or journal evidence.
+                archived_name = f"{tombstone_path.stem}.legacy-aborted-{digest[:12]}-{secrets.token_hex(10)}.json"
+                try:
+                    os.rename(tombstone_path.name, archived_name, src_dir_fd=journal_fd, dst_dir_fd=journal_fd)
+                    os.fsync(journal_fd)
+                except OSError as exc:
+                    raise _fail("TOOL_EXECUTION_FAILED", "legacy journal archival failed", retryable=True) from exc
+            receipt["outcome"] = "archived"
+            receipt["journal_removed"] = True
+            receipt["archive_name"] = archived_name
+            return receipt
+
+
 def candidate_cleanup(
     project_id: str,
     expected_head_sha: str,

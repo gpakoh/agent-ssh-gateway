@@ -25,6 +25,9 @@ from examples.mcp_server.agent_sources import (
     cleanup_remote_resolution_scope,
 )
 from examples.mcp_server.candidate_clone import CandidateCloneError
+from examples.mcp_server.candidate_clone import (
+    abort_legacy_prepared_cleanup as _abort_legacy_prepared_cleanup,
+)
 from examples.mcp_server.candidate_clone import adopt_candidate_lineage as _adopt_candidate_lineage
 from examples.mcp_server.candidate_clone import candidate_cleanup as _candidate_cleanup
 from examples.mcp_server.candidate_clone import (
@@ -893,6 +896,118 @@ async def candidate_adopt(
     )
 
 
+async def candidate_cleanup_abort_legacy_prepared(
+    project_id: str,
+    expected_head_sha: str,
+    expected_branch: str,
+    expected_source_project: str,
+    expected_legacy_root: str,
+    expected_tombstone_sha256: str | None = None,
+    apply: bool = False,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """Inspect or archive one pre-CAS legacy cleanup journal; never remove Git data."""
+
+    async def _run() -> dict[str, Any]:
+        try:
+            source_project, _source_root = _resolve_project(expected_source_project)
+            config_dir = _resolve_registry_config_dir()
+            journal_root = _journal_root_for_project("workspace-registry", config_dir)
+        except _ProjectResolutionError:
+            return tool_error(
+                tool="candidate_cleanup_abort_legacy_prepared",
+                code="PROJECT_NOT_FOUND",
+                message="Source project is not registered or unavailable.",
+            )
+        except ValueError:
+            return tool_error(
+                tool="candidate_cleanup_abort_legacy_prepared",
+                code="INVALID_INPUT",
+                message="Workspace registry control plane is misconfigured.",
+            )
+
+        audit_metadata = {
+            "project_id": project_id,
+            "expected_head_sha": expected_head_sha,
+            "expected_branch": expected_branch,
+            "expected_source_project": source_project,
+            "expected_legacy_root": expected_legacy_root,
+            "expected_tombstone_sha256": expected_tombstone_sha256,
+            "reason": reason,
+            "correlation_id": uuid.uuid4().hex,
+        }
+
+        def _required_audit_guard() -> None:
+            try:
+                server_attr("get_audit_logger")().append_required(
+                    McpAuditEvent(
+                        event_type="mcp.candidate_legacy_cleanup_abort_intent",
+                        tool="candidate_cleanup_abort_legacy_prepared",
+                        action="archive_prepared_legacy_tombstone",
+                        decision="allow",
+                        reason="operator-authorized journal-only recovery",
+                        metadata=audit_metadata,
+                    )
+                )
+            except AuditWriteError as exc:
+                raise CandidateCloneError(
+                    "AUDIT_UNAVAILABLE",
+                    "mandatory audit unavailable; legacy cleanup recovery refused",
+                    retryable=True,
+                ) from exc
+
+        try:
+            result = await asyncio.to_thread(
+                _abort_legacy_prepared_cleanup,
+                project_id=project_id,
+                expected_head_sha=expected_head_sha,
+                expected_branch=expected_branch,
+                expected_source_project=source_project,
+                expected_legacy_root=expected_legacy_root,
+                expected_tombstone_sha256=expected_tombstone_sha256,
+                apply=apply,
+                reason=reason,
+                reference_guard=_required_audit_guard if apply else None,
+                config_dir=config_dir,
+                journal_root=journal_root,
+            )
+        except CandidateCloneError as exc:
+            return tool_error(
+                tool="candidate_cleanup_abort_legacy_prepared",
+                code=exc.code,
+                message=exc.message,
+                retryable=exc.retryable,
+                details=exc.details,
+            )
+
+        if apply and result.get("outcome") == "archived":
+            try:
+                server_attr("get_audit_logger")().append(
+                    McpAuditEvent(
+                        event_type="mcp.candidate_legacy_cleanup_abort_success",
+                        tool="candidate_cleanup_abort_legacy_prepared",
+                        action="archive_prepared_legacy_tombstone",
+                        decision="allow",
+                        reason="journal-only legacy cleanup recovery completed",
+                        metadata=audit_metadata,
+                    )
+                )
+            except Exception:
+                pass
+        return tool_success(
+            tool="candidate_cleanup_abort_legacy_prepared",
+            result=result,
+            success_text="Legacy cleanup journal inspected or archived.",
+        )
+
+    return await run_tool_async(
+        tool="candidate_cleanup_abort_legacy_prepared",
+        title="Legacy cleanup journal recovery",
+        fn=_run,
+        success_text="Legacy cleanup journal inspected or archived.",
+    )
+
+
 async def candidate_cleanup(
     project_id: str,
     expected_head_sha: str,
@@ -1513,6 +1628,11 @@ def register_all() -> None:
     register_tool("candidate_cleanup")(
         instrumented("candidate_cleanup")(candidate_cleanup)
     )
+    register_tool("candidate_cleanup_abort_legacy_prepared")(
+        instrumented("candidate_cleanup_abort_legacy_prepared")(
+            candidate_cleanup_abort_legacy_prepared
+        )
+    )
     register_tool("candidate_orphan_finalize")(
         instrumented("candidate_orphan_finalize")(candidate_orphan_finalize)
     )
@@ -1529,5 +1649,6 @@ __all__ = [
     "prepare_candidate_clone",
     "candidate_adopt",
     "candidate_cleanup",
+    "candidate_cleanup_abort_legacy_prepared",
     "candidate_orphan_finalize",
 ]
