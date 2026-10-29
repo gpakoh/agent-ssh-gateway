@@ -58,6 +58,7 @@ def base_plan() -> dict:
         "candidate_root": "/candidate/xloud",
         "operator_root": "/operator/site-audit",
         "script_path": "/candidate/xloud/deploy-xloud.sh",
+        "expected_site_ipv4": "192.0.2.149",
         "env_file": "/operator/site-audit/.env",
         "state_volume": adapter._XLOUD_STATE_VOLUME,
         "state_volume_fingerprint": "sha256:" + "8" * 64,
@@ -135,7 +136,7 @@ class Client:
 
     async def container_network_snapshot(self, name):
         if name == "xloud-site":
-            return {"proxmox_macvlan": "10.10.10.149", "xloud_default": "172.30.0.2"}
+            return {"proxmox_macvlan": "192.0.2.149", "xloud_default": "172.30.0.2"}
         if name == "xloud-intake":
             return {"site-audit-control": "172.31.0.8", "xloud_default": "172.30.0.3"}
         raise AssertionError(name)
@@ -154,6 +155,7 @@ def setup(monkeypatch):
     monkeypatch.setattr(adapter, "_docker_client", lambda: client)
     monkeypatch.setattr(adapter, "_prepare_xloud_deploy", AsyncMock(return_value=base_plan()))
     monkeypatch.setattr(adapter, "_verify_xloud_guard_resources", AsyncMock())
+    monkeypatch.setattr(adapter, "_verified_xloud_site_ipv4", lambda _path: "192.0.2.149")
     return client
 
 
@@ -198,7 +200,7 @@ async def test_preflight_refuses_untrusted_or_completed_journal(setup, change):
 async def test_public_tool_requires_high_risk_confirmation(setup):
     import examples.mcp_server.server as srv
 
-    result = await adapter.docker_recover_deployment(contract="xloud", parameters=KWARGS)
+    result = await adapter.docker_recover_deployment(contract="static-site-legacy-v1", parameters=KWARGS)
     assert result["ok"] is True
     action, _ = srv._confirm_store.peek_action_id(result["result"]["action_id"])
     assert action is not None and action.tool == "docker_recover_deployment"
@@ -326,16 +328,17 @@ async def test_generic_catalog_exposes_reviewed_contract_only():
     catalog = await adapter.docker_recovery_catalog()
     assert catalog["ok"]
     entries = catalog["result"]["contracts"]
-    assert any(item["id"] == "xloud" for item in entries)
+    assert any(item["id"] == "static-site-legacy-v1" for item in entries)
     assert all(item["scope"] == "mcp:docker:admin" for item in entries)
+    assert all(item["requires_operator_configuration"] is True for item in entries)
     assert all("parameters" in item and "confirmation" in item for item in entries)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("contract,parameters", [
     ("arbitrary-shell", KWARGS),
-    ("xloud", {**KWARGS, "command": "docker rm -f all"}),
-    ("xloud", {key: value for key, value in KWARGS.items() if key != "source_revision"}),
+    ("static-site-legacy-v1", {**KWARGS, "command": "docker rm -f all"}),
+    ("static-site-legacy-v1", {key: value for key, value in KWARGS.items() if key != "source_revision"}),
 ])
 async def test_generic_recovery_rejects_unregistered_or_extra_parameters(setup, contract, parameters):
     result = await adapter.docker_recover_deployment(contract=contract, parameters=parameters)
@@ -347,11 +350,11 @@ async def test_generic_recovery_rejects_unregistered_or_extra_parameters(setup, 
 @pytest.mark.asyncio
 async def test_generic_confirm_dispatch_uses_only_registered_handler(setup, monkeypatch):
     import examples.mcp_server.server as srv
-    prepared = await adapter.docker_recover_deployment(contract="xloud", parameters=KWARGS)
+    prepared = await adapter.docker_recover_deployment(contract="static-site-legacy-v1", parameters=KWARGS)
     assert prepared["ok"] is True
     action, _ = srv._confirm_store.peek_action_id(prepared["result"]["action_id"])
     assert action.tool == "docker_recover_deployment"
-    assert action.kwargs["contract"] == "xloud"
+    assert action.kwargs["contract"] == "static-site-legacy-v1"
     monkeypatch.setattr(adapter.asyncio, "sleep", AsyncMock())
     result = await adapter._docker_recover_deployment_impl(**action.kwargs)
     assert result["ok"] is True
@@ -392,3 +395,18 @@ async def test_generic_contract_supports_other_parameter_and_evidence_shapes(mon
     result = await adapter._docker_recover_deployment_impl(**action.kwargs)
     assert result["ok"] is True
     execute.assert_awaited_once_with(ticket="T-17", lease="sha256:" + "f" * 64, timeout=300)
+
+def test_pinned_site_address_is_parsed_from_script_and_must_be_unambiguous(tmp_path):
+    script = tmp_path / "verified-deploy.sh"
+    script.write_text('SITE_IPV4="192.0.2.149"\n', encoding="utf-8")
+    assert adapter._verified_xloud_site_ipv4(str(script)) == "192.0.2.149"
+    for invalid in (
+        'SITE_IPV4="192.0.2.149"\nSITE_IPV4="192.0.2.150"\n',
+        'SITE_IPV4="invalid"\n',
+        'SITE_IPV4="999.0.2.149"\n',
+        'SITE_IPV4="192.0.2.149" # unreviewed suffix\n',
+        "",
+    ):
+        script.write_text(invalid, encoding="utf-8")
+        with pytest.raises(ValueError):
+            adapter._verified_xloud_site_ipv4(str(script))

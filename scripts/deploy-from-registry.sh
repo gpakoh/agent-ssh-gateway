@@ -474,6 +474,25 @@ docker pull "$GATEWAY_REPO:$DEPLOY_TAG"
 docker pull "$MCP_REPO:$DEPLOY_TAG"
 docker pull "$SSHD_REPO:$DEPLOY_TAG"
 
+# Gitea-only source mappings must be present in the actual operator-owned
+# registry bind, not only the freshly built image. The Compose bind overrides
+# /app/projects.yaml. Test that host file read-only BEFORE recreating services.
+# Never auto-rewrite it: other operator-owned projects must be preserved.
+if [[ "${PROJECTS_YAML_PATH:-}" != /* ]]; then
+  log "REGISTRY_CONFIG_DRIFT: PROJECTS_YAML_PATH must be host-absolute."
+  exit 1
+fi
+if ! docker run --rm -i \
+    --network none --read-only --cap-drop ALL \
+    --security-opt no-new-privileges --pids-limit 64 --memory 256m \
+    --mount "type=bind,source=${PROJECTS_YAML_PATH},target=/app/projects.yaml,readonly" \
+    --entrypoint python "$MCP_REPO:$DEPLOY_TAG" \
+    -B scripts/check_gitea_only_registry_mount.py --mounted /app/projects.yaml \
+    < "$ROOT/projects.yaml"; then
+  log "REGISTRY_CONFIG_DRIFT: refusing deploy; exact-SHA operator reconciliation required."
+  exit 1
+fi
+
 RUNNING_SSHD_ID=$(image_id ssh-gateway-sshd)
 
 PREVIOUS_GATEWAY_IMAGE=$(read_state_field gateway_image)
