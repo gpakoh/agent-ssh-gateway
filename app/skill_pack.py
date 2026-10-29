@@ -35,7 +35,7 @@ SKILLS: dict[str, dict[str, Any]] = {
         "group": "sites",
         "roles": ["controller", "worker"],
         "summary": "Структура, бренд, адаптивность и доступность сайтов, включая Xloud.",
-        "resources": ["SKILL.md", "references/review.md"],
+        "resources": ["SKILL.md", "references/review.md", "references/asset-transfer.md"],
     },
     "site-scroll-video": {
         "title": "Видео по прокрутке",

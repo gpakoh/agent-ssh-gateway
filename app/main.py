@@ -1380,6 +1380,7 @@ from app.routers.system import router as system_router  # noqa: E402
 from app.routers.templates import router as templates_router  # noqa: E402
 from app.routers.webhooks import router as webhooks_router  # noqa: E402
 from app.routers.workspace import router as workspace_router  # noqa: E402
+from app.routers.workspace_assets import router as workspace_assets_router  # noqa: E402
 
 app.include_router(batch_router)
 app.include_router(diagnostics_router)
@@ -1405,6 +1406,7 @@ app.include_router(auth_router)
 app.include_router(oauth_router)
 app.include_router(auth_identity_router)
 app.include_router(workspace_router)
+app.include_router(workspace_assets_router)
 app.include_router(audit_router)
 app.include_router(admin_access_router)
 app.include_router(admin_approval_router)
