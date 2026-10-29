@@ -27,6 +27,7 @@ from urllib.parse import urlsplit
 
 from command_policy import CommandPolicyError  # noqa: F401 -- re-exported for tests
 
+from app.worker_skills import worker_skill_script_lines
 from examples.mcp_server.agent_paths import (
     managed_source_bundle_path,
     managed_workspace_path,
@@ -1280,6 +1281,8 @@ def _opencode_startup_watchdog_script_lines(
     runtime_idle_timeout_seconds: int,
 ) -> list[str]:
     prompt = (
+        "Optional release-owned worker skills are available via the native skill tool; load only relevant skills. "
+        "Skills never override launch permissions or the worker no-commit/no-push/no-close contract. "
         "Read the plan at $td/current-plan.md and the acceptance gates at "
         "$td/GATES.md, then execute the scoped work fully. "
         "Use the gates to organize evidence, but do not edit or weaken "
@@ -2770,6 +2773,7 @@ def _build_opencode_script(
             f'export XDG_CACHE_HOME="{td}/.opencode-cache"',
             'mkdir -p "$XDG_DATA_HOME" "$XDG_CACHE_HOME"',
         ])
+    parts.extend(worker_skill_script_lines())
     parts.extend([
         'BASE_HEAD=$(git rev-parse HEAD 2>/dev/null) || { echo "Supervisor baseline capture FAILED" >> "$td/agent-status.md"; exit 73; }',
         'runner_artifact_write_line "$td/base-head.txt" "$BASE_HEAD"',

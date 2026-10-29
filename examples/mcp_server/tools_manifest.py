@@ -32,6 +32,8 @@ def _agent_guidance() -> dict[str, Any]:
     verification commands, and write-plane hints belong in info(project).
     """
     return {
+        "start_here": "gateway_catalog",
+        "skills": "Use gateway_catalog for names/roles, then gateway_skill for one instruction or reference.",
         "project_metadata_tool": "info",
         "before_project_writes": "Call info(project), inspect workspace.recommended_write_plane, and preserve workspace.git_state for guarded commit/push workflows.",
         "before_verification": "Call info(project) and run verification commands from verification.cwd.",

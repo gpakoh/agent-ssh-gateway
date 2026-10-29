@@ -607,6 +607,7 @@ async def _gateway_tools_manifest_protocol(
 # FastMCP instance.
 from examples.mcp_server.mcp_infra.adapters import (  # noqa: E402
     agent,
+    catalog,
     context7,
     coordination_adapter,
     docker,
@@ -685,7 +686,11 @@ gateway_archive_agent_task = agent.gateway_archive_agent_task
 gateway_run_opencode = agent.gateway_run_opencode
 gateway_run_agent = agent.gateway_run_agent
 
+gateway_catalog = catalog.gateway_catalog
+gateway_skill = catalog.gateway_skill
+
 agent.register_all()
+catalog.register_all()
 context7.register_all()
 coordination_adapter.register_all()
 workspace.register_all()
