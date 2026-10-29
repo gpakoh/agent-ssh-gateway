@@ -1457,6 +1457,50 @@ def _idle_guard() -> None:
     return None
 
 
+def test_candidate_cleanup_rejects_legacy_git_source_before_creating_transaction(
+    registry_fixture, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unmanaged legacy Git source must never get a managed cleanup tombstone."""
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, head = registry_fixture
+    project_id = "legacy-source"
+    branch = "fix/legacy-source"
+    preserved_ref = "archive/candidate-legacy-source"
+    legacy = workspace / ".candidates" / project_id
+    legacy.mkdir(parents=True)
+    marker = legacy / "keep.txt"
+    marker.write_text("owner-controlled", encoding="utf-8")
+    registry_file = config_dir / "projects.yaml"
+    registry_file.write_text(
+        registry_file.read_text(encoding="utf-8")
+        + f"  {project_id}:\n"
+        + f"    root: .candidates/{project_id}\n"
+        + "    type: git-source\n"
+        + "    tags: [legacy]\n",
+        encoding="utf-8",
+    )
+    before = registry_file.read_bytes()
+    _mock_cleanup_remote_probe(
+        monkeypatch, module, preserved_ref=preserved_ref,
+        head=head, delivery_branch=branch,
+    )
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            project_id, head, branch, "source-project", preserved_ref,
+            config_dir=config_dir, journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+
+    assert exc_info.value.code == "WORKSPACE_CONTENDED"
+    assert "registry" in exc_info.value.message.lower()
+    tombstone_path, _ = module._cleanup_tombstone_path(journal_root, project_id)
+    assert not tombstone_path.exists()
+    assert registry_file.read_bytes() == before
+    assert marker.read_text(encoding="utf-8") == "owner-controlled"
+
+
 def test_candidate_cleanup_removes_preserved_candidate_and_is_idempotent(
     registry_fixture,
     monkeypatch: pytest.MonkeyPatch,

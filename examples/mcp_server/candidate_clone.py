@@ -1324,8 +1324,16 @@ def _registry_store_paths(config_dir: Path) -> list[Path]:
     return paths
 
 
-def _registry_has_candidate(config_dir: Path, project_id: str) -> bool:
-    """Return whether any raw source/runtime registry store still lists the id."""
+def _registry_has_candidate(
+    config_dir: Path, project_id: str, *, expected_root: str | None = None,
+) -> bool:
+    """Inspect raw registry identity before any managed cleanup journal mutation.
+
+    A legacy git-source may share a project ID but is not a managed candidate
+    clone. Refuse it before writing a prepared tombstone; otherwise unregister
+    fails its later CAS and strands a transaction that blocks adoption.
+    """
+    present = False
     for path in _registry_store_paths(config_dir):
         if not path.exists():
             continue
@@ -1339,9 +1347,30 @@ def _registry_has_candidate(config_dir: Path, project_id: str) -> bool:
         if not isinstance(projects, dict):
             continue
         entry = projects.get(project_id)
+        if entry is None:
+            continue
+        if expected_root is not None:
+            if (
+                not isinstance(entry, dict)
+                or entry.get("root") != expected_root
+                or entry.get("type") != "candidate-clone"
+                or entry.get("root_selector", "default") != "default"
+            ):
+                raise _fail(
+                    "WORKSPACE_CONTENDED",
+                    "candidate registry identity does not match managed cleanup scope",
+                    retryable=False,
+                    details={"recovery_action": "legacy_source_requires_separate_guarded_reconciliation"},
+                )
+            if present:
+                raise _fail(
+                    "WORKSPACE_CONTENDED",
+                    "candidate is registered in multiple registry stores",
+                    retryable=False,
+                )
         if isinstance(entry, dict) and entry:
-            return True
-    return False
+            present = True
+    return present
 
 
 def candidate_store_inventory(*, config_dir: Path) -> dict[str, Any]:
@@ -2813,6 +2842,13 @@ def _cleanup_candidate_locked(
             for key, value in expected_identity.items():
                 if tombstone.get(key) != value:
                     raise _fail("WORKSPACE_CONTENDED", "candidate cleanup tombstone identity mismatch")
+
+    # This call runs under the existing registry mutation lock. Check the
+    # exact registered type/root *before* any prepared tombstone is written,
+    # including when the managed candidate directory does not exist.
+    _registry_has_candidate(
+        config_dir, project_id, expected_root=expected_registry_root,
+    )
 
     if preserved_ref is not None:
         _require_preserved_head(
