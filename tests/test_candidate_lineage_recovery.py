@@ -179,6 +179,134 @@ def test_adopt_candidate_lineage_rejects_wrong_head_and_dirty_candidate(
     assert not (candidate / ".git" / "mcp-candidate-clone.json").exists()
 
 
+def test_abort_legacy_prepared_cleanup_archives_only_journal(
+    lineage_fixture,
+) -> None:
+    workspace, _source, config_dir, journal_root, head = lineage_fixture
+    project_id = "legacy-git-source"
+    branch = "fix/legacy-git-source"
+    legacy_root = f".candidates/{project_id}"
+    legacy = workspace / legacy_root
+    legacy.mkdir(parents=True)
+    marker = legacy / "unmodified.txt"
+    marker.write_text("preserve me", encoding="utf-8")
+    registry = config_dir / "projects.yaml"
+    registry.write_text(
+        registry.read_text(encoding="utf-8")
+        + f"  {project_id}:\n"
+        + f"    root: {legacy_root}\n"
+        + "    type: git-source\n",
+        encoding="utf-8",
+    )
+    before = registry.read_bytes()
+    path, _ = module._cleanup_tombstone_path(journal_root, project_id)
+    module._write_cleanup_tombstone(path, {
+        "version": 1, "project_id": project_id, "source_project": "source-project",
+        "branch": branch, "head": head, "preserved_ref": None,
+        "registry_root": f".mcp-candidate-clones/{project_id}", "phase": "prepared",
+    })
+    kwargs = dict(
+        project_id=project_id, expected_head_sha=head, expected_branch=branch,
+        expected_source_project="source-project", expected_legacy_root=legacy_root,
+        config_dir=config_dir, journal_root=journal_root,
+    )
+    preview = module.abort_legacy_prepared_cleanup(**kwargs)
+    assert preview["outcome"] == "eligible"
+    assert preview["journal_removed"] is False
+    assert path.exists()
+
+    with pytest.raises(CandidateCloneError) as no_lease:
+        module.abort_legacy_prepared_cleanup(
+            **kwargs, apply=True, reason="Operator approved exact journal recovery",
+            reference_guard=lambda: None,
+        )
+    assert no_lease.value.code == "INVALID_INPUT"
+    assert path.exists()
+
+    with pytest.raises(CandidateCloneError) as stale:
+        module.abort_legacy_prepared_cleanup(
+            **kwargs, apply=True, expected_tombstone_sha256="0" * 64,
+            reason="Operator approved exact journal recovery",
+            reference_guard=lambda: None,
+        )
+    assert stale.value.code == "WORKSPACE_CONTENDED"
+    assert path.exists()
+
+    def audit_unavailable() -> None:
+        raise CandidateCloneError("AUDIT_UNAVAILABLE", "audit is unavailable")
+
+    with pytest.raises(CandidateCloneError) as no_audit:
+        module.abort_legacy_prepared_cleanup(
+            **kwargs, apply=True,
+            expected_tombstone_sha256=preview["tombstone_sha256"],
+            reason="Operator approved exact journal recovery",
+            reference_guard=audit_unavailable,
+        )
+    assert no_audit.value.code == "AUDIT_UNAVAILABLE"
+    assert path.exists()
+
+    finished = module.abort_legacy_prepared_cleanup(
+        **kwargs, apply=True,
+        expected_tombstone_sha256=preview["tombstone_sha256"],
+        reason="Operator approved exact journal recovery",
+        reference_guard=lambda: None,
+    )
+    assert finished["outcome"] == "archived"
+    assert finished["journal_removed"] is True
+    assert not path.exists()
+    assert len(list(path.parent.glob(f"{path.stem}.legacy-aborted-*.json"))) == 1
+    assert registry.read_bytes() == before
+    assert marker.read_text(encoding="utf-8") == "preserve me"
+
+
+def test_abort_legacy_prepared_cleanup_rejects_other_phase_and_managed_registry(
+    lineage_fixture,
+) -> None:
+    workspace, _source, config_dir, journal_root, head = lineage_fixture
+    project_id = "legacy-fail-closed"
+    branch = "fix/legacy-fail-closed"
+    legacy_root = f".candidates/{project_id}"
+    (workspace / legacy_root).mkdir(parents=True)
+    registry = config_dir / "projects.yaml"
+    registry.write_text(
+        registry.read_text(encoding="utf-8")
+        + f"  {project_id}:\n"
+        + f"    root: {legacy_root}\n"
+        + "    type: git-source\n",
+        encoding="utf-8",
+    )
+    path, _ = module._cleanup_tombstone_path(journal_root, project_id)
+    record = {
+        "version": 1, "project_id": project_id, "source_project": "source-project",
+        "branch": branch, "head": head, "preserved_ref": None,
+        "registry_root": f".mcp-candidate-clones/{project_id}",
+        "phase": "registry_removed",
+    }
+    module._write_cleanup_tombstone(path, record)
+    kwargs = dict(
+        project_id=project_id, expected_head_sha=head, expected_branch=branch,
+        expected_source_project="source-project", expected_legacy_root=legacy_root,
+        config_dir=config_dir, journal_root=journal_root,
+    )
+    with pytest.raises(CandidateCloneError) as partial:
+        module.abort_legacy_prepared_cleanup(**kwargs)
+    assert partial.value.code == "WORKSPACE_CONTENDED"
+    assert path.exists()
+
+    record["phase"] = "prepared"
+    module._write_cleanup_tombstone(path, record)
+    registry.write_text(
+        registry.read_text(encoding="utf-8").replace(
+            "type: git-source", "type: candidate-clone",
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(CandidateCloneError) as wrong_owner:
+        module.abort_legacy_prepared_cleanup(**kwargs)
+    assert wrong_owner.value.code == "WORKSPACE_CONTENDED"
+    assert path.exists()
+
+
 def test_adopt_candidate_lineage_refuses_existing_cleanup_transaction(
     lineage_fixture,
     monkeypatch: pytest.MonkeyPatch,
