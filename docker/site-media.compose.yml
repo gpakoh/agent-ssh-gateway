@@ -5,15 +5,17 @@
 services:
   mcp-oauth:
     networks:
+      # Keep the existing Gateway, database and Gitea path after overlay merge.
+      # The worker itself is attached ONLY to the isolated media network.
+      internal_net: {}
       media_net: {}
     environment:
       SITE_MEDIA_WORKER_TOKEN: ${SITE_MEDIA_WORKER_TOKEN:?operator media secret required}
   site-media-worker:
     profiles: ["media"]
+    # Release image only: never rebuild unqualified codecs during rollout.
+    # scripts/site_media_preflight.py requires an immutable @sha256 digest.
     image: ${SITE_MEDIA_WORKER_IMAGE:?approved media image digest required}
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.site-media-worker
     environment:
       SITE_MEDIA_WORKER_TOKEN: ${SITE_MEDIA_WORKER_TOKEN:-}
     networks:

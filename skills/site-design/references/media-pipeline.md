@@ -50,6 +50,40 @@ and PNG→AVIF encoder self-test. `docker/site-media.compose.yml` is
 **not included in the normal release path**. Operators must explicitly
 qualify and deploy the worker in a separately reviewed rollout.
 
+### Safe operator activation (no automatic deployment)
+
+1. Qualify the actual media image in exact-SHA CI, confirm it was published,
+   and obtain its immutable registry **manifest digest**, not just a mutable
+   tag. Set `SITE_MEDIA_WORKER_IMAGE` to
+   `192.168.1.103:3005/gpakoh/site-media-worker@sha256:<verified digest>`.
+   Do not use `:latest`, a local build, or the docker image ID in place of
+   the manifest digest.
+2. Provision a **separate operator-owned random token** (32–512 printable
+   characters) through the existing private runtime secret channel as
+   `SITE_MEDIA_WORKER_TOKEN`. Never commit it, put it in an Issue, or print
+   interpolated Compose configuration in CI logs.
+3. Run `python scripts/site_media_preflight.py` from the exact checkout
+   with the operator's original Compose runtime environment. Its read-only
+   `docker compose config --format json` inspection checks that `mcp-oauth`
+   still has `internal_net`, the worker belongs only to `media_net`, the
+   media network is internal, both services receive the same secret, and the
+   worker's image, permissions and budgets are pinned. Any absence or drift
+   returns **NO-GO** without changing a container.
+4. After an approved maintenance/rollout window, invoke Docker Compose with
+   the base `docker-compose.yml`, `site-media.compose.yml` and `--profile
+   media`. Limit the controlled recreation to **mcp-oauth and
+   site-media-worker**; do not update unrelated services. Both must be able
+   to see `media_net`, while MCP retains the ordinary internal Gateway network.
+   Use the normal pinned release/rollback procedure.
+5. Inspect running container digest, networks, read-only/non-root profile,
+   worker health, and MCP health. Execute a **real candidate-only upload →
+   WebP/AVIF conversion → inspect/readback → SHA/quality check**. Never claim
+   operational readiness on the strength of the build smoke alone. On failure
+   stop the worker and revert only the media-network attachment of MCP.
+
+The overlay is deliberately **image-only**: it cannot build a new worker
+during production activation and cannot silently replace approved source.
+
 The overlay uses private `media_net` with `internal: true`, no host ports,
 no workspace bind, no Docker socket, non-root UID, read-only root filesystem,
 dropped capabilities, no-new-privileges, 512 MiB memory, 1 CPU, limited
