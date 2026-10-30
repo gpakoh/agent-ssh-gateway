@@ -77,8 +77,10 @@ def validate_compose(data: dict[str, Any], image: str, token: str) -> None:
     )
     _check(
         not worker.get("ports") and not worker.get("volumes")
-        and not worker.get("devices") and worker.get("privileged") is not True,
-        "Worker must expose no ports, device grants or workspace mounts",
+        and not worker.get("devices") and not worker.get("cap_add")
+        and not worker.get("network_mode") and not worker.get("pid")
+        and not worker.get("ipc") and worker.get("privileged") is not True,
+        "Worker must expose no ports, device grants, host namespaces or workspace mounts",
     )
     _check(worker.get("read_only") is True, "Worker filesystem must be read-only")
     _check(
@@ -91,7 +93,7 @@ def validate_compose(data: dict[str, Any], image: str, token: str) -> None:
     )
     _check(worker.get("user") == "1201:1201", "Worker must run non-root")
     _check(
-        worker.get("pids_limit") == 64 and float(worker.get("cpus", 0)) <= 1
+        worker.get("pids_limit") == 64 and 0 < float(worker.get("cpus", 0)) <= 1
         and worker.get("mem_limit") in ("512m", 536870912),
         "Worker must retain bounded CPU, memory and PID limits",
     )
