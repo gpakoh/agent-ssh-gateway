@@ -448,7 +448,7 @@ def _docker_inventory_scope(*, truncated: bool) -> dict[str, Any]:
         "count_semantics": "number_of_rows_returned_from_the_configured_daemon_after_limit",
         "multi_endpoint_selection": {
             "supported": False,
-            "reason": "docker_ps is bound to the process-configured Docker endpoint",
+            "reason": "Docker inventory tools are bound to the process-configured Docker endpoint",
         },
     }
 
