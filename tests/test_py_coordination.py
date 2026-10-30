@@ -476,6 +476,58 @@ async def test_project_board_projects_gitea_threads_into_four_columns(monkeypatc
     assert data["columns"][-1]["cards"][0]["gitea_issue_state"] == "open"
 
 
+@pytest.mark.asyncio
+async def test_board_and_inbox_isolate_unreadable_long_thread(monkeypatch):
+    """A stuck comment page must not make the whole read-only board fail."""
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setattr(adapter, "_registered", lambda p: core.validate_project(p))
+    client = FakeClient()
+    for key in ("large-issue-thread-1", "small-issue-thread-2"):
+        await core.create_thread(
+            client, "gpakoh", "agent-ssh-gateway",
+            source_project="agent-ssh-gateway",
+            title=key, body="Evidence", request_key=key,
+        )
+    await core.write_event(
+        client, "gpakoh", "agent-ssh-gateway", 2,
+        text="Acknowledged", state="accepted", request_key="small-issue-accepted",
+    )
+    # A Gitea pagination anomaly can return the same full first page for
+    # later offsets. The write path must remain fail-closed and exhaustive.
+    repeated = [
+        {"id": i + 1, "body": "untrusted", "user": {"login": "other"}}
+        for i in range(50)
+    ]
+    list_comments = client.list_issue_comments
+
+    async def stuck_comments(owner, repo, number, *, limit=50, page=1):
+        if number == 1:
+            return repeated
+        return await list_comments(owner, repo, number, limit=limit, page=page)
+
+    client.list_issue_comments = stuck_comments
+    monkeypatch.setattr(FakeClient, "__aenter__", _fake_aenter, raising=False)
+    monkeypatch.setattr(FakeClient, "__aexit__", _fake_aexit, raising=False)
+    monkeypatch.setattr(
+        adapter, "server_attr",
+        lambda name: (lambda _: client) if name == "GiteaClient" else None,
+    )
+    for reader in (adapter.coord_board, adapter.coord_inbox):
+        result = await reader("agent-ssh-gateway")
+        assert result["ok"] is True, result
+        data = result["result"]
+        assert data["truncated"] is True
+        assert data["incomplete_thread_numbers"] == [1]
+        assert data["count"] == 1
+        if "columns" in data:
+            assert [c["count"] for c in data["columns"]] == [0, 1, 0, 0]
+        else:
+            assert data["threads"][0]["number"] == 2
+            assert data["threads"][0]["coord_state"] == "accepted"
+    with pytest.raises(core.CoordinationOutcomeUnknown, match="5000-row"):
+        await core.open_thread(client, "gpakoh", "agent-ssh-gateway", 1)
+
+
 def test_board_does_not_silently_map_unknown_coord_state():
     with pytest.raises(ValueError, match="invalid coordination state"):
         core.board_from_threads([{"coord_state": "in_progress_without_receipt"}])

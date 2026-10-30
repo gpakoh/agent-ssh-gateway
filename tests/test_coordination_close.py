@@ -394,7 +394,10 @@ async def test_corrupt_receipt_never_authorizes_another_patch(tmp_path):
 def hold_lock_in_process(directory, connection):
     with _issue_lock(directory, OWNER, REPO, 1):
         connection.send("locked")
-        if connection.poll(20):
+        # A fully loaded CI runner can delay the parent after the readiness
+        # handshake. Keep the lock alive until the parent releases it, with a
+        # finite safety bound so orphaned workers cannot block forever.
+        if connection.poll(120):
             connection.recv()
 
 
@@ -405,7 +408,9 @@ async def test_another_process_holding_issue_lock_blocks_dispatch(tmp_path):
     process = context.Process(target=hold_lock_in_process, args=(tmp_path / "receipts", child))
     process.start()
     try:
-        assert await asyncio.to_thread(parent.poll, 15), "lock worker did not start"
+        # Spawn imports this test module in a fresh interpreter. Under shared
+        # Docker runner contention the imports alone can exceed 15 seconds.
+        assert await asyncio.to_thread(parent.poll, 90), "lock worker did not start"
         assert parent.recv() == "locked"
         client = Client()
         with pytest.raises(CloseRefused, match="Another close"):

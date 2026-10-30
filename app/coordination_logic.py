@@ -187,6 +187,40 @@ async def list_threads(client: Any, owner: str, repo: str) -> list[dict[str, Any
     return [item for row in rows if (item := _issue(row)) is not None]
 
 
+async def preview_thread_state(
+    client: Any, owner: str, repo: str, number: int
+) -> tuple[str | None, bool]:
+    """Read-only, bounded board projection; never infer state from a partial history.
+
+    Full issue/comment history remains mandatory for writes, close receipts and
+    explicit thread reads. A very long or non-progressing comments collection
+    must not break the entire read-only inbox.
+    """
+    issue = await client.get_issue(owner, repo, number)
+    if _issue(issue) is None:
+        raise ValueError("issue is not a Py Coordination thread")
+    comments, truncated = await _pages(
+        lambda page: client.list_issue_comments(
+            owner, repo, number, limit=_PAGE_SIZE, page=page
+        ),
+        max_pages=2,
+        allow_partial=True,
+    )
+    if truncated:
+        return None, True
+    trusted_identity = await client.get_user()
+    trusted_login = trusted_identity.get("login")
+    if not isinstance(trusted_login, str) or not trusted_login:
+        raise ValueError("Gitea coordination service identity is unavailable")
+    state = "open"
+    for comment in comments:
+        author = (comment.get("user") or {}).get("login")
+        marker = _parse(comment.get("body", ""), "event") if author == trusted_login else None
+        if marker is not None and marker["state"] != "message":
+            state = marker["state"]
+    return state, False
+
+
 async def open_thread(client: Any, owner: str, repo: str, number: int) -> dict[str, Any]:
     if isinstance(number, bool) or not isinstance(number, int) or number < 1:
         raise ValueError("issue_number must be positive")
