@@ -246,7 +246,12 @@ def _new_remote_driver(opts, base):
 
 
 @pytest.fixture(scope="module")
-def driver(server):
+def driver(server, admin_created):
+    # Seed the admin BEFORE creating/navigating Chromium. Previously the
+    # module-scoped driver visited / while users_count was zero, so async
+    # showAuthForm() could render the registration form (hiding loginUsername)
+    # before the independent admin_created fixture ran. With page-load
+    # strategy "none" that stale registration view raced subsequent _login.
     opts = ChromeOptions()
     # Every navigation below is followed by an explicit wait for the DOM state
     # the test actually needs. Even Selenium's "eager" strategy can leave a
