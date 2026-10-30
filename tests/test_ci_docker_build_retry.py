@@ -275,7 +275,17 @@ def test_persistent_registry_failure_exhausts_bounded_retries(tmp_path: Path) ->
 def test_ci_routes_all_image_builds_through_bounded_retry_wrapper() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
-    assert workflow.count("bash scripts/ci-docker-build-retry.sh -f") == 3
+    wrapped_dockerfiles = re.findall(
+        r"(?m)^\s*bash scripts/ci-docker-build-retry\.sh -f (\S+)", workflow
+    )
+    assert sorted(wrapped_dockerfiles) == sorted(
+        [
+            "docker/Dockerfile",
+            "docker/Dockerfile.mcp-server",
+            "docker/sshd/Dockerfile",
+            "docker/Dockerfile.site-media-worker",
+        ]
+    )
     assert "          docker build -f" not in workflow
 
 

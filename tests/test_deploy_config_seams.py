@@ -1182,6 +1182,16 @@ class TestE2eFailsClosedWithoutBrowserToolchain:
             f"timeout-minutes={timeout}"
         )
 
+    def test_e2e_admin_is_created_before_first_browser_navigation(self):
+        """A pre-admin visit renders Register and hides loginUsername.
+
+        Keep fixture dependency explicit, not just as an independent
+        argument on test methods: pytest may initialize driver first.
+        """
+        source = E2E_WEBUI_PATH.read_text(encoding="utf-8")
+        assert 'def driver(server, admin_created):' in source
+        assert 'drv = _new_remote_driver(opts, base)' in source
+
     def test_e2e_driver_does_not_wait_for_browser_load_milestones(self):
         """The UI assertions wait on concrete DOM state after navigation.
 
