@@ -246,7 +246,12 @@ def _new_remote_driver(opts, base):
 
 
 @pytest.fixture(scope="module")
-def driver(server):
+def driver(server, admin_created):
+    # Seed the admin BEFORE creating/navigating Chromium. Previously the
+    # module-scoped driver visited / while users_count was zero, so async
+    # showAuthForm() could render the registration form (hiding loginUsername)
+    # before the independent admin_created fixture ran. With page-load
+    # strategy "none" that stale registration view raced subsequent _login.
     opts = ChromeOptions()
     # Every navigation below is followed by an explicit wait for the DOM state
     # the test actually needs. Even Selenium's "eager" strategy can leave a
@@ -307,14 +312,29 @@ def admin_created(server):
 
 
 def _login(drv, base):
-    drv.get(f"{base}/")
+    # The browser fixture is module-scoped. Do not navigate away from a
+    # verified, authenticated UI between tests: page-load strategy "none"
+    # otherwise races the preceding document and its async auth bootstrap.
+    if not drv.current_url.startswith(f"{base}/"):
+        drv.get(f"{base}/")
     wait = WebDriverWait(drv, 15)
-    # Already authenticated (httpOnly auth cookie present) → shell is visible.
-    try:
-        wait.until(EC.visibility_of_element_located((By.ID, "appShell")))
+    # The httpOnly cookie is proved by the visible authenticated shell, not
+    # inferred from URL or a stale hidden appShell DOM marker.
+    if any(el.is_displayed() for el in drv.find_elements(By.ID, "appShell")):
         return
-    except Exception:
-        pass
+    # The initial navigation may still be in progress. Wait for either the
+    # authenticated shell or the login form, without forcing a second load.
+    ready = wait.until(
+        lambda browser: (
+            "shell"
+            if any(el.is_displayed() for el in browser.find_elements(By.ID, "appShell"))
+            else "login"
+            if any(el.is_displayed() for el in browser.find_elements(By.ID, "loginUsername"))
+            else False
+        )
+    )
+    if ready == "shell":
+        return
     wait.until(EC.element_to_be_clickable((By.ID, "loginUsername")))
     drv.find_element(By.ID, "loginUsername").send_keys("e2e-admin")
     drv.find_element(By.ID, "loginPassword").send_keys("Str0ng!Pass123")
