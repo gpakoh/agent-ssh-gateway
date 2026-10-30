@@ -448,7 +448,7 @@ def _docker_inventory_scope(*, truncated: bool) -> dict[str, Any]:
         "count_semantics": "number_of_rows_returned_from_the_configured_daemon_after_limit",
         "multi_endpoint_selection": {
             "supported": False,
-            "reason": "docker_ps is bound to the process-configured Docker endpoint",
+            "reason": "Docker inventory tools are bound to the process-configured Docker endpoint",
         },
     }
 
@@ -491,7 +491,11 @@ async def docker_images(limit: int = 50) -> dict[str, Any]:
         return tool_error(tool="docker_images", code="DOCKER_COMMAND_FAILED", message=str(exc), source="docker")
     return tool_success(
         "docker_images",
-        result={"images": rows, "count": len(rows)},
+        result={
+            "images": rows,
+            "count": len(rows),
+            "inventory": _docker_inventory_scope(truncated=client.last_truncated),
+        },
         truncated=client.last_truncated,
         source="docker",
     )
