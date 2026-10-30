@@ -85,27 +85,20 @@ def test_worker_provides_hash_fenced_output_and_quality_metadata(worker_server):
     }
 
 
-def test_media_container_overlay_is_private_opt_in_and_resource_bounded():
-    base = Path("docker/Dockerfile.site-media-worker").read_text()
+def test_gateway_media_overlay_is_client_only_no_embedded_worker():
     overlay = yaml.safe_load(Path("docker/site-media.compose.yml").read_text())
-    service = overlay["services"]["site-media-worker"]
-    assert service["profiles"] == ["media"]
-    assert service["read_only"] is True
-    assert service["mem_limit"] == "512m"
-    assert service["cpus"] == 1
-    assert service["pids_limit"] == 64
-    assert "ports" not in service
-    assert "volumes" not in service
-    assert service["cap_drop"] == ["ALL"]
-    assert overlay["networks"]["media_net"]["internal"] is True
-    assert "mcp-oauth" in overlay["services"]
+    assert set(overlay["services"]) == {"mcp-oauth"}
+    client = overlay["services"]["mcp-oauth"]
+    assert set(client["networks"]) == {"internal_net", "media_net"}
+    assert client["environment"]["MEDIA_API_BASE_URL"] == "http://media-processing:8091"
+    assert "SITE_MEDIA_WORKER_TOKEN" in client["environment"]
+    assert overlay["networks"]["media_net"] == {
+        "external": True, "name": "quart-media-internal",
+    }
+    # Deprecated local codec image is not deployed by the client-only overlay.
+    # Its removal can follow actual external-service acceptance and rollback.
+    base = Path("docker/Dockerfile.site-media-worker").read_text()
     assert "site_media_worker.selftest" in base
-    assert 'Pillow==12.3.0' in base
-    workflow = yaml.safe_load(Path('.github/workflows/ci.yml').read_text())
-    media_job = workflow['jobs']['media-worker-qualify']
-    assert media_job['timeout-minutes'] == 15
-    assert media_job['needs'] == ['scope']
-    assert 'media-worker-qualify' not in workflow['jobs']['deploy']['needs']
 
 
 def test_worker_requires_sufficiently_long_secret():

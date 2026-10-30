@@ -26,11 +26,16 @@ from app.workspace.assets import (
 )
 from app.workspace.registry import WorkspaceRegistry
 
-_WORKER_URL = "http://site-media-worker:8091/v1/convert"
+_MEDIA_BASE_URL = "http://media-processing:8091"
+_MEDIA_PATH = "/v1/convert"
 
 
 class MediaUnavailable(AssetError):
-    """Isolated worker absent or unable to verify a trustworthy result."""
+    """Standalone media service unavailable or its response untrustworthy."""
+
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 def convert_candidate_image(
@@ -77,7 +82,13 @@ def convert_candidate_image(
         "X-Media-Max-Width": str(max_width),
         "X-Media-Min-PSNR": str(min_psnr),
     }
-    request = urllib.request.Request(_WORKER_URL, data=data, headers=headers, method="POST")
+    # Never accept an arbitrary operator URL: media source bytes must cross
+    # only the approved private Compose service boundary. The environment is
+    # a deployment switch, NOT an untrusted request parameter or SSRF gateway.
+    base_url = os.environ.get("MEDIA_API_BASE_URL", _MEDIA_BASE_URL)
+    if base_url != _MEDIA_BASE_URL:
+        raise MediaUnavailable("Media API endpoint is not the approved private service")
+    request = urllib.request.Request(base_url + _MEDIA_PATH, data=data, headers=headers, method="POST")
     # Proxies from the host environment must never intercept private source bytes.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
@@ -90,8 +101,14 @@ def convert_candidate_image(
                 raise MediaUnavailable("Media worker returned an unexpected MIME type")
             out = response.read(MAX_ASSET_BYTES + 1)
             received = dict(response.headers)
+    except urllib.error.HTTPError as exc:
+        if exc.code in (429, 503, 504):
+            raise MediaUnavailable("Media API busy or temporarily unavailable", retryable=True) from exc
+        if exc.code in (403, 422):
+            raise MediaUnavailable("Media API rejected credentials or conversion request") from exc
+        raise MediaUnavailable("Media API returned an unexpected HTTP status") from exc
     except (OSError, urllib.error.URLError, TimeoutError) as exc:
-        raise MediaUnavailable("Isolated media worker unavailable or failed") from exc
+        raise MediaUnavailable("Media API unavailable or failed", retryable=True) from exc
     if not out or len(out) > MAX_ASSET_BYTES or not _asset_kind(out, "." + codec):
         raise MediaUnavailable("Worker result is empty, oversized or has invalid magic")
     digest = hashlib.sha256(out).hexdigest()

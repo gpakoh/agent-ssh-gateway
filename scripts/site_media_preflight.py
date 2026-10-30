@@ -1,8 +1,7 @@
-"""Read-only, fail-closed qualification of the optional site-media Compose overlay.
+"""Read-only qualification of the Gateway-to-Media API client overlay.
 
-Does not deploy, print secrets, pull, build, modify containers or touch Git.
-Run from the repository root with operator-supplied environment variables:
-  python scripts/site_media_preflight.py
+Dedicated media-processing runs under infra-quart; Gateway must never build it.
+This check never prints Compose configuration (operator secrets) or mutates Docker.
 """
 
 from __future__ import annotations
@@ -10,111 +9,75 @@ from __future__ import annotations
 import hmac
 import json
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
-IMAGE_PATTERN = re.compile(
-    r"192\.168\.1\.103:3005/gpakoh/site-media-worker@sha256:[0-9a-f]{64}\Z"
-)
 ROOT = Path(__file__).resolve().parents[1]
+MEDIA_URL = "http://media-processing:8091"
 
 
 class MediaPreflightError(ValueError):
-    """The release must not be activated."""
+    """Media client attachment must not be activated."""
 
 
-def _check(condition: bool, message: str) -> None:
-    if not condition:
-        raise MediaPreflightError(message)
+def _check(allowed: bool, reason: str) -> None:
+    if not allowed:
+        raise MediaPreflightError(reason)
 
 
-def validate_environment(env: dict[str, str]) -> tuple[str, str]:
-    """Return expected image/token privately; never display the token."""
+def validate_environment(env: dict[str, str]) -> str:
     token = env.get("SITE_MEDIA_WORKER_TOKEN", "")
-    image = env.get("SITE_MEDIA_WORKER_IMAGE", "")
     _check(
-        32 <= len(token) <= 512
-        and all(33 <= ord(char) <= 126 for char in token),
-        "SITE_MEDIA_WORKER_TOKEN must be an operator-owned 32..512 character printable secret",
+        32 <= len(token) <= 512 and all(33 <= ord(c) <= 126 for c in token),
+        "SITE_MEDIA_WORKER_TOKEN must be 32..512 printable non-space characters",
     )
     _check(
-        IMAGE_PATTERN.fullmatch(image) is not None,
-        "SITE_MEDIA_WORKER_IMAGE must be an approved registry image pinned by @sha256",
+        env.get("MEDIA_API_BASE_URL", MEDIA_URL) == MEDIA_URL,
+        "MEDIA_API_BASE_URL must be the approved private Media API endpoint",
     )
-    return image, token
+    return token
 
 
-def validate_compose(data: dict[str, Any], image: str, token: str) -> None:
-    """Inspect the fully interpolated Compose model before any deployment."""
+def validate_compose(data: dict[str, Any], token: str) -> None:
     services = data.get("services") or {}
-    _check(isinstance(services, dict), "Compose services missing")
-    mcp = services.get("mcp-oauth") or {}
-    worker = services.get("site-media-worker") or {}
-    _check(bool(mcp and worker), "Both MCP and worker must exist in the overlay")
-    mcp_nets = mcp.get("networks") or {}
-    worker_nets = worker.get("networks") or {}
+    _check(isinstance(services, dict), "services must be an object")
+    _check("mcp-oauth" in services, "Gateway OAuth client missing from Compose")
     _check(
-        isinstance(mcp_nets, dict) and {"internal_net", "media_net"} <= set(mcp_nets),
-        "MCP must retain internal_net and gain media_net",
+        "site-media-worker" not in services and "media-processing" not in services,
+        "Gateway must not run any codec worker; media service belongs to infra-quart",
     )
+    mcp = services["mcp-oauth"]
+    _check(isinstance(mcp, dict), "invalid OAuth client model")
+    networks = mcp.get("networks") or {}
     _check(
-        isinstance(worker_nets, dict) and set(worker_nets) == {"media_net"},
-        "Worker must be attached ONLY to media_net",
+        isinstance(networks, dict) and {"internal_net", "media_net"} <= set(networks),
+        "MCP must retain internal_net and join media_net",
     )
-    networks = data.get("networks") or {}
-    media_net = networks.get("media_net") or {}
-    _check(media_net.get("internal") is True, "media_net must have internal:true")
+    media_net = (data.get("networks") or {}).get("media_net") or {}
     _check(
-        worker.get("image") == image and not worker.get("build"),
-        "Worker must use the verified immutable image, not a local build",
+        media_net.get("external") is True
+        and media_net.get("name") == "quart-media-internal",
+        "media_net must use the approved external Quart media network",
     )
+    env = mcp.get("environment") or {}
+    _check(isinstance(env, dict), "MCP environment missing")
     _check(
-        worker.get("profiles") == ["media"],
-        "Worker requires an explicit opt-in media profile",
+        isinstance(env.get("SITE_MEDIA_WORKER_TOKEN"), str)
+        and hmac.compare_digest(env["SITE_MEDIA_WORKER_TOKEN"], token),
+        "MCP operator media credential mismatch",
     )
-    _check(
-        not worker.get("ports") and not worker.get("volumes")
-        and not worker.get("devices") and not worker.get("cap_add")
-        and not worker.get("network_mode") and not worker.get("pid")
-        and not worker.get("ipc") and worker.get("privileged") is not True,
-        "Worker must expose no ports, device grants, host namespaces or workspace mounts",
-    )
-    _check(worker.get("read_only") is True, "Worker filesystem must be read-only")
-    _check(
-        "ALL" in worker.get("cap_drop", []),
-        "Worker capabilities must be dropped",
-    )
-    _check(
-        "no-new-privileges:true" in worker.get("security_opt", []),
-        "Worker must deny privilege escalation",
-    )
-    _check(worker.get("user") == "1201:1201", "Worker must run non-root")
-    _check(
-        worker.get("pids_limit") == 64 and 0 < float(worker.get("cpus", 0)) <= 1
-        and worker.get("mem_limit") in ("512m", 536870912),
-        "Worker must retain bounded CPU, memory and PID limits",
-    )
-    for service in (mcp, worker):
-        supplied = service.get("environment") or {}
-        _check(
-            isinstance(supplied, dict)
-            and isinstance(supplied.get("SITE_MEDIA_WORKER_TOKEN"), str)
-            and hmac.compare_digest(supplied["SITE_MEDIA_WORKER_TOKEN"], token),
-            "MCP and worker must share the same operator-owned secret",
-        )
+    _check(env.get("MEDIA_API_BASE_URL") == MEDIA_URL, "Media client URL changed")
 
 
 def inspect_compose(env: dict[str, str]) -> dict[str, Any]:
-    """Only resolves Compose configuration. All stdout/stderr remain private."""
     command = [
         "docker", "compose",
         "--project-directory", str(ROOT / "docker"),
         "-f", str(ROOT / "docker" / "docker-compose.yml"),
         "-f", str(ROOT / "docker" / "site-media.compose.yml"),
-        "--profile", "media", "config", "--format", "json",
+        "config", "--format", "json",
     ]
     try:
         proc = subprocess.run(
@@ -123,26 +86,25 @@ def inspect_compose(env: dict[str, str]) -> dict[str, Any]:
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise MediaPreflightError("Docker Compose configuration unavailable") from exc
-    # Compose error output may include interpolated secrets; do NOT echo it.
-    _check(proc.returncode == 0, "Docker Compose configuration invalid or missing environment")
+    # Do not surface stdout/stderr from interpolated Compose.
+    _check(proc.returncode == 0, "Docker Compose configuration invalid or missing inputs")
     try:
         data = json.loads(proc.stdout)
     except (ValueError, TypeError) as exc:
-        raise MediaPreflightError("Docker Compose returned invalid JSON") from exc
-    _check(isinstance(data, dict), "Docker Compose response must be an object")
+        raise MediaPreflightError("Docker Compose output is not valid JSON") from exc
+    _check(isinstance(data, dict), "Docker Compose output must be an object")
     return data
 
 
 def main() -> int:
     try:
-        image, token = validate_environment(dict(os.environ))
-        compose = inspect_compose(dict(os.environ))
-        validate_compose(compose, image, token)
+        token = validate_environment(dict(os.environ))
+        model = inspect_compose(dict(os.environ))
+        validate_compose(model, token)
     except (MediaPreflightError, KeyError, TypeError, ValueError) as exc:
-        # Carefully authored errors never embed the operator secret.
-        print(f"site-media preflight: NO-GO: {exc}", file=sys.stderr)
+        print(f"Gateway Media API preflight: NO-GO: {exc}", file=sys.stderr)
         return 1
-    print("site-media preflight: GO (config only; NOT a live runtime qualification)")
+    print("Gateway Media API preflight: GO (config only; no runtime activation)")
     return 0
 
 

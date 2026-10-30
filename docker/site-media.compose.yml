@@ -1,36 +1,15 @@
-# Optional, operator-enabled media worker. Core Gateway release does not
-# apply this overlay: no new production networks or service recreation by default.
-# Deploy after image qualification with:
-# docker compose -f docker-compose.yml -f site-media.compose.yml --profile media ...
+# Opt-in cross-stack Media API client ONLY. The independent media-processing
+# service, its registry digest and its isolated network belong to infra-quart.
+# This overlay never creates or builds a media codec worker.
 services:
   mcp-oauth:
     networks:
-      # Keep the existing Gateway, database and Gitea path after overlay merge.
-      # The worker itself is attached ONLY to the isolated media network.
       internal_net: {}
       media_net: {}
     environment:
-      SITE_MEDIA_WORKER_TOKEN: ${SITE_MEDIA_WORKER_TOKEN:?operator media secret required}
-  site-media-worker:
-    profiles: ["media"]
-    # Release image only: never rebuild unqualified codecs during rollout.
-    # scripts/site_media_preflight.py requires an immutable @sha256 digest.
-    image: ${SITE_MEDIA_WORKER_IMAGE:?approved media image digest required}
-    environment:
-      SITE_MEDIA_WORKER_TOKEN: ${SITE_MEDIA_WORKER_TOKEN:-}
-    networks:
-      media_net: {}
-    read_only: true
-    cap_drop: [ALL]
-    security_opt:
-      - no-new-privileges:true
-    user: "1201:1201"
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,size=32m
-    mem_limit: 512m
-    cpus: 1
-    pids_limit: 64
-    restart: unless-stopped
+      SITE_MEDIA_WORKER_TOKEN: ${SITE_MEDIA_WORKER_TOKEN:?operator media client secret required}
+      MEDIA_API_BASE_URL: http://media-processing:8091
 networks:
   media_net:
-    internal: true
+    external: true
+    name: quart-media-internal
