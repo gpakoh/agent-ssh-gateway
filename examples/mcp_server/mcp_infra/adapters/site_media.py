@@ -45,7 +45,7 @@ def site_media_pipeline(
     except MediaUnavailable as exc:
         return tool_error(
             tool=tool, code="MEDIA_WORKER_UNAVAILABLE", message=str(exc),
-            retryable=False, source="gateway",
+            retryable=exc.retryable, source="gateway",
         )
     except (AssetError, WorkspacePolicyError, ValueError) as exc:
         return tool_error(
