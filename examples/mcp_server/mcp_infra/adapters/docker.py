@@ -491,7 +491,11 @@ async def docker_images(limit: int = 50) -> dict[str, Any]:
         return tool_error(tool="docker_images", code="DOCKER_COMMAND_FAILED", message=str(exc), source="docker")
     return tool_success(
         "docker_images",
-        result={"images": rows, "count": len(rows)},
+        result={
+            "images": rows,
+            "count": len(rows),
+            "inventory": _docker_inventory_scope(truncated=client.last_truncated),
+        },
         truncated=client.last_truncated,
         source="docker",
     )

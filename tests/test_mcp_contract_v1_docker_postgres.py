@@ -123,6 +123,8 @@ class TestDockerToolsContractV1:
         result = await mcp_server_mod.docker_images()
         _assert_envelope(result)
         assert result["result"]["images"] == [{"Repository": "nginx", "Tag": "alpine"}]
+        assert result["result"]["inventory"]["scope"] == "configured_docker_daemon"
+        assert result["result"]["inventory"]["host_completeness"] == "unknown"
 
     @pytest.mark.asyncio
     async def test_docker_inspect_returns_structured_result(self, monkeypatch):
