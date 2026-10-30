@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import urllib.error
 from unittest.mock import patch
 
 import pytest
@@ -68,6 +69,7 @@ def candidate(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(settings, "workspace_readonly", False)
     monkeypatch.setenv("SITE_MEDIA_WORKER_TOKEN", "X" * 48)
+    monkeypatch.delenv("MEDIA_API_BASE_URL", raising=False)
     return registry, base
 
 
@@ -84,7 +86,7 @@ def test_verified_conversion_never_mutates_source(candidate):
     class FakeOpener:
         def open(self, request, timeout):
             assert timeout <= 90
-            assert request.full_url == "http://site-media-worker:8091/v1/convert"
+            assert request.full_url == "http://media-processing:8091/v1/convert"
             assert request.data == ORIGINAL
             assert request.headers["X-media-source-sha256"] == digest(ORIGINAL)
             assert request.headers["X-media-codec"] == "webp"
@@ -175,6 +177,36 @@ def test_candidate_only_target_validation_and_readonly(candidate, monkeypatch):
     with pytest.raises(AssetError, match="read-only"):
         _convert(registry)
     assert (root / SOURCE).read_bytes() == ORIGINAL
+
+
+def test_client_refuses_unapproved_media_endpoint_before_network(candidate, monkeypatch):
+    registry, root = candidate
+    monkeypatch.setenv("MEDIA_API_BASE_URL", "http://example.com:8091")
+    with patch("app.workspace.media_pipeline.urllib.request.build_opener") as opener:
+        with pytest.raises(MediaUnavailable, match="approved private"):
+            _convert(registry)
+    opener.assert_not_called()
+    assert not (root / TARGET).exists()
+
+
+@pytest.mark.parametrize(
+    ("status", "retryable"),
+    [(403, False), (422, False), (429, True), (503, True), (504, True)],
+)
+def test_client_classifies_media_api_errors_without_writing(candidate, status, retryable):
+    registry, root = candidate
+
+    class ErrorOpener:
+        def open(self, *_args, **_kwargs):
+            raise urllib.error.HTTPError(
+                "http://media-processing:8091/v1/convert", status, "denied", None, None
+            )
+
+    with patch("app.workspace.media_pipeline.urllib.request.build_opener", return_value=ErrorOpener()):
+        with pytest.raises(MediaUnavailable) as caught:
+            _convert(registry)
+    assert caught.value.retryable is retryable
+    assert not (root / TARGET).exists()
 
 
 def test_tool_in_sites_group_only_write_mode_and_scope(candidate, monkeypatch):
