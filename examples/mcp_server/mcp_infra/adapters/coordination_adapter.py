@@ -17,6 +17,7 @@ from examples.mcp_server.coordination import (
     create_thread,
     list_threads_preview,
     open_thread,
+    preview_thread_state,
     validate_project,
     write_event,
 )
@@ -89,15 +90,23 @@ async def coord_inbox(project: str, limit: int = 25) -> dict[str, Any]:
         async with server_attr("GiteaClient")(os.environ["GITEA_TOKEN"]) as client:
             all_threads, scan_truncated = await list_threads_preview(client, owner, repo)
             threads = []
+            incomplete_thread_numbers = []
             for item in all_threads[:limit]:
-                full = await open_thread(client, owner, repo, item["number"])
-                threads.append({**item, "coord_state": full["coord_state"]})
+                state, incomplete = await preview_thread_state(
+                    client, owner, repo, item["number"]
+                )
+                if incomplete or state is None:
+                    incomplete_thread_numbers.append(item["number"])
+                    continue
+                threads.append({**item, "coord_state": state})
     except Exception as exc:
         return _fail(tool, exc)
     return tool_success(
         tool,
         result={"project": repo, "threads": threads, "count": len(threads),
-                "truncated": scan_truncated or len(all_threads) > limit},
+                "truncated": scan_truncated or len(all_threads) > limit
+                or bool(incomplete_thread_numbers),
+                "incomplete_thread_numbers": incomplete_thread_numbers},
         source="gitea",
     )
 
@@ -112,16 +121,24 @@ async def coord_board(project: str, limit: int = 25) -> dict[str, Any]:
         async with server_attr("GiteaClient")(os.environ["GITEA_TOKEN"]) as client:
             all_threads, scan_truncated = await list_threads_preview(client, owner, repo)
             enriched = []
+            incomplete_thread_numbers = []
             for item in all_threads[:limit]:
-                thread = await open_thread(client, owner, repo, item["number"])
-                enriched.append({**item, "coord_state": thread["coord_state"]})
+                state, incomplete = await preview_thread_state(
+                    client, owner, repo, item["number"]
+                )
+                if incomplete or state is None:
+                    incomplete_thread_numbers.append(item["number"])
+                    continue
+                enriched.append({**item, "coord_state": state})
             columns = board_from_threads(enriched)
     except Exception as exc:
         return _fail(tool, exc)
     return tool_success(
         tool, result={
             "project": repo, "columns": columns, "count": len(enriched),
-            "truncated": scan_truncated or len(all_threads) > limit,
+            "truncated": scan_truncated or len(all_threads) > limit
+            or bool(incomplete_thread_numbers),
+            "incomplete_thread_numbers": incomplete_thread_numbers,
             "note": "Gitea Issues is authoritative; resolved does not automatically close an Issue",
         }, source="gitea",
     )
