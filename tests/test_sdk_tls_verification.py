@@ -152,7 +152,8 @@ def test_sdk_import_does_not_silence_certificate_warnings() -> None:
         capture_output=True,
         text=True,
         check=False,
-        timeout=10,
+        # Shared CI runners may delay interpreter startup under parallel shards.
+        timeout=30,
     )
     assert result.returncode == 0, result.stderr
     assert "TLS-warning-canary" in result.stderr
