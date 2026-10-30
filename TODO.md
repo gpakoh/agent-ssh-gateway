@@ -1,8 +1,10 @@
 # Agent SSH Gateway — TODO
 
-**Reconciled:** 2026-10-25; baseline Gitea `master@9f7baa48760fba85f52c77fe4e055a5f7ac42a34`, merged PR evidence, exact-release CI #19743, Gateway runtime and preserved local intake.
+**Reconciled:** 2026-10-30; authoritative Gitea `master@f10b014ed85819ffe974f55be76463d5db71a02f` after merged PR #728. Exact PR CI #21331 and post-merge CI #21342 both SUCCESS. Earlier reconciliation baseline: 2026-10-25, `master@9f7baa48760fba85f52c77fe4e055a5f7ac42a34`, exact-release CI #19743.
 
-**Open: 33 (P1 8 / P2 16 / P3 9).** One checkbox = one independently closeable outcome; no completed checklist/history retained. A merged partial fix is not sufficient for closeout. OpenCode security remains a live prerequisite, not a green-CI assumption. Completed deploy LKG migration evidence is recorded in `docs/operations/SSH_GATEWAY_DEPLOY_STATE_MIGRATION.md`.
+**Open: 31 (P1 8 / P2 14 / P3 9).** One checkbox = one independently closeable outcome; completed items are removed from the active checklist. A merged partial fix is not sufficient for closeout. OpenCode security remains a live prerequisite, not a green-CI assumption. Completed deploy LKG migration evidence is recorded in `docs/operations/SSH_GATEWAY_DEPLOY_STATE_MIGRATION.md`.
+
+**2026-10-30 closeout evidence (not active TODO):** P2-15 — PR #728, commit `f10b014e`, CI #21331 and post-merge #21342 SUCCESS: both `docker_ps` and `docker_images` expose configured-daemon inventory scope, endpoint identity hash and truncation/unknown host-wide completeness; this does **not** establish exhaustive host/multi-daemon discovery or real pagination. P2-16 — verified guarded `git_fetch_ref` + `git_update_branch_by_merge` on the existing #730 and #728 candidates against exact `origin/master` SHA, followed by published current-base PR heads and successful CI/merge. Remaining independent edge cases should be new scoped findings rather than re-opening accepted outcomes.
 
 ## P1 — Security, deploy and release blockers (8)
 
@@ -33,7 +35,7 @@
   <!-- gateway-todo-key: opencode-upgrade-failed --> **Severity:** P1
   **Still blocked:** historical exit 80 / upgrade-blocked job reached zero required checks and zero diff. PR #630 only documented incident, did not fix runtime; new bounded qualified executor canary and Node 22 prerequisite needed. Coordination issues #639 and #642.
 
-## P2 — Reliability and engineering throughput (16)
+## P2 — Reliability and engineering throughput (14)
 
 - [ ] **P2-01: Wire the production `astro-sites` named root into `mcp-oauth` after the host path is provisioned.** (legacy #13)
   Named-root registration is now supported, but production still has no `MCP_OAUTH_ASTRO_SITES_ROOT` setting and the intended host directory is not provisioned. Once the operator supplies an existing absolute host path, add the `registry_roots.astro-sites` entry, the explicit writable `mcp-oauth` bind with host-path auto-creation disabled, the documented env contract, and deploy seam coverage. Deploy must fail closed when the configured path is absent; do not silently create an empty root.
@@ -76,12 +78,6 @@
 
 - [ ] **P2-13: Expose bounded destructive-audit health and recovery evidence.** (legacy #49)
   Guarded Gitea close/delete correctly fail closed with `AUDIT_UNAVAILABLE` before mutation, but callers cannot distinguish transient audit transport or storage outage from malformed cleanup input. Add a safe read-only audit subsystem status/recovery signal with retryability and correlation metadata; keep destructive mutations impossible unless intent persistence succeeds. Acceptance covers zero mutation during outage and exactly-once audited success after recovery for both PR close and exact-SHA branch deletion.
-
-- [ ] **P2-15: Docker inventory omits inspectable running container and its image; expose completeness clearly.** (legacy #2)
-  `docker_inspect(opencode-adapter)` showed RUNNING/HEALTHY while bounded `docker_ps` and `docker_images` omitted it. Inventory must carry accurate completeness/paging and never infer absence from partial scans.
-
-- [ ] **P2-16: Registered candidate cannot fetch new main when updating stale PR.** (legacy #3)
-  Registered candidate with trusted exact main SHA was denied `git_fetch_ref` and lacked local `main` for merge; implement guarded verified same-repo fetch/merge without loosening host-key or lineage policy.
 
 - [ ] **P2-17: Reconcile ambiguous merge attempts when CI evidence read fails but PR becomes merged.** (legacy #4)
   Father UI PR #48 returned `CI_EVIDENCE_INCOMPLETE` while later observed merged; resolve stale/ambiguous responses by exact post-state/head/base/job audit before retries.
