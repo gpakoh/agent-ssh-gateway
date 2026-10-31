@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Literal
 
 from tool_results import tool_error, tool_success
@@ -11,6 +12,8 @@ from app.workspace.media_pipeline import MediaUnavailable, convert_candidate_ima
 from app.workspace.policy import WorkspacePolicyError
 from examples.mcp_server.mcp_infra._server_ref import server_attr
 from examples.mcp_server.mcp_infra.tool_registry import instrumented, register_tool
+
+logger = logging.getLogger(__name__)
 
 
 def site_media_pipeline(
@@ -43,6 +46,10 @@ def site_media_pipeline(
     except AssetConflict as exc:
         return tool_error(tool=tool, code="ASSET_CONFLICT", message=str(exc), source="gateway")
     except MediaUnavailable as exc:
+        # Static error category only: no asset bytes, auth tokens, headers or paths.
+        logger.warning(
+            "site_media_pipeline failed: reason=%s retryable=%s", exc.reason, exc.retryable,
+        )
         return tool_error(
             tool=tool, code="MEDIA_WORKER_UNAVAILABLE", message=str(exc),
             retryable=exc.retryable, source="gateway",

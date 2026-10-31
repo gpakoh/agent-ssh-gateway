@@ -33,9 +33,13 @@ _MEDIA_PATH = "/v1/convert"
 class MediaUnavailable(AssetError):
     """Standalone media service unavailable or its response untrustworthy."""
 
-    def __init__(self, message: str, *, retryable: bool = False) -> None:
+    def __init__(
+        self, message: str, *, retryable: bool = False, reason: str = "unavailable",
+    ) -> None:
         super().__init__(message)
         self.retryable = retryable
+        # Fixed, non-sensitive identifiers for operator logs; never raw headers or token.
+        self.reason = reason
 
 
 def convert_candidate_image(
@@ -62,7 +66,7 @@ def convert_candidate_image(
         raise AssetError("min_psnr must be finite and in 0..99")
     token = os.environ.get("SITE_MEDIA_WORKER_TOKEN", "")
     if len(token) < 32:
-        raise MediaUnavailable("Isolated site media worker not configured")
+        raise MediaUnavailable("Isolated site media worker not configured", reason="not_configured")
     source = _candidate_path(registry, project_id, source_path, write=False)
     _candidate_path(registry, project_id, target_path, write=True)
     metadata = inspect_asset(registry, project_id, source_path)
@@ -87,45 +91,51 @@ def convert_candidate_image(
     # a deployment switch, NOT an untrusted request parameter or SSRF gateway.
     base_url = os.environ.get("MEDIA_API_BASE_URL", _MEDIA_BASE_URL)
     if base_url != _MEDIA_BASE_URL:
-        raise MediaUnavailable("Media API endpoint is not the approved private service")
+        raise MediaUnavailable("Media API endpoint is not the approved private service", reason="invalid_endpoint")
     request = urllib.request.Request(base_url + _MEDIA_PATH, data=data, headers=headers, method="POST")
     # Proxies from the host environment must never intercept private source bytes.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
         with opener.open(request, timeout=90) as response:
             if response.status != 200:
-                raise MediaUnavailable("Media worker did not accept the request")
+                raise MediaUnavailable("Media worker did not accept the request", reason="unexpected_http_status")
             if response.headers.get("Content-Type", "").split(";", 1)[0] != {
                 "png": "image/png", "webp": "image/webp", "avif": "image/avif"
             }[codec]:
-                raise MediaUnavailable("Media worker returned an unexpected MIME type")
+                raise MediaUnavailable("Media worker returned an unexpected MIME type", reason="invalid_mime")
             out = response.read(MAX_ASSET_BYTES + 1)
             received = {key.lower(): value for key, value in response.headers.items()}
     except urllib.error.HTTPError as exc:
         if exc.code in (429, 503, 504):
-            raise MediaUnavailable("Media API busy or temporarily unavailable", retryable=True) from exc
+            raise MediaUnavailable("Media API busy or temporarily unavailable", retryable=True, reason="worker_busy") from exc
         if exc.code in (403, 422):
-            raise MediaUnavailable("Media API rejected credentials or conversion request") from exc
-        raise MediaUnavailable("Media API returned an unexpected HTTP status") from exc
+            raise MediaUnavailable("Media API rejected credentials or conversion request", reason="worker_rejected") from exc
+        raise MediaUnavailable("Media API returned an unexpected HTTP status", reason="unexpected_http_status") from exc
     except (OSError, urllib.error.URLError, TimeoutError) as exc:
-        raise MediaUnavailable("Media API unavailable or failed", retryable=True) from exc
+        raise MediaUnavailable("Media API unavailable or failed", retryable=True, reason="transport_failed") from exc
     if not out or len(out) > MAX_ASSET_BYTES or not _asset_kind(out, "." + codec):
-        raise MediaUnavailable("Worker result is empty, oversized or has invalid magic")
+        raise MediaUnavailable("Worker result is empty, oversized or has invalid magic", reason="invalid_output")
     digest = hashlib.sha256(out).hexdigest()
-    if not hmac.compare_digest(digest, received.get("x-media-output-sha256", "")):
-        raise MediaUnavailable("Worker output checksum mismatch")
-    if not hmac.compare_digest(source_sha256, received.get("x-media-source-sha256", "")):
-        raise MediaUnavailable("Worker source checksum mismatch")
+    output_sha = received.get("x-media-output-sha256")
+    if not output_sha:
+        raise MediaUnavailable("Worker omitted output checksum", reason="output_checksum_missing")
+    if not hmac.compare_digest(digest, output_sha):
+        raise MediaUnavailable("Worker output checksum mismatch", reason="output_checksum_mismatch")
+    worker_source_sha = received.get("x-media-source-sha256")
+    if not worker_source_sha:
+        raise MediaUnavailable("Worker omitted source checksum", reason="source_checksum_missing")
+    if not hmac.compare_digest(source_sha256, worker_source_sha):
+        raise MediaUnavailable("Worker source checksum mismatch", reason="source_checksum_mismatch")
     try:
         width = int(received["x-media-width"])
         height = int(received["x-media-height"])
         psnr = float(received["x-media-psnr"])
     except (KeyError, ValueError) as exc:
-        raise MediaUnavailable("Worker omitted conversion evidence") from exc
+        raise MediaUnavailable("Worker omitted conversion evidence", reason="conversion_evidence_missing") from exc
     if not 1 <= width <= 8192 or not 1 <= height <= 8192 or width * height > 16_000_000:
-        raise MediaUnavailable("Worker reported invalid output dimensions")
+        raise MediaUnavailable("Worker reported invalid output dimensions", reason="dimensions_invalid")
     if not math.isfinite(psnr) or psnr < min_psnr or psnr > 99:
-        raise MediaUnavailable("Worker output failed the quality floor")
+        raise MediaUnavailable("Worker output failed the quality floor", reason="quality_floor_failed")
     if inspect_asset(registry, project_id, source_path)["sha256"] != source_sha256:
         raise AssetConflict("Source was replaced during conversion")
     saved = publish_asset(

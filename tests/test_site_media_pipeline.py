@@ -138,6 +138,57 @@ def test_lowercase_http_headers_preserve_authenticity_guards(candidate, corrupt_
     assert (root / SOURCE).read_bytes() == ORIGINAL
 
 
+@pytest.mark.parametrize(("missing", "reason"), [
+    ("X-Media-Output-Sha256", "output_checksum_missing"),
+    ("X-Media-Source-Sha256", "source_checksum_missing"),
+    ("X-Media-PSNR", "conversion_evidence_missing"),
+])
+def test_missing_worker_evidence_is_distinct_from_mismatch(candidate, missing, reason):
+    registry, root = candidate
+
+    class MissingEvidenceOpener:
+        def open(self, *_args, **_kwargs):
+            reply = FakeResponse()
+            reply.headers.pop(missing)
+            return reply
+
+    with patch("app.workspace.media_pipeline.urllib.request.build_opener", return_value=MissingEvidenceOpener()):
+        with pytest.raises(MediaUnavailable) as err:
+            _convert(registry)
+    assert err.value.reason == reason
+    assert not (root / TARGET).exists()
+    assert (root / SOURCE).read_bytes() == ORIGINAL
+
+
+def test_media_error_logs_only_safe_reason_not_token_or_asset(caplog):
+    import logging
+
+    from examples.mcp_server.mcp_infra.adapters import site_media
+
+    sentinel = "DO_NOT_LOG_SECRET_TOKEN"
+    with (
+        patch.object(site_media, "server_attr", return_value=lambda: object()),
+        patch.object(
+            site_media, "convert_candidate_image",
+            side_effect=MediaUnavailable(
+                f"secret={sentinel}", reason="output_checksum_mismatch",
+            ),
+        ),
+        caplog.at_level(logging.WARNING, logger=site_media.__name__),
+    ):
+        result = site_media.site_media_pipeline(
+            PROJECT, SOURCE, TARGET, digest(ORIGINAL), codec="webp",
+        )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "MEDIA_WORKER_UNAVAILABLE"
+    assert any(
+        "reason=output_checksum_mismatch retryable=False" in r.message
+        for r in caplog.records
+    )
+    assert sentinel not in caplog.text
+    assert SOURCE not in caplog.text
+
+
 def test_source_integrity_fenced_before_call(candidate):
     registry, root = candidate
     with patch("app.workspace.media_pipeline.urllib.request.build_opener") as opener:
