@@ -25,10 +25,11 @@ checkout at `/media/1TB/Python/web_ssh/web-ssh-gateway` may be stale/dirty:
 The canonical CI deploy mounts the host secret file
 `/media/1TB/Python/web_ssh/web-ssh-gateway/docker/.env` read-only. Keep its
 contents private and permissions no broader than needed by the trusted CI
-runner. POSIX ACL for the exact runner UID is preferable to world-readability;
-mode 0666 is forbidden. Note that chmod 0600 alone may block a runner with
-a different UID, resulting in `docker/.env: Permission denied`. Diagnose the
-runner UID and use a narrow read-only ACL, without printing env contents.
+runner. The qualified host operator configuration uses owner UID 1000, group GID
+1001 (trusted CI runner), and mode 0640; default runner UID/GID is 1001.
+Do not set world-readable mode 0666. If CI identity changes, reassess the
+narrow group permission or use a verified per-runner read-only ACL, without
+printing env contents. Mode 0600 alone prevented CI deployment for UID 1001.
 
 The authorized root operator provisions these two entries in that existing
 private Gateway config **without changing any other assignments**:
@@ -62,6 +63,32 @@ candidate data plane. Full approval also requires a real authorized candidate
 `site_asset_transfer(begin/chunk/finish) → site_media_pipeline → inspect/read`,
 source immutability, output hash/MIME/PSNR, a negative CAS test and a reversible
 overlay rollback. Record only SHA/PSNR/status, not confidential bytes.
+
+## Production acceptance and retirement evidence (2026-10-31)
+
+Gateway `master@d546f0ae7d136ac9ea1f1877504f06a7260c3a09` was
+qualified by post-merge Gitea Actions #21623 (build, digest-pinned deploy,
+LKG state and independent host-smoke all SUCCESS). The dedicated Media API
+remains an infra-quart-owned deployment, not a Gateway image or Compose
+service. Actual candidate-scoped Gateway tools converted the same 320×240
+PNG to WebP (220 bytes, PSNR 52.90 dB) and AVIF (344 bytes, PSNR 48.13 dB).
+Original, WebP and AVIF all passed independent inspect/readback SHA-256,
+correct MIME and EOF. Wrong source SHA and duplicate target without CAS
+were denied, without source or output corruption.
+
+The old `app/site_media_worker/`, `docker/Dockerfile.site-media-worker`
+and Gateway codec-image CI build/push are retired after the verified live
+acceptance. The Gateway continues to test the standalone API contract and
+private network overlay; codec source, release and quality qualification
+belong to `media-processing-service` and infra-quart.
+
+Rollback is tested in an unprivileged Bash harness that executes the exact
+first-attachment detection and topology restoration fragments from the
+production deploy script with a **fake** Docker inspector. It verifies the
+previous base-only network is restored on initial opt-in failure, while a
+pre-existing private attachment is retained; LKG image references are
+preserved. This does **not** claim an intentional production rollback or
+DB schema downgrade: avoid deliberately disrupting a healthy release.
 
 ## Rollback
 
