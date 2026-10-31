@@ -314,16 +314,7 @@ jobs:
         # `coverage` job, which combines all six data files and reports.
         env:
           COVERAGE_FILE: coverage.${{ matrix.python-version }}.${{ matrix.shard }}
-        run: |
-          # Under severe runner load the 3.12/5 shard once emitted no test
-          # progress for over an hour before its 70-minute hard timeout.
-          # Keep its canonical test recipe, but print the active test name
-          # and bounded faulthandler stacks so the next stall is diagnosable.
-          diagnostics=""
-          if [ "${{ matrix.python-version }}" = "3.12" ] && [ "${{ matrix.shard }}" = "5" ]; then
-            diagnostics="-vv -o faulthandler_timeout=300"
-          fi
-          make test-unit PYTEST_UNIT_TARGETS="$(cat shard-files.txt)" PYTEST_UNIT_COV_FAIL_UNDER=0 PYTEST_UNIT_ARGS="--junitxml=test-results-${{ matrix.shard }}.xml ${diagnostics}"
+        run: make test-unit PYTEST_UNIT_TARGETS="$(cat shard-files.txt)" PYTEST_UNIT_COV_FAIL_UNDER=0 PYTEST_UNIT_ARGS="--junitxml=test-results-${{ matrix.shard }}.xml"
 
       - name: Upload coverage data
         # upload-artifact@v4 aborts on Gitea (detected as GHES) with
