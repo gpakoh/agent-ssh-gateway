@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import urllib.error
+from email.message import Message
 from unittest.mock import patch
 
 import pytest
@@ -99,6 +100,42 @@ def test_verified_conversion_never_mutates_source(candidate):
     assert (root / SOURCE).read_bytes() == ORIGINAL
     assert (root / TARGET).read_bytes() == OUTPUT
     opener.assert_called_once()
+
+
+@pytest.mark.parametrize("corrupt_field", [
+    None, "x-media-output-sha256", "x-media-source-sha256", "x-media-psnr",
+])
+def test_lowercase_http_headers_preserve_authenticity_guards(candidate, corrupt_field):
+    """Starlette/Uvicorn emit lowercase header names; HTTPMessage lookup is case-insensitive.
+
+    Converting HTTPMessage to dict is NOT case-insensitive; normalize it before
+    validating the worker evidence. Corrupt hashes and PSNR still fail closed.
+    """
+    registry, root = candidate
+
+    class LowercaseOpener:
+        def open(self, *_args, **_kwargs):
+            result = FakeResponse()
+            headers = Message()
+            for key, value in result.headers.items():
+                lower = key.lower()
+                if lower == corrupt_field:
+                    value = "0" * 64 if lower.endswith("sha256") else "0.1"
+                headers[lower] = value
+            result.headers = headers
+            return result
+
+    with patch("app.workspace.media_pipeline.urllib.request.build_opener", return_value=LowercaseOpener()):
+        if corrupt_field is None:
+            result = _convert(registry)
+            assert result["verified"] is True
+            assert result["output"]["sha256"] == digest(OUTPUT)
+            assert (root / TARGET).read_bytes() == OUTPUT
+        else:
+            with pytest.raises(MediaUnavailable):
+                _convert(registry)
+            assert not (root / TARGET).exists()
+    assert (root / SOURCE).read_bytes() == ORIGINAL
 
 
 def test_source_integrity_fenced_before_call(candidate):

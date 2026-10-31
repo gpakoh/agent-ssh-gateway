@@ -100,7 +100,7 @@ def convert_candidate_image(
             }[codec]:
                 raise MediaUnavailable("Media worker returned an unexpected MIME type")
             out = response.read(MAX_ASSET_BYTES + 1)
-            received = dict(response.headers)
+            received = {key.lower(): value for key, value in response.headers.items()}
     except urllib.error.HTTPError as exc:
         if exc.code in (429, 503, 504):
             raise MediaUnavailable("Media API busy or temporarily unavailable", retryable=True) from exc
@@ -112,14 +112,14 @@ def convert_candidate_image(
     if not out or len(out) > MAX_ASSET_BYTES or not _asset_kind(out, "." + codec):
         raise MediaUnavailable("Worker result is empty, oversized or has invalid magic")
     digest = hashlib.sha256(out).hexdigest()
-    if not hmac.compare_digest(digest, received.get("X-Media-Output-Sha256", "")):
+    if not hmac.compare_digest(digest, received.get("x-media-output-sha256", "")):
         raise MediaUnavailable("Worker output checksum mismatch")
-    if not hmac.compare_digest(source_sha256, received.get("X-Media-Source-Sha256", "")):
+    if not hmac.compare_digest(source_sha256, received.get("x-media-source-sha256", "")):
         raise MediaUnavailable("Worker source checksum mismatch")
     try:
-        width = int(received["X-Media-Width"])
-        height = int(received["X-Media-Height"])
-        psnr = float(received["X-Media-PSNR"])
+        width = int(received["x-media-width"])
+        height = int(received["x-media-height"])
+        psnr = float(received["x-media-psnr"])
     except (KeyError, ValueError) as exc:
         raise MediaUnavailable("Worker omitted conversion evidence") from exc
     if not 1 <= width <= 8192 or not 1 <= height <= 8192 or width * height > 16_000_000:
