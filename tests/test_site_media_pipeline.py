@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import urllib.error
+from email.message import Message
 from unittest.mock import patch
 
 import pytest
@@ -99,6 +100,93 @@ def test_verified_conversion_never_mutates_source(candidate):
     assert (root / SOURCE).read_bytes() == ORIGINAL
     assert (root / TARGET).read_bytes() == OUTPUT
     opener.assert_called_once()
+
+
+@pytest.mark.parametrize("corrupt_field", [
+    None, "x-media-output-sha256", "x-media-source-sha256", "x-media-psnr",
+])
+def test_lowercase_http_headers_preserve_authenticity_guards(candidate, corrupt_field):
+    """Starlette/Uvicorn emit lowercase header names; HTTPMessage lookup is case-insensitive.
+
+    Converting HTTPMessage to dict is NOT case-insensitive; normalize it before
+    validating the worker evidence. Corrupt hashes and PSNR still fail closed.
+    """
+    registry, root = candidate
+
+    class LowercaseOpener:
+        def open(self, *_args, **_kwargs):
+            result = FakeResponse()
+            headers = Message()
+            for key, value in result.headers.items():
+                lower = key.lower()
+                if lower == corrupt_field:
+                    value = "0" * 64 if lower.endswith("sha256") else "0.1"
+                headers[lower] = value
+            result.headers = headers
+            return result
+
+    with patch("app.workspace.media_pipeline.urllib.request.build_opener", return_value=LowercaseOpener()):
+        if corrupt_field is None:
+            result = _convert(registry)
+            assert result["verified"] is True
+            assert result["output"]["sha256"] == digest(OUTPUT)
+            assert (root / TARGET).read_bytes() == OUTPUT
+        else:
+            with pytest.raises(MediaUnavailable):
+                _convert(registry)
+            assert not (root / TARGET).exists()
+    assert (root / SOURCE).read_bytes() == ORIGINAL
+
+
+@pytest.mark.parametrize(("missing", "reason"), [
+    ("X-Media-Output-Sha256", "output_checksum_missing"),
+    ("X-Media-Source-Sha256", "source_checksum_missing"),
+    ("X-Media-PSNR", "conversion_evidence_missing"),
+])
+def test_missing_worker_evidence_is_distinct_from_mismatch(candidate, missing, reason):
+    registry, root = candidate
+
+    class MissingEvidenceOpener:
+        def open(self, *_args, **_kwargs):
+            reply = FakeResponse()
+            reply.headers.pop(missing)
+            return reply
+
+    with patch("app.workspace.media_pipeline.urllib.request.build_opener", return_value=MissingEvidenceOpener()):
+        with pytest.raises(MediaUnavailable) as err:
+            _convert(registry)
+    assert err.value.reason == reason
+    assert not (root / TARGET).exists()
+    assert (root / SOURCE).read_bytes() == ORIGINAL
+
+
+def test_media_error_logs_only_safe_reason_not_token_or_asset(caplog):
+    import logging
+
+    from examples.mcp_server.mcp_infra.adapters import site_media
+
+    sentinel = "DO_NOT_LOG_SECRET_TOKEN"
+    with (
+        patch.object(site_media, "server_attr", return_value=lambda: object()),
+        patch.object(
+            site_media, "convert_candidate_image",
+            side_effect=MediaUnavailable(
+                f"secret={sentinel}", reason="output_checksum_mismatch",
+            ),
+        ),
+        caplog.at_level(logging.WARNING, logger=site_media.__name__),
+    ):
+        result = site_media.site_media_pipeline(
+            PROJECT, SOURCE, TARGET, digest(ORIGINAL), codec="webp",
+        )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "MEDIA_WORKER_UNAVAILABLE"
+    assert any(
+        "reason=output_checksum_mismatch retryable=False" in r.message
+        for r in caplog.records
+    )
+    assert sentinel not in caplog.text
+    assert SOURCE not in caplog.text
 
 
 def test_source_integrity_fenced_before_call(candidate):
