@@ -784,11 +784,31 @@ async def test_candidate_cleanup_uses_fresh_guard_twice_and_required_audit_once(
     )
 
 
+async def test_candidate_cleanup_allows_independent_pr_branch_sharing_base_sha(
+    tmp_path, immediate_run_tool_async, monkeypatch
+):
+    """An unrelated PR branch sharing immutable HEAD cannot block a clean clone."""
+    head = "a" * 40
+    client = _PullClient({1: [_same_repo_pr(51, ref="security/other-work", sha=head)]})
+    audit = _AuditLogger()
+    guard_calls: list[str] = []
+    _configure_cleanup_adapter(
+        tmp_path, monkeypatch, client=client, audit=audit, guard_calls=guard_calls,
+    )
+    result = await supervisor.candidate_cleanup(
+        "candidate-demo", head, "candidate/demo", "demo", abandon_unmodified=True,
+    )
+    assert result["ok"] is True
+    assert guard_calls == ["abandon", "first", "second", "third"]
+    assert client.calls == [1, 1, 1]
+    assert len(audit.required) == 1
+
+
 @pytest.mark.parametrize(
     ("ref", "sha", "reference_type"),
     [
         ("candidate/demo", "b" * 40, "branch"),
-        ("different/ref", "a" * 40, "head_sha"),
+        ("", "a" * 40, "head_sha"),
         ("refs/pull/42/head", "a" * 40, "head_sha"),
     ],
 )
