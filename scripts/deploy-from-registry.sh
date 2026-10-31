@@ -30,7 +30,31 @@ if [ -f docker/.env ]; then
   set +a
 fi
 
-COMPOSE="${COMPOSE:-docker compose -p web-ssh-gateway -f docker/docker-compose.yml}"
+# Operator-controlled opt-in for the independent Quart Media API. Never let a
+# custom Compose override bypass the reviewed overlay or its secret preflight.
+BASE_COMPOSE="docker compose -p web-ssh-gateway -f docker/docker-compose.yml"
+SITE_MEDIA_OVERLAY_ENABLED="${SITE_MEDIA_OVERLAY_ENABLED:-false}"
+case "$SITE_MEDIA_OVERLAY_ENABLED" in
+  true)
+    if [ -n "${COMPOSE:-}" ]; then
+      echo "Media overlay: NO-GO (custom COMPOSE override is not allowed)" >&2
+      exit 1
+    fi
+    export MEDIA_API_BASE_URL=http://media-processing:8091
+    COMPOSE="$BASE_COMPOSE -f docker/site-media.compose.yml"
+    # Validates a redacted, exact Compose model before any image pull or
+    # container replacement. Never logs rendered credentials.
+    python3 "$ROOT/scripts/site_media_preflight.py" || exit 1
+    ;;
+  false)
+    COMPOSE="${COMPOSE:-$BASE_COMPOSE}"
+    ;;
+  *)
+    echo "Media overlay: NO-GO (SITE_MEDIA_OVERLAY_ENABLED must be true or false)" >&2
+    exit 1
+    ;;
+esac
+
 GATEWAY_REPO="${WEB_SSH_GATEWAY_REPO:?set WEB_SSH_GATEWAY_REPO in docker/.env}"
 MCP_REPO="${MCP_SERVER_REPO:?set MCP_SERVER_REPO in docker/.env}"
 # CI publishes the executor next to the gateway artifact.
@@ -208,6 +232,15 @@ smoke() {
       ok=false
     fi
     verify_provenance "$expected_sha" || ok=false
+    if $ok && [ "$SITE_MEDIA_OVERLAY_ENABLED" = "true" ]; then
+      echo -n "  mcp-oauth (Media API authenticated): "
+      if docker exec mcp-oauth python3 scripts/site_media_runtime_smoke.py; then
+        echo "OK"
+      else
+        echo "FAIL"
+        ok=false
+      fi
+    fi
   fi
   $ok
 }
@@ -493,6 +526,17 @@ if ! docker run --rm -i \
   exit 1
 fi
 
+SITE_MEDIA_FIRST_ATTACHMENT=false
+if [ "$SITE_MEDIA_OVERLAY_ENABLED" = "true" ]; then
+  if docker inspect mcp-oauth --format '{{json .NetworkSettings.Networks}}' 2>/dev/null | \
+      python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if "quart-media-internal" in d else 1)' 2>/dev/null; then
+    log "Media overlay already attached to mcp-oauth; preserve attachment on rollback."
+  else
+    SITE_MEDIA_FIRST_ATTACHMENT=true
+    log "First Media overlay attachment: rollback will restore the original base-only network."
+  fi
+fi
+
 RUNNING_SSHD_ID=$(image_id ssh-gateway-sshd)
 
 PREVIOUS_GATEWAY_IMAGE=$(read_state_field gateway_image)
@@ -573,6 +617,13 @@ if ! [[ "$PREVIOUS_DEPLOY_SHA" =~ ^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$ ]] || \
   exit 1
 fi
 
+if [ "$SITE_MEDIA_FIRST_ATTACHMENT" = "true" ]; then
+  # First opt-in must not strand the OAuth endpoint on a failing new private
+  # network. Preserve the old image and the old base-only Compose topology.
+  COMPOSE="$BASE_COMPOSE"
+  SITE_MEDIA_OVERLAY_ENABLED=false
+  log "Rolling back the first Media attachment to the original Gateway network."
+fi
 log "Rolling back to $PREVIOUS_GATEWAY_IMAGE / $PREVIOUS_MCP_IMAGE / $PREVIOUS_SSHD_IMAGE"
 if ! deploy_services "$PREVIOUS_GATEWAY_IMAGE" "$PREVIOUS_MCP_IMAGE" "$PREVIOUS_SSHD_IMAGE"; then
   log "Rollback deployment FAILED — manual investigation required."
