@@ -413,8 +413,9 @@ def _classify_env_failure(stderr: str | None, exit_code: int | None) -> str | No
         "read-only file system",
         "uv: error",
         "verifier_root_unsafe",
+        "verifier_bootstrap_failed",
     )
-    if "verifier_root_unsafe" in low:
+    if "verifier_root_unsafe" in low or "verifier_bootstrap_failed" in low:
         return "VERIFIER_BOOTSTRAP_FAILED"
     return "VERIFIER_ENV_UNAVAILABLE" if any(marker in low for marker in env_markers) else None
 
@@ -1010,7 +1011,17 @@ def _build_readonly_fallback_script(
         'SOURCE_META_NEW="$TMP_ROOT/.source-pyproject.toml.new"',
         'SOURCE_LOCK="$TMP_ROOT/.source-uv.lock"',
         'STAMP="$TMP_ROOT/.uv_sync_stamp"',
-        'cp "$PROJECT_DIR/pyproject.toml" "$SOURCE_META_NEW"',
+        # A registered requirements-only service may have no pyproject.toml.
+        # Generate metadata only under the trusted external verifier root;
+        # never invent a source-local pyproject or uv.lock.
+        'if [ -f "$PROJECT_DIR/pyproject.toml" ]; then',
+        '  cp "$PROJECT_DIR/pyproject.toml" "$SOURCE_META_NEW"',
+        'elif [ -f "$PROJECT_DIR/requirements.txt" ] || [ -f "$PROJECT_DIR/requirements-dev.txt" ] || [ -f "$PROJECT_DIR/requirements-test.txt" ]; then',
+        '  printf \'[project]\\nname = "mcp-verifier-requirements-only"\\nversion = "0.0.0"\\n\' > "$SOURCE_META_NEW"',
+        "else",
+        '  echo "VERIFIER_BOOTSTRAP_FAILED: no pyproject.toml or supported requirements file" >&2',
+        "  exit 90",
+        "fi",
         "NEED_SYNC=0",
         'if [ ! -f "$STAMP" ]; then NEED_SYNC=1; fi',
         'if [ ! -f "$SOURCE_META" ] || ! diff -q "$SOURCE_META_NEW" "$SOURCE_META" >/dev/null 2>&1; then NEED_SYNC=1; fi',

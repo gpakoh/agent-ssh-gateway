@@ -562,10 +562,11 @@ def test_readonly_fallback_locked_project_executes_from_source_with_external_ven
     assert not (project / ".venv").exists()
 
 
+@pytest.mark.parametrize("with_pyproject", [False, True])
 def test_readonly_fallback_legacy_requirements_execute_without_source_mutation(
-    tmp_path, trusted_verifier_root
+    tmp_path, trusted_verifier_root, with_pyproject
 ):
-    """KOJO-shaped regression: no uv.lock/dependency extras, requirements.txt only."""
+    """Both requirements-only and pyproject projects can check without uv.lock."""
     import os
     import subprocess
 
@@ -573,10 +574,11 @@ def test_readonly_fallback_legacy_requirements_execute_without_source_mutation(
 
     project = tmp_path / "legacy-project"
     project.mkdir()
-    (project / "pyproject.toml").write_text(
-        '[project]\nname = "legacy"\nversion = "0.0.0"\nrequires-python = ">=3.12"\n',
-        encoding="utf-8",
-    )
+    if with_pyproject:
+        (project / "pyproject.toml").write_text(
+            '[project]\nname = "legacy"\nversion = "0.0.0"\nrequires-python = ">=3.12"\n',
+            encoding="utf-8",
+        )
     (project / "requirements.txt").write_text("pytest>=8\nruff>=0.11\n", encoding="utf-8")
     (project / "tests").mkdir()
     before = {
@@ -632,6 +634,35 @@ def test_readonly_fallback_legacy_requirements_execute_without_source_mutation(
     assert after == before
     assert not (project / ".venv").exists()
     assert not (project / "uv.lock").exists()
+
+
+def test_readonly_fallback_without_dependency_manifest_fails_typed(
+    tmp_path, trusted_verifier_root
+):
+    """A missing requirements/pyproject contract cannot be reported as a test failure."""
+    import os
+    import subprocess
+
+    from mcp_client_tools import _build_readonly_fallback_script, _classify_env_failure
+
+    project = tmp_path / "missing-dependencies"
+    project.mkdir()
+    (project / "tests").mkdir()
+    script = _build_readonly_fallback_script("pytest", str(project), ["tests"])
+    completed = subprocess.run(
+        ["sh", "-c", script],
+        env=os.environ.copy(),
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert completed.returncode == 90
+    assert "VERIFIER_BOOTSTRAP_FAILED" in completed.stderr
+    assert _classify_env_failure(completed.stderr, completed.returncode) == (
+        "VERIFIER_BOOTSTRAP_FAILED"
+    )
+    assert list(project.iterdir()) == [project / "tests"]
 
 
 class _MockJobClient:
