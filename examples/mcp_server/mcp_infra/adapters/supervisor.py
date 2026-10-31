@@ -640,8 +640,17 @@ async def _assert_no_open_candidate_pr_reference(
                         continue
                     head_ref = str(head.get("ref") or "").strip()
                     head_sha = str(head.get("sha") or "").strip().lower()
-                    if head_ref != expected_branch and head_sha != expected_head_sha:
-                        continue
+                    # A Git commit may be shared by many independent branches.
+                    # Cleanup removes this candidate workspace/ref, not every
+                    # other branch pointing to the same immutable object. An
+                    # clearly different *named* PR branch is independent.
+                    # Gitea synthetic refs/pull/N/head and absent refs do not
+                    # prove branch identity, so their SHA must stay fenced.
+                    if head_ref != expected_branch:
+                        if head_ref and not head_ref.startswith("refs/pull/"):
+                            continue
+                        if head_sha != expected_head_sha:
+                            continue
                     same_repo = _same_gitea_repo_from_pr_head(
                         head,
                         owner=owner,
