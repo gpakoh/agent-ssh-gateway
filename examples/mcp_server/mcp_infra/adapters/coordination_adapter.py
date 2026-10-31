@@ -145,12 +145,12 @@ async def coord_board(project: str, limit: int = 25) -> dict[str, Any]:
 
 
 async def coord_open(project: str, issue_number: int) -> dict[str, Any]:
-    """Read the full coordination thread and its durable Gitea comments."""
+    """Read bounded Gitea comments; incomplete history has no authoritative state or close lease."""
     tool = "coord_open"
     try:
         owner, repo = await _connection(tool, project, write=False)
         async with server_attr("GiteaClient")(os.environ["GITEA_TOKEN"]) as client:
-            thread = await open_thread(client, owner, repo, issue_number)
+            thread = await open_thread(client, owner, repo, issue_number, allow_partial=True)
     except Exception as exc:
         return _fail(tool, exc)
     return tool_success(tool, result={"project": repo, "thread": thread}, source="gitea")

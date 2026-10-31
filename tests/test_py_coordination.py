@@ -528,6 +528,93 @@ async def test_board_and_inbox_isolate_unreadable_long_thread(monkeypatch):
         await core.open_thread(client, "gpakoh", "agent-ssh-gateway", 1)
 
 
+@pytest.mark.asyncio
+async def test_coord_open_repeated_comment_page_is_bounded_and_untrusted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Read-only can show evidence while writes still reject an incomplete journal."""
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setattr(adapter, "_registered", lambda p: core.validate_project(p))
+    client = FakeClient()
+    await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway",
+        source_project="agent-ssh-gateway", title="Long history",
+        body="Evidence", request_key="long-history-thread-123",
+    )
+    repeated = [
+        {
+            "id": n + 1,
+            "body": "untrusted note",
+            "user": {"login": "other"},
+        }
+        for n in range(50)
+    ]
+    requested_pages: list[int] = []
+
+    async def stuck_comments(owner, repo, number, *, limit=50, page=1):
+        requested_pages.append(page)
+        assert number == 1
+        return repeated
+
+    async def enter(self):
+        return self
+
+    async def leave(self, *args):
+        return None
+
+    client.list_issue_comments = stuck_comments
+    monkeypatch.setattr(FakeClient, "__aenter__", enter, raising=False)
+    monkeypatch.setattr(FakeClient, "__aexit__", leave, raising=False)
+    monkeypatch.setattr(
+        adapter, "server_attr",
+        lambda name: (lambda _: client) if name == "GiteaClient" else None,
+    )
+
+    response = await adapter.coord_open("agent-ssh-gateway", 1)
+    assert response["ok"] is True, response
+    detail = response["result"]["thread"]
+    assert detail["number"] == 1
+    assert detail["state"] == "open"
+    assert detail["history_truncated"] is True
+    assert detail["coord_state"] is None
+    assert len(detail["history"]) == 50
+    assert len({entry["id"] for entry in detail["history"]}) == 50
+    assert "close_state_sha256" not in detail
+    assert "close_content_sha256" not in detail
+    assert requested_pages == [1, 2]
+
+    # The same fake server must never authorize a new comment based on the
+    # preview: real write idempotency still requires full history.
+    with pytest.raises(core.CoordinationOutcomeUnknown, match="5000-row"):
+        await core.write_event(
+            client, "gpakoh", "agent-ssh-gateway", 1,
+            text="Do not append", request_key="long-history-deny-123", state="message",
+        )
+    assert client.comment_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_coord_open_short_history_retains_verified_state_and_close_lease():
+    client = FakeClient()
+    await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway",
+        source_project="agent-ssh-gateway", title="Small history",
+        body="Evidence", request_key="short-history-thread-123",
+    )
+    await core.write_event(
+        client, "gpakoh", "agent-ssh-gateway", 1,
+        text="Ready", request_key="short-history-accept-123", state="accepted",
+    )
+    full = await core.open_thread(client, "gpakoh", "agent-ssh-gateway", 1)
+    partial_allowed = await core.open_thread(
+        client, "gpakoh", "agent-ssh-gateway", 1, allow_partial=True,
+    )
+    assert partial_allowed["history_truncated"] is False
+    assert partial_allowed["history"] == full["history"]
+    assert partial_allowed["coord_state"] == "accepted"
+    assert partial_allowed["close_state_sha256"] == full["close_state_sha256"]
+
+
 def test_board_does_not_silently_map_unknown_coord_state():
     with pytest.raises(ValueError, match="invalid coordination state"):
         core.board_from_threads([{"coord_state": "in_progress_without_receipt"}])

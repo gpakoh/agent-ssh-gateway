@@ -198,6 +198,49 @@ async def test_browser_board_and_thread_are_gitea_backed(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_browser_long_thread_keeps_partial_state_explicit(monkeypatch) -> None:
+    import json
+
+    class Registry:
+        def project_info(self, project):
+            return {"type": "source"}
+
+    class RepeatedPageGitea(FakeGitea):
+        async def list_issue_comments(self, owner, repo, number, *, limit, page):
+            self.requests += 1
+            return [
+                {
+                    "id": idx + 1,
+                    "body": "untrusted",
+                    "user": {"login": "other"},
+                }
+                for idx in range(50)
+            ]
+
+    monkeypatch.setattr(route, "get_registry", lambda: Registry())
+    monkeypatch.setenv("COORDINATION_GITEA_READ_TOKEN", "fake-read-token")
+    monkeypatch.setenv("COORDINATION_GITEA_API_BASE", "https://git.xloud.ru/api/v1")
+    monkeypatch.setattr(route, "_ReadOnlyGitea", RepeatedPageGitea)
+
+    board = await route.browser_coordination_board(
+        project="agent-ssh-gateway", limit=20, _identity=identity("web-ui", "admin")
+    )
+    board_data = json.loads(board.body)
+    assert board_data["truncated"] is True
+    assert board_data["count"] == 0
+    assert board_data["incomplete_thread_numbers"] == [634]
+
+    thread = await route.browser_coordination_thread(
+        project="agent-ssh-gateway", issue_number=634, _identity=identity("web-ui", "admin")
+    )
+    thread_data = json.loads(thread.body)["thread"]
+    assert thread_data["history_truncated"] is True
+    assert thread_data["coord_state"] is None
+    assert len(thread_data["history"]) == 50
+    assert "close_state_sha256" not in thread_data
+
+
+@pytest.mark.asyncio
 async def test_board_missing_credential_does_not_call_gitea(monkeypatch) -> None:
     class Registry:
         def project_info(self, project):

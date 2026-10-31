@@ -22,6 +22,7 @@ from app.coordination_logic import (
     board_from_threads,
     list_threads_preview,
     open_thread,
+    preview_thread_state,
 )
 from app.workspace.registry import WorkspacePolicyError, get_registry
 
@@ -154,9 +155,15 @@ async def browser_coordination_board(
             async with _ReadOnlyGitea(token, base) as client:
                 issues, scanned_truncated = await list_threads_preview(client, owner, repo)
                 cards = []
+                incomplete_thread_numbers: list[int] = []
                 for issue in issues[:limit]:
-                    detail = await open_thread(client, owner, repo, issue["number"])
-                    cards.append({**issue, "coord_state": detail["coord_state"]})
+                    state, incomplete = await preview_thread_state(
+                        client, owner, repo, issue["number"]
+                    )
+                    if incomplete or state is None:
+                        incomplete_thread_numbers.append(issue["number"])
+                        continue
+                    cards.append({**issue, "coord_state": state})
                 columns = board_from_threads(cards)
     except (TimeoutError, httpx.HTTPError, ValueError, TypeError, KeyError) as exc:
         raise _upstream_error(exc) from exc
@@ -164,7 +171,9 @@ async def browser_coordination_board(
         "project": repo,
         "columns": columns,
         "count": len(cards),
-        "truncated": scanned_truncated or len(issues) > limit,
+        "truncated": scanned_truncated or len(issues) > limit
+        or bool(incomplete_thread_numbers),
+        "incomplete_thread_numbers": incomplete_thread_numbers,
         "source_origin": f"{urlsplit(base).scheme}://{urlsplit(base).netloc}",
         "read_only": True,
     }
@@ -184,7 +193,7 @@ async def browser_coordination_thread(
     try:
         async with asyncio.timeout(30):
             async with _ReadOnlyGitea(token, base) as client:
-                detail = await open_thread(client, owner, repo, issue_number)
+                detail = await open_thread(client, owner, repo, issue_number, allow_partial=True)
     except (TimeoutError, httpx.HTTPError, ValueError, TypeError, KeyError) as exc:
         raise _upstream_error(exc) from exc
     from fastapi.responses import JSONResponse

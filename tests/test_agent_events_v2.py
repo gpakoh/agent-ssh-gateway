@@ -659,9 +659,12 @@ async def test_recovery_after_stale_computes_duration(monkeypatch):
         idx = [i for i, t in enumerate(pg.ok_types) if t == "recovered"]
         assert len(idx) == 1
         duration = pg.ok_payloads[idx[0]]["stale_duration"]
-        expected_min = time.time() - stale_at - 1.0
-        assert duration >= 0.1 and duration <= (time.time() - stale_at)
-        assert duration >= expected_min or True  # bounded above strictly
+        assert stale_at is not None
+        # Production reports rounded milliseconds. Compare at the same
+        # precision: rounded .203 can exceed an unrounded elapsed .20299.
+        # An earlier recovery event cannot exceed the later observed bound.
+        observed_upper = round(time.time() - stale_at, 3)
+        assert 0.1 <= duration <= observed_upper
     finally:
         await jm.stop_supervisor_task()
 
