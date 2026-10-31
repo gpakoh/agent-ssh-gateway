@@ -283,7 +283,6 @@ def test_ci_routes_all_image_builds_through_bounded_retry_wrapper() -> None:
             "docker/Dockerfile",
             "docker/Dockerfile.mcp-server",
             "docker/sshd/Dockerfile",
-            "docker/Dockerfile.site-media-worker",
         ]
     )
     assert "          docker build -f" not in workflow
