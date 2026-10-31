@@ -29,6 +29,40 @@ def test_deployed_mapping_matches_reviewed_source():
     assert compare_gitea_only_bindings(registry(), registry()) == []
 
 
+def test_case_sensitive_nod_source_repo_pin_is_required_by_deploy():
+    source = yaml.safe_load(registry())
+    source["projects"]["nod-gateway"] = {
+        "type": "monorepo", "root": "NOD_gateway",
+        "gitea_repo": "gpakoh/NOD_gateway",
+    }
+    mounted = yaml.safe_load(yaml.safe_dump(source))
+    mounted["projects"]["nod-gateway"].pop("gitea_repo")
+    expect = yaml.safe_dump(source).encode()
+    assert compare_gitea_only_bindings(expect, yaml.safe_dump(mounted).encode()) == [
+        "nod-gateway"
+    ]
+    mounted["projects"]["nod-gateway"]["gitea_repo"] = "gpakoh/nod-gateway"
+    assert compare_gitea_only_bindings(expect, yaml.safe_dump(mounted).encode()) == [
+        "nod-gateway"
+    ]
+    mounted["projects"]["nod-gateway"]["gitea_repo"] = "gpakoh/NOD_gateway"
+    mounted["projects"]["nod-gateway"]["description"] = "host-owned note"
+    assert compare_gitea_only_bindings(expect, yaml.safe_dump(mounted).encode()) == []
+
+
+def test_extra_or_cross_owner_source_repo_pin_fails_closed():
+    source = yaml.safe_load(registry())
+    mounted = yaml.safe_load(registry())
+    mounted["projects"]["agent-ssh-gateway"]["gitea_repo"] = "gpakoh/other"
+    assert compare_gitea_only_bindings(
+        yaml.safe_dump(source).encode(), yaml.safe_dump(mounted).encode(),
+    ) == ["agent-ssh-gateway"]
+    source["projects"]["agent-ssh-gateway"]["gitea_repo"] = "other/agent-ssh-gateway"
+    assert compare_gitea_only_bindings(
+        yaml.safe_dump(source).encode(), yaml.safe_dump(source).encode(),
+    ) == ["agent-ssh-gateway"]
+
+
 def test_stale_legacy_nod_shared_mapping_fails_before_deploy():
     old = yaml.safe_dump({
         "version": 1,

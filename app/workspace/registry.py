@@ -279,6 +279,7 @@ def _add_project_entries(
             description=str(cfg.get("description", "")),
             tags=list(cfg.get("tags", [])),
             parent=cfg.get("parent"),
+            gitea_repo=cfg.get("gitea_repo") if source == "source_registry" else None,
         )
         if unavailable is not None:
             unavailable.pop(pid, None)
@@ -456,6 +457,8 @@ class WorkspaceRegistry:
         }
         if info.parent:
             result["parent"] = info.parent
+        if info.gitea_repo is not None:
+            result["gitea_repo"] = info.gitea_repo
         return result
 
     def project_tree(

@@ -1,4 +1,4 @@
-"""Read-only predeploy contract for Gitea-only project registry bind mounts.
+"""Read-only predeploy contract for explicit coordination repo bind mounts.
 
 CI uses a fresh Git checkout, but Compose mounts an operator-owned host
 projects.yaml over the image's /app/projects.yaml. A healthy image can
@@ -8,6 +8,7 @@ therefore serve an obsolete project catalog. Never auto-edit the host file.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
@@ -20,7 +21,7 @@ _REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
 class RegistryDrift(ValueError):
-    """Expected Gitea-only registry binding is not present on the host."""
+    """Expected coordination repository binding is not present on the host."""
 
 
 class _UniqueKeysLoader(yaml.SafeLoader):
@@ -59,7 +60,7 @@ def _projects(raw: bytes) -> dict[str, dict[str, Any]]:
 
 
 def compare_gitea_only_bindings(expected: bytes, mounted: bytes) -> list[str]:
-    """Return IDs with missing/changed Gitea-only contract; never expose secrets.
+    """Return IDs with missing/changed explicit coordination repo contracts; no secrets.
 
     Compare only the source-controlled Gitea-only contracts. Unrelated host
     project entries may differ independently and must never be overwritten.
@@ -93,7 +94,35 @@ def compare_gitea_only_bindings(expected: bytes, mounted: bytes) -> list[str]:
             or "parent" in have
         ):
             changed.append(project_id)
-    return changed
+    # Source projects may also carry an explicit, case-sensitive Gitea repo
+    # different from their registry project_id. The host bind mount must
+    # preserve that pin; otherwise a green deploy would still route to a
+    # nonexistent lower-case repository. Only compare declared pins, not
+    # unrelated operator-owned roots, descriptions or tags.
+    source_pinned = {
+        key: cfg for key, cfg in source_projects.items()
+        if cfg.get("type") != "coordination-only" and "gitea_repo" in cfg
+    }
+    host_pinned = {
+        key: cfg for key, cfg in host_projects.items()
+        if cfg.get("type") != "coordination-only" and "gitea_repo" in cfg
+    }
+    for project_id in sorted(source_pinned.keys() | host_pinned.keys()):
+        want = source_pinned.get(project_id)
+        have = host_pinned.get(project_id)
+        if want is None or have is None:
+            changed.append(project_id)
+            continue
+        repo = want.get("gitea_repo")
+        if (
+            not isinstance(repo, str)
+            or not _REPO.fullmatch(repo)
+            or repo.split("/", 1)[0] != os.environ.get("MCP_COORD_GITEA_OWNER", "gpakoh").strip()
+            or have.get("gitea_repo") != repo
+            or have.get("type") != want.get("type")
+        ):
+            changed.append(project_id)
+    return sorted(set(changed))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -112,13 +141,13 @@ def main(argv: list[str] | None = None) -> int:
     if drift:
         ids = ",".join(drift[:20])
         print(
-            f"REGISTRY_CONFIG_DRIFT: Gitea-only entries mismatch: {ids}; "
+            f"REGISTRY_CONFIG_DRIFT: coordination repository bindings mismatch: {ids}; "
             "check PROJECTS_YAML_PATH and reconcile it with source-controlled "
             "projects.yaml using an operator-approved exact-SHA update.",
             file=sys.stderr,
         )
         return 3
-    print("Gitea-only registry bind contract: OK")
+    print("Coordination repository registry bind contract: OK")
     return 0
 
 

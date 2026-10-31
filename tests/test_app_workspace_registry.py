@@ -123,6 +123,15 @@ class TestLoadRegistry:
         assert info.root.exists()
         assert root == registry_root
 
+    def test_source_registry_exposes_explicit_case_sensitive_gitea_repo(self, registry_root, yaml_path):
+        data = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+        data["projects"]["nod-gateway"]["gitea_repo"] = "gpakoh/NOD_gateway"
+        yaml_path.write_text(yaml.safe_dump(data), encoding="utf-8")
+        projects, _ = load_registry(yaml_path)
+        assert projects["nod-gateway"].gitea_repo == "gpakoh/NOD_gateway"
+        loaded = WorkspaceRegistry.load(yaml_path, allowed_roots=[registry_root])
+        assert loaded.project_info("nod-gateway")["gitea_repo"] == "gpakoh/NOD_gateway"
+
     def test_load_missing_file_raises(self, tmp_path):
         with pytest.raises(WorkspacePolicyError, match="not found"):
             load_registry(str(tmp_path / "nonexistent.yaml"))

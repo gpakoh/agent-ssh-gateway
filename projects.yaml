@@ -10,6 +10,7 @@ projects:
 
   nod-gateway:
     root: NOD_gateway
+    gitea_repo: gpakoh/NOD_gateway
     type: monorepo
     description: "NOD platform — master server, gateway client, tg bot, web UI, payment"
     tags: [nod, platform]

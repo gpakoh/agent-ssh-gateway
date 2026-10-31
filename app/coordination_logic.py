@@ -48,6 +48,32 @@ def validate_project(value: str) -> str:
     return value
 
 
+def resolve_coordination_repo(project: str, owner: str, metadata: dict[str, Any]) -> str:
+    """Resolve a trusted, case-sensitive Gitea repo; never lowercase its slug.
+
+    Source-controlled registry metadata may explicitly pin a repo distinct
+    from the Gateway project_id (e.g. nod-gateway -> gpakoh/NOD_gateway).
+    A malformed or cross-owner pin fails closed instead of falling back.
+    """
+    validate_project(project)
+    validate_project(owner)
+    if not isinstance(metadata, dict) or metadata.get("type") == "candidate-clone":
+        raise ValueError("coordination requires a registered source project")
+    configured = metadata.get("gitea_repo")
+    if metadata.get("type") == "coordination-only":
+        if "root" in metadata or configured != f"{owner}/{project}":
+            raise ValueError("Gitea-only coordination repo mapping is not verified")
+    if configured is None:
+        return project
+    if not isinstance(configured, str) or configured.count("/") != 1:
+        raise ValueError("registered Gitea repo mapping is invalid")
+    configured_owner, repo = configured.split("/", 1)
+    if configured_owner != owner:
+        raise ValueError("registered Gitea repo owner does not match coordination owner")
+    validate_project(repo)
+    return repo
+
+
 def _text(value: str, *, name: str, limit: int) -> str:
     if not isinstance(value, str):
         raise ValueError(f"{name} must be a string")

@@ -23,6 +23,7 @@ from app.coordination_logic import (
     list_threads_preview,
     open_thread,
     preview_thread_state,
+    resolve_coordination_repo,
 )
 from app.workspace.registry import WorkspacePolicyError, get_registry
 
@@ -51,7 +52,11 @@ def _source_project(project: str) -> str:
         raise HTTPException(status_code=404, detail="Project is not registered") from exc
     if info.get("type") == "candidate-clone":
         raise HTTPException(status_code=404, detail="Project is not a source project")
-    return project
+    try:
+        owner = os.environ.get("COORDINATION_GITEA_OWNER", "gpakoh")
+        return resolve_coordination_repo(project, owner, info)
+    except ValueError as exc:
+        raise HTTPException(status_code=503, detail="Unverified project repository mapping") from exc
 
 
 def _source_config() -> tuple[str, str, str]:

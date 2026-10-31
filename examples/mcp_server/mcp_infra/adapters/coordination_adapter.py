@@ -18,6 +18,7 @@ from examples.mcp_server.coordination import (
     list_threads_preview,
     open_thread,
     preview_thread_state,
+    resolve_coordination_repo,
     validate_project,
     write_event,
 )
@@ -37,17 +38,7 @@ def _registered(project: str) -> str:
         metadata = server_attr("_get_workspace_registry")().project_info(name)
     except Exception as exc:
         raise ValueError("project is not registered in SSH Gateway") from exc
-    if not isinstance(metadata, dict) or metadata.get("type") == "candidate-clone":
-        raise ValueError("coordination requires a registered source project")
-    if metadata.get("type") == "coordination-only":
-        # No filesystem checkout is implied. Bind only the exact trusted
-        # Gitea owner/repo configured in the source-controlled registry.
-        if (
-            "root" in metadata
-            or metadata.get("gitea_repo") != f"{_owner()}/{name}"
-        ):
-            raise ValueError("Gitea-only coordination repo mapping is not verified")
-    return name
+    return resolve_coordination_repo(name, _owner(), metadata)
 
 
 def _principal() -> str | None:
@@ -162,7 +153,8 @@ async def coord_create(
     """Address an issue to a registered project's inbox; request_key is reusable."""
     tool = "coord_create"
     try:
-        source = _registered(source_project)
+        source = validate_project(source_project)
+        _registered(source)  # Registration check; issue marker keeps project_id, not repo slug.
         owner, target = await _connection(tool, target_project, write=True)
         async with server_attr("GiteaClient")(os.environ["GITEA_TOKEN"]) as client:
             repo = await client.get_repo(owner, target)
@@ -178,7 +170,10 @@ async def coord_create(
             )
     except Exception as exc:
         return _fail(tool, exc)
-    return tool_success(tool, result={"target_project": target, **outcome}, source="gitea")
+    return tool_success(
+        tool, result={"target_project": target_project, "gitea_repo": f"{owner}/{target}", **outcome},
+        source="gitea",
+    )
 
 
 async def _mutate(
