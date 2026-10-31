@@ -221,17 +221,39 @@ async def preview_thread_state(
     return state, False
 
 
-async def open_thread(client: Any, owner: str, repo: str, number: int) -> dict[str, Any]:
+async def open_thread(
+    client: Any, owner: str, repo: str, number: int, *, allow_partial: bool = False
+) -> dict[str, Any]:
+    """Read an exact thread; allow a bounded, explicitly incomplete read-only preview.
+
+    Mutations and close receipts MUST use the default exhaustive scan. A partial
+    preview cannot attest the latest coordination state or produce close leases.
+    """
     if isinstance(number, bool) or not isinstance(number, int) or number < 1:
         raise ValueError("issue_number must be positive")
     issue = await client.get_issue(owner, repo, number)
     item = _issue(issue)
     if item is None:
         raise ValueError("issue is not a Py Coordination thread")
-    comments, _ = await _pages(
+    comments, truncated = await _pages(
         lambda page: client.list_issue_comments(owner, repo, number, limit=_PAGE_SIZE, page=page),
-        max_pages=_WRITE_MAX_PAGES,
+        max_pages=2 if allow_partial else _WRITE_MAX_PAGES,
+        allow_partial=allow_partial,
     )
+    if allow_partial:
+        # A broken Gitea page cursor can repeat the same full page indefinitely.
+        # Show only distinct observed comments, without claiming completeness.
+        unique: list[dict[str, Any]] = []
+        seen_ids: set[int] = set()
+        for comment in comments:
+            identifier = comment.get("id")
+            if isinstance(identifier, int) and not isinstance(identifier, bool):
+                if identifier in seen_ids:
+                    truncated = True
+                    continue
+                seen_ids.add(identifier)
+            unique.append(comment)
+        comments = unique
     trusted_identity = await client.get_user()
     trusted_login = trusted_identity.get("login")
     if not isinstance(trusted_login, str) or not trusted_login:
@@ -254,9 +276,17 @@ async def open_thread(client: Any, owner: str, repo: str, number: int) -> dict[s
             }
         )
     item["history"] = history
-    item["coord_state"] = next(
-        (entry["state"] for entry in reversed(history) if entry["state"] not in (None, "message")), "open"
+    item["history_truncated"] = truncated
+    item["coord_state"] = (
+        None if truncated else next(
+            (entry["state"] for entry in reversed(history) if entry["state"] not in (None, "message")),
+            "open",
+        )
     )
+    if truncated:
+        # No authoritative final state and NO close-state/content hashes: a
+        # mutation can only use the exhaustive, fail-closed default path.
+        return item
     # An explicit close reviews this exact report and discussion. Closing changes
     # state/updated_at, so retain a separate content digest for post-write checks.
     content = {
