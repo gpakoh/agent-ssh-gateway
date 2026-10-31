@@ -17,6 +17,8 @@ class ProjectInfo:
     description: str
     tags: list[str]
     parent: str | None = None
+    # Explicit trusted Gitea repository identity, not inferred from project_id.
+    gitea_repo: str | None = None
 
 
 @dataclass

@@ -59,6 +59,160 @@ class FakeClient:
         return comment
 
 
+@pytest.mark.parametrize(
+    ("mapping", "expected"),
+    [
+        ("gpakoh/NOD_gateway", "NOD_gateway"),
+        (None, "nod-gateway"),
+    ],
+)
+def test_source_repo_mapping_preserves_registered_case(mapping, expected, monkeypatch):
+    from app.routers import coordination as browser
+
+    metadata = {"type": "monorepo", "root": "/trusted/NOD_gateway"}
+    if mapping is not None:
+        metadata["gitea_repo"] = mapping
+    assert core.resolve_coordination_repo("nod-gateway", "gpakoh", metadata) == expected
+
+    class Registry:
+        def project_info(self, project):
+            assert project == "nod-gateway"
+            return metadata
+
+    monkeypatch.setattr(browser, "get_registry", lambda: Registry())
+    monkeypatch.setenv("COORDINATION_GITEA_OWNER", "gpakoh")
+    assert browser._source_project("nod-gateway") == expected
+
+
+@pytest.mark.parametrize(
+    "mapping",
+    ["other/NOD_gateway", "gpakoh/nod-gateway/extra", "gpakoh/%2f", "gpakoh/", 3, ""],
+)
+def test_source_repo_mapping_denies_invalid_or_cross_owner_identity(mapping):
+    with pytest.raises(ValueError, match="mapping|owner|project"):
+        core.resolve_coordination_repo(
+            "nod-gateway", "gpakoh",
+            {"type": "monorepo", "root": "/trusted/NOD_gateway", "gitea_repo": mapping},
+        )
+
+
+@pytest.mark.asyncio
+async def test_mcp_nod_gateway_coord_uses_pinned_case_not_project_id(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setenv("MCP_COORD_GITEA_OWNER", "gpakoh")
+
+    class Registry:
+        def project_info(self, project):
+            assert project == "nod-gateway"
+            return {
+                "type": "monorepo",
+                "root": "/trusted/NOD_gateway",
+                "gitea_repo": "gpakoh/NOD_gateway",
+            }
+
+    class NodClient:
+        def __init__(self, token):
+            assert token == "fake"
+            self.requests = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def list_issues(self, owner, repo, *, state="all", limit=50, page=1):
+            self.requests.append((owner, repo, state, page))
+            assert (owner, repo) == ("gpakoh", "NOD_gateway")
+            return []
+
+    clients = []
+
+    def server(name):
+        if name == "_get_workspace_registry":
+            return lambda: Registry()
+        if name == "GiteaClient":
+            def new_client(token):
+                instance = NodClient(token)
+                clients.append(instance)
+                return instance
+            return new_client
+        raise AssertionError(name)
+
+    monkeypatch.setattr(adapter, "server_attr", server)
+    assert adapter._registered("nod-gateway") == "NOD_gateway"
+    assert await adapter._connection("coord_board", "nod-gateway", write=False) == (
+        "gpakoh", "NOD_gateway"
+    )
+    result = await adapter.coord_board("nod-gateway", limit=5)
+    assert result["ok"] is True, result
+    assert result["result"]["count"] == 0
+    assert clients[-1].requests == [("gpakoh", "NOD_gateway", "all", 1)]
+
+
+@pytest.mark.asyncio
+async def test_nod_create_uses_exact_repo_and_keeps_source_project_marker(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setenv("MCP_COORD_GITEA_OWNER", "gpakoh")
+    monkeypatch.setattr(adapter, "_principal", lambda: "0123456789abcdef")
+
+    class Registry:
+        def project_info(self, project):
+            assert project in {"nod-master-standalone", "nod-gateway"}
+            if project == "nod-gateway":
+                return {
+                    "type": "monorepo", "root": "/trusted/NOD_gateway",
+                    "gitea_repo": "gpakoh/NOD_gateway",
+                }
+            return {"type": "source", "root": "/trusted/nod-master-standalone"}
+
+    class NodClient:
+        created = []
+
+        def __init__(self, token):
+            assert token == "fake"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def get_repo(self, owner, repo):
+            assert (owner, repo) == ("gpakoh", "NOD_gateway")
+            return {"full_name": "gpakoh/NOD_gateway", "permissions": {"push": True}}
+
+        async def list_issues(self, owner, repo, *, state="all", limit=50, page=1):
+            assert (owner, repo, state) == ("gpakoh", "NOD_gateway", "all")
+            return []
+
+        async def create_coord_issue(self, owner, repo, *, title, body):
+            assert (owner, repo) == ("gpakoh", "NOD_gateway")
+            self.created.append(body)
+            return {
+                "number": 101, "title": title, "body": body, "state": "open",
+                "html_url": "https://git.xloud.ru/gpakoh/NOD_gateway/issues/101",
+            }
+
+    def server(name):
+        if name == "_get_workspace_registry":
+            return lambda: Registry()
+        if name == "GiteaClient":
+            return NodClient
+        raise AssertionError(name)
+
+    monkeypatch.setattr(adapter, "server_attr", server)
+    result = await adapter.coord_create(
+        "nod-master-standalone", "nod-gateway",
+        "NOD outbox", "Evidence", "nod-outbox-routing-20261031",
+    )
+    assert result["ok"] is True, result
+    assert result["result"]["target_project"] == "nod-gateway"
+    assert result["result"]["gitea_repo"] == "gpakoh/NOD_gateway"
+    assert result["result"]["thread"]["source_project"] == "nod-master-standalone"
+    assert "source=nod-master-standalone" in NodClient.created[0]
+
+
 @pytest.mark.asyncio
 async def test_create_read_replay_and_comment_state_across_restart():
     a = FakeClient()
