@@ -27,6 +27,13 @@ projects:
     description: "Quart platform umbrella"
     tags: [quart, platform]
 
+  design-workbench-service:
+    root: quart-platform/design-workbench-service
+    parent: quart-platform
+    type: python-service
+    description: "Isolated design skills registry, Chromium renderer and visual QA"
+    tags: [quart, design, visual, service]
+
   content-cleaning-adapter:
     root: quart-platform/content-cleaning-adapter
     parent: quart-platform
