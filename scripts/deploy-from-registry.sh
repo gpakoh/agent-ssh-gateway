@@ -232,7 +232,7 @@ smoke() {
       ok=false
     fi
     verify_provenance "$expected_sha" || ok=false
-    if $ok && [ "$SITE_MEDIA_OVERLAY_ENABLED" = "true" ]; then
+    if $ok && [ "${SITE_MEDIA_OVERLAY_ENABLED:-false}" = "true" ]; then
       echo -n "  mcp-oauth (Media API authenticated): "
       if docker exec mcp-oauth python3 scripts/site_media_runtime_smoke.py; then
         echo "OK"
