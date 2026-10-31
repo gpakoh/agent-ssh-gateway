@@ -385,6 +385,98 @@ def test_prepare_candidate_clone_routes_registered_source_through_bundle_bridge(
     assert not destination.exists()
 
 
+def test_prepare_candidate_clone_retries_exact_trusted_remote_after_local_bundle_failure(
+    registry_fixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from examples.mcp_server import candidate_clone as candidate_clone_module
+    from examples.mcp_server.registered_source_clone import RegisteredSourceCloneError
+
+    workspace, source, config_dir, journal_root, base = registry_fixture
+    bundle = tmp_path / "trusted-exact.bundle"
+    _git(source, "bundle", "create", str(bundle), "HEAD")
+    source_head_before = (source / ".git" / "HEAD").read_bytes()
+    source_config_before = (source / ".git" / "config").read_bytes()
+    remote_calls: list[tuple[Path, str]] = []
+
+    def fail_local_bundle(**kwargs: object) -> None:
+        assert kwargs["source_root"] == source.resolve()
+        assert kwargs["expected_sha"] == base
+        raise RegisteredSourceCloneError(
+            "local Git objects cannot be packed",
+            phase="create_bundle",
+            exit_code=1,
+        )
+
+    def trusted_remote(root: Path, sha: str, _path: Path) -> ManagedSourcePublication:
+        remote_calls.append((root, sha))
+        return ManagedSourcePublication(str(bundle), "a" * 64)
+
+    monkeypatch.setattr(
+        candidate_clone_module, "clone_registered_commit_via_bundle", fail_local_bundle
+    )
+    monkeypatch.setattr(
+        candidate_clone_module, "materialize_trusted_remote_bundle", trusted_remote
+    )
+    receipt = candidate_clone_module.prepare_candidate_clone(
+        "source-project",
+        "candidate/trusted-remote-after-unreadable-pack",
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    assert receipt.clean and receipt.registered
+    assert receipt.base_sha == base
+    assert _git(clone_root, "rev-parse", "HEAD") == base
+    assert remote_calls == [(source.resolve(), base)]
+    assert (source / ".git" / "HEAD").read_bytes() == source_head_before
+    assert (source / ".git" / "config").read_bytes() == source_config_before
+
+
+def test_prepare_candidate_clone_local_bundle_failure_denies_untrusted_remote(
+    registry_fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from examples.mcp_server import candidate_clone as candidate_clone_module
+    from examples.mcp_server.registered_source_clone import RegisteredSourceCloneError
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+
+    def fail_local_bundle(**_kwargs: object) -> None:
+        raise RegisteredSourceCloneError(
+            "local Git objects cannot be packed",
+            phase="create_bundle",
+            exit_code=1,
+        )
+
+    def unavailable_remote(
+        _root: Path, _sha: str, _path: Path
+    ) -> ManagedSourcePublication:
+        raise ManagedSourceBundleError("trusted remote identity unavailable")
+
+    monkeypatch.setattr(
+        candidate_clone_module, "clone_registered_commit_via_bundle", fail_local_bundle
+    )
+    monkeypatch.setattr(
+        candidate_clone_module, "materialize_trusted_remote_bundle", unavailable_remote
+    )
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_clone_module.prepare_candidate_clone(
+            "source-project",
+            "candidate/no-untrusted-bundle-fallback",
+            base,
+            config_dir=config_dir,
+            journal_root=journal_root,
+        )
+
+    assert exc_info.value.code == "SOURCE_REPO_STALE"
+    assert exc_info.value.retryable is True
+    assert exc_info.value.details is not None
+    assert exc_info.value.details["local_phase"] == "create_bundle"
+    clones = workspace / ".mcp-candidate-clones"
+    assert not any(path.name.startswith("candidate-") for path in clones.iterdir())
+
+
 def test_prepare_candidate_clone_refuses_dirty_existing_clone(registry_fixture) -> None:
     workspace, _source, config_dir, journal_root, base = registry_fixture
     receipt = prepare_candidate_clone(

@@ -1958,18 +1958,59 @@ def _prepare_candidate_locked(
                         timeout=120,
                     )
                 except RegisteredSourceCloneError as exc:
-                    raise _fail(
-                        "SOURCE_REPO_OWNERSHIP_BLOCKED"
-                        if exc.phase in {"source_trust", "resolve_source", "resolve_source_objects"}
-                        else "TOOL_EXECUTION_FAILED",
-                        "source repository could not be materialized through the trusted bundle bridge",
-                        retryable=exc.retryable,
-                        details={
-                            "operation": "clone source repository",
-                            "phase": exc.phase,
-                            "exit_code": exc.exit_code,
-                        },
-                    ) from exc
+                    if exc.phase == "create_bundle":
+                        # A readable ref can still point into an inaccessible
+                        # local object pack. Never chmod/fetch into the source
+                        # checkout: rebuild the exact commit from the trusted
+                        # remote inside private scratch storage instead.
+                        try:
+                            with tempfile.TemporaryDirectory(
+                                prefix=".candidate-remote-",
+                                dir=str(candidate_root.parent),
+                            ) as scratch_raw:
+                                remote_publication = materialize_trusted_remote_bundle(
+                                    source_root,
+                                    base_sha,
+                                    Path(scratch_raw) / "source.bundle",
+                                )
+                                _run_git(
+                                    candidate_root.parent,
+                                    [
+                                        "clone",
+                                        "--no-checkout",
+                                        remote_publication.path,
+                                        str(tmp),
+                                    ],
+                                    timeout=120,
+                                    operation="clone trusted remote bundle after local failure",
+                                )
+                        except ManagedSourceBundleError as remote_exc:
+                            raise _fail(
+                                "SOURCE_REPO_STALE",
+                                "local source bundle failed and the exact trusted remote base is unavailable",
+                                retryable=True,
+                                details={
+                                    "base_ref": requested_ref,
+                                    "base_sha": base_sha,
+                                    "local_phase": exc.phase,
+                                    "source_cause": classify_source_failure_message(
+                                        str(remote_exc)
+                                    ).value,
+                                },
+                            ) from remote_exc
+                    else:
+                        raise _fail(
+                            "SOURCE_REPO_OWNERSHIP_BLOCKED"
+                            if exc.phase in {"source_trust", "resolve_source", "resolve_source_objects"}
+                            else "TOOL_EXECUTION_FAILED",
+                            "source repository could not be materialized through the trusted bundle bridge",
+                            retryable=exc.retryable,
+                            details={
+                                "operation": "clone source repository",
+                                "phase": exc.phase,
+                                "exit_code": exc.exit_code,
+                            },
+                        ) from exc
             else:
                 try:
                     publication = ensure_managed_source_bundle(project, base_sha)
