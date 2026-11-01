@@ -94,8 +94,27 @@ def _resolve_compose_confirmation_target(
     later registry remap cannot retarget an already-issued confirmation.  The
     logical id is retained only as a safe display label for summaries/errors.
     """
+    # Preflight the deployment allowlist before issuing a one-shot
+    # confirmation token. Missing configuration must fail before an
+    # operator is asked to approve an action that cannot execute.
+    configured_roots = os.environ.get("MCP_ALLOWED_PROJECT_ROOTS", "")
+    if not any(root.strip() for root in configured_roots.split(",")):
+        raise ValueError("Docker Compose allowed project roots are not configured")
     resolved = _resolve_compose_project_dir(project_dir, client)
     label = project_dir if project_dir is not None and resolved != project_dir else None
+    if resolved is not None:
+        # Project ids are checked during resolution, but explicit paths must
+        # pass the same DockerClient policy before confirmation is created.
+        try:
+            client._validate_project_dir(resolved)
+        except (ValueError, RuntimeError):
+            if label:
+                raise ValueError(
+                    f"Registered project {label!r} is unavailable to Docker Compose"
+                ) from None
+            raise ValueError(
+                "Docker Compose project directory is unavailable or outside allowed roots"
+            ) from None
     return resolved, label
 
 
