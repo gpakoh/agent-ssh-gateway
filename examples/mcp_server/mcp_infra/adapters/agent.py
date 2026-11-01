@@ -449,7 +449,9 @@ def gateway_write_agent_task(
     worktree_path: str | None = None,
     base_ref: str | None = None,
     source_mode: Literal["committed_head", "dirty_worktree_snapshot"] | None = None,
-    workflow_phase: str | None = None,
+    workflow_phase: Literal[
+        "discovery", "validation", "implementation", "verification", "review", "cleanup"
+    ] | None = None,
 ) -> dict[str, Any]:
     """Create an OpenCode task; only project, task_id, agent and task are required.
 
