@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import shlex
+import signal
 import subprocess
 import threading
 import time
@@ -45,6 +46,46 @@ PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS = RUNNER_HARNESS_TIMEOUT_SECONDS * 2
 PROXY_RETRY_HARNESS_TIMEOUT_SECONDS = RUNNER_HARNESS_TIMEOUT_SECONDS * 2
 RUNTIME_TIMEOUT_HARNESS_TIMEOUT_SECONDS = RUNNER_HARNESS_TIMEOUT_SECONDS * 2
 TEST_STARTUP_MAX_PROXY_ATTEMPTS = 7
+
+
+def _run_bounded_shell_tree(
+    script: str, *, cwd: Path, timeout: float
+) -> subprocess.CompletedProcess[str]:
+    """Bound the entire shell subprocess group, including pipe-holding children.
+
+    subprocess.run(timeout=...) kills only its direct child. A descendant that
+    inherited stdout/stderr can keep communicate() blocked after the shell
+    has been killed, making the outer CI job run until its 70-minute timeout.
+    """
+    with subprocess.Popen(
+        ["sh", "-c", script],
+        cwd=cwd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    ) as process:
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            # Bounded drain: never wait indefinitely for an inherited pipe.
+            stdout, stderr = process.communicate(timeout=5)
+            raise subprocess.TimeoutExpired(
+                process.args, timeout, output=stdout, stderr=stderr
+            ) from None
+    return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+
+
+def test_bounded_shell_tree_kills_pipe_holding_descendant(tmp_path: Path) -> None:
+    """A background child holding stdout cannot strand the test harness."""
+    with pytest.raises(subprocess.TimeoutExpired):
+        _run_bounded_shell_tree(
+            "sleep 10 & exit 0", cwd=tmp_path, timeout=0.3
+        )
 
 
 def test_supervisor_scope_diff_disables_rename_detection() -> None:
@@ -1653,13 +1694,8 @@ def test_proxy_transport_marker_after_real_progress_does_not_retry(tmp_path, mon
         monkeypatch.setenv("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "5")
 
         script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
-        result = subprocess.run(
-            ["sh", "-c", script],
-            cwd=source,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+        result = _run_bounded_shell_tree(
+            script, cwd=source, timeout=RUNNER_HARNESS_TIMEOUT_SECONDS
         )
 
         assert result.returncode == 1
