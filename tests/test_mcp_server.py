@@ -131,6 +131,34 @@ def test_tools_manifest_gitea_close_pull_request_matches_invokable_schema():
 
 
 @patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "mcp_client_write"}, clear=False)
+def test_write_agent_task_schema_exposes_runtime_supported_source_modes():
+    """MCP clients must discover both source_mode choices before handoff."""
+    import importlib
+
+    import examples.mcp_server.server as srv
+
+    importlib.reload(srv)
+    tools = {tool.name: tool for tool in srv.mcp._tool_manager.list_tools()}
+    assert "write_agent_task" in tools
+    schema = tools["write_agent_task"].parameters
+    assert "source_mode" in schema["properties"]
+    assert "source_mode" not in schema.get("required", [])
+
+    def enums(node):
+        if isinstance(node, dict):
+            if "enum" in node:
+                yield set(node["enum"])
+            for value in node.values():
+                yield from enums(value)
+        elif isinstance(node, list):
+            for value in node:
+                yield from enums(value)
+
+    allowed = {"committed_head", "dirty_worktree_snapshot"}
+    assert allowed in list(enums(schema["properties"]["source_mode"]))
+
+
+@patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "mcp_client_write"}, clear=False)
 def test_git_commit_schema_exposes_optional_workspace_guards():
     """git_commit keeps message required, but exposes optional lease guards."""
     import importlib
