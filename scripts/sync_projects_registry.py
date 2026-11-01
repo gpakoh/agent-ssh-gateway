@@ -30,9 +30,11 @@ Without --apply, prints a dry-run summary only.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import urllib.request
@@ -176,6 +178,49 @@ def _find_parent(root_rel: str, existing_keys: list[str], text: str) -> str | No
     return None
 
 
+def _append_entries_if_unchanged(
+    yaml_path: Path, expected_text: str, new_entries: list[str]
+) -> None:
+    """Add only new bytes, never replace an independently edited registry.
+
+    The advisory lock serializes cooperating sync invocations. For other writers,
+    a byte-exact snapshot comparison rejects changes made during remote discovery.
+    O_APPEND ensures this process cannot truncate or overwrite existing records.
+    """
+    append_text = (
+        ("\n" if expected_text and not expected_text.endswith("\n") else "")
+        + "\n"
+        + "\n\n".join(new_entries)
+        + "\n"
+    )
+    flags = os.O_RDWR | os.O_APPEND | os.O_CLOEXEC | os.O_NOFOLLOW
+    fd = os.open(yaml_path, flags)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        opened = os.fstat(fd)
+        pathname = os.stat(yaml_path, follow_symlinks=False)
+        if not stat.S_ISREG(opened.st_mode) or (
+            opened.st_dev, opened.st_ino
+        ) != (pathname.st_dev, pathname.st_ino):
+            raise RuntimeError("registry path is not the locked regular file")
+        with os.fdopen(os.dup(fd), "rb") as source:
+            current = source.read()
+        if current != expected_text.encode("utf-8"):
+            raise RuntimeError("registry changed since snapshot; rerun dry-run")
+        appended = append_text.encode("utf-8")
+        count = os.write(fd, appended)
+        if count != len(appended):
+            raise RuntimeError("partial registry append; operator review required")
+        os.fsync(fd)
+        pathname_after = os.stat(yaml_path, follow_symlinks=False)
+        if (opened.st_dev, opened.st_ino) != (
+            pathname_after.st_dev, pathname_after.st_ino
+        ):
+            raise RuntimeError("registry was replaced during append; verify outcome")
+    finally:
+        os.close(fd)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true", help="Write changes to projects.yaml (default: dry run)")
@@ -254,9 +299,12 @@ def main() -> int:
         print("\nDry run only -- pass --apply to write projects.yaml")
         return 0
 
-    updated = text.rstrip("\n") + "\n\n" + "\n\n".join(new_entries) + "\n"
-    args.yaml.write_text(updated, encoding="utf-8")
-    print(f"\nWrote {len(new_entries)} new entries to {args.yaml}")
+    try:
+        _append_entries_if_unchanged(args.yaml, text, new_entries)
+    except (OSError, RuntimeError) as exc:
+        print(f"Registry sync aborted safely: {exc}", file=sys.stderr)
+        return 2
+    print(f"\nAppended {len(new_entries)} new entries to {args.yaml}")
     print("Restart agent-ssh-gateway-mcp.service to pick up the changes "
           "(the registry is loaded once per process).")
     return 0
