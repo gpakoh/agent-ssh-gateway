@@ -73,19 +73,29 @@ def _run_bounded_shell_tree(
             except ProcessLookupError:
                 pass
             # Bounded drain: never wait indefinitely for an inherited pipe.
-            stdout, stderr = process.communicate(timeout=5)
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+            # Never paste generated runner shell source into CI failures:
+            # it can be very large and may contain private test data.
             raise subprocess.TimeoutExpired(
-                process.args, timeout, output=stdout, stderr=stderr
+                ["sh", "-c", "<redacted test runner>"], timeout
             ) from None
     return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
 
 
 def test_bounded_shell_tree_kills_pipe_holding_descendant(tmp_path: Path) -> None:
     """A background child holding stdout cannot strand the test harness."""
-    with pytest.raises(subprocess.TimeoutExpired):
+    secret_marker = "harness-secret-must-not-enter-failure"
+    with pytest.raises(subprocess.TimeoutExpired) as exc_info:
         _run_bounded_shell_tree(
-            "sleep 10 & exit 0", cwd=tmp_path, timeout=0.3
+            f"printf '%s\\n' '{secret_marker}'; sleep 10 & exit 0",
+            cwd=tmp_path,
+            timeout=0.3,
         )
+    assert secret_marker not in str(exc_info.value)
+    assert secret_marker not in repr(exc_info.value)
 
 
 def test_supervisor_scope_diff_disables_rename_detection() -> None:
@@ -1755,13 +1765,8 @@ def test_startup_stall_retries_with_different_proxy(tmp_path, monkeypatch):
         )
 
         script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
-        result = subprocess.run(
-            ["sh", "-c", script],
-            cwd=source,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+        result = _run_bounded_shell_tree(
+            script, cwd=source, timeout=RUNNER_HARNESS_TIMEOUT_SECONDS
         )
 
         assert result.returncode == 0, result.stderr or result.stdout
