@@ -16,7 +16,7 @@ import os
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from agent_tasks import (
     agent_task_status as _agent_task_status,
@@ -448,7 +448,7 @@ def gateway_write_agent_task(
     constraints: str | None = None,
     worktree_path: str | None = None,
     base_ref: str | None = None,
-    source_mode: str | None = None,
+    source_mode: Literal["committed_head", "dirty_worktree_snapshot"] | None = None,
     workflow_phase: str | None = None,
 ) -> dict[str, Any]:
     """Create an OpenCode task; only project, task_id, agent and task are required.
