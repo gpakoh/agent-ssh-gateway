@@ -219,6 +219,44 @@ class TestComposeConfirmFlow:
         assert not srv._confirm_store._actions
 
     @pytest.mark.asyncio
+    async def test_missing_allowed_roots_rejects_confirmation_before_allocating_token(
+        self, clean_confirm_store, monkeypatch
+    ):
+        """No confirm token may be issued when the deployment allowlist is blank."""
+        import examples.mcp_server.server as srv
+
+        monkeypatch.setenv("MCP_ALLOWED_PROJECT_ROOTS", " , , ")
+        client = _AliasDockerClient()
+        with patch.object(srv, "DockerClient", lambda: client), patch.object(
+            srv, "_get_workspace_registry", return_value=_AliasRegistry("/allowed/infra-quart")
+        ):
+            result = await srv.docker_compose_up(project_dir="infra-quart")
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "INVALID_INPUT"
+        assert "allowed project roots" in result["error"]["message"]
+        assert not srv._confirm_store._actions
+
+    @pytest.mark.asyncio
+    async def test_explicit_disallowed_path_rejected_before_confirmation(
+        self, clean_confirm_store
+    ):
+        """Legacy raw paths receive the same allowlist preflight as registry ids."""
+        import examples.mcp_server.server as srv
+
+        client = _AliasDockerClient(reject_root=True)
+        secret_path = "/outside/private-compose"
+        with patch.object(srv, "DockerClient", lambda: client), patch.object(
+            srv, "_get_workspace_registry", return_value=_AliasRegistry("/allowed/infra-quart")
+        ):
+            result = await srv.docker_compose_up(project_dir=secret_path)
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "INVALID_INPUT"
+        assert secret_path not in str(result)
+        assert not srv._confirm_store._actions
+
+    @pytest.mark.asyncio
     async def test_bound_alias_redacts_root_from_confirmation_error(self, clean_confirm_store):
         import examples.mcp_server.server as srv
 
@@ -241,7 +279,7 @@ class TestComposeConfirmFlow:
         """Create action via MCP tool, confirm it, verify execution."""
         # 1. Create action
         action = await docker_compose_up(
-            project_dir="/app", services=["web"], detach=True, build=False, timeout=60
+            project_dir=None, services=["web"], detach=True, build=False, timeout=60
         )
         assert action["ok"] is True
         result = action["result"]
@@ -265,7 +303,7 @@ class TestComposeConfirmFlow:
     async def test_compose_restart_confirm_flow(self, clean_confirm_store):
         """Create action via MCP tool, confirm it, verify execution."""
         action = await docker_compose_restart(
-            project_dir="/app", services=["api"], timeout=15
+            project_dir=None, services=["api"], timeout=15
         )
         result = action["result"]
         assert result["status"] == "confirmation_required"
@@ -285,7 +323,7 @@ class TestComposeConfirmFlow:
     async def test_compose_build_confirm_flow(self, clean_confirm_store):
         """Create action via MCP tool, confirm it, verify execution."""
         action = await docker_compose_build(
-            project_dir="/app", services=["worker"], no_cache=True, timeout=120
+            project_dir=None, services=["worker"], no_cache=True, timeout=120
         )
         result = action["result"]
         assert result["status"] == "confirmation_required"
@@ -361,7 +399,7 @@ class TestComposeConfirmFlow:
     async def test_expired_token_rejected(self, clean_confirm_store):
         """Expired confirm token is rejected."""
         # Create action
-        action = await docker_compose_up(project_dir="/app")
+        action = await docker_compose_up(project_dir=None)
         action_result = action["result"]
 
         # Manually expire it
@@ -413,7 +451,7 @@ class TestAdminDoubleBarrier:
     async def test_non_admin_action_ok_without_scopes(self, clean_confirm_store):
         """Compose actions (required_scope=mcp:docker default) keep working
         without a token scope context, preserving existing behavior."""
-        action = await docker_compose_up(project_dir="/app")
+        action = await docker_compose_up(project_dir=None)
         action_result = action["result"]
         with patch("examples.mcp_server.server.DockerClient") as mock_dc:
             mock_instance = AsyncMock()
