@@ -621,6 +621,9 @@ async def test_project_board_projects_gitea_threads_into_four_columns(monkeypatc
     data = result["result"]
     assert data["count"] == 4
     assert data["truncated"] is False
+    assert data["count_exact"] is True
+    assert data["examined_thread_count"] == 4
+    assert all(col["count_exact"] for col in data["columns"])
     assert [col["state"] for col in data["columns"]] == [
         "open", "accepted", "waiting_review", "resolved",
     ]
@@ -671,13 +674,28 @@ async def test_board_and_inbox_isolate_unreadable_long_thread(monkeypatch):
         assert result["ok"] is True, result
         data = result["result"]
         assert data["truncated"] is True
+        assert data["count_exact"] is False
+        assert data["examined_thread_count"] == 2
         assert data["incomplete_thread_numbers"] == [1]
         assert data["count"] == 1
         if "columns" in data:
+            assert all(col["count_exact"] is False for col in data["columns"])
             assert [c["count"] for c in data["columns"]] == [0, 1, 0, 0]
         else:
             assert data["threads"][0]["number"] == 2
             assert data["threads"][0]["coord_state"] == "accepted"
+        # Backfill one requested slot beyond the first unreadable thread.
+        # No unverified state is invented and totals remain explicitly partial.
+        small = (await reader("agent-ssh-gateway", limit=1))["result"]
+        assert small["count"] == 1
+        assert small["count_exact"] is False
+        assert small["truncated"] is True
+        assert small["examined_thread_count"] == 2
+        assert small["incomplete_thread_numbers"] == [1]
+        if "columns" in small:
+            assert small["columns"][1]["cards"][0]["number"] == 2
+        else:
+            assert small["threads"][0]["number"] == 2
     with pytest.raises(core.CoordinationOutcomeUnknown, match="5000-row"):
         await core.open_thread(client, "gpakoh", "agent-ssh-gateway", 1)
 

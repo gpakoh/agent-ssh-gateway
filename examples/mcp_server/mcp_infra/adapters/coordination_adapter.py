@@ -71,6 +71,33 @@ async def _connection(tool: str, project: str, *, write: bool) -> tuple[str, str
     return owner, repo
 
 
+async def _verified_preview(
+    client: Any, owner: str, repo: str, all_threads: list[dict[str, Any]], limit: int,
+) -> tuple[list[dict[str, Any]], list[int], int]:
+    """Backfill unreadable threads from a capped lookahead, never invent states.
+
+    A long/unreadable first thread should not prevent the next healthy thread
+    from occupying a requested preview slot. Bounded to at most 2 * limit
+    issue-comment probes; remaining threads and all ambiguous states stay
+    outside the verified result.
+    """
+    verified: list[dict[str, Any]] = []
+    incomplete_numbers: list[int] = []
+    examined = 0
+    for item in all_threads[: 2 * limit]:
+        if len(verified) == limit:
+            break
+        examined += 1
+        state, incomplete = await preview_thread_state(
+            client, owner, repo, item["number"]
+        )
+        if incomplete or state is None:
+            incomplete_numbers.append(item["number"])
+            continue
+        verified.append({**item, "coord_state": state})
+    return verified, incomplete_numbers, examined
+
+
 async def coord_inbox(project: str, limit: int = 25) -> dict[str, Any]:
     """Show open/closed project threads and the latest verified coordination state."""
     tool = "coord_inbox"
@@ -80,24 +107,20 @@ async def coord_inbox(project: str, limit: int = 25) -> dict[str, Any]:
         owner, repo = await _connection(tool, project, write=False)
         async with server_attr("GiteaClient")(os.environ["GITEA_TOKEN"]) as client:
             all_threads, scan_truncated = await list_threads_preview(client, owner, repo)
-            threads = []
-            incomplete_thread_numbers = []
-            for item in all_threads[:limit]:
-                state, incomplete = await preview_thread_state(
-                    client, owner, repo, item["number"]
-                )
-                if incomplete or state is None:
-                    incomplete_thread_numbers.append(item["number"])
-                    continue
-                threads.append({**item, "coord_state": state})
+            threads, incomplete_thread_numbers, examined = await _verified_preview(
+                client, owner, repo, all_threads, limit
+            )
     except Exception as exc:
         return _fail(tool, exc)
+    truncated = scan_truncated or len(all_threads) > examined or bool(incomplete_thread_numbers)
     return tool_success(
         tool,
-        result={"project": repo, "threads": threads, "count": len(threads),
-                "truncated": scan_truncated or len(all_threads) > limit
-                or bool(incomplete_thread_numbers),
-                "incomplete_thread_numbers": incomplete_thread_numbers},
+        result={
+            "project": repo, "threads": threads, "count": len(threads),
+            "truncated": truncated, "count_exact": not truncated,
+            "examined_thread_count": examined,
+            "incomplete_thread_numbers": incomplete_thread_numbers,
+        },
         source="gitea",
     )
 
@@ -111,24 +134,22 @@ async def coord_board(project: str, limit: int = 25) -> dict[str, Any]:
         owner, repo = await _connection(tool, project, write=False)
         async with server_attr("GiteaClient")(os.environ["GITEA_TOKEN"]) as client:
             all_threads, scan_truncated = await list_threads_preview(client, owner, repo)
-            enriched = []
-            incomplete_thread_numbers = []
-            for item in all_threads[:limit]:
-                state, incomplete = await preview_thread_state(
-                    client, owner, repo, item["number"]
-                )
-                if incomplete or state is None:
-                    incomplete_thread_numbers.append(item["number"])
-                    continue
-                enriched.append({**item, "coord_state": state})
+            enriched, incomplete_thread_numbers, examined = await _verified_preview(
+                client, owner, repo, all_threads, limit
+            )
             columns = board_from_threads(enriched)
     except Exception as exc:
         return _fail(tool, exc)
+    truncated = scan_truncated or len(all_threads) > examined or bool(incomplete_thread_numbers)
+    # Counts are exact only after every thread/state was verified. Otherwise
+    # they are lower bounds across the observed sample, not global Kanban totals.
+    for column in columns:
+        column["count_exact"] = not truncated
     return tool_success(
         tool, result={
             "project": repo, "columns": columns, "count": len(enriched),
-            "truncated": scan_truncated or len(all_threads) > limit
-            or bool(incomplete_thread_numbers),
+            "truncated": truncated, "count_exact": not truncated,
+            "examined_thread_count": examined,
             "incomplete_thread_numbers": incomplete_thread_numbers,
             "note": "Gitea Issues is authoritative; resolved does not automatically close an Issue",
         }, source="gitea",
