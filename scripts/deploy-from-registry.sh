@@ -111,6 +111,16 @@ dump_health_failure_diagnostics() {
   fi
 }
 
+# Docker's 30s HEALTHCHECK cadence can lag an application that has just become
+# ready under runner contention. This is only evidence for a bounded grace
+# period, never permission to skip Docker's own health verdict.
+gateway_api_reports_ready() {
+  local container="$1"
+  docker exec "$container" python3 -c \
+    "import json, sys, urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8085/health', timeout=4)); sys.exit(0 if d.get('status') == 'ok' and d.get('ready') is True else 1)" \
+    >/dev/null 2>&1
+}
+
 wait_docker_health() {
   local name="$1" container="$2" timeout="$3"
   echo -n "  $name: "
@@ -132,6 +142,27 @@ wait_docker_health() {
       return 0
     fi
     if (( $(date +%s) - start >= timeout )); then
+      # A recently-ready gateway may still be awaiting Docker's next
+      # 30-second health sample. Give exactly one bounded sample window,
+      # but only when the authenticated-independent API body says ready.
+      # All other containers and missing/unknown states fail immediately.
+      if [ "$container" = "web-ssh-gateway" ] &&
+         { [ "$status" = "unhealthy" ] || [ "$status" = "starting" ]; } &&
+         gateway_api_reports_ready "$container"; then
+        local grace_start
+        grace_start=$(date +%s)
+        while (( $(date +%s) - grace_start < 36 )); do
+          sleep 2
+          status=$(docker inspect --format '{{.State.Health.Status}}' "$container" 2>/dev/null || echo "missing")
+          if [ "$status" = "healthy" ]; then
+            echo "OK (Docker health confirmed after late API readiness)"
+            return 0
+          fi
+          if [ "$status" != "starting" ] && [ "$status" != "unhealthy" ]; then
+            break
+          fi
+        done
+      fi
       echo "FAIL (status=$status after ${timeout}s)"
       dump_health_failure_diagnostics "$name" "$container"
       return 1
