@@ -159,6 +159,32 @@ def test_write_agent_task_schema_exposes_runtime_supported_source_modes():
 
 
 @patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "mcp_client_write"}, clear=False)
+def test_write_agent_task_schema_exposes_runtime_supported_workflow_phases():
+    """Invalid workflow phases must fail at MCP schema validation, before I/O."""
+    import importlib
+
+    import examples.mcp_server.server as srv
+    from examples.mcp_server.agent_tasks import WORKFLOW_PHASES
+
+    importlib.reload(srv)
+    tools = {tool.name: tool for tool in srv.mcp._tool_manager.list_tools()}
+    schema = tools["write_agent_task"].parameters
+    assert "workflow_phase" not in schema.get("required", [])
+
+    def enums(node):
+        if isinstance(node, dict):
+            if "enum" in node:
+                yield set(node["enum"])
+            for value in node.values():
+                yield from enums(value)
+        elif isinstance(node, list):
+            for value in node:
+                yield from enums(value)
+
+    assert set(WORKFLOW_PHASES) in list(enums(schema["properties"]["workflow_phase"]))
+
+
+@patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "mcp_client_write"}, clear=False)
 def test_git_commit_schema_exposes_optional_workspace_guards():
     """git_commit keeps message required, but exposes optional lease guards."""
     import importlib
