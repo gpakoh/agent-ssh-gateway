@@ -6,6 +6,7 @@ import shutil
 from pathlib import Path
 
 import pytest
+import yaml
 
 from app.workspace.registry import reset_registry
 from examples.mcp_server import candidate_orphan_finalize as module
@@ -203,6 +204,85 @@ def test_orphan_finalize_rejects_registry_reappearance(
 
     assert caught.value.code == "WORKSPACE_CONTENDED"
     assert root.is_dir()
+
+
+def _add_orphan_guard_registry_project(
+    config_dir: Path, *, project_id: str, entry: dict[str, object]
+) -> None:
+    registry_path = config_dir / "projects.yaml"
+    registry = yaml.safe_load(registry_path.read_text(encoding="utf-8"))
+    registry["projects"][project_id] = entry
+    registry_path.write_text(
+        yaml.safe_dump(registry, sort_keys=False), encoding="utf-8"
+    )
+    reset_registry()
+
+
+def test_orphan_finalize_ignores_valid_rootless_coordination_only_project(
+    registry_fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    branch = "candidate/orphan-coordination-only"
+    root, config_dir, journal_root, base, project_id = _orphanize(
+        registry_fixture, branch=branch
+    )
+    _add_orphan_guard_registry_project(
+        config_dir,
+        project_id="nod-shared",
+        entry={
+            "type": "coordination-only",
+            "gitea_repo": "gpakoh/nod-shared",
+            "description": "No filesystem root by design",
+        },
+    )
+    _mock_delivery(monkeypatch)
+
+    result = module.candidate_orphan_finalize(
+        project_id,
+        base,
+        branch,
+        "source-project",
+        config_dir=config_dir,
+        journal_root=journal_root,
+        reference_guard=_idle_guard,
+    )
+    assert result.directory_removed is True
+    assert not root.exists()
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"type": "python-service", "gitea_repo": "gpakoh/nod-shared"},
+        {"type": "coordination-only", "gitea_repo": "gpakoh/nod-shared", "root": ""},
+        {"type": "coordination-only", "gitea_repo": "gpakoh/nod-shared", "root_selector": "default"},
+        {"type": "coordination-only", "gitea_repo": "../outside"},
+        {"type": "coordination-only"},
+    ],
+)
+def test_orphan_finalize_rejects_other_unresolved_project_roots(
+    registry_fixture, monkeypatch: pytest.MonkeyPatch, entry: dict[str, object]
+) -> None:
+    branch = "candidate/orphan-invalid-rootless"
+    root, config_dir, journal_root, base, project_id = _orphanize(
+        registry_fixture, branch=branch
+    )
+    _add_orphan_guard_registry_project(
+        config_dir, project_id="ambiguous-project", entry=entry
+    )
+    _mock_delivery(monkeypatch)
+
+    with pytest.raises(CandidateCloneError, match="unresolved project root") as caught:
+        module.candidate_orphan_finalize(
+            project_id,
+            base,
+            branch,
+            "source-project",
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+    assert caught.value.code == "WORKSPACE_CONTENDED"
+    assert root.exists()
 
 
 def test_orphan_finalize_rejects_registered_descendant_root(

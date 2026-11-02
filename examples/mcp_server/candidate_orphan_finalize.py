@@ -14,6 +14,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -427,6 +428,23 @@ def _require_no_registered_descendants(config_dir: Path, candidate_root: Path) -
                     "workspace registry contains an unsafe project entry",
                     retryable=True,
                 )
+            # Gitea-only coordination projects have no filesystem root by
+            # contract. They cannot be descendants of a local candidate.
+            # Require an exact, path-free mapping; malformed rootless entries
+            # must still fail closed instead of being silently ignored.
+            repo_name = entry.get("gitea_repo")
+            if (
+                entry.get("type") == "coordination-only"
+                and "root" not in entry
+                and "root_selector" not in entry
+                and isinstance(repo_name, str)
+                and re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*",
+                    repo_name,
+                ) is not None
+                and repo_name.partition("/")[2] == registered_id
+            ):
+                continue
             raw_root = entry.get("root")
             selector = entry.get("root_selector", "default")
             if (
