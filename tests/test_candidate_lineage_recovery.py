@@ -258,6 +258,74 @@ def test_abort_legacy_prepared_cleanup_archives_only_journal(
     assert registry.read_bytes() == before
     assert marker.read_text(encoding="utf-8") == "preserve me"
 
+    # A lost response after archival must be independently reconcilable by an
+    # exact prior lease, without another mutation, registry change or cleanup.
+    archive = path.parent / finished["archive_name"]
+    archive_before = archive.read_bytes()
+    verified = module.abort_legacy_prepared_cleanup(
+        **kwargs, expected_tombstone_sha256=preview["tombstone_sha256"],
+    )
+    assert verified["outcome"] == "archived_verified"
+    assert verified["active_journal_present"] is False
+    assert verified["archive_name"] == archive.name
+    assert verified["journal_removed"] is True
+    assert verified["registry_mutated"] is False
+    assert verified["legacy_files_mutated"] is False
+    assert archive.read_bytes() == archive_before
+    assert registry.read_bytes() == before
+    assert marker.read_text(encoding="utf-8") == "preserve me"
+
+    with pytest.raises(CandidateCloneError) as unleased:
+        module.abort_legacy_prepared_cleanup(**kwargs)
+    assert unleased.value.code == "PROJECT_NOT_FOUND"
+    with pytest.raises(CandidateCloneError) as bad_lease:
+        module.abort_legacy_prepared_cleanup(**kwargs, expected_tombstone_sha256="not-a-sha")
+    assert bad_lease.value.code == "INVALID_INPUT"
+    with pytest.raises(CandidateCloneError) as bad_type:
+        module.abort_legacy_prepared_cleanup(**kwargs, expected_tombstone_sha256=17)
+    assert bad_type.value.code == "INVALID_INPUT"
+    with pytest.raises(CandidateCloneError) as repeat_apply:
+        module.abort_legacy_prepared_cleanup(
+            **kwargs, apply=True,
+            expected_tombstone_sha256=preview["tombstone_sha256"],
+            reason="Do not run archive mutation twice",
+            reference_guard=lambda: None,
+        )
+    assert repeat_apply.value.code == "PROJECT_NOT_FOUND"
+    with pytest.raises(CandidateCloneError) as wrong_lease:
+        module.abort_legacy_prepared_cleanup(
+            **kwargs, expected_tombstone_sha256="0" * 64,
+        )
+    assert wrong_lease.value.code == "WORKSPACE_CONTENDED"
+
+    # Ambiguous duplicate archives, corrupted bytes and a symlink may not
+    # masquerade as authenticated evidence of successful journal recovery.
+    duplicate = archive.with_name(
+        f"{path.stem}.legacy-aborted-{preview['tombstone_sha256'][:12]}-"
+        + "a" * 20 + ".json"
+    )
+    duplicate.write_bytes(archive_before)
+    with pytest.raises(CandidateCloneError) as duplicates:
+        module.abort_legacy_prepared_cleanup(
+            **kwargs, expected_tombstone_sha256=preview["tombstone_sha256"],
+        )
+    assert duplicates.value.code == "WORKSPACE_CONTENDED"
+    duplicate.unlink()
+    archive.write_bytes(archive_before + b" ")
+    with pytest.raises(CandidateCloneError) as changed:
+        module.abort_legacy_prepared_cleanup(
+            **kwargs, expected_tombstone_sha256=preview["tombstone_sha256"],
+        )
+    assert changed.value.code == "WORKSPACE_CONTENDED"
+    archive.unlink()
+    archive.symlink_to(marker)
+    with pytest.raises(CandidateCloneError) as symlink:
+        module.abort_legacy_prepared_cleanup(
+            **kwargs, expected_tombstone_sha256=preview["tombstone_sha256"],
+        )
+    assert symlink.value.code == "WORKSPACE_CONTENDED"
+    assert marker.read_text(encoding="utf-8") == "preserve me"
+
 
 def test_abort_legacy_prepared_cleanup_rejects_other_phase_and_managed_registry(
     lineage_fixture,
