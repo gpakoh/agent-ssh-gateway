@@ -321,6 +321,99 @@ def test_orphan_finalize_rejects_registered_descendant_root(
     assert root.is_dir()
 
 
+def test_orphan_finalize_denies_root_owned_generated_directory_before_journal(
+    registry_fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    branch = "candidate/orphan-root-owned"
+    root, config_dir, journal_root, base, project_id = _orphanize(
+        registry_fixture, branch=branch
+    )
+    (root / ".build-data/audit/artifact-staging").mkdir(parents=True)
+    (root / ".build-data/audit/artifacts").mkdir()
+    _mock_delivery(monkeypatch, entries=4)
+    real_access = module.os.access
+    blocked = root / ".build-data"
+
+    def deny_root_owned_staging(path, mode, *, effective_ids=False):
+        if Path(path) == blocked:
+            return False
+        return real_access(path, mode, effective_ids=effective_ids)
+
+    monkeypatch.setattr(module.os, "access", deny_root_owned_staging)
+    with pytest.raises(CandidateCloneError, match="host operator filesystem permission") as caught:
+        module.candidate_orphan_finalize(
+            project_id,
+            base,
+            branch,
+            "source-project",
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+    assert caught.value.code == "POLICY_DENIED"
+    assert caught.value.retryable is False
+    assert caught.value.details == {
+        "path": ".build-data",
+        "recovery_action": "host_operator_required",
+    }
+    assert (root / ".build-data/audit/artifacts").is_dir()
+    tombstone, _ = module._orphan_tombstone_path(journal_root, project_id)
+    assert module._read_orphan_tombstone(tombstone) is None
+
+    # With permission restored, the same unchanged original candidate is
+    # eligible for the normal exact-provenance path, not a blind retry.
+    monkeypatch.setattr(module.os, "access", real_access)
+    receipt = module.candidate_orphan_finalize(
+        project_id,
+        base,
+        branch,
+        "source-project",
+        config_dir=config_dir,
+        journal_root=journal_root,
+        reference_guard=_idle_guard,
+    )
+    assert receipt.directory_removed is True
+    assert not root.exists()
+
+
+def test_orphan_finalize_permission_error_during_remove_is_nonretryable(
+    registry_fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    branch = "candidate/orphan-rmtree-eacces"
+    root, config_dir, journal_root, base, project_id = _orphanize(
+        registry_fixture, branch=branch
+    )
+    _mock_delivery(monkeypatch)
+    real_rmtree = module.shutil.rmtree
+
+    def deny_removal(path: Path, *args, **kwargs) -> None:
+        if Path(path) == root:
+            raise PermissionError(13, "Permission denied", str(root))
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(module.shutil, "rmtree", deny_removal)
+    with pytest.raises(CandidateCloneError, match="host operator filesystem permission") as caught:
+        module.candidate_orphan_finalize(
+            project_id,
+            base,
+            branch,
+            "source-project",
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+    assert caught.value.code == "POLICY_DENIED"
+    assert caught.value.retryable is False
+    assert caught.value.details == {
+        "path": ".",
+        "recovery_action": "host_operator_required",
+    }
+    assert str(root) not in str(caught.value)
+    journal, _ = module._orphan_tombstone_path(journal_root, project_id)
+    assert module._read_orphan_tombstone(journal)["phase"] == "prepared"
+    assert root.exists()
+
+
 def test_orphan_finalize_retries_same_leased_directory_after_rmtree_failure(
     registry_fixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:

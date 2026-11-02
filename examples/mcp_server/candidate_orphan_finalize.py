@@ -537,6 +537,55 @@ def _prove_delivered_subset(
     return default.branch, default.sha, entries
 
 
+def _require_orphan_removal_permissions(candidate_root: Path) -> None:
+    """Fail before journaling when the current identity cannot remove the tree.
+
+    POSIX rmdir/unlink requires write+search permission on each *nonempty*
+    containing directory, and on the orphan's parent for the final rmdir.
+    Inspect real directories only: the prior delivered-subset proof rejects
+    unknown entries and this preflight must never follow symlinks.
+    """
+
+    def _require_writable(directory: Path, relative: str) -> None:
+        if not os.access(directory, os.W_OK | os.X_OK, effective_ids=True):
+            raise _fail(
+                "POLICY_DENIED",
+                "candidate orphan removal requires host operator filesystem permission",
+                details={"path": relative, "recovery_action": "host_operator_required"},
+                retryable=False,
+            )
+
+    _require_writable(candidate_root.parent, "..")
+
+    def _walk(directory: Path, relative: str) -> None:
+        try:
+            with os.scandir(directory) as children:
+                entries = list(children)
+        except OSError as exc:
+            raise _fail(
+                "WORKSPACE_CONTENDED",
+                "candidate orphan removal permissions could not be inspected",
+                retryable=True,
+            ) from exc
+
+        if entries:
+            _require_writable(directory, relative or ".")
+        for entry in entries:
+            try:
+                metadata = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise _fail(
+                    "WORKSPACE_CONTENDED",
+                    "candidate orphan removal entry could not be inspected",
+                    retryable=True,
+                ) from exc
+            if stat.S_ISDIR(metadata.st_mode):
+                child_relative = f"{relative}/{entry.name}" if relative else entry.name
+                _walk(Path(entry.path), child_relative)
+
+    _walk(candidate_root, "")
+
+
 def candidate_orphan_finalize(
     project_id: str,
     expected_base_sha: str,
@@ -641,6 +690,10 @@ def candidate_orphan_finalize(
                 base_sha=expected_base_sha,
                 expected_branch=expected_branch,
             )
+            # A root-owned historical directory can pass byte/Git proof yet
+            # be undeletable by the Gateway identity. Refuse BEFORE recording
+            # a prepared journal that would otherwise invite futile retries.
+            _require_orphan_removal_permissions(candidate_root)
             if tombstone is None:
                 tombstone = {
                     **identity,
@@ -669,8 +722,16 @@ def candidate_orphan_finalize(
             )
             if final_default_branch != default_branch or final_default_head != default_head:
                 raise _fail("WORKSPACE_CONTENDED", "trusted remote default changed during orphan finalization", retryable=True)
+            _require_orphan_removal_permissions(candidate_root)
             try:
                 shutil.rmtree(candidate_root)
+            except PermissionError as exc:
+                raise _fail(
+                    "POLICY_DENIED",
+                    "candidate orphan removal requires host operator filesystem permission",
+                    details={"path": ".", "recovery_action": "host_operator_required"},
+                    retryable=False,
+                ) from exc
             except OSError as exc:
                 raise _fail("TOOL_EXECUTION_FAILED", "candidate orphan directory removal did not complete", retryable=True) from exc
             if candidate_root.exists() or candidate_root.is_symlink():
