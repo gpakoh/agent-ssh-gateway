@@ -701,6 +701,138 @@ async def test_board_and_inbox_isolate_unreadable_long_thread(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_board_and_inbox_bounded_offset_pagination_without_false_totals(monkeypatch):
+    """Every verified page is reachable; no page claims global exact counts."""
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setattr(adapter, "_registered", lambda p: core.validate_project(p))
+    client = FakeClient()
+    for index in range(5):
+        key = f"paged-thread-issue-{index}-123"
+        await core.create_thread(
+            client, "gpakoh", "agent-ssh-gateway",
+            source_project="agent-ssh-gateway",
+            title=f"Paged {index}", body="Evidence", request_key=key,
+        )
+    monkeypatch.setattr(FakeClient, "__aenter__", _fake_aenter, raising=False)
+    monkeypatch.setattr(FakeClient, "__aexit__", _fake_aexit, raising=False)
+    monkeypatch.setattr(
+        adapter, "server_attr",
+        lambda name: (lambda _: client) if name == "GiteaClient" else None,
+    )
+
+    for reader in (adapter.coord_inbox, adapter.coord_board):
+        position = 0
+        numbers = []
+        for expected_next in (2, 4, None):
+            response = await reader("agent-ssh-gateway", limit=2, offset=position)
+            assert response["ok"] is True, response
+            data = response["result"]
+            assert data["offset"] == position
+            assert data["next_offset"] == expected_next
+            assert data["source_scan_truncated"] is False
+            assert data["count_exact"] is False
+            assert data["truncated"] is True
+            assert data["examined_thread_count"] == (2 if expected_next else 1)
+            if "threads" in data:
+                numbers.extend(t["number"] for t in data["threads"])
+            else:
+                numbers.extend(c["number"] for col in data["columns"] for c in col["cards"])
+                assert all(col["count_exact"] is False for col in data["columns"])
+            if expected_next is not None:
+                position = expected_next
+        assert sorted(numbers) == [1, 2, 3, 4, 5]
+        assert len(set(numbers)) == 5
+        for invalid in (-1, 500, True, "1"):
+            denied = await reader("agent-ssh-gateway", limit=2, offset=invalid)
+            assert denied["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_bounded_offset_skips_unknown_state_without_losing_following_threads(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setattr(adapter, "_registered", lambda p: core.validate_project(p))
+    client = FakeClient()
+    for index in range(4):
+        await core.create_thread(
+            client, "gpakoh", "agent-ssh-gateway",
+            source_project="agent-ssh-gateway",
+            title=f"Thread {index}", body="Evidence",
+            request_key=f"skip-long-history-{index}-123",
+        )
+    original_comments = client.list_issue_comments
+
+    async def repeated_comments(owner, repo, number, *, limit=50, page=1):
+        if number == 1:
+            return [{"id": x + 1, "body": "untrusted",
+                     "user": {"login": "other"}} for x in range(50)]
+        return await original_comments(owner, repo, number, limit=limit, page=page)
+
+    client.list_issue_comments = repeated_comments
+    monkeypatch.setattr(FakeClient, "__aenter__", _fake_aenter, raising=False)
+    monkeypatch.setattr(FakeClient, "__aexit__", _fake_aexit, raising=False)
+    monkeypatch.setattr(
+        adapter, "server_attr",
+        lambda name: (lambda _: client) if name == "GiteaClient" else None,
+    )
+    for reader in (adapter.coord_inbox, adapter.coord_board):
+        first = (await reader("agent-ssh-gateway", limit=1))["result"]
+        assert first["incomplete_thread_numbers"] == [1]
+        assert first["examined_thread_count"] == 2
+        assert first["next_offset"] == 2
+        second = (await reader("agent-ssh-gateway", limit=1, offset=2))["result"]
+        assert second["incomplete_thread_numbers"] == []
+        assert second["next_offset"] == 3
+        assert second["count_exact"] is False
+        third = (await reader("agent-ssh-gateway", limit=1, offset=3))["result"]
+        assert third["next_offset"] is None
+        assert third["count_exact"] is False
+
+
+@pytest.mark.asyncio
+async def test_paginated_board_explicitly_marks_source_window_exhaustion(monkeypatch):
+    """The 500-Issue ceiling is not a verified global total or a write lease."""
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setattr(adapter, "_registered", lambda p: core.validate_project(p))
+    client = FakeClient()
+    monkeypatch.setattr(FakeClient, "__aenter__", _fake_aenter, raising=False)
+    monkeypatch.setattr(FakeClient, "__aexit__", _fake_aexit, raising=False)
+    monkeypatch.setattr(
+        adapter, "server_attr",
+        lambda name: (lambda _: client) if name == "GiteaClient" else None,
+    )
+    async def capped_scan(_client, _owner, _repo):
+        return [
+            {
+                "number": i + 1, "title": f"Thread {i + 1}", "state": "open",
+                "url": f"https://git.example/issues/{i + 1}",
+                "source_project": "agent-ssh-gateway",
+                "request_key": f"bounded-thread-{i + 1}-123",
+                "updated_at": "2026-11-02T12:00:00Z",
+            }
+            for i in range(500)
+        ], True
+
+    seen = []
+
+    async def verify(_client, _owner, _repo, number):
+        seen.append(number)
+        return "open", False
+
+    monkeypatch.setattr(adapter, "list_threads_preview", capped_scan)
+    monkeypatch.setattr(adapter, "preview_thread_state", verify)
+    for reader in (adapter.coord_board, adapter.coord_inbox):
+        seen.clear()
+        data = (await reader("agent-ssh-gateway", limit=2, offset=498))["result"]
+        assert seen == [499, 500]
+        assert data["count"] == 2
+        assert data["offset"] == 498
+        assert data["next_offset"] is None
+        assert data["source_scan_truncated"] is True
+        assert data["truncated"] is True
+        assert data["count_exact"] is False
+
+
+@pytest.mark.asyncio
 async def test_coord_open_repeated_comment_page_is_bounded_and_untrusted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

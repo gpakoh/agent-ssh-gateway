@@ -73,6 +73,7 @@ async def _connection(tool: str, project: str, *, write: bool) -> tuple[str, str
 
 async def _verified_preview(
     client: Any, owner: str, repo: str, all_threads: list[dict[str, Any]], limit: int,
+    offset: int = 0,
 ) -> tuple[list[dict[str, Any]], list[int], int]:
     """Backfill unreadable threads from a capped lookahead, never invent states.
 
@@ -84,7 +85,7 @@ async def _verified_preview(
     verified: list[dict[str, Any]] = []
     incomplete_numbers: list[int] = []
     examined = 0
-    for item in all_threads[: 2 * limit]:
+    for item in all_threads[offset : offset + 2 * limit]:
         if len(verified) == limit:
             break
         examined += 1
@@ -98,26 +99,31 @@ async def _verified_preview(
     return verified, incomplete_numbers, examined
 
 
-async def coord_inbox(project: str, limit: int = 25) -> dict[str, Any]:
+async def coord_inbox(project: str, limit: int = 25, offset: int = 0) -> dict[str, Any]:
     """Show open/closed project threads and the latest verified coordination state."""
     tool = "coord_inbox"
     try:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 30:
             raise ValueError("limit must be an integer from 1 to 30")
+        if type(offset) is not int or not 0 <= offset < 500:
+            raise ValueError("offset must be an integer from 0 to 499")
         owner, repo = await _connection(tool, project, write=False)
         async with server_attr("GiteaClient")(os.environ["GITEA_TOKEN"]) as client:
             all_threads, scan_truncated = await list_threads_preview(client, owner, repo)
             threads, incomplete_thread_numbers, examined = await _verified_preview(
-                client, owner, repo, all_threads, limit
+                client, owner, repo, all_threads, limit, offset
             )
     except Exception as exc:
         return _fail(tool, exc)
-    truncated = scan_truncated or len(all_threads) > examined or bool(incomplete_thread_numbers)
+    next_offset = offset + examined if offset + examined < len(all_threads) else None
+    truncated = scan_truncated or offset > 0 or next_offset is not None or bool(incomplete_thread_numbers)
     return tool_success(
         tool,
         result={
             "project": repo, "threads": threads, "count": len(threads),
             "truncated": truncated, "count_exact": not truncated,
+            "offset": offset, "next_offset": next_offset,
+            "source_scan_truncated": scan_truncated,
             "examined_thread_count": examined,
             "incomplete_thread_numbers": incomplete_thread_numbers,
         },
@@ -125,22 +131,25 @@ async def coord_inbox(project: str, limit: int = 25) -> dict[str, Any]:
     )
 
 
-async def coord_board(project: str, limit: int = 25) -> dict[str, Any]:
+async def coord_board(project: str, limit: int = 25, offset: int = 0) -> dict[str, Any]:
     """Read the project's Gitea-backed Kanban columns without changing issues."""
     tool = "coord_board"
     try:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 30:
             raise ValueError("limit must be an integer from 1 to 30")
+        if type(offset) is not int or not 0 <= offset < 500:
+            raise ValueError("offset must be an integer from 0 to 499")
         owner, repo = await _connection(tool, project, write=False)
         async with server_attr("GiteaClient")(os.environ["GITEA_TOKEN"]) as client:
             all_threads, scan_truncated = await list_threads_preview(client, owner, repo)
             enriched, incomplete_thread_numbers, examined = await _verified_preview(
-                client, owner, repo, all_threads, limit
+                client, owner, repo, all_threads, limit, offset
             )
             columns = board_from_threads(enriched)
     except Exception as exc:
         return _fail(tool, exc)
-    truncated = scan_truncated or len(all_threads) > examined or bool(incomplete_thread_numbers)
+    next_offset = offset + examined if offset + examined < len(all_threads) else None
+    truncated = scan_truncated or offset > 0 or next_offset is not None or bool(incomplete_thread_numbers)
     # Counts are exact only after every thread/state was verified. Otherwise
     # they are lower bounds across the observed sample, not global Kanban totals.
     for column in columns:
@@ -149,6 +158,8 @@ async def coord_board(project: str, limit: int = 25) -> dict[str, Any]:
         tool, result={
             "project": repo, "columns": columns, "count": len(enriched),
             "truncated": truncated, "count_exact": not truncated,
+            "offset": offset, "next_offset": next_offset,
+            "source_scan_truncated": scan_truncated,
             "examined_thread_count": examined,
             "incomplete_thread_numbers": incomplete_thread_numbers,
             "note": "Gitea Issues is authoritative; resolved does not automatically close an Issue",
