@@ -49,6 +49,15 @@ from examples.mcp_server.project_registry_control import project_registry_mutati
 
 _ORPHAN_JOURNAL_DIR = "candidate-orphan-finalize"
 _ORPHAN_TOMBSTONE_MAX_BYTES = 64 * 1024
+# Some historical Site Audit orphan tails retained only empty staging
+# directories after Git metadata was lost. Never whitelist files/symlinks:
+# anything containing data must still fail the delivered-subset guard.
+_SITE_AUDIT_GENERATED_DIRS = frozenset({
+    ".build-data",
+    ".build-data/audit",
+    ".build-data/audit/artifact-staging",
+    ".build-data/audit/artifacts",
+})
 
 
 @dataclass(frozen=True)
@@ -289,7 +298,13 @@ def _tree_manifest(repo: Path, base_sha: str) -> dict[str, tuple[str, str, str]]
     return manifest
 
 
-def _verify_subset(candidate_root: Path, reference_repo: Path, base_sha: str) -> int:
+def _verify_subset(
+    candidate_root: Path,
+    reference_repo: Path,
+    base_sha: str,
+    *,
+    allow_empty_site_audit_staging: bool = False,
+) -> int:
     manifest = _tree_manifest(reference_repo, base_sha)
     verified = 0
 
@@ -303,6 +318,26 @@ def _verify_subset(candidate_root: Path, reference_repo: Path, base_sha: str) ->
             rel = f"{prefix}/{entry.name}" if prefix else entry.name
             expected = manifest.get(rel)
             if expected is None:
+                if allow_empty_site_audit_staging and rel in _SITE_AUDIT_GENERATED_DIRS:
+                    # Never follow a symlink or accept a file at a generated
+                    # directory name; descendants must be whitelisted too.
+                    try:
+                        generated_stat = entry.stat(follow_symlinks=False)
+                    except OSError as exc:
+                        raise _fail(
+                            "WORKSPACE_CONTENDED",
+                            "candidate orphan generated directory cannot be inspected",
+                            retryable=True,
+                        ) from exc
+                    if not stat.S_ISDIR(generated_stat.st_mode):
+                        raise _fail(
+                            "WORKSPACE_CONTENDED",
+                            "candidate orphan contains content not present in the delivered base tree",
+                            details={"path": rel},
+                        )
+                    verified += 1
+                    _walk(Path(entry.path), rel)
+                    continue
                 raise _fail(
                     "WORKSPACE_CONTENDED",
                     "candidate orphan contains content not present in the delivered base tree",
@@ -475,7 +510,12 @@ def _prove_delivered_subset(
                 "candidate base commit is not contained in the trusted remote default history",
                 retryable=False,
             )
-        entries = _verify_subset(candidate_root, repo, base_sha)
+        entries = _verify_subset(
+            candidate_root,
+            repo,
+            base_sha,
+            allow_empty_site_audit_staging=(source_project == "site-audit-platform"),
+        )
     return default.branch, default.sha, entries
 
 
