@@ -48,6 +48,71 @@ def _mock_delivery(monkeypatch: pytest.MonkeyPatch, *, entries: int = 1) -> None
     )
 
 
+def test_orphan_subset_accepts_only_empty_site_audit_staging_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lost-Git Site Audit tails may contain four generated EMPTY dirs."""
+    root = tmp_path / "orphan"
+    (root / ".build-data/audit/artifact-staging").mkdir(parents=True)
+    (root / ".build-data/audit/artifacts").mkdir()
+    monkeypatch.setattr(module, "_tree_manifest", lambda *_: {})
+
+    with pytest.raises(CandidateCloneError, match="content not present"):
+        module._verify_subset(root, tmp_path, "a" * 40)
+
+    assert (
+        module._verify_subset(
+            root, tmp_path, "a" * 40, allow_empty_site_audit_staging=True
+        )
+        == 4
+    )
+
+
+@pytest.mark.parametrize(
+    ("extra", "as_symlink"),
+    [
+        (".build-data/audit/artifacts/proof.txt", False),
+        (".build-data/audit/artifact-staging/hidden-file", False),
+        (".build-data/audit/other", False),
+        (".build-data/audit/artifacts/link", True),
+    ],
+)
+def test_orphan_subset_never_discards_untracked_bytes_or_unexpected_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra: str, as_symlink: bool
+) -> None:
+    root = tmp_path / "orphan"
+    (root / ".build-data/audit/artifact-staging").mkdir(parents=True)
+    (root / ".build-data/audit/artifacts").mkdir()
+    target = root / extra
+    if as_symlink:
+        target.symlink_to(tmp_path / "elsewhere")
+    elif "." in target.name or target.name == "hidden-file":
+        target.write_bytes(b"preserve original bytes")
+    else:
+        target.mkdir()
+    monkeypatch.setattr(module, "_tree_manifest", lambda *_: {})
+
+    with pytest.raises(CandidateCloneError, match="content not present"):
+        module._verify_subset(
+            root, tmp_path, "a" * 40, allow_empty_site_audit_staging=True
+        )
+    assert target.is_symlink() if as_symlink else target.exists()
+
+
+def test_orphan_subset_rejects_symlink_instead_of_generated_staging_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "orphan"
+    (root / ".build-data/audit").mkdir(parents=True)
+    (root / ".build-data/audit/artifacts").symlink_to(tmp_path / "other-dir")
+    monkeypatch.setattr(module, "_tree_manifest", lambda *_: {})
+
+    with pytest.raises(CandidateCloneError):
+        module._verify_subset(
+            root, tmp_path, "a" * 40, allow_empty_site_audit_staging=True
+        )
+
+
 def test_orphan_finalize_removes_exact_unregistered_no_git_tail_and_is_idempotent(
     registry_fixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -327,6 +392,25 @@ def test_delivered_subset_proof_requires_base_in_remote_default_history(
     assert default_branch == "main"
     assert proven_head == default_head
     assert entries == 1
+
+    (orphan / ".build-data/audit/artifact-staging").mkdir(parents=True)
+    (orphan / ".build-data/audit/artifacts").mkdir()
+    with pytest.raises(CandidateCloneError, match="content not present"):
+        module._prove_delivered_subset(
+            source_project="source-project",
+            source_root=source,
+            candidate_root=orphan,
+            base_sha=base,
+            expected_branch="candidate/orphan-proof",
+        )
+    _branch, _head, site_audit_entries = module._prove_delivered_subset(
+        source_project="site-audit-platform",
+        source_root=source,
+        candidate_root=orphan,
+        base_sha=base,
+        expected_branch="candidate/orphan-proof",
+    )
+    assert site_audit_entries == 5
 
 
 def test_subset_proof_accepts_only_entries_from_exact_git_tree(tmp_path: Path) -> None:
