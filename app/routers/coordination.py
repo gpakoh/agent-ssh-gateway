@@ -106,8 +106,10 @@ class _ReadOnlyGitea:
     async def list_issues(
         self, owner: str, repo: str, *, state: str, limit: int, page: int
     ) -> object:
+        # Gitea includes pull requests in /issues unless filtered BEFORE
+        # pagination. Keep the browser projection aligned with the MCP client.
         return await self._get(
-            f"repos/{owner}/{repo}/issues", state=state, limit=limit, page=page
+            f"repos/{owner}/{repo}/issues", state=state, type="issues", limit=limit, page=page
         )
 
     async def get_issue(self, owner: str, repo: str, number: int) -> object:
@@ -172,12 +174,16 @@ async def browser_coordination_board(
                 columns = board_from_threads(cards)
     except (TimeoutError, httpx.HTTPError, ValueError, TypeError, KeyError) as exc:
         raise _upstream_error(exc) from exc
+    truncated = scanned_truncated or len(issues) > limit or bool(incomplete_thread_numbers)
+    for column in columns:
+        column["count_exact"] = not truncated
     data = {
         "project": repo,
         "columns": columns,
         "count": len(cards),
-        "truncated": scanned_truncated or len(issues) > limit
-        or bool(incomplete_thread_numbers),
+        "truncated": truncated,
+        "count_exact": not truncated,
+        "source_scan_truncated": scanned_truncated,
         "incomplete_thread_numbers": incomplete_thread_numbers,
         "source_origin": f"{urlsplit(base).scheme}://{urlsplit(base).netloc}",
         "read_only": True,
