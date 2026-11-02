@@ -70,6 +70,9 @@ def test_postdeploy_verifier_has_single_scoped_responsibility() -> None:
     assert 'running_sha="$(docker exec "$name" printenv BUILD_SHA)"' in script
     assert "sshd -T -C user=mcpuser,host=localhost,addr=127.0.0.1" in script
     assert "authenticationmethods publickey" in script
+    # No grep -q pipeline under pipefail: it may falsely reject a good setting.
+    assert 'grep -Fqx "$setting" <<< "$effective"' in script
+    assert '| grep -Fqx "$setting"' not in script
     assert 'grep -Eq "^mcpuser:NP:" /etc/shadow' in script
     assert "docker run" not in script
 

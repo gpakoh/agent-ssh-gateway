@@ -22,7 +22,9 @@ verify_live_executor() {
     "permitemptypasswords no" \
     "pubkeyauthentication yes" \
     "authenticationmethods publickey"; do
-    if ! printf '%s\n' "$effective" | grep -Fqx "$setting"; then
+    # Avoid grep -q exiting before printf under pipefail: a producer SIGPIPE
+    # must never make a present SSHD security setting look absent.
+    if ! grep -Fqx "$setting" <<< "$effective"; then
       echo "::error::$name missing effective setting: $setting" >&2
       return 1
     fi
