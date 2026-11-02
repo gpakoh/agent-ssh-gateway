@@ -101,6 +101,44 @@ async def docker_inspect(name: str) -> dict:
 
 
 @mcp.tool()
+async def docker_network_ls(name: str | None = None, limit: int = 50) -> dict:
+    """Read-only exact-name and bounded Docker network inventory."""
+    client = _get_client()
+    try:
+        rows = await client.network_ls(name=name, limit=limit)
+    except ValueError as exc:
+        return tool_error("docker_network_ls", "INVALID_INPUT", str(exc), source="docker")
+    except RuntimeError:
+        return tool_error(
+            "docker_network_ls", "DOCKER_COMMAND_FAILED",
+            "network inventory could not be verified", source="docker",
+        )
+    return tool_success(
+        "docker_network_ls",
+        {"networks": rows, "count": len(rows), "query_name": name,
+         "query_status": "unknown" if client.last_truncated or name is None
+                         else "present" if rows else "absent"},
+        source="docker", truncated=client.last_truncated, redacted=True,
+    )
+
+
+@mcp.tool()
+async def docker_network_inspect(name: str) -> dict:
+    """Read-only network identity and attached container IDs; no topology."""
+    client = _get_client()
+    try:
+        data = await client.network_inspect(name)
+    except ValueError as exc:
+        return tool_error("docker_network_inspect", "INVALID_INPUT", str(exc), source="docker")
+    except RuntimeError:
+        return tool_error(
+            "docker_network_inspect", "DOCKER_COMMAND_FAILED",
+            "network details could not be verified", source="docker",
+        )
+    return tool_success("docker_network_inspect", data, source="docker", redacted=True)
+
+
+@mcp.tool()
 async def docker_logs(container: str, tail: int = 200) -> dict:
     """Fetch logs from a running container as {"lines": [...], "count": N}.
 

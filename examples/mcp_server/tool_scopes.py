@@ -203,6 +203,8 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "docker_ps": ["mcp:docker"],
     "docker_images": ["mcp:docker"],
     "docker_inspect": ["mcp:docker"],
+    "docker_network_ls": ["mcp:docker"],
+    "docker_network_inspect": ["mcp:docker"],
     "docker_logs": ["mcp:docker"],
     "docker_stats": ["mcp:docker"],
     "docker_site_audit_deploy_status": ["mcp:docker"],

@@ -40,6 +40,10 @@ IMAGE_TAG_RE = re.compile(r"^[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+$")
 IMAGE_REF_RE = re.compile(r"^[a-zA-Z0-9._/-]+(:[a-zA-Z0-9._-]+)?$")
 VOLUME_NAME_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
 NETWORK_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
+_NETWORK_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+_NETWORK_METADATA_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,31}$")
+_NETWORK_LABEL_ALLOW = frozenset({"com.docker.compose.project", "com.docker.compose.network"})
+_SAFE_NETWORK_LABEL_VALUE = re.compile(r"^[a-zA-Z0-9_.-]{1,128}$")
 
 EXEC_ARGV_COMMAND_DENYLIST: set[str] = {"env", "printenv"}
 EXEC_ARGV_PATTERN_DENYLIST: set[str] = {
@@ -420,6 +424,130 @@ class DockerClient:
         rows, total = self._truncate_rows(self._parse_json_lines(result), limit)
         self.last_truncated = output_truncated or total > len(rows)
         return rows
+
+    async def network_ls(
+        self, name: str | None = None, limit: int = 50,
+    ) -> list[dict]:
+        """Bounded configured-daemon inventory; never returns raw network labels."""
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("network limit must be between 1 and 100")
+        if name is not None:
+            if not isinstance(name, str):
+                raise ValueError("network name must be a string")
+            self._validate_network_name(name)
+        argv = [DOCKER_BIN, "network", "ls", "--no-trunc", "--format", "json"]
+        if name is not None:
+            # Docker's name filter is regex; escape exact user-supplied names.
+            argv.extend(["--filter", f"name=^{re.escape(name)}$"])
+        output = await self._run(argv)
+        cut = self.last_output_truncated
+        lines = [line for line in output.splitlines() if line.strip()]
+        if cut:
+            lines = [line for line in lines if line != "[output truncated]"]
+        parsed = self._parse_json_lines("\n".join(lines))
+        if not cut and len(parsed) != len(lines):
+            raise RuntimeError("network inventory returned malformed JSON")
+        rows: list[dict] = []
+        for item in parsed:
+            network_name = item.get("Name")
+            network_id = item.get("ID")
+            if not isinstance(network_name, str) or not NETWORK_NAME_RE.fullmatch(network_name):
+                raise RuntimeError("network inventory returned an unverifiable name")
+            if not isinstance(network_id, str) or not _NETWORK_ID_RE.fullmatch(network_id):
+                raise RuntimeError("network inventory returned an unverifiable full ID")
+            driver, scope = item.get("Driver"), item.get("Scope")
+            if (
+                not isinstance(driver, str) or not _NETWORK_METADATA_RE.fullmatch(driver)
+                or not isinstance(scope, str) or not _NETWORK_METADATA_RE.fullmatch(scope)
+            ):
+                raise RuntimeError("network inventory metadata is unverified")
+            if name is not None and network_name != name:
+                # An unmatched row means even an empty exact-name filter result
+                # cannot be trusted as proof of absence.
+                raise RuntimeError("network inventory did not honor exact-name filter")
+            rows.append({
+                "id": network_id, "name": network_name,
+                "driver": driver, "scope": scope,
+            })
+        self.last_truncated = cut or len(rows) > limit
+        self.last_redacted = True
+        return rows[:limit]
+
+    async def network_inspect(self, name: str) -> dict:
+        """Exact network identity and attached IDs, without topology or secrets.
+
+        Absence is proven only by Docker's exact "No such network" diagnostic;
+        any other command/format error remains unknown, not an absent network.
+        """
+        if not isinstance(name, str):
+            raise ValueError("network name must be a string")
+        if not _NETWORK_ID_RE.fullmatch(name):
+            self._validate_network_name(name)
+        try:
+            output = await self._run([DOCKER_BIN, "network", "inspect", name])
+        except RuntimeError as exc:
+            if str(exc).strip().endswith(f"No such network: {name}"):
+                self.last_truncated = False
+                return {"status": "absent", "network": None}
+            raise
+        if self.last_output_truncated:
+            raise RuntimeError("network inspect output is incomplete")
+        try:
+            parsed = json.loads(output)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("network inspect output is invalid JSON") from exc
+        if not isinstance(parsed, list) or len(parsed) != 1 or not isinstance(parsed[0], dict):
+            raise RuntimeError("network inspect returned an unverifiable identity")
+        item = parsed[0]
+        network_id, network_name = item.get("Id"), item.get("Name")
+        if not isinstance(network_id, str) or not _NETWORK_ID_RE.fullmatch(network_id):
+            raise RuntimeError("network inspect returned an invalid full ID")
+        if not isinstance(network_name, str) or not NETWORK_NAME_RE.fullmatch(network_name):
+            raise RuntimeError("network inspect returned an invalid name")
+        if name not in {network_id, network_name}:
+            raise RuntimeError("network inspect identity differs from requested network")
+        driver, scope, internal = item.get("Driver"), item.get("Scope"), item.get("Internal")
+        if (
+            not isinstance(driver, str) or not _NETWORK_METADATA_RE.fullmatch(driver)
+            or not isinstance(scope, str) or not _NETWORK_METADATA_RE.fullmatch(scope)
+            or type(internal) is not bool
+        ):
+            raise RuntimeError("network inspect metadata is unverified")
+        attached = item.get("Containers")
+        if not isinstance(attached, dict):
+            raise RuntimeError("network attached-container inventory is not provable")
+        if any(not isinstance(cid, str) or not _NETWORK_ID_RE.fullmatch(cid) for cid in attached):
+            raise RuntimeError("network inspect contains invalid attached-container IDs")
+        if len(attached) > 100:
+            raise RuntimeError("network has more than 100 attachments; inventory not complete")
+        labels = item.get("Labels")
+        if labels is None:
+            labels = {}
+        if not isinstance(labels, dict):
+            raise RuntimeError("network labels are malformed")
+        allowed_labels = {
+            key: value
+            for key, value in labels.items()
+            if key in _NETWORK_LABEL_ALLOW
+            and isinstance(value, str)
+            and _SAFE_NETWORK_LABEL_VALUE.fullmatch(value)
+        }
+        self.last_truncated = False
+        self.last_redacted = True
+        return {
+            "status": "present",
+            "network": {
+                "id": network_id, "name": network_name,
+                "driver": driver,
+                "scope": scope,
+                "internal": internal,
+                "attached_container_ids": sorted(attached),
+                "attached_count": len(attached),
+                "attachments_complete": True,
+                "labels": allowed_labels,
+                "other_label_values_redacted": len(allowed_labels) != len(labels),
+            },
+        }
 
     async def inspect(
         self,

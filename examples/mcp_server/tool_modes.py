@@ -149,6 +149,8 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "docker_ps",
         "docker_images",
         "docker_inspect",
+        "docker_network_ls",
+        "docker_network_inspect",
         "docker_logs",
         "docker_stats",
         "docker_site_audit_deploy_status",
