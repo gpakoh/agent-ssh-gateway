@@ -519,6 +519,49 @@ async def docker_images(limit: int = 50) -> dict[str, Any]:
         source="docker",
     )
 
+async def docker_network_ls(name: str | None = None, limit: int = 50) -> dict[str, Any]:
+    """List verified Docker networks, bound to the configured daemon endpoint."""
+    try:
+        client = _docker_client()
+        rows = await client.network_ls(name=name, limit=limit)
+    except ValueError as exc:
+        return tool_error(tool="docker_network_ls", code="INVALID_INPUT", message=str(exc), source="docker")
+    except RuntimeError:
+        return tool_error(tool="docker_network_ls", code="DOCKER_COMMAND_FAILED",
+                          message="network inventory could not be verified", source="docker")
+    truncated = client.last_truncated
+    return tool_success(
+        "docker_network_ls",
+        result={
+            "networks": rows, "count": len(rows), "query_name": name,
+            "query_status": (
+                "unknown" if truncated or name is None
+                else "present" if rows else "absent"
+            ),
+            "inventory": _docker_inventory_scope(truncated=truncated),
+        },
+        truncated=truncated, redacted=True, source="docker",
+    )
+
+
+async def docker_network_inspect(name: str) -> dict[str, Any]:
+    """Inspect exact network ID and attachment IDs without IPs/host paths."""
+    try:
+        client = _docker_client()
+        data = await client.network_inspect(name)
+    except ValueError as exc:
+        return tool_error(tool="docker_network_inspect", code="INVALID_INPUT",
+                          message=str(exc), source="docker")
+    except RuntimeError:
+        return tool_error(tool="docker_network_inspect", code="DOCKER_COMMAND_FAILED",
+                          message="network details could not be verified", source="docker")
+    return tool_success(
+        "docker_network_inspect",
+        result={**data, "inventory": _docker_inventory_scope(truncated=False)},
+        redacted=True, source="docker",
+    )
+
+
 async def docker_inspect(name: str) -> dict[str, Any]:
     """Inspect a container by name or ID. Returns structured metadata
     reduced to a strict allowlist (host paths, PID, IPs, network/endpoint
@@ -7008,6 +7051,8 @@ def register_all() -> None:
         "docker_ps",
         "docker_images",
         "docker_inspect",
+        "docker_network_ls",
+        "docker_network_inspect",
         "docker_logs",
         "docker_stats",
         "docker_compose_ps",
