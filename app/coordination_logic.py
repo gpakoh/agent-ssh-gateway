@@ -156,6 +156,60 @@ async def _pages(
     )
 
 
+async def _preview_comment_pages(
+    fetch: Any, *, max_pages: int = 2
+) -> tuple[list[dict[str, Any]], bool, str | None, int]:
+    """Read bounded comment pages and expose why a cursor is not trustworthy.
+
+    Unlike the exhaustive mutation scan, this is only for read-only views.
+    A repeated or reordered comment ID must never make a page look complete.
+    """
+    observed: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    last_id = 0
+    for page in range(1, max_pages + 1):
+        rows = await fetch(page)
+        if (
+            not isinstance(rows, list)
+            or len(rows) > _PAGE_SIZE
+            or any(not isinstance(row, dict) for row in rows)
+        ):
+            raise ValueError("Gitea collection returned invalid rows")
+        overlap = False
+        invalid_id = False
+        out_of_order = False
+        new_ids = 0
+        for row in rows:
+            identifier = row.get("id")
+            if type(identifier) is not int or identifier < 1:
+                invalid_id = True
+                observed.append(row)
+                continue
+            if identifier in seen:
+                overlap = True
+                continue
+            if identifier <= last_id:
+                out_of_order = True
+            seen.add(identifier)
+            last_id = identifier
+            new_ids += 1
+            observed.append(row)
+        if invalid_id:
+            return observed, True, "unverifiable_comment_ids", page
+        if overlap:
+            reason = (
+                "non_progressing_comment_cursor" if new_ids == 0
+                else "overlapping_comment_pages"
+            )
+            return observed, True, reason, page
+        if out_of_order:
+            return observed, True, "non_monotonic_comment_cursor", page
+        if len(rows) < _PAGE_SIZE:
+            return observed, False, None, page
+    # The next page may contain more comments; do not claim a final state.
+    return observed, True, "bounded_comment_window", max_pages
+
+
 # Stable, read-only Kanban representation of the authoritative Gitea threads.
 # This projection never creates a second status store or treats a merged PR
 # as a closed cross-project dependency.
@@ -225,12 +279,10 @@ async def preview_thread_state(
     issue = await client.get_issue(owner, repo, number)
     if _issue(issue) is None:
         raise ValueError("issue is not a Py Coordination thread")
-    comments, truncated = await _pages(
+    comments, truncated, _reason, _pages_read = await _preview_comment_pages(
         lambda page: client.list_issue_comments(
             owner, repo, number, limit=_PAGE_SIZE, page=page
-        ),
-        max_pages=2,
-        allow_partial=True,
+        )
     )
     if truncated:
         return None, True
@@ -261,25 +313,22 @@ async def open_thread(
     item = _issue(issue)
     if item is None:
         raise ValueError("issue is not a Py Coordination thread")
-    comments, truncated = await _pages(
-        lambda page: client.list_issue_comments(owner, repo, number, limit=_PAGE_SIZE, page=page),
-        max_pages=2 if allow_partial else _WRITE_MAX_PAGES,
-        allow_partial=allow_partial,
-    )
     if allow_partial:
-        # A broken Gitea page cursor can repeat the same full page indefinitely.
-        # Show only distinct observed comments, without claiming completeness.
-        unique: list[dict[str, Any]] = []
-        seen_ids: set[int] = set()
-        for comment in comments:
-            identifier = comment.get("id")
-            if isinstance(identifier, int) and not isinstance(identifier, bool):
-                if identifier in seen_ids:
-                    truncated = True
-                    continue
-                seen_ids.add(identifier)
-            unique.append(comment)
-        comments = unique
+        comments, truncated, incomplete_reason, pages_read = await _preview_comment_pages(
+            lambda page: client.list_issue_comments(
+                owner, repo, number, limit=_PAGE_SIZE, page=page
+            )
+        )
+        item["history_incomplete_reason"] = incomplete_reason
+        item["history_pages_scanned"] = pages_read
+    else:
+        # Write/close still demand the original exhaustive, fail-closed scan.
+        comments, truncated = await _pages(
+            lambda page: client.list_issue_comments(
+                owner, repo, number, limit=_PAGE_SIZE, page=page
+            ),
+            max_pages=_WRITE_MAX_PAGES,
+        )
     trusted_identity = await client.get_user()
     trusted_login = trusted_identity.get("login")
     if not isinstance(trusted_login, str) or not trusted_login:
