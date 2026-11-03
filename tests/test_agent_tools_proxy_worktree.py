@@ -1409,13 +1409,8 @@ def test_runner_final_proxy_status_overwrites_worker_authored_bytes(tmp_path, mo
     monkeypatch.setenv("OPENCODE_ADMISSION_WAIT_SECONDS", "0")
 
     script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
-    result = subprocess.run(
-        ["sh", "-c", script],
-        cwd=source,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+    result = _run_bounded_shell_tree(
+        script, cwd=source, timeout=PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
