@@ -1,10 +1,12 @@
 {
   "mode": "mcp_client",
   "safe_mode": true,
-  "expected_safe_count": 92,
+  "expected_safe_count": 94,
   "expected_blocked_count": 38,
-  "expected_mcp_client_full_count": 129,
+  "expected_mcp_client_full_count": 131,
   "must_include": [
+    "docker_network_ls",
+    "docker_network_inspect",
     "docker_site_audit_crm_ingress_readiness",
     "docker_site_audit_deploy_status",
     "health",
