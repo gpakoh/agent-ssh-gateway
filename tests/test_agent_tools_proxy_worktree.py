@@ -85,6 +85,52 @@ def _run_bounded_shell_tree(
     return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
 
 
+def _terminate_bounded_shell_tree(process: subprocess.Popen[str]) -> None:
+    """Kill the isolated shell process group and never block on inherited pipes."""
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        process.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _communicate_bounded_shell_tree(
+    process: subprocess.Popen[str], *, timeout: float
+) -> tuple[str, str]:
+    """Preserve useful output; sanitize timeout errors and reap descendants."""
+    try:
+        return process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _terminate_bounded_shell_tree(process)
+        raise subprocess.TimeoutExpired(
+            ["sh", "-c", "<redacted test runner>"], timeout
+        ) from None
+
+
+def test_bounded_interactive_shell_kills_pipe_holding_descendant(tmp_path: Path) -> None:
+    """Even if the shell exits, a descendant retaining a pipe must not hang pytest."""
+    script = "printf 'private-shell-data\\n'; sleep 10 & exit 0"
+    process = subprocess.Popen(
+        ["sh", "-c", script],
+        cwd=tmp_path,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        with pytest.raises(subprocess.TimeoutExpired) as exc_info:
+            _communicate_bounded_shell_tree(process, timeout=0.3)
+        assert "private-shell-data" not in str(exc_info.value)
+        assert "sleep 10" not in str(exc_info.value)
+        assert process.poll() is not None
+    finally:
+        _terminate_bounded_shell_tree(process)
+
+
 def test_bounded_shell_tree_kills_pipe_holding_descendant(tmp_path: Path) -> None:
     """A background child holding stdout cannot strand the test harness."""
     secret_marker = "harness-secret-must-not-enter-failure"
@@ -558,6 +604,10 @@ class TestBuildOpencodeScriptProxy:
         monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
         monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "false")
         monkeypatch.setenv("OPENCODE_STARTUP_RESERVE_BYTES", "0")
+        # This runtime-marker test is not an admission-capacity test.
+        # Never inherit the production 300-second admission wait on a busy runner.
+        monkeypatch.setenv("OPENCODE_ADMISSION_WAIT_SECONDS", "0")
+        monkeypatch.setenv("OPENCODE_ADMISSION_POLL_SECONDS", "1")
         monkeypatch.setenv("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "10")
         monkeypatch.setenv("OPENCODE_RUN_TIMEOUT_SECONDS", "10")
 
@@ -570,6 +620,7 @@ class TestBuildOpencodeScriptProxy:
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            start_new_session=True,
         )
         heartbeat_path = artifacts / "agent-heartbeat.json"
 
@@ -617,12 +668,12 @@ class TestBuildOpencodeScriptProxy:
             assert not (artifacts / "proxy-status.json").exists()
 
             exit_trigger.write_text("done\n", encoding="utf-8")
-            stdout, stderr = process.communicate(timeout=RUNNER_HARNESS_TIMEOUT_SECONDS)
+            stdout, stderr = _communicate_bounded_shell_tree(
+                process, timeout=RUNNER_HARNESS_TIMEOUT_SECONDS
+            )
             assert process.returncode == 0, stderr or stdout
         finally:
-            if process.poll() is None:
-                process.kill()
-                process.communicate()
+            _terminate_bounded_shell_tree(process)
 
     def test_managed_source_cleanup_preserves_heartbeat_exit_trap(self, monkeypatch):
         monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
