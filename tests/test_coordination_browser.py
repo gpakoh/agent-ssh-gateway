@@ -174,9 +174,12 @@ class FakeGitea:
         self.requests += 1
         return next(x for x in self.issues if x["number"] == number)
 
-    async def list_issue_comments(self, owner, repo, number, *, limit, page):
+    async def list_issue_timeline(self, owner, repo, number, *, limit, page):
         self.requests += 1
-        return self.comments[(page - 1) * limit:page * limit]
+        return [
+            {"type": "comment", **row}
+            for row in self.comments[(page - 1) * limit:page * limit]
+        ]
 
     async def get_user(self):
         self.requests += 1
@@ -223,11 +226,12 @@ async def test_browser_long_thread_keeps_partial_state_explicit(monkeypatch) -> 
             return {"type": "source"}
 
     class RepeatedPageGitea(FakeGitea):
-        async def list_issue_comments(self, owner, repo, number, *, limit, page):
+        async def list_issue_timeline(self, owner, repo, number, *, limit, page):
             self.requests += 1
             return [
                 {
                     "id": idx + 1,
+                    "type": "comment",
                     "body": "untrusted",
                     "user": {"login": "other"},
                 }
