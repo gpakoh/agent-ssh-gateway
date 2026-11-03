@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app import coordination_logic as coordination_engine
 from examples.mcp_server import coordination as core
 from examples.mcp_server.mcp_infra.adapters import coordination_adapter as adapter
 from examples.mcp_server.tool_modes import should_register_tool
@@ -1036,6 +1037,8 @@ async def test_coord_open_repeated_comment_page_is_bounded_and_untrusted(
     assert detail["number"] == 1
     assert detail["state"] == "open"
     assert detail["history_truncated"] is True
+    assert detail["history_incomplete_reason"] == "non_progressing_comment_cursor"
+    assert detail["history_pages_scanned"] == 2
     assert detail["coord_state"] is None
     assert len(detail["history"]) == 50
     assert len({entry["id"] for entry in detail["history"]}) == 50
@@ -1051,6 +1054,61 @@ async def test_coord_open_repeated_comment_page_is_bounded_and_untrusted(
             text="Do not append", request_key="long-history-deny-123", state="message",
         )
     assert client.comment_calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("second_ids", "expected_reason", "expected_count", "incomplete"),
+    [
+        (list(range(1, 51)), "non_progressing_comment_cursor", 50, True),
+        (list(range(26, 76)), "overlapping_comment_pages", 75, True),
+        (list(range(51, 101)), "bounded_comment_window", 100, True),
+        ([51], None, 51, False),
+        ([75, 51], "non_monotonic_comment_cursor", 52, True),
+        ([None], "unverifiable_comment_ids", 51, True),
+    ],
+)
+async def test_readonly_comment_preview_explains_page_progress(
+    second_ids, expected_reason, expected_count, incomplete
+):
+    pages = []
+    async def fetch(page):
+        pages.append(page)
+        ids = list(range(1, 51)) if page == 1 else second_ids
+        return [{"id": ident, "body": "evidence"} for ident in ids]
+
+    rows, truncated, reason, count_pages = await coordination_engine._preview_comment_pages(fetch)
+    assert truncated is incomplete
+    assert reason == expected_reason
+    assert len(rows) == expected_count
+    assert count_pages == 2
+    assert pages == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_short_unverifiable_comment_id_never_receives_readonly_close_lease():
+    client = FakeClient()
+    await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway",
+        source_project="agent-ssh-gateway", title="Unverifiable history",
+        body="Evidence", request_key="unverifiable-history-123",
+    )
+    client.comments[1] = [
+        {"id": None, "body": "not verifiable", "user": {"login": "gpakoh"}}
+    ]
+    detail = await core.open_thread(
+        client, "gpakoh", "agent-ssh-gateway", 1, allow_partial=True
+    )
+    assert detail["history_truncated"] is True
+    assert detail["history_incomplete_reason"] == "unverifiable_comment_ids"
+    assert detail["history_pages_scanned"] == 1
+    assert detail["coord_state"] is None
+    assert "close_state_sha256" not in detail
+    assert "close_content_sha256" not in detail
+    state, incomplete = await core.preview_thread_state(
+        client, "gpakoh", "agent-ssh-gateway", 1
+    )
+    assert state is None and incomplete is True
 
 
 @pytest.mark.asyncio
