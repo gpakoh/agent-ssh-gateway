@@ -25,6 +25,25 @@ into an adjacent `*.legacy-aborted-*.json` evidence archive. It does not
 remove or rewrite the legacy Git-source, registry entry, project data, or
 existing archives.
 
+## Read-only proof after an interrupted response
+
+When an earlier `apply=true` response was lost or a reviewer needs to verify
+archival after the fact, call the **same tool** with `apply=false` and all five
+original identity arguments **plus the exact full**
+`expected_tombstone_sha256` returned by the earlier eligible preflight.
+No new archival request is made. If the active prepared journal is absent,
+Gateway verifies the matching archive under the source-lineage and registry
+locks. A successful result reports `outcome=archived_verified`,
+`active_journal_present=false`, the matching archive name and SHA, and
+`journal_removed=true`. The original `git-source` registration and physical
+legacy root must still match the caller's exact lease. The audit archive is
+read with `O_NOFOLLOW`; its full canonical bytes and SHA must match the
+original prepared journal. Ambiguous duplicates, symlinks, non-regular files,
+altered archive bytes, wrong leases or an unbounded archive inventory fail
+closed. This is **read-only evidence**, not a repeat of `apply=true` or
+proof that source files can be deleted. A call without a full lease still
+reports the missing active journal instead of assuming archival.
+
 Fail-closed cases: missing/foreign/duplicate registry entry; symlinked or
 missing legacy directory; managed clone occupying the ID; changed journal
 SHA; any phase other than `prepared`; other journal fields, prior cleanup
