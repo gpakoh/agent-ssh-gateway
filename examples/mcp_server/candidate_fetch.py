@@ -1,7 +1,10 @@
-"""Import the current default branch into an existing managed candidate.
+"""Import trusted exact remote refs into an existing managed candidate.
 
-Only immutable Git objects and a leased remote-tracking ref are imported.
-The candidate's feature branch, worktree and origin are never rewritten.
+The default branch import requires a matching published feature HEAD. A
+separate feature-head import permits ONLY a verified fast-forward from the
+candidate's clean local feature branch. Neither operation mutates the
+candidate feature branch, worktree or origin; callers can use the existing
+guarded git_refresh_branch_to_head after importing a remote feature.
 """
 
 from __future__ import annotations
@@ -126,25 +129,36 @@ def _clean_head(root: Path, feature: str) -> str:
 
 def _remote_lease(
     source: Path, feature: str, branch: str, expected: str, token: str
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, str]:
     from examples.mcp_server import control_plane_git as git
     from examples.mcp_server.agent_sources import _resolve_trusted_remote
 
     _username, clone_url, _token = _resolve_trusted_remote(source)
     _host, owner, repo = git._parse_gitea_remote(clone_url)
     repo_data = git._gitea_get(f"/repos/{owner}/{repo}", token=token)
-    if branch != repo_data.get("default_branch") or feature == branch:
+    default_branch = repo_data.get("default_branch")
+    if (
+        not isinstance(default_branch, str)
+        or feature == default_branch
+        or branch not in {default_branch, feature}
+    ):
         raise FetchRefError("GIT_REMOTE_NOT_ALLOWED")
     heads = []
-    for name in (branch, feature):
-        data = git._gitea_get(f"/repos/{owner}/{repo}/branches/{quote(name, safe='')}", token=token)
-        head = git._full_commit_id(str((data.get("commit") or {}).get("id") or ""), "remote_head")
+    for name in (default_branch, feature):
+        data = git._gitea_get(
+            f"/repos/{owner}/{repo}/branches/{quote(name, safe='')}", token=token
+        )
+        head = git._full_commit_id(
+            str((data.get("commit") or {}).get("id") or ""), "remote_head"
+        )
         if not head:
             raise FetchRefError("SOURCE_REF_NOT_AVAILABLE")
         heads.append(head)
-    if heads[0] != expected:
+    selected_head = heads[1] if branch == feature else heads[0]
+    if selected_head != expected:
         raise FetchRefError("HEAD_MISMATCH")
-    return owner, repo, heads[1]
+    # Bind BOTH Gitea refs: a default-branch move also invalidates a feature import.
+    return owner, repo, heads[1], heads[0]
 
 
 def _is_symbolic_ref(root: Path, ref: str) -> bool:
@@ -200,11 +214,11 @@ def _staging_ref(root: Path, ref: str):
 def fetch_managed_candidate_base(
     project: str, root: Path, remote: str, branch: str, expected: str | None, *, token: str
 ) -> dict:
-    """Bundle-only fallback for git_fetch_ref, with registry/lineage/SHA guards.
+    """Bundle-only ref import with registry/lineage/SHA and fast-forward guards.
 
-    Credentials are used by the existing trusted source publisher in private
-    staging, never by Git inside the candidate. No arbitrary local origin is
-    trusted and no new executor capability is introduced.
+    The remote feature is importable only when it descends from the original
+    candidate HEAD, leaving the local branch/worktree unchanged. Credentials
+    remain exclusively inside the existing trusted private source publisher.
     """
     from examples.mcp_server import control_plane_git as git
     from examples.mcp_server.agent_sources import (
@@ -224,6 +238,7 @@ def fetch_managed_candidate_base(
         identity = _identity(project, root, remote)
         feature = identity["feature_branch"]
         source = identity["source_root"]
+        feature_import = branch == feature
         with (
             _lineage_lock(root.parent.parent, identity["source_project"], feature),
             _staging_ref(root, staging),
@@ -232,7 +247,7 @@ def fetch_managed_candidate_base(
             head = _clean_head(root, feature)
             stage = "remote_lease"
             lease = _remote_lease(source, feature, branch, expected, token)
-            if lease[2] != head:
+            if not feature_import and lease[2] != head:
                 raise FetchRefError("HEAD_MISMATCH")
             if _is_symbolic_ref(root, tracking):
                 raise FetchRefError("WORKSPACE_CONTENDED")
@@ -262,6 +277,16 @@ def fetch_managed_candidate_base(
                     raise FetchRefError("GIT_OPERATION_FAILED")
                 if git._read_ref(root, staging) != expected:
                     raise FetchRefError("HEAD_MISMATCH")
+                if feature_import:
+                    # Importing a later PR commit may never discard local work.
+                    # Do this on immutable objects, BEFORE publishing a ref.
+                    stage = "feature_fast_forward"
+                    ancestor = git._run_git(
+                        ["git", "merge-base", "--is-ancestor", head, expected],
+                        cwd=root,
+                    )
+                    if ancestor.returncode != 0:
+                        raise FetchRefError("GIT_NON_FAST_FORWARD")
                 stage = "identity_recheck"
                 if (
                     _identity(project, root, remote) != identity
@@ -306,8 +331,12 @@ def fetch_managed_candidate_base(
                     "local_ref": tracking,
                     "previous_head": previous,
                     "remote_head": expected,
+                    "remote_default_head": lease[3],
                     "fetched_head": expected,
-                    "import_mode": "managed_candidate_default_branch",
+                    "import_mode": (
+                        "managed_candidate_feature_fast_forward"
+                        if feature_import else "managed_candidate_default_branch"
+                    ),
                     "worktree_unchanged": True,
                     "origin_unchanged": True,
                 },
@@ -332,6 +361,7 @@ def fetch_managed_candidate_base(
             "GIT_LOCAL_REF_MISSING",
             "SOURCE_REF_NOT_AVAILABLE",
             "HEAD_MISMATCH",
+            "GIT_NON_FAST_FORWARD",
             "WORKSPACE_VERIFICATION_FAILED",
             "GIT_OPERATION_FAILED",
             "GIT_AUTH_FAILED",
@@ -346,7 +376,7 @@ def fetch_managed_candidate_base(
                 "Managed candidate identity/origin proof is missing or mismatched; "
                 "a never-modified legacy clone can use guarded abandon_unmodified cleanup."
                 if stage == "candidate_identity"
-                else "Managed candidate default-branch import did not complete; inspect the reported stage and leases before retrying."
+                else "Managed candidate exact-ref import did not complete; inspect the reported stage and leases before retrying."
             ),
             retryable=code in {"HEAD_MISMATCH", "WORKSPACE_CONTENDED", "GIT_REMOTE_UNAVAILABLE"},
             details={

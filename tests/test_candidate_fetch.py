@@ -96,7 +96,9 @@ def managed(tmp_path, monkeypatch):
 
     def publish(source_root, expected, destination):
         assert source_root == source
-        assert expected == target
+        assert expected in {
+            target, run(upstream, "rev-parse", f"refs/heads/{feature}")
+        }
         published.append(expected)
         run(upstream, "update-ref", "refs/heads/source", expected)
         run(upstream, "bundle", "create", str(destination), "refs/heads/source")
@@ -192,11 +194,129 @@ def test_unrelated_local_bundle_is_not_a_trust_anchor(managed):
     assert_preserved(managed)
 
 
-def test_wrong_default_branch_is_rejected(managed):
+def test_feature_import_requires_exact_remote_feature_sha(managed):
+    # Supplying the main SHA while naming the feature is never sufficient.
     result = fetch(managed, branch=managed.feature)
+    assert not result["ok"] and result["error"]["code"] == "HEAD_MISMATCH"
+    assert not managed.published
+    assert_preserved(managed)
+
+
+def test_other_non_default_remote_branch_is_rejected(managed):
+    result = fetch(managed, branch="unreviewed-remote-branch")
     assert not result["ok"] and result["error"]["code"] == "GIT_REMOTE_NOT_ALLOWED"
     assert not managed.published
     assert_preserved(managed)
+
+
+def _advance_remote_feature(m):
+    run(m.upstream, "checkout", "-q", m.feature)
+    newer_head = commit(m.upstream, "remote-feature.txt", "reviewed remote work\n")
+    run(m.upstream, "checkout", "-q", "main")
+    return newer_head
+
+
+def test_feature_fast_forward_import_does_not_touch_local_branch_or_origin(managed):
+    m = managed
+    remote_head = _advance_remote_feature(m)
+    original_config = (m.root / ".git/config").read_bytes()
+    original_index = (m.root / ".git/index").read_bytes()
+    result = fetch(m, branch=m.feature, expected=remote_head)
+    assert result["ok"], result
+    receipt = result["result"]
+    assert receipt["import_mode"] == "managed_candidate_feature_fast_forward"
+    assert receipt["feature_head"] == m.head
+    assert receipt["fetched_head"] == remote_head
+    assert receipt["remote_head"] == remote_head
+    assert receipt["local_ref"] == f"refs/remotes/origin/{m.feature}"
+    assert run(m.root, "rev-parse", receipt["local_ref"]) == remote_head
+    assert (m.root / ".git/config").read_bytes() == original_config
+    assert (m.root / ".git/index").read_bytes() == original_index
+    assert not (m.root / ".git/FETCH_HEAD").exists()
+    assert "sensitive-test-token" not in str(result)
+    assert_preserved(m)
+    assert fetch(m, branch=m.feature, expected=remote_head)["ok"]
+    # Existing Git refresh tool can now safely fast-forward from local to remote.
+    run(m.root, "reset", "--keep", remote_head)
+    assert run(m.root, "rev-parse", "HEAD") == remote_head
+    assert (m.root / "remote-feature.txt").read_text() == "reviewed remote work\n"
+    # The default-branch import no longer rejects feature-head mismatch.
+    assert fetch(m)["ok"]
+    assert run(m.root, "rev-parse", "refs/remotes/origin/main") == m.target
+
+
+def test_feature_import_rejects_diverged_or_rewound_remote_head(managed):
+    m = managed
+    run(m.upstream, "checkout", "-qb", "alternate", m.base)
+    diverged = commit(m.upstream, "alternate.txt", "forced unrelated remote change\n")
+    run(m.upstream, "update-ref", f"refs/heads/{m.feature}", diverged)
+    run(m.upstream, "checkout", "-q", "main")
+    result = fetch(m, branch=m.feature, expected=diverged)
+    assert not result["ok"]
+    assert result["error"]["code"] == "GIT_NON_FAST_FORWARD"
+    assert result["error"]["details"]["stage"] == "feature_fast_forward"
+    assert git._read_ref(m.root, f"refs/remotes/origin/{m.feature}") is None
+    assert_preserved(m)
+
+
+def test_feature_import_rejects_changed_remote_lease_during_publication(managed, monkeypatch):
+    m = managed
+    remote_head = _advance_remote_feature(m)
+    def racing_publish(*args):
+        result = m.publish(*args)
+        run(m.upstream, "checkout", "-q", m.feature)
+        commit(m.upstream, "race.txt", "remote advanced again\n")
+        run(m.upstream, "checkout", "-q", "main")
+        return result
+
+    monkeypatch.setattr(agent_sources, "materialize_trusted_remote_bundle", racing_publish)
+    result = fetch(m, branch=m.feature, expected=remote_head)
+    assert not result["ok"] and result["error"]["code"] == "HEAD_MISMATCH"
+    assert git._read_ref(m.root, f"refs/remotes/origin/{m.feature}") is None
+    assert_preserved(m)
+
+
+def test_feature_import_rechecks_default_branch_lease(managed, monkeypatch):
+    m = managed
+    remote_head = _advance_remote_feature(m)
+
+    def move_default_after_publication(*args):
+        published = m.publish(*args)
+        commit(m.upstream, "main-race.txt", "new default after preflight\n")
+        return published
+
+    monkeypatch.setattr(
+        agent_sources, "materialize_trusted_remote_bundle", move_default_after_publication
+    )
+    result = fetch(m, branch=m.feature, expected=remote_head)
+    assert not result["ok"] and result["error"]["code"] == "HEAD_MISMATCH"
+    assert result["error"]["details"]["stage"] == "remote_lease_recheck"
+    assert git._read_ref(m.root, f"refs/remotes/origin/{m.feature}") is None
+    assert_preserved(m)
+
+
+def test_feature_import_refuses_symbolic_tracking_alias(managed):
+    m = managed
+    remote_head = _advance_remote_feature(m)
+    alias_target = "refs/heads/unrelated"
+    run(m.root, "update-ref", alias_target, m.base)
+    run(m.root, "symbolic-ref", f"refs/remotes/origin/{m.feature}", alias_target)
+    result = fetch(m, branch=m.feature, expected=remote_head)
+    assert not result["ok"] and result["error"]["code"] == "WORKSPACE_CONTENDED"
+    assert run(m.root, "rev-parse", alias_target) == m.base
+    assert run(m.root, "symbolic-ref", f"refs/remotes/origin/{m.feature}") == alias_target
+    assert m.published == []
+    assert_preserved(m)
+
+
+def test_feature_import_rejects_dirty_candidate_even_when_remote_fast_forward(managed):
+    m = managed
+    remote_head = _advance_remote_feature(m)
+    (m.root / "unfinished.txt").write_text("uncommitted\n")
+    result = fetch(m, branch=m.feature, expected=remote_head)
+    assert not result["ok"] and result["error"]["code"] == "WORKSPACE_CONTENDED"
+    assert m.published == []
+    assert git._read_ref(m.root, f"refs/remotes/origin/{m.feature}") is None
 
 
 def test_dirty_candidate_is_rejected_without_publishing(managed):
