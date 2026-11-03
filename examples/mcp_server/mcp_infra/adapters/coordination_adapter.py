@@ -99,10 +99,59 @@ async def _verified_preview(
     return verified, incomplete_numbers, examined
 
 
-async def coord_inbox(project: str, limit: int = 25, offset: int = 0) -> dict[str, Any]:
+_SUMMARY_MAX_THREADS = 50
+
+
+async def _verified_global_summary(
+    client: Any, owner: str, repo: str, all_threads: list[dict[str, Any]],
+    source_scan_truncated: bool,
+) -> dict[str, Any]:
+    """Opt-in bounded projection, never infer a state for unreadable history.
+
+    Counts are verified lower bounds unless every Gitea Issue in the complete
+    read window has an unambiguous event history. The read is not an atomic
+    Gitea snapshot and cannot authorize a write or close lease.
+    """
+    counts = {"open": 0, "accepted": 0, "waiting_review": 0, "resolved": 0}
+    unknown: list[int] = []
+    examined = min(len(all_threads), _SUMMARY_MAX_THREADS)
+    for item in all_threads[:examined]:
+        state, incomplete = await preview_thread_state(client, owner, repo, item["number"])
+        if incomplete or state is None:
+            unknown.append(item["number"])
+        elif state not in counts:
+            raise ValueError("invalid coordination state in verified summary")
+        else:
+            counts[state] += 1
+    exact = (
+        not source_scan_truncated
+        and examined == len(all_threads)
+        and not unknown
+    )
+    return {
+        "state_counts": {
+            key: {"count": count, "count_exact": exact}
+            for key, count in counts.items()
+        },
+        "count_exact": exact,
+        "verified_thread_count": sum(counts.values()),
+        "observed_thread_count": len(all_threads),
+        "examined_thread_count": examined,
+        "unexamined_thread_count": len(all_threads) - examined,
+        "unverified_thread_numbers": unknown,
+        "source_scan_truncated": source_scan_truncated,
+        "note": "Non-atomic read-only observation; counts are lower bounds if not exact",
+    }
+
+
+async def coord_inbox(
+    project: str, limit: int = 25, offset: int = 0, include_summary: bool = False
+) -> dict[str, Any]:
     """Show open/closed project threads and the latest verified coordination state."""
     tool = "coord_inbox"
     try:
+        if type(include_summary) is not bool:
+            raise ValueError("include_summary must be a boolean")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 30:
             raise ValueError("limit must be an integer from 1 to 30")
         if type(offset) is not int or not 0 <= offset < 500:
@@ -112,6 +161,10 @@ async def coord_inbox(project: str, limit: int = 25, offset: int = 0) -> dict[st
             all_threads, scan_truncated = await list_threads_preview(client, owner, repo)
             threads, incomplete_thread_numbers, examined = await _verified_preview(
                 client, owner, repo, all_threads, limit, offset
+            )
+            summary = (
+                await _verified_global_summary(client, owner, repo, all_threads, scan_truncated)
+                if include_summary else None
             )
     except Exception as exc:
         return _fail(tool, exc)
@@ -126,15 +179,20 @@ async def coord_inbox(project: str, limit: int = 25, offset: int = 0) -> dict[st
             "source_scan_truncated": scan_truncated,
             "examined_thread_count": examined,
             "incomplete_thread_numbers": incomplete_thread_numbers,
+            **({"summary": summary} if include_summary else {}),
         },
         source="gitea",
     )
 
 
-async def coord_board(project: str, limit: int = 25, offset: int = 0) -> dict[str, Any]:
+async def coord_board(
+    project: str, limit: int = 25, offset: int = 0, include_summary: bool = False
+) -> dict[str, Any]:
     """Read the project's Gitea-backed Kanban columns without changing issues."""
     tool = "coord_board"
     try:
+        if type(include_summary) is not bool:
+            raise ValueError("include_summary must be a boolean")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 30:
             raise ValueError("limit must be an integer from 1 to 30")
         if type(offset) is not int or not 0 <= offset < 500:
@@ -146,6 +204,10 @@ async def coord_board(project: str, limit: int = 25, offset: int = 0) -> dict[st
                 client, owner, repo, all_threads, limit, offset
             )
             columns = board_from_threads(enriched)
+            summary = (
+                await _verified_global_summary(client, owner, repo, all_threads, scan_truncated)
+                if include_summary else None
+            )
     except Exception as exc:
         return _fail(tool, exc)
     next_offset = offset + examined if offset + examined < len(all_threads) else None
@@ -162,6 +224,7 @@ async def coord_board(project: str, limit: int = 25, offset: int = 0) -> dict[st
             "source_scan_truncated": scan_truncated,
             "examined_thread_count": examined,
             "incomplete_thread_numbers": incomplete_thread_numbers,
+            **({"summary": summary} if include_summary else {}),
             "note": "Gitea Issues is authoritative; resolved does not automatically close an Issue",
         }, source="gitea",
     )

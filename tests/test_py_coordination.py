@@ -700,6 +700,162 @@ async def test_board_and_inbox_isolate_unreadable_long_thread(monkeypatch):
         await core.open_thread(client, "gpakoh", "agent-ssh-gateway", 1)
 
 
+
+@pytest.mark.asyncio
+async def test_opt_in_summary_counts_every_verified_state_without_changing_page(monkeypatch):
+    """Global projection is a separate opt-in scan, not page-local counts."""
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setattr(adapter, "_registered", lambda p: core.validate_project(p))
+    client = FakeClient()
+    for i in range(5):
+        await core.create_thread(
+            client, "gpakoh", "agent-ssh-gateway",
+            source_project="agent-ssh-gateway",
+            title=f"Summary {i}", body="Evidence",
+            request_key=f"summary-thread-{i}-123",
+        )
+    for number, states in (
+        (2, ("accepted",)),
+        (3, ("accepted", "waiting_review")),
+        (4, ("accepted", "waiting_review", "resolved")),
+    ):
+        for n, state in enumerate(states):
+            await core.write_event(
+                client, "gpakoh", "agent-ssh-gateway", number,
+                text=f"Proof {state}", state=state,
+                request_key=f"summary-{number}-{n}-transition",
+            )
+    monkeypatch.setattr(FakeClient, "__aenter__", _fake_aenter, raising=False)
+    monkeypatch.setattr(FakeClient, "__aexit__", _fake_aexit, raising=False)
+    monkeypatch.setattr(
+        adapter, "server_attr",
+        lambda name: (lambda _: client) if name == "GiteaClient" else None,
+    )
+    for reader in (adapter.coord_inbox, adapter.coord_board):
+        ordinary = (await reader("agent-ssh-gateway", limit=2))["result"]
+        assert ordinary["count"] == 2
+        assert ordinary["count_exact"] is False
+        assert "summary" not in ordinary
+        result = await reader("agent-ssh-gateway", limit=2, include_summary=True)
+        assert result["ok"] is True, result
+        data = result["result"]
+        assert data["count"] == 2
+        assert data["next_offset"] == 2
+        assert data["count_exact"] is False
+        summary = data["summary"]
+        assert summary["count_exact"] is True
+        assert summary["verified_thread_count"] == 5
+        assert summary["examined_thread_count"] == 5
+        assert summary["observed_thread_count"] == 5
+        assert summary["unexamined_thread_count"] == 0
+        assert summary["unverified_thread_numbers"] == []
+        assert {key: item["count"] for key, item in summary["state_counts"].items()} == {
+            "open": 2, "accepted": 1, "waiting_review": 1, "resolved": 1,
+        }
+        assert all(item["count_exact"] for item in summary["state_counts"].values())
+
+
+@pytest.mark.asyncio
+async def test_opt_in_summary_preserves_unknown_state_as_lower_bound(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setattr(adapter, "_registered", lambda p: core.validate_project(p))
+    client = FakeClient()
+    for i in range(3):
+        await core.create_thread(
+            client, "gpakoh", "agent-ssh-gateway",
+            source_project="agent-ssh-gateway", title=f"Unknown {i}",
+            body="Evidence", request_key=f"summary-unknown-{i}-123",
+        )
+    monkeypatch.setattr(FakeClient, "__aenter__", _fake_aenter, raising=False)
+    monkeypatch.setattr(FakeClient, "__aexit__", _fake_aexit, raising=False)
+    monkeypatch.setattr(
+        adapter, "server_attr",
+        lambda name: (lambda _: client) if name == "GiteaClient" else None,
+    )
+    observed = []
+
+    async def verified(_client, _owner, _repo, number):
+        observed.append(number)
+        return (None, True) if number == 2 else ("open", False)
+
+    monkeypatch.setattr(adapter, "preview_thread_state", verified)
+    for reader in (adapter.coord_inbox, adapter.coord_board):
+        observed.clear()
+        data = (await reader("agent-ssh-gateway", limit=2, include_summary=True))["result"]
+        assert data["summary"]["count_exact"] is False
+        assert data["summary"]["verified_thread_count"] == 2
+        assert data["summary"]["unverified_thread_numbers"] == [2]
+        assert data["summary"]["state_counts"]["open"] == {"count": 2, "count_exact": False}
+        assert data["summary"]["unexamined_thread_count"] == 0
+        assert data["summary"]["source_scan_truncated"] is False
+        assert set(observed) == {1, 2, 3}
+        assert all(not c["count_exact"] for c in data["summary"]["state_counts"].values())
+    for invalid in (1, "true", None):
+        for reader in (adapter.coord_inbox, adapter.coord_board):
+            denied = await reader("agent-ssh-gateway", include_summary=invalid)
+            assert denied["ok"] is False
+            assert denied["error"]["code"] == "INVALID_INPUT"
+
+
+@pytest.mark.asyncio
+async def test_opt_in_summary_caps_work_and_never_claims_exact_large_totals(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setattr(adapter, "_registered", lambda p: core.validate_project(p))
+    client = FakeClient()
+    monkeypatch.setattr(FakeClient, "__aenter__", _fake_aenter, raising=False)
+    monkeypatch.setattr(FakeClient, "__aexit__", _fake_aexit, raising=False)
+    monkeypatch.setattr(
+        adapter, "server_attr",
+        lambda name: (lambda _: client) if name == "GiteaClient" else None,
+    )
+
+    async def large_scan(_client, _owner, _repo):
+        return [
+            {
+                "number": i + 1, "title": f"Issue {i}", "state": "open",
+                "url": f"https://gitea.example/issues/{i + 1}",
+                "source_project": "agent-ssh-gateway",
+                "request_key": f"large-summary-{i}-123",
+                "updated_at": "2026-11-03T09:00:00Z",
+            }
+            for i in range(105)
+        ], False
+
+    checked = []
+
+    async def verify(_client, _owner, _repo, number):
+        checked.append(number)
+        return "accepted", False
+
+    monkeypatch.setattr(adapter, "list_threads_preview", large_scan)
+    monkeypatch.setattr(adapter, "preview_thread_state", verify)
+    for reader in (adapter.coord_inbox, adapter.coord_board):
+        checked.clear()
+        result = await reader("agent-ssh-gateway", limit=1, include_summary=True)
+        assert result["ok"] is True, result
+        summary = result["result"]["summary"]
+        assert summary["observed_thread_count"] == 105
+        assert summary["examined_thread_count"] == adapter._SUMMARY_MAX_THREADS
+        assert summary["verified_thread_count"] == adapter._SUMMARY_MAX_THREADS
+        assert summary["unexamined_thread_count"] == 55
+        assert summary["count_exact"] is False
+        assert summary["state_counts"]["accepted"]["count"] == 50
+        assert max(checked) <= 50
+        assert len(checked) <= 51  # One ordinary preview + 50 summary probes.
+
+    async def capped_scan(_client, _owner, _repo):
+        threads, _ = await large_scan(_client, _owner, _repo)
+        return threads[:1], True
+
+    monkeypatch.setattr(adapter, "list_threads_preview", capped_scan)
+    data = (await adapter.coord_board(
+        "agent-ssh-gateway", limit=1, include_summary=True
+    ))["result"]
+    assert data["summary"]["source_scan_truncated"] is True
+    assert data["summary"]["count_exact"] is False
+    assert data["summary"]["state_counts"]["accepted"]["count_exact"] is False
+
+
 @pytest.mark.asyncio
 async def test_board_and_inbox_bounded_offset_pagination_without_false_totals(monkeypatch):
     """Every verified page is reachable; no page claims global exact counts."""
