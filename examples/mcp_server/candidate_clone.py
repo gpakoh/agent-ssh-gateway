@@ -2725,6 +2725,88 @@ def adopt_candidate_lineage(
         )
 
 
+def _verify_archived_legacy_prepared_cleanup(
+    *,
+    tombstone_path: Path,
+    tombstone_id: str,
+    project_id: str,
+    source_project: str,
+    expected_sha256: str,
+    required: dict[str, Any],
+) -> dict[str, Any]:
+    """Prove a completed journal-only archival without modifying any source data.
+
+    Caller holds the source lineage and registry locks and has already verified
+    the exact legacy root and registered git-source identity.
+    """
+    original = {**required, "preserved_ref": None}
+    canonical = (json.dumps(original, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    if hashlib.sha256(canonical).hexdigest() != expected_sha256:
+        raise _fail("WORKSPACE_CONTENDED", "archived journal lease differs from expected identity")
+
+    prefix = f"{tombstone_path.stem}.legacy-aborted-{expected_sha256[:12]}-"
+    matched_name: str | None = None
+    with _cleanup_journal_dir(tombstone_path, create=False) as journal_fd:
+        if journal_fd is None:
+            raise _fail("PROJECT_NOT_FOUND", "legacy cleanup journal archive is absent")
+        try:
+            with os.scandir(journal_fd) as entries:
+                for examined, entry in enumerate(entries, start=1):
+                    if examined > 5000:
+                        raise _fail("WORKSPACE_CONTENDED", "legacy journal archive inventory is too large")
+                    name = entry.name
+                    if not name.startswith(prefix):
+                        continue
+                    suffix = name[len(prefix):]
+                    if not re.fullmatch(r"[0-9a-f]{20}\.json", suffix):
+                        continue
+                    if matched_name is not None:
+                        raise _fail("WORKSPACE_CONTENDED", "multiple matching legacy journal archives")
+                    matched_name = name
+        except OSError as exc:
+            raise _fail("WORKSPACE_CONTENDED", "legacy journal archive inventory is unavailable") from exc
+        if matched_name is None:
+            raise _fail("PROJECT_NOT_FOUND", "matching legacy cleanup journal archive is absent")
+
+        flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        try:
+            archive_fd = os.open(matched_name, flags, dir_fd=journal_fd)
+        except OSError as exc:
+            raise _fail("WORKSPACE_CONTENDED", "legacy journal archive is unsafe") from exc
+        try:
+            metadata = os.fstat(archive_fd)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or metadata.st_size != len(canonical)
+            ):
+                raise _fail("WORKSPACE_CONTENDED", "legacy journal archive identity is invalid")
+            content = os.read(archive_fd, len(canonical) + 1)
+            if content != canonical:
+                raise _fail("WORKSPACE_CONTENDED", "legacy journal archive content differs")
+        finally:
+            os.close(archive_fd)
+        try:
+            current = os.stat(matched_name, dir_fd=journal_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise _fail("WORKSPACE_CONTENDED", "legacy journal archive became unavailable") from exc
+        if current.st_dev != metadata.st_dev or current.st_ino != metadata.st_ino:
+            raise _fail("WORKSPACE_CONTENDED", "legacy journal archive inode changed")
+
+    return {
+        "project_id": project_id,
+        "source_project": source_project,
+        "tombstone_id": tombstone_id,
+        "tombstone_sha256": expected_sha256,
+        "outcome": "archived_verified",
+        "active_journal_present": False,
+        "archive_name": matched_name,
+        "journal_removed": True,
+        "registry_mutated": False,
+        "legacy_files_mutated": False,
+    }
+
+
 def abort_legacy_prepared_cleanup(
     *,
     project_id: str,
@@ -2816,9 +2898,6 @@ def abort_legacy_prepared_cleanup(
             if seen != 1:
                 raise _fail("WORKSPACE_CONTENDED", "legacy registry entry must exist in exactly one store")
 
-            tombstone = _read_cleanup_tombstone(tombstone_path)
-            if tombstone is None:
-                raise _fail("PROJECT_NOT_FOUND", "legacy cleanup journal is absent")
             required = {
                 "version": 1,
                 "project_id": project_id,
@@ -2828,6 +2907,22 @@ def abort_legacy_prepared_cleanup(
                 "registry_root": f".mcp-candidate-clones/{project_id}",
                 "phase": "prepared",
             }
+            tombstone = _read_cleanup_tombstone(tombstone_path)
+            if tombstone is None:
+                if not apply and expected_tombstone_sha256 is not None:
+                    if not isinstance(expected_tombstone_sha256, str) or not re.fullmatch(
+                        r"[0-9a-f]{64}", expected_tombstone_sha256,
+                    ):
+                        raise _fail("INVALID_INPUT", "expected_tombstone_sha256 must be a full SHA-256")
+                    return _verify_archived_legacy_prepared_cleanup(
+                        tombstone_path=tombstone_path,
+                        tombstone_id=tombstone_id,
+                        project_id=project_id,
+                        source_project=source_project,
+                        expected_sha256=expected_tombstone_sha256,
+                        required=required,
+                    )
+                raise _fail("PROJECT_NOT_FOUND", "legacy cleanup journal is absent")
             if (
                 set(tombstone) != set(required) | {"preserved_ref"}
                 or tombstone.get("preserved_ref") is not None

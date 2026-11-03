@@ -75,6 +75,20 @@ async def test_read_only_gitea_principal_must_match_event_writer(monkeypatch) ->
         client._get.assert_awaited_once_with("user")
 
 
+@pytest.mark.asyncio
+async def test_browser_issue_list_filters_pull_requests_before_pagination(monkeypatch) -> None:
+    # Without type=issues, a PR-heavy repository can hide real Issues beyond
+    # the bounded Gitea issue scan even when local filtering discards PR rows.
+    async with route._ReadOnlyGitea("dummy", "https://git.xloud.ru/api/v1") as client:
+        fetch = AsyncMock(return_value=[])
+        monkeypatch.setattr(client, "_get", fetch)
+        assert await client.list_issues("gpakoh", "agent-ssh-gateway", state="all", limit=50, page=3) == []
+        fetch.assert_awaited_once_with(
+            "repos/gpakoh/agent-ssh-gateway/issues",
+            state="all", type="issues", limit=50, page=3,
+        )
+
+
 def test_browser_access_is_admin_only() -> None:
     assert route._admin_only(identity("master")).token_type == "master"
     assert route._admin_only(identity("web-ui", "admin")).role == "admin"
@@ -187,6 +201,9 @@ async def test_browser_board_and_thread_are_gitea_backed(monkeypatch) -> None:
     assert data["read_only"] is True
     assert data["source_origin"] == "https://git.xloud.ru"
     assert data["count"] == 1 and data["truncated"] is False
+    assert data["count_exact"] is True
+    assert data["source_scan_truncated"] is False
+    assert all(c["count_exact"] is True for c in data["columns"])
     assert [c["count"] for c in data["columns"]] == [0, 1, 0, 0]
     assert data["columns"][1]["cards"][0]["number"] == 634
     thread_response = await route.browser_coordination_thread(
@@ -227,6 +244,8 @@ async def test_browser_long_thread_keeps_partial_state_explicit(monkeypatch) -> 
     )
     board_data = json.loads(board.body)
     assert board_data["truncated"] is True
+    assert board_data["count_exact"] is False
+    assert all(c["count_exact"] is False for c in board_data["columns"])
     assert board_data["count"] == 0
     assert board_data["incomplete_thread_numbers"] == [634]
 
