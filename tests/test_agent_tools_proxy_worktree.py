@@ -2152,12 +2152,8 @@ def _run_supervisor_postrun(
             "exit $FINAL_RC",
         ]
     )
-    result = subprocess.run(
-        ["sh", "-c", script],
-        cwd=root,
-        text=True,
-        capture_output=True,
-        check=False,
+    result = _run_bounded_shell_tree(
+        script, cwd=root, timeout=PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS
     )
     return result, td
 
@@ -2447,12 +2443,8 @@ class TestSupervisorPostrunEvidence:
                 "exit $FINAL_RC",
             ]
         )
-        result = subprocess.run(
-            ["sh", "-c", script],
-            cwd=worker,
-            text=True,
-            capture_output=True,
-            check=False,
+        result = _run_bounded_shell_tree(
+            script, cwd=worker, timeout=PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS
         )
 
         assert result.returncode == 74, result.stderr
@@ -2497,12 +2489,8 @@ class TestSupervisorPostrunEvidence:
                 "exit $FINAL_RC",
             ]
         )
-        result = subprocess.run(
-            ["sh", "-c", script],
-            cwd=worker,
-            text=True,
-            capture_output=True,
-            check=False,
+        result = _run_bounded_shell_tree(
+            script, cwd=worker, timeout=PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS
         )
 
         assert result.returncode == 74, result.stderr
@@ -2544,12 +2532,8 @@ class TestSupervisorPostrunEvidence:
                 "exit $FINAL_RC",
             ]
         )
-        result = subprocess.run(
-            ["sh", "-c", script],
-            cwd=worker,
-            text=True,
-            capture_output=True,
-            check=False,
+        result = _run_bounded_shell_tree(
+            script, cwd=worker, timeout=PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS
         )
 
         assert result.returncode == 74, result.stderr
