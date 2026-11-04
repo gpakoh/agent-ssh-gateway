@@ -906,6 +906,52 @@ async def test_verified_commit_verifier_error_is_structured_no_push_no_traceback
 
 
 @pytest.mark.asyncio
+async def test_verified_commit_provenance_denial_is_typed_and_never_pushes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def deny_checks(**_kwargs: Any) -> None:
+        raise remote.CandidateVerificationError(
+            "unresolved or unsafe primary tool provenance in verifier receipt",
+            code="VERIFIER_PROVENANCE_UNRESOLVED",
+            phase="receipt_validation",
+            retryable=False,
+            details={
+                "phase": "receipt_validation",
+                "mutation_occurred": False,
+                "check_index": 0,
+                "provenance_reason": "not_found_on_trusted_path",
+            },
+        )
+
+    def must_not_push(**_kwargs: Any) -> None:
+        raise AssertionError("no remote mutation after provenance denial")
+
+    monkeypatch.setenv("GITEA_TOKEN", "managed-token")
+    monkeypatch.setattr(remote, "_server_workspace_registry", lambda: _Registry(tmp_path))
+    monkeypatch.setattr(remote, "verify_registered_delivery_workspace", lambda **_kw: _delivery_proof())
+    monkeypatch.setattr(remote, "verify_workspace_via_docker", deny_checks)
+    monkeypatch.setattr(remote, "push_exact_sha", must_not_push)
+
+    result = await remote.gitea_push_verified_commit(
+        project="gpt-browser-bridge-hardening",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_base_sha="0" * 40,
+        expected_head_sha=SHA,
+        allowed_files="app/**",
+        required_checks="(git diff --check HEAD)",
+    )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "VERIFIER_PROVENANCE_UNRESOLVED"
+    assert result["error"]["retryable"] is False
+    assert result["error"]["details"]["phase"] == "receipt_validation"
+    assert result["error"]["details"]["check_index"] == 0
+    assert result["error"]["details"]["mutation_occurred"] is False
+    assert result["error"]["details"]["provenance_reason"] == "not_found_on_trusted_path"
+
+
+@pytest.mark.asyncio
 async def test_verified_commit_clean_tree_failure_is_structured_no_mutation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

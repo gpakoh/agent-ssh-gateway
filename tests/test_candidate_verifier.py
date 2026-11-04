@@ -948,6 +948,29 @@ def test_quoted_and_newline_commands_round_trip_in_receipt(
     assert "a\nb" in receipt["checks"][1]["command"]
 
 
+@pytest.mark.parametrize(
+    "code",
+    [
+        "VERIFIER_EVIDENCE_UNAVAILABLE",
+        "VERIFIER_RECEIPT_INVALID",
+        "VERIFIER_PROVENANCE_UNRESOLVED",
+    ],
+)
+def test_all_verifier_receipt_failures_keep_typed_error_codes(code: str) -> None:
+    from examples.mcp_server.tool_results import ERROR_CODES, tool_error
+
+    assert code in ERROR_CODES
+    error = tool_error(
+        tool="gitea_push_verified_commit",
+        code=code,
+        message="verifier denied push before mutation",
+        details={"phase": "receipt_validation", "mutation_occurred": False},
+        source="gitea",
+    )
+    assert error["error"]["code"] == code
+    assert error["error"]["details"]["mutation_occurred"] is False
+
+
 def test_provenance_accepts_python_git_uv_and_shell_builtin(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1035,6 +1058,9 @@ def test_unresolved_provenance_fails_closed(
         )
     assert exc_info.value.code == "VERIFIER_PROVENANCE_UNRESOLVED"
     assert exc_info.value.phase == "receipt_validation"
+    assert exc_info.value.details["check_index"] == 0
+    assert exc_info.value.details["provenance_reason"] == "not_found_on_trusted_path"
+    assert exc_info.value.details["mutation_occurred"] is False
 
 
 @pytest.mark.parametrize(
@@ -1107,6 +1133,67 @@ def test_mutation_digest_changes_when_check_creates_file(tmp_path: Path) -> None
     assert check["before_status_sha256"] != check["after_status_sha256"]
     assert check["after_status_entries"] == 1
     assert check["primary_tool"]["kind"] == "external"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git diff --check HEAD",
+        "(git diff --check HEAD)",
+        "( git diff --check HEAD )",
+    ],
+)
+def test_parenthesized_successful_git_check_has_attested_primary_tool(
+    tmp_path: Path, command: str,
+) -> None:
+    # A single subshell group is legitimate POSIX syntax. The old parser
+    # treated '(git' (or '(') as a binary, denying successful checks.
+    run_id = "cafebaef" * 4
+    image = "registry.invalid/verifier:test"
+    rc, stdout, _sha = _run_verifier_script_locally(
+        tmp_path, [command], run_id=run_id, verifier_image=image,
+    )
+    assert rc == 0
+    checks = candidate_verifier_module._parse_check_receipts(
+        stdout, run_id=run_id, verifier_image=image, required_checks=[command],
+    )
+    assert len(checks) == 1
+    tool = checks[0]["primary_tool"]
+    assert tool["kind"] == "external"
+    assert tool["name"] == "git"
+    assert re.fullmatch(r"[0-9a-f]{64}", tool["sha256"])
+
+
+def test_unresolved_reason_is_fixed_enum_without_secret_reflection() -> None:
+    with pytest.raises(CandidateVerificationError) as exc:
+        candidate_verifier_module._validated_provenance(
+            {"kind": "unresolved", "reason": "secret=ghp_untrusted_value"},
+            check_index=3,
+        )
+    assert exc.value.code == "VERIFIER_PROVENANCE_UNRESOLVED"
+    assert exc.value.details["check_index"] == 3
+    assert exc.value.details["provenance_reason"] == "unclassified"
+    assert "ghp_untrusted_value" not in str(exc.value.details)
+
+
+def test_parenthesized_unknown_primary_still_denied(
+    tmp_path: Path,
+) -> None:
+    # The shell exits successfully via 'true', but the first tool is unknown.
+    # A fallback to shell identity must NOT convert it into trusted evidence.
+    run_id = "baaddead" * 4
+    image = "registry.invalid/verifier:test"
+    command = "(no-such-tool-with-fallback || true)"
+    rc, stdout, _sha = _run_verifier_script_locally(
+        tmp_path, [command], run_id=run_id, verifier_image=image,
+    )
+    assert rc == 0
+    with pytest.raises(CandidateVerificationError) as exc:
+        candidate_verifier_module._parse_check_receipts(
+            stdout, run_id=run_id, verifier_image=image, required_checks=[command],
+        )
+    assert exc.value.code == "VERIFIER_PROVENANCE_UNRESOLVED"
+    assert exc.value.details["mutation_occurred"] is False
 
 
 def test_verifier_script_emits_real_builtin_provenance(tmp_path: Path) -> None:
