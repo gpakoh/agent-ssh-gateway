@@ -370,6 +370,7 @@ TOOL_NAMES_BY_MODE["mcp_client_write"] = (
     "prepare_candidate_clone",
     "candidate_adopt",
     "candidate_cleanup",
+    "candidate_discard_untracked_file",
     "candidate_cleanup_abort_legacy_prepared",
     "candidate_orphan_finalize",
     "fleet_status",

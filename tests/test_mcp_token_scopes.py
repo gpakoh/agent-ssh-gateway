@@ -110,10 +110,11 @@ def test_candidate_adopt_requires_repo_and_admin_scope():
     assert has_required_scope(["mcp:repo", "mcp:admin"], "candidate_adopt")
 
 
-def test_candidate_cleanup_requires_repo_and_admin_scope():
+@pytest.mark.parametrize("name", ["candidate_cleanup", "candidate_discard_untracked_file"])
+def test_candidate_cleanup_requires_repo_and_admin_scope(name):
     from examples.mcp_server.tool_scopes import get_required_scopes, has_required_scope
 
-    assert get_required_scopes("candidate_cleanup") == ["mcp:repo", "mcp:admin"]
-    assert not has_required_scope(["mcp:repo"], "candidate_cleanup")
-    assert not has_required_scope(["mcp:admin"], "candidate_cleanup")
-    assert has_required_scope(["mcp:repo", "mcp:admin"], "candidate_cleanup")
+    assert get_required_scopes(name) == ["mcp:repo", "mcp:admin"]
+    assert not has_required_scope(["mcp:repo"], name)
+    assert not has_required_scope(["mcp:admin"], name)
+    assert has_required_scope(["mcp:repo", "mcp:admin"], name)

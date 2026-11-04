@@ -33,6 +33,9 @@ from examples.mcp_server.candidate_clone import candidate_cleanup as _candidate_
 from examples.mcp_server.candidate_clone import (
     prepare_candidate_clone as _prepare_candidate_clone,
 )
+from examples.mcp_server.candidate_file_discard import (
+    discard_untracked_candidate_file as _discard_untracked_candidate_file,
+)
 from examples.mcp_server.candidate_orphan_finalize import (
     candidate_orphan_finalize as _candidate_orphan_finalize,
 )
@@ -1194,6 +1197,140 @@ async def candidate_cleanup(
     )
 
 
+async def candidate_discard_untracked_file(
+    project_id: str,
+    expected_head_sha: str,
+    expected_branch: str,
+    expected_source_project: str,
+    relative_path: str,
+    expected_sha256: str,
+    expected_size: int,
+) -> dict[str, Any]:
+    """Archive and remove exactly one untracked file from an idle managed clone."""
+
+    async def _run() -> dict[str, Any]:
+        try:
+            source_project, source_root = _resolve_project(expected_source_project)
+            config_dir = _resolve_registry_config_dir()
+            journal_root = _journal_root_for_project("workspace-registry", config_dir)
+        except _ProjectResolutionError:
+            return tool_error(
+                tool="candidate_discard_untracked_file",
+                code="PROJECT_NOT_FOUND",
+                message="Source project is not registered or its root is unavailable.",
+            )
+        except ValueError:
+            return tool_error(
+                tool="candidate_discard_untracked_file",
+                code="INVALID_INPUT",
+                message="Workspace registry control plane is misconfigured.",
+            )
+
+        audit_metadata = {
+            "project_id": project_id,
+            "expected_head_sha": expected_head_sha,
+            "expected_branch": expected_branch,
+            "expected_source_project": source_project,
+            "path_sha256": hashlib.sha256(str(relative_path).encode("utf-8")).hexdigest(),
+            "expected_sha256": expected_sha256,
+            "expected_size": expected_size,
+            "correlation_id": uuid.uuid4().hex,
+        }
+        audit_written = False
+
+        def _reference_guard() -> None:
+            nonlocal audit_written
+            try:
+                _username, clone_url, token = _resolve_trusted_remote(source_root)
+                _host, owner, repo = _parse_gitea_remote(clone_url)
+            except (ManagedSourceBundleError, RuntimeError, ValueError) as exc:
+                raise CandidateCloneError(
+                    "CHECK_FAILED",
+                    "trusted candidate source remote identity could not be verified",
+                    retryable=True,
+                ) from exc
+
+            asyncio.run(
+                _assert_no_open_candidate_pr_reference(
+                    token=token,
+                    owner=owner,
+                    repo=repo,
+                    expected_branch=expected_branch,
+                    expected_head_sha=expected_head_sha,
+                )
+            )
+            if not audit_written:
+                try:
+                    server_attr("get_audit_logger")().append_required(
+                        McpAuditEvent(
+                            event_type="mcp.candidate_file_destructive_intent",
+                            tool="candidate_discard_untracked_file",
+                            action="candidate_discard_untracked_file",
+                            decision="allow",
+                            reason="exact untracked file verified; archive mandatory",
+                            metadata=audit_metadata,
+                        )
+                    )
+                except AuditWriteError as exc:
+                    raise CandidateCloneError(
+                        "AUDIT_UNAVAILABLE",
+                        "required candidate file discard audit unavailable",
+                        retryable=True,
+                    ) from exc
+                audit_written = True
+
+        try:
+            with cleanup_remote_resolution_scope():
+                receipt = await asyncio.to_thread(
+                    _discard_untracked_candidate_file,
+                    project_id,
+                    source_project,
+                    expected_branch,
+                    expected_head_sha,
+                    relative_path,
+                    expected_sha256,
+                    expected_size,
+                    config_dir=config_dir,
+                    journal_root=journal_root,
+                    reference_guard=_reference_guard,
+                )
+        except CandidateCloneError as exc:
+            return tool_error(
+                tool="candidate_discard_untracked_file",
+                code=exc.code,
+                message=exc.message,
+                retryable=exc.retryable,
+                details=exc.details,
+            )
+
+        if audit_written:
+            try:
+                server_attr("get_audit_logger")().append(
+                    McpAuditEvent(
+                        event_type="mcp.candidate_file_destructive_success",
+                        tool="candidate_discard_untracked_file",
+                        action="candidate_discard_untracked_file",
+                        decision="allow",
+                        reason="single archived untracked file discarded",
+                        metadata={**audit_metadata, "archive_id": receipt["archive_id"]},
+                    )
+                )
+            except Exception:
+                pass
+        return tool_success(
+            tool="candidate_discard_untracked_file",
+            result=receipt,
+            success_text="Archived and discarded one untracked candidate file.",
+        )
+
+    return await run_tool_async(
+        tool="candidate_discard_untracked_file",
+        title="Candidate single untracked file discard",
+        fn=_run,
+        success_text="Archived and discarded one untracked candidate file.",
+    )
+
+
 async def candidate_orphan_finalize(
     project_id: str,
     expected_base_sha: str,
@@ -1637,6 +1774,9 @@ def register_all() -> None:
     register_tool("candidate_cleanup")(
         instrumented("candidate_cleanup")(candidate_cleanup)
     )
+    register_tool("candidate_discard_untracked_file")(
+        instrumented("candidate_discard_untracked_file")(candidate_discard_untracked_file)
+    )
     register_tool("candidate_cleanup_abort_legacy_prepared")(
         instrumented("candidate_cleanup_abort_legacy_prepared")(
             candidate_cleanup_abort_legacy_prepared
@@ -1658,6 +1798,7 @@ __all__ = [
     "prepare_candidate_clone",
     "candidate_adopt",
     "candidate_cleanup",
+    "candidate_discard_untracked_file",
     "candidate_cleanup_abort_legacy_prepared",
     "candidate_orphan_finalize",
 ]
