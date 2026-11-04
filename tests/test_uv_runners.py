@@ -876,7 +876,10 @@ class TestRunUvToolContract:
         assert result["result"]["stderr"] == "2 failed"
         assert result["error"]["code"] == "CHECK_FAILED"
 
-    def test_pytest_missing_uv_lock_uses_external_fallback(self, monkeypatch):
+    @pytest.mark.parametrize("diagnostic_stream", ["stderr", "stdout"])
+    def test_pytest_missing_uv_lock_uses_external_fallback(
+        self, monkeypatch, diagnostic_stream
+    ):
         """Projects without uv.lock must not fail before pytest starts."""
         from mcp_client_tools import _run_uv_tool
 
@@ -885,6 +888,7 @@ class TestRunUvToolContract:
             "mcp_client_tools._build_readonly_fallback_script",
             lambda *a: "external fallback script",
         )
+        uv_error = "error: Unable to find lockfile at `uv.lock`, but `--frozen` was provided.\n"
 
         class MissingLockClient:
             def __init__(self):
@@ -900,8 +904,12 @@ class TestRunUvToolContract:
                     return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
                 return {
                     "exit_code": 2,
-                    "stdout": "",
-                    "stderr": "error: Unable to find lockfile at `uv.lock`, but `--frozen` was provided.\n",
+                    "stdout": (
+                        "Using CPython 3.12.15 interpreter\n" + uv_error
+                        if diagnostic_stream == "stdout"
+                        else ""
+                    ),
+                    "stderr": uv_error if diagnostic_stream == "stderr" else "",
                 }
 
             def execute_project_script(self, proj, script, timeout_s=300):
@@ -922,11 +930,15 @@ class TestRunUvToolContract:
         assert result["result"]["outcome"] == "passed"
         assert result["result"]["stdout"] == "fallback OK"
 
-    def test_ruff_missing_uv_lock_uses_uvx_fallback(self, monkeypatch):
+    @pytest.mark.parametrize("diagnostic_stream", ["stderr", "stdout"])
+    def test_ruff_missing_uv_lock_uses_uvx_fallback(
+        self, monkeypatch, diagnostic_stream
+    ):
         """Ruff has no project install requirement; uvx is the external fallback."""
         from mcp_client_tools import _run_uv_tool
 
         monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
+        uv_error = "error: Unable to find lockfile at `uv.lock`, but `--frozen` was provided.\n"
 
         class MissingLockClient:
             def __init__(self):
@@ -942,8 +954,8 @@ class TestRunUvToolContract:
                     return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
                 return {
                     "exit_code": 2,
-                    "stdout": "",
-                    "stderr": "error: Unable to find lockfile at `uv.lock`, but `--frozen` was provided.\n",
+                    "stdout": uv_error if diagnostic_stream == "stdout" else "",
+                    "stderr": uv_error if diagnostic_stream == "stderr" else "",
                 }
 
             def execute_argv(self, argv, **kw):
@@ -968,6 +980,32 @@ class TestRunUvToolContract:
         assert client.argv_calls[0][2:4] == ["uvx", "--from"]
         assert result["ok"] is True
         assert result["result"]["stdout"] == "All checks passed!\n"
+
+    @pytest.mark.parametrize(
+        ("exit_code", "stdout", "expected"),
+        [
+            (0, "error: unable to find lockfile at `uv.lock` --frozen", False),
+            (1, "error: unable to find lockfile at `uv.lock` --frozen", False),
+            (2, "pytest failed: unable to find lockfile --frozen", False),
+            (
+                2,
+                "Using CPython 3.12.15\n"
+                "error: unable to find lockfile at `uv.lock`, but `--frozen` was provided.\n",
+                True,
+            ),
+        ],
+    )
+    def test_stdout_lockfile_detection_never_retries_an_actual_test_failure(
+        self, exit_code, stdout, expected
+    ):
+        from mcp_client_tools import _uv_run_needs_external_fallback
+
+        assert (
+            _uv_run_needs_external_fallback(
+                {"exit_code": exit_code, "stdout": stdout, "stderr": ""}
+            )
+            is expected
+        )
 
     def test_compileall_missing_uv_lock_uses_no_project_python(self, monkeypatch):
         """compileall must bypass a missing project lockfile with stdlib Python."""

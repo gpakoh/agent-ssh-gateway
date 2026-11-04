@@ -1134,6 +1134,15 @@ def _uv_run_needs_external_fallback(raw: dict[str, Any]) -> bool:
     if raw.get("exit_code", 0) == 0:
         return False
     stderr_lower = (raw.get("stderr", "") or "").lower()
+    # The SSH job adapter may combine uv's stderr with stdout.  Match only
+    # uv's own exit-2 lockfile diagnostic there: arbitrary failed test output
+    # must not trigger a second, potentially side-effecting execution.
+    stdout_lower = (raw.get("stdout", "") or raw.get("output", "") or "").lower()
+    stdout_missing_lock = raw.get("exit_code") == 2 and any(
+        line.startswith("error: unable to find lockfile at `uv.lock`")
+        and "--frozen" in line
+        for line in stdout_lower.splitlines()
+    )
     return (
         "read-only file system" in stderr_lower
         or "failed to remove directory" in stderr_lower
@@ -1141,6 +1150,7 @@ def _uv_run_needs_external_fallback(raw: dict[str, Any]) -> bool:
             "unable to find lockfile" in stderr_lower
             and "--frozen" in stderr_lower
         )
+        or stdout_missing_lock
     )
 
 
