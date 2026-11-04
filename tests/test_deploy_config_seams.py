@@ -176,7 +176,7 @@ class TestAgentRuntimeIsolationWiring:
         mkdir_line = next(line for line in text.splitlines() if line.startswith("RUN mkdir -p /app/data"))
         assert "/var/lib/mcp-candidates" in mkdir_line
         assert "/var/lib/mcp-candidates" in next(
-            line for line in text.splitlines() if "chown -R appuser:appuser" in line
+            line for line in text.splitlines() if "chown appuser:appuser" in line
         )
 
     def test_mcp_docker_cli_supports_candidate_volume_subpath(self):
@@ -760,7 +760,7 @@ class TestMcpOauthServiceCoherence:
             line for line in text.splitlines() if line.startswith("RUN mkdir -p /app/data")
         )
         chown_line = next(
-            line for line in text.splitlines() if "chown -R appuser:appuser" in line
+            line for line in text.splitlines() if "chown appuser:appuser" in line
         )
         assert "/var/lib/mcp-supervisor" in mkdir_line
         assert "/var/lib/mcp-supervisor" in chown_line
@@ -780,7 +780,7 @@ class TestMcpOauthServiceCoherence:
             line for line in text.splitlines() if line.startswith("RUN mkdir -p /app/data")
         )
         chown_line = next(
-            line for line in text.splitlines() if "chown -R appuser:appuser" in line
+            line for line in text.splitlines() if "chown appuser:appuser" in line
         )
         assert "/var/lib/mcp-audit" in mkdir_line
         assert "/var/lib/mcp-audit" in chown_line
@@ -2735,6 +2735,57 @@ class TestMcpServerDockerfileInstallsComposePlugin:
         ) in text
 
 
+class TestImagePermissionsAreScoped:
+    """The image must not walk the whole virtualenv to change file modes."""
+
+    @pytest.mark.parametrize("dockerfile", [GATEWAY_DOCKERFILE, MCP_SERVER_DOCKERFILE])
+    def test_no_recursive_app_or_virtualenv_permission_mutation(self, dockerfile):
+        text = dockerfile.read_text(encoding="utf-8")
+        assert "COPY --chown=appuser:appuser app/ ./app/" in text
+        # These expensive recursive operations used to traverse thousands of
+        # already-readable wheel files on every image rebuild. They also
+        # unnecessarily made every source file executable.
+        assert not re.search(r"\b(?:chown|chmod)\s+-R\b[^\n]*\s/app(?:/|\s|$)", text)
+        assert "USER appuser" in text
+
+    @pytest.mark.parametrize(
+        ("dockerfile", "writable_paths"),
+        [
+            (GATEWAY_DOCKERFILE, ("/app/ssh_keys", "/app/logs", "/app/data")),
+            (
+                MCP_SERVER_DOCKERFILE,
+                (
+                    "/app/data",
+                    "/var/lib/mcp-agent",
+                    "/var/lib/mcp-agent/sources",
+                    "/var/lib/mcp-supervisor",
+                    "/var/lib/mcp-candidates",
+                    "/var/lib/mcp-audit",
+                ),
+            ),
+        ],
+    )
+    def test_only_explicit_runtime_dirs_chowned_before_dropping_root(
+        self, dockerfile, writable_paths
+    ):
+        text = dockerfile.read_text(encoding="utf-8")
+        chown = next(
+            line.strip()
+            for line in text.splitlines()
+            if line.strip().startswith("chown appuser:appuser ")
+        )
+        for path in writable_paths:
+            assert path in chown.split(), (dockerfile.name, path)
+        assert text.index("chown appuser:appuser ") < text.index("USER appuser")
+        assert "chown appuser:appuser /tmp" not in text
+        # A build must prove actual non-root file creation and wheel import,
+        # rather than trusting source-mode assumptions alone.
+        after_user = text.split("USER appuser", 1)[1]
+        assert 'RUN python -c "import fastapi, tempfile;' in after_user
+        for path in writable_paths:
+            assert repr(path) in after_user
+
+
 class TestMcpServerBuildMetadataCacheBoundary:
     """Per-run provenance must not invalidate expensive Docker build layers."""
 
@@ -2750,7 +2801,7 @@ class TestMcpServerBuildMetadataCacheBoundary:
             "COPY --from=node-runtime /usr/local/bin/node",
             "uv sync --frozen",
             "COPY --chown=appuser:appuser scripts/ ./scripts/",
-            "RUN chmod -R 755 /app",
+            "chown appuser:appuser /app/data /var/lib/mcp-agent",
         ):
             assert build_sha > text.index(marker), marker
 
