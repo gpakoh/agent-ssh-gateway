@@ -164,4 +164,3 @@ def test_clone_bundle_failure_reports_only_sanitized_classification(
     assert error.failure_class == expected_class
     assert error.retryable is expected_retryable
     assert "secret-token" not in str(error)
-
