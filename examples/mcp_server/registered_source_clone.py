@@ -38,11 +38,13 @@ class RegisteredSourceCloneError(RuntimeError):
         phase: str,
         retryable: bool = False,
         exit_code: int | None = None,
+        failure_class: str = "unclassified",
     ) -> None:
         super().__init__(message)
         self.phase = phase
         self.retryable = retryable
         self.exit_code = exit_code
+        self.failure_class = failure_class
 
 
 def _clean_env(base_env: Mapping[str, str] | None, *, home: Path) -> dict[str, str]:
@@ -71,6 +73,30 @@ def _clean_env(base_env: Mapping[str, str] | None, *, home: Path) -> dict[str, s
     return env
 
 
+def _classify_git_failure(stderr: str) -> tuple[str, bool]:
+    """Classify known Git failures without exposing arbitrary stderr or paths.
+
+    Unknown exit codes remain non-retryable; an observed pre-mutation resource
+    shortage is safe to reconsider only after checking the environment.
+    """
+    sample = stderr[:8192].lower()
+    if any(marker in sample for marker in (
+        "resource temporarily unavailable",
+        "too many open files",
+        "cannot fork",
+    )):
+        return "resource_pressure", True
+    if "permission denied" in sample or "access is denied" in sample:
+        return "permission_denied", False
+    if any(marker in sample for marker in (
+        "not a git bundle",
+        "unrecognized bundle",
+        "invalid bundle header",
+    )):
+        return "invalid_bundle", False
+    return "git_failure", False
+
+
 def _run(
     argv: list[str],
     *,
@@ -94,19 +120,23 @@ def _run(
             "registered source materialization timed out",
             phase=phase,
             retryable=True,
+            failure_class="git_timeout",
         ) from exc
     except OSError as exc:
         raise RegisteredSourceCloneError(
             "registered source materialization could not execute Git",
             phase=phase,
             retryable=True,
+            failure_class="git_spawn_error",
         ) from exc
     if result.returncode != 0:
+        failure_class, retryable = _classify_git_failure(result.stderr)
         raise RegisteredSourceCloneError(
             "registered source materialization Git command failed",
             phase=phase,
-            retryable=False,
+            retryable=retryable,
             exit_code=result.returncode,
+            failure_class=failure_class,
         )
     return result.stdout.strip()
 

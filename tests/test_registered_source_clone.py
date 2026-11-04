@@ -128,3 +128,40 @@ def test_clone_registered_commit_rejects_malformed_inherited_git_config_before_g
     assert excinfo.value.phase == "source_trust"
     assert excinfo.value.retryable is False
     assert not destination.exists()
+
+
+@pytest.mark.parametrize(
+    ("git_stderr", "expected_class", "expected_retryable"),
+    [
+        ("fatal: unable to create thread: Resource temporarily unavailable", "resource_pressure", True),
+        ("fatal: Permission denied (contains secret-token)", "permission_denied", False),
+        ("fatal: unrecognized bundle secret-token", "invalid_bundle", False),
+        ("fatal: unknown Git failure secret-token", "git_failure", False),
+    ],
+)
+def test_clone_bundle_failure_reports_only_sanitized_classification(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    git_stderr: str,
+    expected_class: str,
+    expected_retryable: bool,
+) -> None:
+    def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 128, stdout="", stderr=git_stderr)
+
+    monkeypatch.setattr(registered_source_clone.subprocess, "run", fake_run)
+    with pytest.raises(RegisteredSourceCloneError) as excinfo:
+        registered_source_clone._run(
+            ["git", "clone", "source.bundle", "destination"],
+            cwd=tmp_path,
+            env={"PATH": "/usr/bin"},
+            phase="clone_bundle",
+            timeout=1,
+        )
+    error = excinfo.value
+    assert error.phase == "clone_bundle"
+    assert error.exit_code == 128
+    assert error.failure_class == expected_class
+    assert error.retryable is expected_retryable
+    assert "secret-token" not in str(error)
+

@@ -146,9 +146,10 @@ def test_push_exact_sha_bundle_bridge_failure_is_sanitized(
 ) -> None:
     def reject_materialization(**_kwargs: Any) -> None:
         raise managed_git.RegisteredSourceCloneError(
-            "sensitive source failure",
+            "sensitive source failure secret-token",
             phase="source_trust",
             retryable=False,
+            failure_class="permission_denied",
         )
 
     def must_not_run(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -160,7 +161,7 @@ def test_push_exact_sha_bundle_bridge_failure_is_sanitized(
     with pytest.raises(
         managed_git.ManagedGitError,
         match="failed to stage registered Git repository during source_trust",
-    ):
+    ) as excinfo:
         managed_git.push_exact_sha(
             project_root=tmp_path,
             owner="gpakoh",
@@ -171,6 +172,8 @@ def test_push_exact_sha_bundle_bridge_failure_is_sanitized(
             token="secret",
             git_base="https://git.example.test",
         )
+    assert "failure_class=permission_denied" in str(excinfo.value)
+    assert "secret-token" not in str(excinfo.value)
 
 
 def test_push_exact_sha_timeout_after_remote_push_starts_is_ambiguous(
