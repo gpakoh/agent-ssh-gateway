@@ -1109,7 +1109,96 @@ async def test_candidate_orphan_finalize_uses_fresh_reference_guard_and_required
     assert len(audit.success) == 1
 
 
-def test_register_all_registers_exactly_eleven_tools(monkeypatch):
+async def test_candidate_discard_adapter_requires_exact_ref_and_durable_audit(
+    tmp_path, immediate_run_tool_async, monkeypatch
+):
+    client = _PullClient()
+    audit = _AuditLogger()
+    calls: list[str] = []
+    _configure_cleanup_adapter(
+        tmp_path, monkeypatch, client=client, audit=audit, guard_calls=calls
+    )
+
+    def _discard(
+        project_id, source_project, branch, head, relative_path, sha, size, *,
+        config_dir, journal_root, reference_guard,
+    ):
+        assert (project_id, source_project, branch, head) == (
+            "candidate-demo", "demo", "candidate/demo", "a" * 40
+        )
+        assert relative_path == "scratch.txt"
+        assert sha == "b" * 64
+        assert size == 9
+        assert config_dir == tmp_path / "registry"
+        assert journal_root == tmp_path / "journals"
+        reference_guard()
+        reference_guard()
+        return {"discarded": True, "archive_id": "c" * 64}
+
+    monkeypatch.setattr(supervisor, "_discard_untracked_candidate_file", _discard)
+    result = await supervisor.candidate_discard_untracked_file(
+        "candidate-demo", "a" * 40, "candidate/demo", "demo",
+        "scratch.txt", "b" * 64, 9,
+    )
+    assert result["ok"] is True
+    assert result["result"]["discarded"] is True
+    assert len(audit.required) == 1
+    assert len(audit.success) == 1
+    assert audit.required[0].metadata["path_sha256"] == hashlib.sha256(b"scratch.txt").hexdigest()
+    assert "scratch.txt" not in repr(audit.required[0].metadata)
+    assert client.calls == [1, 1]
+
+
+async def test_candidate_discard_adapter_audit_failure_blocks_mutation(
+    tmp_path, immediate_run_tool_async, monkeypatch
+):
+    client = _PullClient()
+    audit = _AuditLogger(fail_required=True)
+    _configure_cleanup_adapter(
+        tmp_path, monkeypatch, client=client, audit=audit, guard_calls=[]
+    )
+
+    def _discard(*_args, reference_guard, **_kwargs):
+        reference_guard()
+        raise AssertionError("must not pass required audit")
+
+    monkeypatch.setattr(supervisor, "_discard_untracked_candidate_file", _discard)
+    result = await supervisor.candidate_discard_untracked_file(
+        "candidate-demo", "a" * 40, "candidate/demo", "demo",
+        "scratch.txt", "b" * 64, 9,
+    )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "AUDIT_UNAVAILABLE"
+    assert audit.success == []
+    assert client.calls == [1]
+
+
+async def test_candidate_discard_adapter_blocks_open_pr_before_archive(
+    tmp_path, immediate_run_tool_async, monkeypatch
+):
+    client = _PullClient(
+        pages={1: [_same_repo_pr(39, ref="candidate/demo", sha="a" * 40)]}
+    )
+    audit = _AuditLogger()
+    _configure_cleanup_adapter(
+        tmp_path, monkeypatch, client=client, audit=audit, guard_calls=[]
+    )
+
+    def _discard(*_args, reference_guard, **_kwargs):
+        reference_guard()
+        raise AssertionError("must not archive when PR remains open")
+
+    monkeypatch.setattr(supervisor, "_discard_untracked_candidate_file", _discard)
+    result = await supervisor.candidate_discard_untracked_file(
+        "candidate-demo", "a" * 40, "candidate/demo", "demo",
+        "scratch.txt", "b" * 64, 9,
+    )
+    assert result["ok"] is False
+    assert audit.required == []
+    assert audit.success == []
+
+
+def test_register_all_registers_exactly_twelve_tools(monkeypatch):
     registered: list[str] = []
 
     def _register(name):
@@ -1134,6 +1223,7 @@ def test_register_all_registers_exactly_eleven_tools(monkeypatch):
         "prepare_candidate_clone",
         "candidate_adopt",
         "candidate_cleanup",
+        "candidate_discard_untracked_file",
         "candidate_cleanup_abort_legacy_prepared",
         "candidate_orphan_finalize",
     ]
