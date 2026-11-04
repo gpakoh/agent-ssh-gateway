@@ -243,6 +243,67 @@ async def test_cancel_ambiguous_unproven_result_forbids_blind_retry(monkeypatch)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("pending_status", ["queued", "in_progress"])
+async def test_cancel_acknowledged_but_runner_cleanup_pending_is_distinct(monkeypatch, pending_status):
+    client = FakeClient(after=_run(status=pending_status))
+    audit = _setup(monkeypatch, client)
+
+    result = await remote.gitea_cancel_action_run("owner", "repo", RUN_ID, SHA, ATTEMPT)
+
+    assert result["ok"] is False
+    error = result["error"]
+    assert error["code"] == "ACTION_CANCEL_ACCEPTED_PENDING"
+    assert error["retryable"] is False
+    details = error["details"]
+    assert details["dispatch_acknowledged"] is True
+    assert details["terminal_verified"] is False
+    assert details["cancelled"] is False
+    assert details["observed"]["status"] == pending_status
+    assert details["observed"]["head_sha"] == SHA
+    assert details["observed"]["run_attempt"] == ATTEMPT
+    assert client.cancel_calls == [("owner", "repo", RUN_ID)]
+    assert client.reads == 4
+    assert [event.event_type for event in audit.appended] == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_ambiguous_timeout_stays_unknown_even_if_run_is_queued(monkeypatch):
+    request = httpx.Request("POST", f"https://git.example/actions/runs/{RUN_ID}/cancel")
+    client = FakeClient(
+        after=_run(status="queued"),
+        mutation_error=httpx.ReadTimeout("lost response", request=request),
+    )
+    _setup(monkeypatch, client)
+
+    result = await remote.gitea_cancel_action_run("owner", "repo", RUN_ID, SHA, ATTEMPT)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "MUTATION_OUTCOME_UNKNOWN"
+    assert result["error"]["details"]["observed"]["status"] == "queued"
+    assert client.cancel_calls == [("owner", "repo", RUN_ID)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "after",
+    [
+        _run(head_sha="b" * 40, status="queued"),
+        _run(run_attempt=ATTEMPT + 1, status="queued"),
+    ],
+)
+async def test_cancel_acknowledgement_never_trusts_identity_drift(monkeypatch, after):
+    client = FakeClient(after=after)
+    _setup(monkeypatch, client)
+
+    result = await remote.gitea_cancel_action_run("owner", "repo", RUN_ID, SHA, ATTEMPT)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "MUTATION_OUTCOME_UNKNOWN"
+    assert result["error"]["details"].get("dispatch_acknowledged") is not True
+    assert client.cancel_calls == [("owner", "repo", RUN_ID)]
+
+
+@pytest.mark.asyncio
 async def test_cancel_natural_completion_race_is_not_mislabeled_cancelled(monkeypatch):
     client = FakeClient(after=_run(status="completed", conclusion="success"))
     _setup(monkeypatch, client)

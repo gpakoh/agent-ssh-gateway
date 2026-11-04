@@ -5323,8 +5323,9 @@ async def gitea_cancel_action_run(
                 )
 
             mutation_error: BaseException | None = None
+            mutation_response: dict[str, Any] | None = None
             try:
-                await client.cancel_action_run(owner, repo, run_id)
+                mutation_response = await client.cancel_action_run(owner, repo, run_id)
             except asyncio.CancelledError as exc:
                 current_task = asyncio.current_task()
                 if current_task is not None and current_task.cancelling():
@@ -5357,6 +5358,39 @@ async def gitea_cancel_action_run(
                     details["mutation_error_class"] = type(mutation_error).__name__
                     if isinstance(mutation_error, httpx.HTTPStatusError):
                         details["mutation_http_status"] = mutation_error.response.status_code
+                observed = reconciliation.get("observed")
+                # A successful cancel POST is a dispatch receipt, not proof
+                # that its asynchronous runner cleanup has finished. Only
+                # report pending when BOTH the POST and a fresh read attest
+                # the exact same run, HEAD and attempt. Timeouts and identity
+                # drift retain the ambiguous fail-closed error.
+                if (
+                    mutation_error is None
+                    and isinstance(mutation_response, dict)
+                    and _action_run_id(mutation_response.get("id")) == run_id
+                    and _valid_commit_sha(mutation_response.get("head_sha")) == expected_head_sha
+                    and _action_run_attempt(mutation_response.get("run_attempt"))
+                    == expected_run_attempt
+                    and isinstance(observed, dict)
+                    and observed.get("id") == run_id
+                    and observed.get("head_sha") == expected_head_sha
+                    and observed.get("run_attempt") == expected_run_attempt
+                    and observed.get("status") in _ACTION_RUN_CANCELLABLE_STATUSES
+                ):
+                    return tool_error(
+                        tool=tool,
+                        code="ACTION_CANCEL_ACCEPTED_PENDING",
+                        message="Gitea accepted the exact cancellation request; terminal runner cleanup is still pending.",
+                        retryable=False,
+                        hint="Do not replay cancel. Read the same run/head/attempt and its jobs until terminal; no cancellation completion is claimed.",
+                        details={
+                            **details,
+                            "dispatch_acknowledged": True,
+                            "terminal_verified": False,
+                            "cancelled": False,
+                        },
+                        source="gitea",
+                    )
                 return tool_error(
                     tool=tool,
                     code="MUTATION_OUTCOME_UNKNOWN",
