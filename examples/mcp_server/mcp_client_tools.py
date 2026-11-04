@@ -946,6 +946,26 @@ def show_file_diff(
 # ── Project test target tools ───────────────────────────────────
 
 
+def _verifier_requirement_paths(targets: list[str]) -> tuple[str, ...]:
+    """Select root and explicit target-component requirements without a tree scan.
+
+    A monorepo root may only declare verifier tooling while the requested
+    service owns its runtime requirements one directory below that root.
+    Never import requirements from sibling services or follow target paths
+    outside the validated project. The caller has already checked targets.
+    """
+    req_names = ("requirements.txt", "requirements-dev.txt", "requirements-test.txt")
+    scoped_dirs: set[str] = set()
+    for raw in targets:
+        path = Path(raw)
+        if path.is_absolute() or not path.parts:
+            continue
+        component = path.parts[0]
+        if component not in {".", ".."} and re.fullmatch(r"[A-Za-z0-9_.-]+", component):
+            scoped_dirs.add(component)
+    return (*req_names, *(f"{directory}/{req}" for directory in sorted(scoped_dirs) for req in req_names))
+
+
 def _build_readonly_fallback_script(
     tool_key: str,
     project_dir: str,
@@ -965,6 +985,8 @@ def _build_readonly_fallback_script(
     lock/cache files in source.  For projects without a lockfile, dependency
     metadata is copied to the temp root and synced with ``--no-install-project``
     so uv is never allowed to create a new lockfile inside the read-only repo.
+    Immediate requirements of the explicitly selected service are installed
+    only into the external verifier environment, never into the source.
     """
     project_hash = hashlib.sha1(project_dir.encode("utf-8")).hexdigest()[:8]
     project_name = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(project_dir).name) or "project"
@@ -981,6 +1003,13 @@ def _build_readonly_fallback_script(
             p = Path(t).relative_to("/") if len(p.parts) > 1 else Path(".")
         abs_targets.append(str(Path(project_dir) / p))
     target_args = " ".join(shlex.quote(t) for t in abs_targets)
+    requirement_paths = _verifier_requirement_paths(targets)
+    requirement_args = " ".join(shlex.quote(req) for req in requirement_paths)
+    # The target-specific selection is part of the isolated environment
+    # identity. A different service target must re-sync before checking.
+    requirement_set_sha = hashlib.sha256(
+        "\n".join(requirement_paths).encode("utf-8")
+    ).hexdigest()
 
     lines = [
         "set -eu",
@@ -1011,6 +1040,8 @@ def _build_readonly_fallback_script(
         'SOURCE_META_NEW="$TMP_ROOT/.source-pyproject.toml.new"',
         'SOURCE_LOCK="$TMP_ROOT/.source-uv.lock"',
         'STAMP="$TMP_ROOT/.uv_sync_stamp"',
+        'REQ_SET="$TMP_ROOT/.source-requirement-set"',
+        f"REQ_SET_SHA={shlex.quote(requirement_set_sha)}",
         # A registered requirements-only service may have no pyproject.toml.
         # Generate metadata only under the trusted external verifier root;
         # never invent a source-local pyproject or uv.lock.
@@ -1031,9 +1062,11 @@ def _build_readonly_fallback_script(
         "else",
         "  HAS_LOCK=0",
         '  if [ -f "$SOURCE_LOCK" ]; then NEED_SYNC=1; fi',
-        "  for req in requirements.txt requirements-dev.txt requirements-test.txt; do",
+        '  if [ ! -f "$REQ_SET" ] || [ "$(cat "$REQ_SET")" != "$REQ_SET_SHA" ]; then NEED_SYNC=1; fi',
+        f"  for req in {requirement_args}; do",
         '    req_src="$PROJECT_DIR/$req"',
-        '    req_cache="$TMP_ROOT/.source-$req"',
+        '    req_cache="$TMP_ROOT/.source-$(printf %s "$req" | tr / _)"',
+        '    if [ -L "$req_src" ] || [ -L "$PROJECT_DIR/${req%%/*}" ]; then echo "VERIFIER_ROOT_UNSAFE: symlinked requirements source" >&2; exit 90; fi',
         '    if [ -f "$req_src" ]; then',
         '      if [ ! -f "$req_cache" ] || ! diff -q "$req_src" "$req_cache" >/dev/null 2>&1; then NEED_SYNC=1; fi',
         '    elif [ -f "$req_cache" ]; then',
@@ -1064,14 +1097,18 @@ def _build_readonly_fallback_script(
         '    rm -f "$TMP_ROOT/uv.lock"',
         '    cd "$TMP_ROOT"',
         "    uv sync --all-extras --no-install-project 2>&1",
-        "    for req in requirements.txt requirements-dev.txt requirements-test.txt; do",
-        '      if [ -f "$PROJECT_DIR/$req" ]; then',
-        '        uv pip install --python "$UV_PROJECT_ENVIRONMENT/bin/python3" -r "$PROJECT_DIR/$req" 2>&1',
-        '        cp "$PROJECT_DIR/$req" "$TMP_ROOT/.source-$req"',
+        f"    for req in {requirement_args}; do",
+        '      req_src="$PROJECT_DIR/$req"',
+        '      req_cache="$TMP_ROOT/.source-$(printf %s "$req" | tr / _)"',
+        '      if [ -L "$req_src" ] || [ -L "$PROJECT_DIR/${req%%/*}" ]; then echo "VERIFIER_ROOT_UNSAFE: symlinked requirements source" >&2; exit 90; fi',
+        '      if [ -f "$req_src" ]; then',
+        '        uv pip install --python "$UV_PROJECT_ENVIRONMENT/bin/python3" -r "$req_src" 2>&1',
+        '        cp "$req_src" "$req_cache"',
         "      else",
-        '        rm -f "$TMP_ROOT/.source-$req"',
+        '        rm -f "$req_cache"',
         "      fi",
         "    done",
+        '    printf "%s\\n" "$REQ_SET_SHA" > "$REQ_SET"',
         '    rm -f "$SOURCE_LOCK"',
         '    SYNC_PROJECT="$TMP_ROOT"',
         "  fi",
