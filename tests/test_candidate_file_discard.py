@@ -90,6 +90,33 @@ def test_discard_rejects_bad_target_path(registry_fixture, monkeypatch, relative
     assert path.read_bytes() == b"abandoned scratch\n"
 
 
+def test_discard_refuses_unsafe_archive_directory_without_deleting_file(
+    registry_fixture, monkeypatch, tmp_path
+):
+    _, path, params = _setup(registry_fixture, monkeypatch)
+    archive_dir = params["journal_root"] / "candidate-file-archive"
+    outside = tmp_path / "untrusted"
+    outside.mkdir()
+    archive_dir.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(CandidateCloneError, match="archive unsafe"):
+        discard_untracked_candidate_file(**params)
+
+    assert path.read_bytes() == b"abandoned scratch\n"
+    assert not list(outside.iterdir())
+
+
+def test_discard_rejects_fifo_before_open_without_hanging(
+    registry_fixture, monkeypatch
+):
+    _, path, params = _setup(registry_fixture, monkeypatch)
+    path.unlink()
+    os.mkfifo(path)
+    with pytest.raises(CandidateCloneError, match="other changes|type"):
+        discard_untracked_candidate_file(**params)
+    assert path.is_fifo()
+
+
 def test_discard_requires_external_reference_guard_and_preserves_file(registry_fixture, monkeypatch):
     _, path, params = _setup(registry_fixture, monkeypatch)
 
@@ -133,6 +160,27 @@ def test_discard_detects_writer_race_after_quarantine_and_restores_path(
     archive = params["journal_root"] / "candidate-file-archive"
     assert [p.read_bytes() for p in archive.glob("*.blob")] == [b"abandoned scratch\n"]
     assert not list(path.parent.glob(".mcp-discard-*"))
+
+
+def test_discard_replay_after_success_preserves_recreated_identical_file(
+    registry_fixture, monkeypatch
+):
+    _, path, params = _setup(registry_fixture, monkeypatch)
+    first = discard_untracked_candidate_file(**params)
+    assert first["discarded"]
+    assert not path.exists()
+
+    # Same path, HEAD, SHA and size, but it is a NEW file. A replay of the
+    # previous ambiguous request must never silently delete it.
+    path.write_bytes(b"abandoned scratch\n")
+    with pytest.raises(CandidateCloneError, match="archive already exists"):
+        discard_untracked_candidate_file(**params)
+    assert path.read_bytes() == b"abandoned scratch\n"
+    archive = (
+        params["journal_root"] / "candidate-file-archive" /
+        (first["archive_id"] + ".blob")
+    )
+    assert archive.read_bytes() == b"abandoned scratch\n"
 
 
 def test_discard_archive_collision_keeps_original_bytes(registry_fixture, monkeypatch):

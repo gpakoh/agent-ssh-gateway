@@ -143,20 +143,25 @@ def _archive(journal_root: Path, archive_id: str, data: bytes) -> None:
                 name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
                 dir_fd=archive_fd,
             )
-        except FileExistsError:
-            fd = None
+        except FileExistsError as exc:
+            # An earlier attempt may already have removed a file. Never
+            # interpret identical archived bytes as authority to delete a
+            # newly recreated file on an ambiguous replay.
+            raise clone.CandidateCloneError(
+                "WORKSPACE_CONTENDED",
+                "candidate archive already exists; reconcile prior discard before retry",
+            ) from exc
         except OSError as exc:
             raise clone.CandidateCloneError("AUDIT_UNAVAILABLE", "candidate archive write unavailable") from exc
-        if fd is not None:
-            try:
-                offset = 0
-                while offset < len(data):
-                    offset += os.write(fd, data[offset:])
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-            os.fsync(archive_fd)
-        # Refuse an existing corrupt/colliding archive rather than overwrite it.
+        try:
+            offset = 0
+            while offset < len(data):
+                offset += os.write(fd, data[offset:])
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.fsync(archive_fd)
+        # Verify only the exact new archive before destructive action.
         try:
             check_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=archive_fd)
         except OSError as exc:

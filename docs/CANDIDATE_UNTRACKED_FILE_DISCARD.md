@@ -36,7 +36,9 @@ expected_size (0 through 1 MiB).
 
 The receipt provides archive_id, archived_sha256 and size. If the operation
 is interrupted, inspect the persistent archive, audit and candidate status
-under operator authority. A leftover quarantined untracked file is evidence;
+under operator authority. A pre-existing archive (even when its SHA and bytes
+match) denies repeat discard: a new file at the same path could otherwise be
+removed by replay. A leftover quarantined untracked file is evidence;
 do not rm -rf or blindly retry an unknown outcome. Archives are not pruned
 automatically.
 
