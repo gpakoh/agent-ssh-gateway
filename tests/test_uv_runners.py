@@ -364,7 +364,7 @@ class TestReadOnlyFallbackMypyPackageBase:
         assert "requirements.txt requirements-dev.txt requirements-test.txt" in script
         assert (
             'uv pip install --python "$UV_PROJECT_ENVIRONMENT/bin/python3" '
-            '-r "$PROJECT_DIR/$req"'
+            '-r "$req_src"'
         ) in script
         assert 'diff -q "$req_src" "$req_cache"' in script
 
@@ -633,6 +633,133 @@ def test_readonly_fallback_legacy_requirements_execute_without_source_mutation(
     }
     assert after == before
     assert not (project / ".venv").exists()
+    assert not (project / "uv.lock").exists()
+
+
+def test_target_scoped_requirement_paths_do_not_include_sibling_services():
+    from mcp_client_tools import _verifier_requirement_paths
+
+    paths = _verifier_requirement_paths(["master_server/tests/core/test_config.py"])
+    assert "requirements-dev.txt" in paths
+    assert "master_server/requirements.txt" in paths
+    assert "master_server/requirements-dev.txt" in paths
+    assert not any(path.startswith("payment_service/") for path in paths)
+    assert _verifier_requirement_paths(["."]) == (
+        "requirements.txt",
+        "requirements-dev.txt",
+        "requirements-test.txt",
+    )
+
+
+def test_readonly_fallback_nested_requirements_resync_without_source_mutation(
+    tmp_path, trusted_verifier_root
+):
+    """Only the requested service gets installed, and its manifest changes resync."""
+    import os
+    import subprocess
+
+    from mcp_client_tools import _build_readonly_fallback_script
+
+    project = tmp_path / "monorepo"
+    service = project / "master_server"
+    sibling = project / "payment_service"
+    (service / "tests").mkdir(parents=True)
+    sibling.mkdir()
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "monorepo"\nversion = "0.0.0"\n', encoding="utf-8"
+    )
+    (project / "requirements-dev.txt").write_text("pytest>=8\n", encoding="utf-8")
+    (service / "requirements.txt").write_text("pydantic==2.10.6\n", encoding="utf-8")
+    (service / "requirements-dev.txt").write_text("fakeredis\n", encoding="utf-8")
+    (sibling / "requirements.txt").write_text("not-requested\n", encoding="utf-8")
+    before = {
+        p.relative_to(project): p.read_bytes() for p in project.rglob("*") if p.is_file()
+    }
+
+    fake_bin = tmp_path / "fake-uv-bin"
+    fake_bin.mkdir()
+    log_path = tmp_path / "fake-uv.log"
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text(
+        "#!/bin/sh\n"
+        "printf 'cwd=%s|args=%s\\n' \"$PWD\" \"$*\" >> \"$UV_LOG\"\n"
+        "if [ \"$1\" = sync ]; then\n"
+        "  mkdir -p \"$UV_PROJECT_ENVIRONMENT/bin\"\n"
+        "  printf '#!/bin/sh\\nexit 0\\n' > \"$UV_PROJECT_ENVIRONMENT/bin/python3\"\n"
+        "  chmod +x \"$UV_PROJECT_ENVIRONMENT/bin/python3\"\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
+    env["UV_LOG"] = str(log_path)
+
+    def run(target):
+        script = _build_readonly_fallback_script("pytest", str(project), [target])
+        result = subprocess.run(
+            ["sh", "-c", script], env=env, capture_output=True,
+            text=True, check=False, timeout=10,
+        )
+        assert result.returncode == 0, result.stderr or result.stdout
+        return log_path.read_text(encoding="utf-8").splitlines()
+
+    log = run("master_server/tests/test_config.py")
+    assert any(f"-r {service}/requirements.txt" in line for line in log)
+    assert any(f"-r {service}/requirements-dev.txt" in line for line in log)
+    assert not any(str(sibling / "requirements.txt") in line for line in log)
+    first_syncs = sum("args=sync " in line for line in log)
+    assert first_syncs == 1
+    log = run("master_server/tests/test_config.py")
+    assert sum("args=sync " in line for line in log) == first_syncs
+
+    (service / "requirements.txt").write_text("pydantic==2.10.6\nuvloop\n", encoding="utf-8")
+    log = run("master_server/tests/test_config.py")
+    assert sum("args=sync " in line for line in log) == first_syncs + 1
+
+    log = run("payment_service/tests/test_api.py")
+    assert sum("args=sync " in line for line in log) == first_syncs + 2
+    assert any(f"-r {sibling}/requirements.txt" in line for line in log)
+    after = {
+        p.relative_to(project): p.read_bytes() for p in project.rglob("*") if p.is_file()
+    }
+    expected = dict(before)
+    expected[service.relative_to(project) / "requirements.txt"] = (
+        b"pydantic==2.10.6\nuvloop\n"
+    )
+    assert after == expected
+    assert not (project / "uv.lock").exists()
+    assert not (project / ".venv").exists()
+
+
+def test_readonly_fallback_rejects_symlinked_scoped_requirements(
+    tmp_path, trusted_verifier_root
+):
+    """Subproject manifest selection must not read requirements outside source."""
+    import subprocess
+
+    from mcp_client_tools import _build_readonly_fallback_script
+
+    project = tmp_path / "scoped-project"
+    service = project / "master_server"
+    service.mkdir(parents=True)
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "scoped-project"\nversion = "0.0.0"\n', encoding="utf-8"
+    )
+    outside = tmp_path / "external-credentials"
+    outside.write_text("not-a-dependency\n", encoding="utf-8")
+    (service / "requirements.txt").symlink_to(outside)
+
+    script = _build_readonly_fallback_script(
+        "pytest", str(project), ["master_server/tests/test_config.py"]
+    )
+    result = subprocess.run(
+        ["sh", "-c", script], text=True, capture_output=True, timeout=10, check=False
+    )
+    assert result.returncode == 90
+    assert "VERIFIER_ROOT_UNSAFE" in (result.stderr + result.stdout)
+    assert outside.read_text(encoding="utf-8") == "not-a-dependency\n"
     assert not (project / "uv.lock").exists()
 
 
