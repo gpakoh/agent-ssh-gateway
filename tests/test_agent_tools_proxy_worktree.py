@@ -30,6 +30,7 @@ from examples.mcp_server.agent_tools import (
     PROXY_LIMIT_MARKERS,
     _build_opencode_script,
     _isolated_worktree_error,
+    _opencode_startup_watchdog_script_lines,
     _parent_prerun_snapshot_script_lines,
     _proxy_report_script_lines,
     _proxy_startup_cooldown_script_lines,
@@ -108,6 +109,77 @@ def _communicate_bounded_shell_tree(
         raise subprocess.TimeoutExpired(
             ["sh", "-c", "<redacted test runner>"], timeout
         ) from None
+
+
+def _scan_opencode_progress(
+    path: Path, offset: int, skip: int
+) -> tuple[int, int, int]:
+    """Run exactly the Python payload embedded in the shipped shell watchdog."""
+    lines = _opencode_startup_watchdog_script_lines("", 5, 1, 10, 10)
+    start = lines.index("import os, re, sys")
+    end = lines.index("OPENCODEPROGRESS_EOF", start)
+    result = subprocess.run(
+        [
+            "python3",
+            "-c",
+            "\n".join(lines[start:end]),
+            str(path),
+            str(offset),
+            str(skip),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=5,
+    )
+    parsed = tuple(int(field) for field in result.stdout.strip().split(":"))
+    assert len(parsed) == 3
+    return parsed
+
+
+def test_opencode_startup_progress_scan_is_bounded_across_megabytes(tmp_path: Path) -> None:
+    log = tmp_path / "large-private-opencode.log"
+    # Repeated benign startup banners and a very long untrusted line must
+    # not be mistaken for useful work or scanned from byte zero on each poll.
+    log.write_bytes(
+        (b"> build : starting\n" * 140_000)
+        + b"x" * 1_100_000
+        + b"\n"
+        + "→ Read current-plan.md\n".encode()
+    )
+    offset, skip = 0, 0
+    for _ in range(10):
+        previous = offset
+        offset, skip, found = _scan_opencode_progress(log, offset, skip)
+        assert 0 <= offset - previous <= 1048576
+        if found:
+            assert skip == 0
+            assert offset == log.stat().st_size
+            break
+    else:
+        pytest.fail("bounded progress scanner lost real useful work after a long log")
+
+
+def test_opencode_startup_progress_keeps_partial_line_and_handles_truncation(
+    tmp_path: Path,
+) -> None:
+    log = tmp_path / "incomplete-opencode.log"
+    log.write_text("> build : boot\nnot yet useful", encoding="utf-8")
+    offset, skip, found = _scan_opencode_progress(log, 0, 0)
+    assert (skip, found) == (0, 0)
+    assert offset < log.stat().st_size
+    with log.open("a", encoding="utf-8") as stream:
+        stream.write("\n→ Read source\n")
+    new_offset, skip, found = _scan_opencode_progress(log, offset, skip)
+    assert (skip, found) == (0, 1)
+    assert new_offset == log.stat().st_size
+
+    # A new attempt truncates the private log, so the old byte cursor
+    # must not leave the next valid response invisible.
+    log.write_text("→ Read new attempt\n", encoding="utf-8")
+    next_offset, skip, found = _scan_opencode_progress(log, new_offset, skip)
+    assert (skip, found) == (0, 1)
+    assert next_offset == log.stat().st_size
 
 
 def test_bounded_interactive_shell_kills_pipe_holding_descendant(tmp_path: Path) -> None:
@@ -587,10 +659,12 @@ class TestBuildOpencodeScriptProxy:
         fake_bin.mkdir()
         activity_trigger = tmp_path / "emit-useful-activity"
         exit_trigger = tmp_path / "finish-opencode"
+        fake_ready = tmp_path / "fake-opencode-started"
         fake = fake_bin / "opencode"
         fake.write_text(
             "#!/bin/sh\n"
             'printf "\\033[0m\\n> build · big-pickle\\n\\033[0m"\n'
+            ': > "$FAKE_OPENCODE_READY"\n'
             'while [ ! -f "$ACTIVITY_TRIGGER" ]; do sleep 0.05; done\n'
             'printf "→ Read current-plan.md\\n"\n'
             'while [ ! -f "$EXIT_TRIGGER" ]; do sleep 0.05; done\n'
@@ -601,6 +675,7 @@ class TestBuildOpencodeScriptProxy:
         monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
         monkeypatch.setenv("ACTIVITY_TRIGGER", str(activity_trigger))
         monkeypatch.setenv("EXIT_TRIGGER", str(exit_trigger))
+        monkeypatch.setenv("FAKE_OPENCODE_READY", str(fake_ready))
         monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
         monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "false")
         monkeypatch.setenv("OPENCODE_STARTUP_RESERVE_BYTES", "0")
@@ -608,8 +683,10 @@ class TestBuildOpencodeScriptProxy:
         # Never inherit the production 300-second admission wait on a busy runner.
         monkeypatch.setenv("OPENCODE_ADMISSION_WAIT_SECONDS", "0")
         monkeypatch.setenv("OPENCODE_ADMISSION_POLL_SECONDS", "1")
-        monkeypatch.setenv("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "10")
-        monkeypatch.setenv("OPENCODE_RUN_TIMEOUT_SECONDS", "10")
+        # The test waits for actual fake executor readiness. Shared CI load
+        # must not burn the startup watchdog budget before that point.
+        monkeypatch.setenv("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "30")
+        monkeypatch.setenv("OPENCODE_RUN_TIMEOUT_SECONDS", "30")
 
         script = _build_opencode_script(
             str(artifacts), TASK_ID, None, project_root=str(source)
@@ -639,7 +716,7 @@ class TestBuildOpencodeScriptProxy:
             pytest.fail(f"heartbeat never reached loop; last={last!r}")
 
         def wait_for_runtime_marker() -> dict:
-            deadline = time.monotonic() + 8
+            deadline = time.monotonic() + 20
             last: dict = {}
             while time.monotonic() < deadline:
                 if runtime_path.exists():
@@ -657,6 +734,16 @@ class TestBuildOpencodeScriptProxy:
             assert heartbeat["state"] == "running"
             assert not runtime_path.exists()
             assert not (artifacts / "proxy-status.json").exists()
+
+            # A heartbeat is emitted before runner worktree setup and OpenCode
+            # process launch. Wait for the fake process itself before sending
+            # useful output, or an overloaded shared CI host can exhaust the
+            # test's 8s marker deadline before the executor even exists.
+            deadline = time.monotonic() + 20
+            while not fake_ready.exists() and time.monotonic() < deadline:
+                assert process.poll() is None, "runner exited before OpenCode launch"
+                time.sleep(0.05)
+            assert fake_ready.exists(), "fake OpenCode never started"
 
             activity_trigger.write_text("go\n", encoding="utf-8")
             runtime = wait_for_runtime_marker()
