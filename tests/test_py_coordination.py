@@ -1121,6 +1121,93 @@ async def test_short_unverifiable_comment_id_never_receives_readonly_close_lease
 
 
 @pytest.mark.asyncio
+async def test_null_timeline_with_verified_zero_comments_is_empty_not_an_error():
+    """Gitea can return JSON null for a timeline with no events."""
+    class NullTimeline(FakeClient):
+        async def list_issue_timeline(self, owner, repo, number, *, limit=50, page=1):
+            return None
+
+    client = NullTimeline()
+    await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway",
+        source_project="agent-ssh-gateway", title="No comments",
+        body="New coordination issue", request_key="null-timeline-empty-123",
+    )
+    client.issues[0]["comments"] = 0
+
+    partial = await core.open_thread(
+        client, "gpakoh", "agent-ssh-gateway", 1, allow_partial=True
+    )
+    assert partial["history"] == []
+    assert partial["history_truncated"] is False
+    assert partial["history_incomplete_reason"] is None
+    assert partial["history_pages_scanned"] == 1
+    assert partial["coord_state"] == "open"
+    assert "close_state_sha256" in partial
+
+    strict = await core.open_thread(client, "gpakoh", "agent-ssh-gateway", 1)
+    assert strict["coord_state"] == "open"
+    assert "close_state_sha256" in strict
+    assert await core.preview_thread_state(
+        client, "gpakoh", "agent-ssh-gateway", 1
+    ) == ("open", False)
+
+
+@pytest.mark.asyncio
+async def test_zero_comment_count_cannot_authorize_conflicting_timeline_comment():
+    client = FakeClient()
+    await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway",
+        source_project="agent-ssh-gateway", title="Conflicting count",
+        body="Untrusted history", request_key="timeline-count-conflict-123",
+    )
+    client.issues[0]["comments"] = 0
+    client.comments[1] = [
+        {"id": 1, "type": "comment", "body": core._header(
+            kind="event", key="spoofed-count-state-123", state="resolved"
+        ) + "\nDo not trust", "user": {"login": "gpakoh"}}
+    ]
+    partial = await core.open_thread(
+        client, "gpakoh", "agent-ssh-gateway", 1, allow_partial=True
+    )
+    assert partial["history_truncated"] is True
+    assert partial["coord_state"] is None
+    assert "close_state_sha256" not in partial
+    with pytest.raises(core.CoordinationOutcomeUnknown, match="invalid"):
+        await core.open_thread(client, "gpakoh", "agent-ssh-gateway", 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [1, None, True])
+async def test_null_timeline_without_verified_zero_comments_fails_closed(count):
+    class NullTimeline(FakeClient):
+        async def list_issue_timeline(self, owner, repo, number, *, limit=50, page=1):
+            return None
+
+    client = NullTimeline()
+    await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway",
+        source_project="agent-ssh-gateway", title="Unverified history",
+        body="Uncertain", request_key="null-timeline-unknown-123",
+    )
+    if count is not None:
+        client.issues[0]["comments"] = count
+
+    partial = await core.open_thread(
+        client, "gpakoh", "agent-ssh-gateway", 1, allow_partial=True
+    )
+    assert partial["history_truncated"] is True
+    assert partial["history_incomplete_reason"] == "unverifiable_null_timeline_page"
+    assert partial["coord_state"] is None
+    assert "close_state_sha256" not in partial
+    assert await core.preview_thread_state(
+        client, "gpakoh", "agent-ssh-gateway", 1
+    ) == (None, True)
+    with pytest.raises(core.CoordinationOutcomeUnknown, match="null"):
+        await core.open_thread(client, "gpakoh", "agent-ssh-gateway", 1)
+
+
+@pytest.mark.asyncio
 async def test_timeline_service_only_first_page_keeps_later_coordination_event():
     """Count raw timeline events, not filtered comments, to detect next page."""
     client = FakeClient()
