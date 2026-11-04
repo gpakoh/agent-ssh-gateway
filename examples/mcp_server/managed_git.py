@@ -178,8 +178,10 @@ def push_exact_sha(
                     timeout=30,
                 )
             except RegisteredSourceCloneError as exc:
+                # Only emit our fixed diagnostic category, never raw Git stderr.
                 raise ManagedGitError(
                     f"failed to stage registered Git repository during {exc.phase}"
+                    f" (failure_class={exc.failure_class})"
                 ) from exc
 
             resolved = subprocess.run(
