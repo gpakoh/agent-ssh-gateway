@@ -659,10 +659,12 @@ class TestBuildOpencodeScriptProxy:
         fake_bin.mkdir()
         activity_trigger = tmp_path / "emit-useful-activity"
         exit_trigger = tmp_path / "finish-opencode"
+        fake_ready = tmp_path / "fake-opencode-started"
         fake = fake_bin / "opencode"
         fake.write_text(
             "#!/bin/sh\n"
             'printf "\\033[0m\\n> build · big-pickle\\n\\033[0m"\n'
+            ': > "$FAKE_OPENCODE_READY"\n'
             'while [ ! -f "$ACTIVITY_TRIGGER" ]; do sleep 0.05; done\n'
             'printf "→ Read current-plan.md\\n"\n'
             'while [ ! -f "$EXIT_TRIGGER" ]; do sleep 0.05; done\n'
@@ -673,6 +675,7 @@ class TestBuildOpencodeScriptProxy:
         monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
         monkeypatch.setenv("ACTIVITY_TRIGGER", str(activity_trigger))
         monkeypatch.setenv("EXIT_TRIGGER", str(exit_trigger))
+        monkeypatch.setenv("FAKE_OPENCODE_READY", str(fake_ready))
         monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
         monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "false")
         monkeypatch.setenv("OPENCODE_STARTUP_RESERVE_BYTES", "0")
@@ -680,8 +683,10 @@ class TestBuildOpencodeScriptProxy:
         # Never inherit the production 300-second admission wait on a busy runner.
         monkeypatch.setenv("OPENCODE_ADMISSION_WAIT_SECONDS", "0")
         monkeypatch.setenv("OPENCODE_ADMISSION_POLL_SECONDS", "1")
-        monkeypatch.setenv("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "10")
-        monkeypatch.setenv("OPENCODE_RUN_TIMEOUT_SECONDS", "10")
+        # The test waits for actual fake executor readiness. Shared CI load
+        # must not burn the startup watchdog budget before that point.
+        monkeypatch.setenv("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "30")
+        monkeypatch.setenv("OPENCODE_RUN_TIMEOUT_SECONDS", "30")
 
         script = _build_opencode_script(
             str(artifacts), TASK_ID, None, project_root=str(source)
@@ -711,7 +716,7 @@ class TestBuildOpencodeScriptProxy:
             pytest.fail(f"heartbeat never reached loop; last={last!r}")
 
         def wait_for_runtime_marker() -> dict:
-            deadline = time.monotonic() + 8
+            deadline = time.monotonic() + 20
             last: dict = {}
             while time.monotonic() < deadline:
                 if runtime_path.exists():
@@ -729,6 +734,16 @@ class TestBuildOpencodeScriptProxy:
             assert heartbeat["state"] == "running"
             assert not runtime_path.exists()
             assert not (artifacts / "proxy-status.json").exists()
+
+            # A heartbeat is emitted before runner worktree setup and OpenCode
+            # process launch. Wait for the fake process itself before sending
+            # useful output, or an overloaded shared CI host can exhaust the
+            # test's 8s marker deadline before the executor even exists.
+            deadline = time.monotonic() + 20
+            while not fake_ready.exists() and time.monotonic() < deadline:
+                assert process.poll() is None, "runner exited before OpenCode launch"
+                time.sleep(0.05)
+            assert fake_ready.exists(), "fake OpenCode never started"
 
             activity_trigger.write_text("go\n", encoding="utf-8")
             runtime = wait_for_runtime_marker()
