@@ -33,8 +33,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN python -m pip install --default-timeout=120 --no-cache-dir uv && \
     uv sync --frozen --no-dev --no-install-project && \
-    rm -rf /root/.cache/pip /root/.cache/uv && \
-    chmod -R 755 /app/.venv
+    rm -rf /root/.cache/pip /root/.cache/uv
 ENV PATH="/app/.venv/bin:$PATH"
 
 # Security: Copy application with proper ownership
@@ -58,16 +57,21 @@ COPY --chown=appuser:appuser scripts/gateway_black_box_smoke.py ./scripts/gatewa
 COPY --chown=appuser:appuser scripts/coordination_browser_smoke.py ./scripts/coordination_browser_smoke.py
 COPY --chown=appuser:appuser scripts/ensure-agent-known-host.py ./scripts/ensure-agent-known-host.py
 
-# Security: Create necessary directories
-RUN mkdir -p /app/ssh_keys /app/logs /app/data /tmp && \
-    chown -R appuser:appuser /app /tmp
-
-# Security: Set restrictive permissions
-RUN chmod -R 755 /app && \
+# Source trees and the virtualenv are already installed with safe read/execute
+# modes, and COPY --chown grants ownership of shipped source files. Avoid
+# recursively rewriting every virtualenv inode on each image rebuild.
+# Only runtime-writable paths need explicit ownership. /tmp retains its
+# standard root-owned sticky permissions.
+RUN mkdir -p /app/ssh_keys /app/logs /app/data && \
+    chown appuser:appuser /app/ssh_keys /app/logs /app/data && \
     chmod 700 /app/ssh_keys
 
 # Switch to non-root user
 USER appuser
+
+# Build-time proof: non-root can import locked dependencies and create files
+# only in explicitly writable image directories, before any image is published.
+RUN python -c "import fastapi, tempfile; [tempfile.TemporaryFile(dir=d).close() for d in ('/app/ssh_keys', '/app/logs', '/app/data')]"
 
 # Security: Read-only filesystem (except /tmp and /app/logs)
 VOLUME ["/tmp", "/app/logs", "/app/data"]

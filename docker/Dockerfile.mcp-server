@@ -48,8 +48,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN python -m pip install --default-timeout=120 --no-cache-dir uv && \
     uv sync --frozen --no-dev --no-install-project && \
-    rm -rf /root/.cache/pip /root/.cache/uv && \
-    chmod -R 755 /app/.venv
+    rm -rf /root/.cache/pip /root/.cache/uv
 ENV PATH="/app/.venv/bin:$PATH"
 
 # Copy application (MCP server imports app.*), MCP portal (server.py imports
@@ -67,13 +66,15 @@ RUN .venv/bin/python -c "from app.skill_pack import snapshot; from app.worker_sk
 # produce empty, non-JSON evidence only when a production preflight runs.
 RUN /app/.venv/bin/python /app/scripts/site_audit_crm_provisioner.py --help > /dev/null
 
-# Security: Create necessary directories.  The supervisor journal target is
-# pre-owned by appuser so a fresh named volume inherits a writable root when
-# Docker initializes it from the image; only mcp-oauth mounts that volume.
-RUN mkdir -p /app/data /tmp /var/lib/mcp-agent/sources /var/lib/mcp-supervisor /var/lib/mcp-candidates /var/lib/mcp-audit && \
-    chown -R appuser:appuser /app /tmp /var/lib/mcp-agent /var/lib/mcp-supervisor /var/lib/mcp-candidates /var/lib/mcp-audit
-
-RUN chmod -R 755 /app
+# COPY --chown already owns source files; uv gives the virtualenv
+# non-root-readable modes. Do not traverse/rewrite all /app/.venv in a
+# recursive chown/chmod step on every image build.
+# Runtime-writable locations must belong to appuser, including the parent
+# of the sources directory (the agent also creates sibling state paths).
+# Docker-initialized named volumes inherit these exact directory owners.
+# /tmp keeps its standard root-owned sticky-directory permissions.
+RUN mkdir -p /app/data /var/lib/mcp-agent/sources /var/lib/mcp-supervisor /var/lib/mcp-candidates /var/lib/mcp-audit && \
+    chown appuser:appuser /app/data /var/lib/mcp-agent /var/lib/mcp-agent/sources /var/lib/mcp-supervisor /var/lib/mcp-candidates /var/lib/mcp-audit
 
 # Build metadata is intentionally applied only after all expensive/static
 # dependency and application layers. BUILD_TIME changes on every CI run;
@@ -84,6 +85,10 @@ ENV BUILD_TIME=${BUILD_TIME}
 
 # Switch to non-root user
 USER appuser
+
+# Build-time proof: the non-root runtime imports installed dependencies and
+# can write every dedicated volume root without changing the whole /app tree.
+RUN python -c "import fastapi, tempfile; [tempfile.TemporaryFile(dir=d).close() for d in ('/app/data', '/var/lib/mcp-agent', '/var/lib/mcp-agent/sources', '/var/lib/mcp-supervisor', '/var/lib/mcp-candidates', '/var/lib/mcp-audit')]"
 
 # Read-only filesystem (except /tmp and /app/data)
 VOLUME ["/tmp", "/app/data"]
