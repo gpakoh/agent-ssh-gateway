@@ -30,6 +30,7 @@ from examples.mcp_server.agent_tools import (
     PROXY_LIMIT_MARKERS,
     _build_opencode_script,
     _isolated_worktree_error,
+    _opencode_startup_watchdog_script_lines,
     _parent_prerun_snapshot_script_lines,
     _proxy_report_script_lines,
     _proxy_startup_cooldown_script_lines,
@@ -108,6 +109,77 @@ def _communicate_bounded_shell_tree(
         raise subprocess.TimeoutExpired(
             ["sh", "-c", "<redacted test runner>"], timeout
         ) from None
+
+
+def _scan_opencode_progress(
+    path: Path, offset: int, skip: int
+) -> tuple[int, int, int]:
+    """Run exactly the Python payload embedded in the shipped shell watchdog."""
+    lines = _opencode_startup_watchdog_script_lines("", 5, 1, 10, 10)
+    start = lines.index("import os, re, sys")
+    end = lines.index("OPENCODEPROGRESS_EOF", start)
+    result = subprocess.run(
+        [
+            "python3",
+            "-c",
+            "\n".join(lines[start:end]),
+            str(path),
+            str(offset),
+            str(skip),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=5,
+    )
+    parsed = tuple(int(field) for field in result.stdout.strip().split(":"))
+    assert len(parsed) == 3
+    return parsed
+
+
+def test_opencode_startup_progress_scan_is_bounded_across_megabytes(tmp_path: Path) -> None:
+    log = tmp_path / "large-private-opencode.log"
+    # Repeated benign startup banners and a very long untrusted line must
+    # not be mistaken for useful work or scanned from byte zero on each poll.
+    log.write_bytes(
+        (b"> build : starting\n" * 140_000)
+        + b"x" * 1_100_000
+        + b"\n"
+        + "→ Read current-plan.md\n".encode()
+    )
+    offset, skip = 0, 0
+    for _ in range(10):
+        previous = offset
+        offset, skip, found = _scan_opencode_progress(log, offset, skip)
+        assert 0 <= offset - previous <= 1048576
+        if found:
+            assert skip == 0
+            assert offset == log.stat().st_size
+            break
+    else:
+        pytest.fail("bounded progress scanner lost real useful work after a long log")
+
+
+def test_opencode_startup_progress_keeps_partial_line_and_handles_truncation(
+    tmp_path: Path,
+) -> None:
+    log = tmp_path / "incomplete-opencode.log"
+    log.write_text("> build : boot\nnot yet useful", encoding="utf-8")
+    offset, skip, found = _scan_opencode_progress(log, 0, 0)
+    assert (skip, found) == (0, 0)
+    assert offset < log.stat().st_size
+    with log.open("a", encoding="utf-8") as stream:
+        stream.write("\n→ Read source\n")
+    new_offset, skip, found = _scan_opencode_progress(log, offset, skip)
+    assert (skip, found) == (0, 1)
+    assert new_offset == log.stat().st_size
+
+    # A new attempt truncates the private log, so the old byte cursor
+    # must not leave the next valid response invisible.
+    log.write_text("→ Read new attempt\n", encoding="utf-8")
+    next_offset, skip, found = _scan_opencode_progress(log, new_offset, skip)
+    assert (skip, found) == (0, 1)
+    assert next_offset == log.stat().st_size
 
 
 def test_bounded_interactive_shell_kills_pipe_holding_descendant(tmp_path: Path) -> None:
