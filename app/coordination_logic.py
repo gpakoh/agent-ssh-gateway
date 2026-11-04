@@ -157,7 +157,8 @@ async def _pages(
 
 
 async def _timeline_comment_pages(
-    fetch: Any, *, max_pages: int = 2, allow_partial: bool = True
+    fetch: Any, *, max_pages: int = 2, allow_partial: bool = True,
+    verified_no_comments: bool = False,
 ) -> tuple[list[dict[str, Any]], bool, str | None, int]:
     """Page Gitea TIMELINE events, then select only ordinary user comments.
 
@@ -165,6 +166,8 @@ async def _timeline_comment_pages(
     The /timeline API does, but includes service events. A page's raw length
     (not the number of comments) determines exhaustion. All event IDs must
     advance monotonically, including events that are not user comments.
+    An empty JSON null is accepted only when the independently fetched Gitea
+    Issue proves comments=0; otherwise it is incomplete/unknown.
     The strict mutation/close caller may not accept ANY incomplete history.
     """
     comments: list[dict[str, Any]] = []
@@ -172,6 +175,17 @@ async def _timeline_comment_pages(
     last_id = 0
     for page in range(1, max_pages + 1):
         rows = await fetch(page)
+        if rows is None:
+            if verified_no_comments:
+                # Gitea may serialize its empty timeline slice as JSON null.
+                # Issue.comments=0 independently rules out state-bearing comments.
+                rows = []
+            elif allow_partial:
+                return comments, True, "unverifiable_null_timeline_page", page
+            else:
+                raise CoordinationOutcomeUnknown(
+                    "Gitea timeline returned null with unverified comment history"
+                )
         if not isinstance(rows, list) or len(rows) > _PAGE_SIZE or any(
             not isinstance(row, dict) for row in rows
         ):
@@ -197,6 +211,10 @@ async def _timeline_comment_pages(
             last_id = identifier
             fresh += 1
             if event_type == "comment":
+                if verified_no_comments:
+                    # Gitea's independent Issue count contradicts the timeline.
+                    invalid = True
+                    continue
                 user = row.get("user")
                 if not isinstance(row.get("body"), str) or (
                     not isinstance(user, dict)
@@ -304,7 +322,8 @@ async def preview_thread_state(
     comments, truncated, _reason, _pages_read = await _timeline_comment_pages(
         lambda page: client.list_issue_timeline(
             owner, repo, number, limit=_PAGE_SIZE, page=page
-        )
+        ),
+        verified_no_comments=type(issue.get("comments")) is int and issue["comments"] == 0,
     )
     if truncated:
         return None, True
@@ -335,11 +354,13 @@ async def open_thread(
     item = _issue(issue)
     if item is None:
         raise ValueError("issue is not a Py Coordination thread")
+    verified_no_comments = type(issue.get("comments")) is int and issue["comments"] == 0
     if allow_partial:
         comments, truncated, incomplete_reason, pages_read = await _timeline_comment_pages(
             lambda page: client.list_issue_timeline(
                 owner, repo, number, limit=_PAGE_SIZE, page=page
-            )
+            ),
+            verified_no_comments=verified_no_comments,
         )
         item["history_incomplete_reason"] = incomplete_reason
         item["history_pages_scanned"] = pages_read
@@ -351,6 +372,7 @@ async def open_thread(
             ),
             max_pages=_WRITE_MAX_PAGES,
             allow_partial=False,
+            verified_no_comments=verified_no_comments,
         )
     trusted_identity = await client.get_user()
     trusted_login = trusted_identity.get("login")

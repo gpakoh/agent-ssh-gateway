@@ -218,6 +218,47 @@ async def test_browser_board_and_thread_are_gitea_backed(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_browser_board_keeps_zero_comment_issue_when_gitea_timeline_is_null(monkeypatch):
+    import json
+
+    class Registry:
+        def project_info(self, project):
+            return {"type": "source"}
+
+    class NullTimelineGitea(FakeGitea):
+        def __init__(self, token, base):
+            super().__init__(token, base)
+            self.issues[0]["comments"] = 0
+            self.comments = []
+
+        async def list_issue_timeline(self, owner, repo, number, *, limit, page):
+            self.requests += 1
+            return None
+
+    monkeypatch.setattr(route, "get_registry", lambda: Registry())
+    monkeypatch.setenv("COORDINATION_GITEA_READ_TOKEN", "fake-read-token")
+    monkeypatch.setenv("COORDINATION_GITEA_API_BASE", "https://git.xloud.ru/api/v1")
+    monkeypatch.setattr(route, "_ReadOnlyGitea", NullTimelineGitea)
+
+    response = await route.browser_coordination_board(
+        project="agent-ssh-gateway", limit=20, _identity=identity("web-ui", "admin")
+    )
+    data = json.loads(response.body)
+    assert data["count"] == 1
+    assert data["count_exact"] is True
+    assert data["incomplete_thread_numbers"] == []
+    assert [column["count"] for column in data["columns"]] == [1, 0, 0, 0]
+    assert data["columns"][0]["cards"][0]["number"] == 634
+
+    thread = await route.browser_coordination_thread(
+        project="agent-ssh-gateway", issue_number=634, _identity=identity("web-ui", "admin")
+    )
+    detail = json.loads(thread.body)["thread"]
+    assert detail["coord_state"] == "open"
+    assert detail["history_truncated"] is False
+
+
+@pytest.mark.asyncio
 async def test_browser_long_thread_keeps_partial_state_explicit(monkeypatch) -> None:
     import json
 
