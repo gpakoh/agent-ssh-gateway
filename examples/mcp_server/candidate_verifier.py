@@ -187,11 +187,19 @@ def probe_version(path, trusted_path):
 
 def resolve_primary(command, trusted_path, repo):
     try:
-        tokens = shlex.split(command, posix=True)
+        # POSIX subshell grouping is syntax, not part of an executable name.
+        # shlex.split('(git status)') yields '(git', so a successful, valid
+        # grouped check was previously misclassified as an unknown binary.
+        lexer = shlex.shlex(command, posix=True, punctuation_chars="()")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
     except ValueError:
         return {"kind": "unresolved", "reason": "unparseable_command"}
     index = 0
-    while index < len(tokens) and ASSIGN_RE.match(tokens[index]):
+    while index < len(tokens) and (
+        tokens[index] == "(" or ASSIGN_RE.match(tokens[index])
+    ):
         index += 1
     if index >= len(tokens) or not tokens[index]:
         return {"kind": "unresolved", "reason": "empty_command"}
@@ -385,7 +393,7 @@ def _bounded_tail(value: str) -> str:
     return sanitize_verifier_output_tail(text)
 
 
-def _validated_provenance(primary_tool: Any) -> None:
+def _validated_provenance(primary_tool: Any, *, check_index: int) -> None:
     if not isinstance(primary_tool, dict):
         raise _receipt_failure("verifier receipt provenance is malformed")
     kind = primary_tool.get("kind")
@@ -410,12 +418,30 @@ def _validated_provenance(primary_tool: Any) -> None:
         if version is not None and not isinstance(version, str):
             raise _receipt_failure("verifier receipt external provenance is malformed")
         return
+    # Receipt fields are untrusted check evidence. Expose only a fixed
+    # classifier reason and the position, never candidate command text,
+    # arbitrary primary_tool attributes, or paths that could leak secrets.
+    reason = primary_tool.get("reason") if kind == "unresolved" else None
+    allowed_reasons = {
+        "not_found_on_trusted_path",
+        "unparseable_command",
+        "empty_command",
+        "unsafe_command_name",
+    }
+    safe_reason = (
+        reason if isinstance(reason, str) and reason in allowed_reasons else "unclassified"
+    )
     raise CandidateVerificationError(
         "unresolved or unsafe primary tool provenance in verifier receipt",
         code="VERIFIER_PROVENANCE_UNRESOLVED",
         phase="receipt_validation",
         retryable=False,
-        details={"phase": "receipt_validation", "mutation_occurred": False},
+        details={
+            "phase": "receipt_validation",
+            "mutation_occurred": False,
+            "check_index": check_index,
+            "provenance_reason": safe_reason,
+        },
     )
 
 
@@ -481,7 +507,7 @@ def _validated_receipt_check(
         != (payload["before_status_sha256"] != payload["after_status_sha256"])
     ):
         raise _receipt_failure("verifier receipt frame has inconsistent mutation evidence")
-    _validated_provenance(payload.get("primary_tool"))
+    _validated_provenance(payload.get("primary_tool"), check_index=check_index)
     return {
         "check_index": check_index,
         "command": payload["command"],
