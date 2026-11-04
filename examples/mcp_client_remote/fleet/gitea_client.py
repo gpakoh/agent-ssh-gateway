@@ -62,7 +62,7 @@ ALLOWED_ENDPOINTS = frozenset(
         "/repos/{owner}/{repo}/contents/{path}",
         "/repos/{owner}/{repo}/issues",
         "/repos/{owner}/{repo}/issues/{number}",
-        "/repos/{owner}/{repo}/issues/{number}/comments",
+        "/repos/{owner}/{repo}/issues/{number}/timeline",
         "/repos/{owner}/{repo}/pulls",
         "/repos/{owner}/{repo}/pulls/{number}",
         "/repos/{owner}/{repo}/actions/runs",
@@ -1290,14 +1290,21 @@ class GiteaClient:
             number=issue_number,
         )
 
-    async def list_issue_comments(self, owner: str, repo: str, number: int, *, limit: int = 50, page: int = 1) -> list[dict[str, Any]]:
+    async def list_issue_timeline(
+        self, owner: str, repo: str, number: int, *, limit: int = 50, page: int = 1
+    ) -> list[dict[str, Any]]:
+        """Return RAW paginated timeline events, never filtered comment pages.
+
+        Gitea's /issues/{index}/comments does not document page/limit; the
+        timeline endpoint does. Callers must count all events before filtering.
+        """
         limit = _validate_positive_int(limit, "limit")
         if limit > MAX_LIMIT:
             raise ValueError("limit exceeds maximum")
         page = _validate_positive_int(page, "page")
         number = _validate_positive_int(number, "number")
         return await self._get(
-            "/repos/{owner}/{repo}/issues/{number}/comments",
+            "/repos/{owner}/{repo}/issues/{number}/timeline",
             params={"limit": limit, "page": page},
             owner=owner, repo=repo, number=number,
         )

@@ -33,9 +33,14 @@ class FakeClient:
     async def get_issue(self, owner, repo, number):
         return next(i for i in self.issues if i["number"] == number)
 
-    async def list_issue_comments(self, owner, repo, number, *, limit=50, page=1):
+    async def list_issue_timeline(self, owner, repo, number, *, limit=50, page=1):
         rows = self.comments.get(number, [])
-        return rows[(page - 1) * limit:page * limit]
+        # Fake only stores ordinary issue comments unless a test injects
+        # explicit service events into the timeline.
+        return [
+            {"type": "comment", **row}
+            for row in rows[(page - 1) * limit:page * limit]
+        ]
 
     async def create_coord_issue(self, owner, repo, *, title, body):
         self.create_calls += 1
@@ -653,17 +658,17 @@ async def test_board_and_inbox_isolate_unreadable_long_thread(monkeypatch):
     # A Gitea pagination anomaly can return the same full first page for
     # later offsets. The write path must remain fail-closed and exhaustive.
     repeated = [
-        {"id": i + 1, "body": "untrusted", "user": {"login": "other"}}
+        {"id": i + 1, "type": "comment", "body": "untrusted", "user": {"login": "other"}}
         for i in range(50)
     ]
-    list_comments = client.list_issue_comments
+    list_comments = client.list_issue_timeline
 
     async def stuck_comments(owner, repo, number, *, limit=50, page=1):
         if number == 1:
             return repeated
         return await list_comments(owner, repo, number, limit=limit, page=page)
 
-    client.list_issue_comments = stuck_comments
+    client.list_issue_timeline = stuck_comments
     monkeypatch.setattr(FakeClient, "__aenter__", _fake_aenter, raising=False)
     monkeypatch.setattr(FakeClient, "__aexit__", _fake_aexit, raising=False)
     monkeypatch.setattr(
@@ -916,15 +921,15 @@ async def test_bounded_offset_skips_unknown_state_without_losing_following_threa
             title=f"Thread {index}", body="Evidence",
             request_key=f"skip-long-history-{index}-123",
         )
-    original_comments = client.list_issue_comments
+    original_comments = client.list_issue_timeline
 
     async def repeated_comments(owner, repo, number, *, limit=50, page=1):
         if number == 1:
-            return [{"id": x + 1, "body": "untrusted",
+            return [{"id": x + 1, "type": "comment", "body": "untrusted",
                      "user": {"login": "other"}} for x in range(50)]
         return await original_comments(owner, repo, number, limit=limit, page=page)
 
-    client.list_issue_comments = repeated_comments
+    client.list_issue_timeline = repeated_comments
     monkeypatch.setattr(FakeClient, "__aenter__", _fake_aenter, raising=False)
     monkeypatch.setattr(FakeClient, "__aexit__", _fake_aexit, raising=False)
     monkeypatch.setattr(
@@ -1005,6 +1010,7 @@ async def test_coord_open_repeated_comment_page_is_bounded_and_untrusted(
     repeated = [
         {
             "id": n + 1,
+            "type": "comment",
             "body": "untrusted note",
             "user": {"login": "other"},
         }
@@ -1023,7 +1029,7 @@ async def test_coord_open_repeated_comment_page_is_bounded_and_untrusted(
     async def leave(self, *args):
         return None
 
-    client.list_issue_comments = stuck_comments
+    client.list_issue_timeline = stuck_comments
     monkeypatch.setattr(FakeClient, "__aenter__", enter, raising=False)
     monkeypatch.setattr(FakeClient, "__aexit__", leave, raising=False)
     monkeypatch.setattr(
@@ -1065,7 +1071,7 @@ async def test_coord_open_repeated_comment_page_is_bounded_and_untrusted(
         (list(range(51, 101)), "bounded_comment_window", 100, True),
         ([51], None, 51, False),
         ([75, 51], "non_monotonic_comment_cursor", 52, True),
-        ([None], "unverifiable_comment_ids", 51, True),
+        ([None], "unverifiable_timeline_event", 50, True),
     ],
 )
 async def test_readonly_comment_preview_explains_page_progress(
@@ -1075,9 +1081,12 @@ async def test_readonly_comment_preview_explains_page_progress(
     async def fetch(page):
         pages.append(page)
         ids = list(range(1, 51)) if page == 1 else second_ids
-        return [{"id": ident, "body": "evidence"} for ident in ids]
+        return [
+            {"id": ident, "type": "comment", "body": "evidence", "user": {"login": "gpakoh"}}
+            for ident in ids
+        ]
 
-    rows, truncated, reason, count_pages = await coordination_engine._preview_comment_pages(fetch)
+    rows, truncated, reason, count_pages = await coordination_engine._timeline_comment_pages(fetch)
     assert truncated is incomplete
     assert reason == expected_reason
     assert len(rows) == expected_count
@@ -1100,7 +1109,7 @@ async def test_short_unverifiable_comment_id_never_receives_readonly_close_lease
         client, "gpakoh", "agent-ssh-gateway", 1, allow_partial=True
     )
     assert detail["history_truncated"] is True
-    assert detail["history_incomplete_reason"] == "unverifiable_comment_ids"
+    assert detail["history_incomplete_reason"] == "unverifiable_timeline_event"
     assert detail["history_pages_scanned"] == 1
     assert detail["coord_state"] is None
     assert "close_state_sha256" not in detail
@@ -1109,6 +1118,189 @@ async def test_short_unverifiable_comment_id_never_receives_readonly_close_lease
         client, "gpakoh", "agent-ssh-gateway", 1
     )
     assert state is None and incomplete is True
+
+
+@pytest.mark.asyncio
+async def test_timeline_service_only_first_page_keeps_later_coordination_event():
+    """Count raw timeline events, not filtered comments, to detect next page."""
+    client = FakeClient()
+    await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway", source_project="agent-ssh-gateway",
+        title="Interleaved timeline", body="Review", request_key="timeline-interleaved-123",
+    )
+    spoof = core._header(kind="event", key="timeline-spoof-123", state="resolved")
+    accepted = core._header(kind="event", key="timeline-valid-123", state="accepted")
+    client.comments[1] = [
+        {"id": i, "type": "label", "body": spoof, "user": {"login": "gpakoh"}}
+        for i in range(1, 51)
+    ] + [
+        {"id": 51, "type": "comment", "body": accepted + "\nAccepted",
+         "user": {"login": "gpakoh"}}
+    ]
+    # The service-only first page is FULL, so it cannot prove the end.
+    full = await core.open_thread(client, "gpakoh", "agent-ssh-gateway", 1)
+    assert full["coord_state"] == "accepted"
+    assert [entry["id"] for entry in full["history"]] == [51]
+    assert full["history"][0]["request_key"] == "timeline-valid-123"
+    assert "close_state_sha256" in full
+    state, incomplete = await core.preview_thread_state(
+        client, "gpakoh", "agent-ssh-gateway", 1
+    )
+    assert (state, incomplete) == ("accepted", False)
+
+
+@pytest.mark.asyncio
+async def test_timeline_bound_counts_unfiltered_service_events():
+    """The two-page preview cannot hide 100 activity events before a comment."""
+    client = FakeClient()
+    await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway", source_project="agent-ssh-gateway",
+        title="Untrusted end", body="Review", request_key="timeline-bound-123",
+    )
+    accepted = core._header(kind="event", key="timeline-late-123", state="accepted")
+    client.comments[1] = [
+        {"id": i, "type": "close", "body": accepted, "user": {"login": "gpakoh"}}
+        for i in range(1, 101)
+    ] + [
+        {"id": 101, "type": "comment", "body": accepted + "\nAccepted",
+         "user": {"login": "gpakoh"}}
+    ]
+    partial = await core.open_thread(
+        client, "gpakoh", "agent-ssh-gateway", 1, allow_partial=True
+    )
+    assert partial["history"] == []
+    assert partial["history_incomplete_reason"] == "bounded_comment_window"
+    assert partial["history_pages_scanned"] == 2
+    assert partial["coord_state"] is None
+    assert "close_state_sha256" not in partial
+    complete = await core.open_thread(client, "gpakoh", "agent-ssh-gateway", 1)
+    assert complete["coord_state"] == "accepted"
+    assert len(complete["history"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_timeline_invalid_type_and_duplicate_service_event_fail_closed():
+    for problem in ("missing_type", "duplicate_id"):
+        client = FakeClient()
+        await core.create_thread(
+            client, "gpakoh", "agent-ssh-gateway", source_project="agent-ssh-gateway",
+            title="Invalid timeline", body="Review",
+            request_key=f"invalid-timeline-{problem}-123",
+        )
+        if problem == "missing_type":
+            client.comments[1] = [{"id": 1, "type": "", "body": "not verifiable"}]
+        else:
+            client.comments[1] = [
+                {"id": i, "type": "label"} for i in range(1, 51)
+            ] + [{"id": 50, "type": "comment", "body": "malicious",
+                  "user": {"login": "gpakoh"}}]
+        partial = await core.open_thread(
+            client, "gpakoh", "agent-ssh-gateway", 1, allow_partial=True
+        )
+        assert partial["history_truncated"] is True
+        assert partial["coord_state"] is None
+        assert "close_state_sha256" not in partial
+        with pytest.raises(core.CoordinationOutcomeUnknown):
+            await core.open_thread(client, "gpakoh", "agent-ssh-gateway", 1)
+
+
+@pytest.mark.asyncio
+async def test_timeline_strict_scan_stops_at_5000_raw_events_even_if_no_comments():
+    client = FakeClient()
+    await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway", source_project="agent-ssh-gateway",
+        title="Bounded activity", body="Review", request_key="timeline-5000-123",
+    )
+    client.comments[1] = [{"id": i, "type": "label"} for i in range(1, 5001)]
+    with pytest.raises(core.CoordinationOutcomeUnknown, match="5000-row"):
+        await core.open_thread(client, "gpakoh", "agent-ssh-gateway", 1)
+
+
+@pytest.mark.asyncio
+async def test_real_gitea_transport_pages_timeline_before_filtering():
+    """Mock the actual HTTP API: a full service-event page is not EOF."""
+    import httpx
+
+    from examples.mcp_client_remote.fleet.gitea_client import GiteaClient
+
+    fake = FakeClient()
+    await core.create_thread(
+        fake, "gpakoh", "agent-ssh-gateway", source_project="agent-ssh-gateway",
+        title="Transport paging", body="Review", request_key="transport-timeline-123",
+    )
+    event = core._header(kind="event", key="transport-timeline-accepted-123", state="accepted")
+    requested = []
+
+    def handle(request):
+        path = request.url.path
+        if path.endswith("/timeline"):
+            assert request.url.params["limit"] == "50"
+            page = int(request.url.params["page"])
+            requested.append(page)
+            if page == 1:
+                return httpx.Response(200, json=[
+                    {"id": i, "type": "label", "body": event,
+                     "user": {"login": "gpakoh"}}
+                    for i in range(1, 51)
+                ])
+            assert page == 2
+            return httpx.Response(200, json=[
+                {"id": 51, "type": "comment", "body": event + "\nAccepted",
+                 "user": {"login": "gpakoh"}}
+            ])
+        if path.endswith("/user"):
+            return httpx.Response(200, json={"login": "gpakoh"})
+        if path.endswith("/issues/1"):
+            return httpx.Response(200, json=fake.issues[0])
+        raise AssertionError(f"unexpected Gitea API path: {path}")
+
+    client = GiteaClient("fake-token")
+    await client.aclose()
+    client._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handle),
+        base_url="https://gitea.invalid/api/v1/",
+    )
+    try:
+        thread = await core.open_thread(
+            client, "gpakoh", "agent-ssh-gateway", fake.issues[0]["number"]
+        )
+        assert thread["coord_state"] == "accepted"
+        assert [entry["id"] for entry in thread["history"]] == [51]
+        assert thread["history"][0]["request_key"] == "transport-timeline-accepted-123"
+        assert requested == [1, 2]
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_lowlevel_timeline_uses_documented_page_endpoint_only(monkeypatch):
+    from examples.mcp_client_remote.fleet.gitea_client import (
+        ALLOWED_ENDPOINTS,
+        GiteaClient,
+    )
+
+    client = GiteaClient("fake-token")
+    get = AsyncMock(return_value=[{"type": "comment", "id": 1}])
+    monkeypatch.setattr(client, "_get", get)
+    try:
+        rows = await client.list_issue_timeline(
+            "gpakoh", "agent-ssh-gateway", 42, limit=50, page=2
+        )
+        assert rows == [{"type": "comment", "id": 1}]
+        get.assert_awaited_once_with(
+            "/repos/{owner}/{repo}/issues/{number}/timeline",
+            params={"limit": 50, "page": 2},
+            owner="gpakoh", repo="agent-ssh-gateway", number=42,
+        )
+        assert "/repos/{owner}/{repo}/issues/{number}/timeline" in ALLOWED_ENDPOINTS
+        assert "/repos/{owner}/{repo}/issues/{number}/comments" not in ALLOWED_ENDPOINTS
+        for kwargs in ({"page": 0}, {"page": True}, {"limit": 51}, {"number": -1}):
+            with pytest.raises(ValueError):
+                await client.list_issue_timeline(
+                    "gpakoh", "agent-ssh-gateway", kwargs.pop("number", 42), **kwargs
+                )
+    finally:
+        await client.aclose()
 
 
 @pytest.mark.asyncio

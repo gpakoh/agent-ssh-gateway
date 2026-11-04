@@ -68,8 +68,13 @@ class Client:
             self.before_get(self.get_calls)
         return copy.deepcopy(self.issue)
 
-    async def list_issue_comments(self, owner, repo, number, *, limit, page):
-        return copy.deepcopy(self.comments[(page - 1) * limit : page * limit])
+    async def list_issue_timeline(self, owner, repo, number, *, limit, page):
+        return [
+            {"type": "comment", **row}
+            for row in copy.deepcopy(
+                self.comments[(page - 1) * limit : page * limit]
+            )
+        ]
 
     async def close_coord_issue(self, owner, repo, number):
         self.patch_calls += 1
@@ -544,8 +549,10 @@ async def test_transport_full_workflow_reconciles_actual_http_response_loss(tmp_
             raise httpx.ReadError("sensitive transport failure", request=request)
         if path == "/api/v1/user":
             return httpx.Response(200, json={"login": OWNER})
-        if path.endswith("/comments"):
-            return httpx.Response(200, json=state.comments)
+        if path.endswith("/timeline"):
+            assert request.url.params["limit"] == "50"
+            assert request.url.params["page"] == "1"
+            return httpx.Response(200, json=[{"type": "comment", **row} for row in state.comments])
         assert path == "/api/v1/repos/gpakoh/agent-ssh-gateway/issues/1"
         return httpx.Response(200, json=state.issue)
 

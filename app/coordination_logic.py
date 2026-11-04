@@ -156,58 +156,80 @@ async def _pages(
     )
 
 
-async def _preview_comment_pages(
-    fetch: Any, *, max_pages: int = 2
+async def _timeline_comment_pages(
+    fetch: Any, *, max_pages: int = 2, allow_partial: bool = True
 ) -> tuple[list[dict[str, Any]], bool, str | None, int]:
-    """Read bounded comment pages and expose why a cursor is not trustworthy.
+    """Page Gitea TIMELINE events, then select only ordinary user comments.
 
-    Unlike the exhaustive mutation scan, this is only for read-only views.
-    A repeated or reordered comment ID must never make a page look complete.
+    The /issues/{index}/comments API has no documented page/limit cursor.
+    The /timeline API does, but includes service events. A page's raw length
+    (not the number of comments) determines exhaustion. All event IDs must
+    advance monotonically, including events that are not user comments.
+    The strict mutation/close caller may not accept ANY incomplete history.
     """
-    observed: list[dict[str, Any]] = []
-    seen: set[int] = set()
+    comments: list[dict[str, Any]] = []
+    seen_ids: set[int] = set()
     last_id = 0
     for page in range(1, max_pages + 1):
         rows = await fetch(page)
-        if (
-            not isinstance(rows, list)
-            or len(rows) > _PAGE_SIZE
-            or any(not isinstance(row, dict) for row in rows)
+        if not isinstance(rows, list) or len(rows) > _PAGE_SIZE or any(
+            not isinstance(row, dict) for row in rows
         ):
-            raise ValueError("Gitea collection returned invalid rows")
+            raise ValueError("Gitea timeline returned invalid rows")
         overlap = False
-        invalid_id = False
+        invalid = False
         out_of_order = False
-        new_ids = 0
+        fresh = 0
         for row in rows:
             identifier = row.get("id")
-            if type(identifier) is not int or identifier < 1:
-                invalid_id = True
-                observed.append(row)
+            event_type = row.get("type")
+            if type(identifier) is not int or identifier < 1 or (
+                not isinstance(event_type, str) or not event_type
+            ):
+                invalid = True
                 continue
-            if identifier in seen:
+            if identifier in seen_ids:
                 overlap = True
                 continue
             if identifier <= last_id:
                 out_of_order = True
-            seen.add(identifier)
+            seen_ids.add(identifier)
             last_id = identifier
-            new_ids += 1
-            observed.append(row)
-        if invalid_id:
-            return observed, True, "unverifiable_comment_ids", page
-        if overlap:
+            fresh += 1
+            if event_type == "comment":
+                user = row.get("user")
+                if not isinstance(row.get("body"), str) or (
+                    not isinstance(user, dict)
+                    or not isinstance(user.get("login"), str)
+                    or not user.get("login")
+                ):
+                    invalid = True
+                    continue
+                comments.append(row)
+        reason: str | None = None
+        if invalid:
+            reason = "unverifiable_timeline_event"
+        elif overlap:
             reason = (
-                "non_progressing_comment_cursor" if new_ids == 0
+                "non_progressing_comment_cursor" if fresh == 0
                 else "overlapping_comment_pages"
             )
-            return observed, True, reason, page
-        if out_of_order:
-            return observed, True, "non_monotonic_comment_cursor", page
+        elif out_of_order:
+            reason = "non_monotonic_comment_cursor"
+        if reason is not None:
+            if allow_partial:
+                return comments, True, reason, page
+            raise CoordinationOutcomeUnknown(
+                f"collection exceeds bounded {max_pages * _PAGE_SIZE}-row "
+                f"reconciliation window or Gitea timeline cursor is invalid ({reason})"
+            )
         if len(rows) < _PAGE_SIZE:
-            return observed, False, None, page
-    # The next page may contain more comments; do not claim a final state.
-    return observed, True, "bounded_comment_window", max_pages
+            return comments, False, None, page
+    if allow_partial:
+        return comments, True, "bounded_comment_window", max_pages
+    raise CoordinationOutcomeUnknown(
+        f"collection exceeds bounded {max_pages * _PAGE_SIZE}-row reconciliation window"
+    )
 
 
 # Stable, read-only Kanban representation of the authoritative Gitea threads.
@@ -279,8 +301,8 @@ async def preview_thread_state(
     issue = await client.get_issue(owner, repo, number)
     if _issue(issue) is None:
         raise ValueError("issue is not a Py Coordination thread")
-    comments, truncated, _reason, _pages_read = await _preview_comment_pages(
-        lambda page: client.list_issue_comments(
+    comments, truncated, _reason, _pages_read = await _timeline_comment_pages(
+        lambda page: client.list_issue_timeline(
             owner, repo, number, limit=_PAGE_SIZE, page=page
         )
     )
@@ -314,20 +336,21 @@ async def open_thread(
     if item is None:
         raise ValueError("issue is not a Py Coordination thread")
     if allow_partial:
-        comments, truncated, incomplete_reason, pages_read = await _preview_comment_pages(
-            lambda page: client.list_issue_comments(
+        comments, truncated, incomplete_reason, pages_read = await _timeline_comment_pages(
+            lambda page: client.list_issue_timeline(
                 owner, repo, number, limit=_PAGE_SIZE, page=page
             )
         )
         item["history_incomplete_reason"] = incomplete_reason
         item["history_pages_scanned"] = pages_read
     else:
-        # Write/close still demand the original exhaustive, fail-closed scan.
-        comments, truncated = await _pages(
-            lambda page: client.list_issue_comments(
+        # Mutations require ALL timeline pages, not 50 filtered comments.
+        comments, truncated, _reason, _pages_read = await _timeline_comment_pages(
+            lambda page: client.list_issue_timeline(
                 owner, repo, number, limit=_PAGE_SIZE, page=page
             ),
             max_pages=_WRITE_MAX_PAGES,
+            allow_partial=False,
         )
     trusted_identity = await client.get_user()
     trusted_login = trusted_identity.get("login")

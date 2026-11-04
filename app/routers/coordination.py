@@ -115,11 +115,12 @@ class _ReadOnlyGitea:
     async def get_issue(self, owner: str, repo: str, number: int) -> object:
         return await self._get(f"repos/{owner}/{repo}/issues/{number}")
 
-    async def list_issue_comments(
+    async def list_issue_timeline(
         self, owner: str, repo: str, number: int, *, limit: int, page: int
     ) -> object:
+        # Only timeline documents page/limit; filter after raw pagination.
         return await self._get(
-            f"repos/{owner}/{repo}/issues/{number}/comments", limit=limit, page=page
+            f"repos/{owner}/{repo}/issues/{number}/timeline", limit=limit, page=page
         )
 
     async def get_user(self) -> object:
