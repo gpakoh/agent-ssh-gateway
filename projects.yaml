@@ -611,3 +611,10 @@ projects:
     type: python-service
     description: "Business analytics service: deterministic, auditable KPI calculations over normalized commerce facts (Quart pilot; A0-A3 slice)"
     tags: []
+
+  mail-composer-service:
+    root: quart-platform/mail-composer-service
+    parent: quart-platform
+    type: python-service
+    description: "Branded XLOUD email composition and delivery service (scaffold)"
+    tags: []
