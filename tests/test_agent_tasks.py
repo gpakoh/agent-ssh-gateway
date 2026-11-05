@@ -2100,6 +2100,95 @@ class TestAgentStartupDiagnostics:
 
         assert result["useful_agent_activity_seen"] is False
 
+    @pytest.mark.parametrize("now_epoch", [2_000, 10_000])
+    def test_terminal_startup_exhaustion_report_is_not_model_work_and_time_is_frozen(
+        self, now_epoch
+    ):
+        """Actual #684: runner writes a report after all six proxies fail startup."""
+        from examples.mcp_server.agent_tasks import _agent_startup_diagnostics
+
+        result = _agent_startup_diagnostics(
+            status="startup-timeout",
+            status_text="Status: startup-timeout\n",
+            log_stdout="> build · big-pickle\n",
+            files={
+                "attempt_state": {"mtime_epoch": 1_000},
+                "proxy_status": {"mtime_epoch": 1_140},
+                "status": {"mtime_epoch": 1_400},
+                "heartbeat": {"mtime_epoch": 1_400},
+                "report": {"size_bytes": 1_057, "mtime_epoch": 1_400},
+                "diff": {"size_bytes": 0, "mtime_epoch": 1_400},
+            },
+            active=False,
+            now_epoch=now_epoch,
+            proxy_status={
+                "exists": True,
+                "valid": True,
+                "attempt": 6,
+                "max_attempts": 6,
+                "last_error_class": "startup_stalled",
+                "final_outcome": "startup_exhausted",
+            },
+            runtime_status={"exists": False},
+        )
+        assert result["phase"] == "startup"
+        assert result["startup_timeout"] is True
+        assert result["useful_agent_activity_seen"] is False
+        assert result["elapsed_seconds"] == 400
+        assert result["proxy_rotation"]["count"] == 5
+
+    def test_proxy_exhaustion_does_not_reclassify_generated_report_as_work(self):
+        from examples.mcp_server.agent_tasks import _agent_startup_diagnostics
+
+        result = _agent_startup_diagnostics(
+            status="failed",
+            status_text="Status: failed\n",
+            log_stdout="> build · big-pickle\n",
+            files={
+                "status": {"mtime_epoch": 1_300},
+                "attempt_state": {"mtime_epoch": 1_000},
+                "report": {"size_bytes": 800},
+                "diff": {"size_bytes": 0},
+            },
+            active=False,
+            now_epoch=4_000,
+            proxy_status={
+                "exists": True,
+                "valid": True,
+                "attempt": 1,
+                "max_attempts": 1,
+                "final_outcome": "upstream_error_exhausted",
+            },
+        )
+        assert result["useful_agent_activity_seen"] is False
+        assert result["elapsed_seconds"] == 300
+
+    def test_real_completed_report_still_counts_as_useful_work(self):
+        from examples.mcp_server.agent_tasks import _agent_startup_diagnostics
+
+        result = _agent_startup_diagnostics(
+            status="needs-review",
+            status_text="Status: needs-review\n",
+            log_stdout="",
+            files={
+                "status": {"mtime_epoch": 1_200},
+                "attempt_state": {"mtime_epoch": 1_000},
+                "report": {"size_bytes": 600},
+                "diff": {"size_bytes": 0},
+            },
+            active=False,
+            now_epoch=5_000,
+            proxy_status={
+                "exists": True,
+                "valid": True,
+                "final_outcome": "completed",
+                "attempt": 1,
+                "max_attempts": 6,
+            },
+        )
+        assert result["useful_agent_activity_seen"] is True
+        assert result["elapsed_seconds"] == 200
+
 
 class TestInspectAgentTask:
     @staticmethod
@@ -2119,6 +2208,85 @@ class TestInspectAgentTask:
             }
 
         return run_cmd
+
+    def test_terminal_proxy_exhaustion_is_consistent_across_both_live_status_surfaces(
+        self, tmp_path, monkeypatch
+    ):
+        """Regress the actual #684 six-proxy failure through the SSH shell reader."""
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: startup-timeout\n", encoding="utf-8")
+        (td / "attempt-state.json").write_text(
+            json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+            encoding="utf-8",
+        )
+        (td / "proxy-status.json").write_text(
+            json.dumps({
+                "version": 1,
+                "provider_kind": "configured_provider",
+                "attempt": 6,
+                "max_attempts": 6,
+                "last_error_class": "startup_stalled",
+                "final_outcome": "startup_exhausted",
+            }),
+            encoding="utf-8",
+        )
+        (td / "agent-heartbeat.json").write_text(
+            json.dumps({
+                "version": 1,
+                "state": "finished",
+                "phase": "final",
+                "updated_at": "2026-11-04T21:04:44Z",
+                "updated_epoch": 1_400,
+                "runner_pid": 123,
+                "exit_code": 78,
+            }),
+            encoding="utf-8",
+        )
+        (td / "agent-report.md").write_text(
+            "OpenCode startup failed before the task could run", encoding="utf-8"
+        )
+        (td / "implementation-diff.patch").write_bytes(b"")
+        (td / "opencode-output.log").write_text(
+            "> build · big-pickle\n", encoding="utf-8"
+        )
+        for child in td.iterdir():
+            os.utime(child, (1_000, 1_000))
+        for name in ("agent-status.md", "agent-heartbeat.json"):
+            os.utime(td / name, (1_400, 1_400))
+
+        run_cmd = self._shell_runner(tmp_path)
+
+        def job_status(job_id):
+            return {"job_id": job_id, "status": "failed", "exit_code": 78}
+
+        for now_epoch in (2_000, 10_000):
+            compact = agent_task_status(
+                run_cmd,
+                project="my-proj",
+                task_id=task_id,
+                now_epoch=now_epoch,
+                job_status=job_status,
+            )
+            detailed = inspect_agent_task(
+                run_cmd,
+                project="my-proj",
+                task_id=task_id,
+                now_epoch=now_epoch,
+                job_status=job_status,
+            )
+            for snapshot in (compact, detailed):
+                assert snapshot["terminal"] is True
+                assert snapshot["verdict"] == "startup_timeout"
+                assert snapshot["startup"]["phase"] == "startup"
+                assert snapshot["startup"]["elapsed_seconds"] == 400
+                assert snapshot["startup"]["useful_agent_activity_seen"] is False
+                assert snapshot["startup"]["proxy_rotation"]["attempt"] == 6
+                assert snapshot["startup"]["proxy_rotation"]["count"] == 5
+            assert compact["log_included"] is False
+            assert detailed["log"]["stdout"].strip() == "> build · big-pickle"
 
     def test_missing_task_returns_missing_verdict(self, tmp_path, monkeypatch):
         monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
