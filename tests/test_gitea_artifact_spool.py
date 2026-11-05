@@ -262,6 +262,40 @@ async def test_cancelled_download_closes_fd_and_releases_reservation(spool, leas
 
 
 @pytest.mark.asyncio
+async def test_stalled_download_expires_reservation_and_closes_private_inode(spool, lease):
+    captured = []
+
+    class Stalled(Fake):
+        async def download_action_artifact_zip(
+            self, owner, repo, artifact_id, output, **kwargs
+        ):
+            captured.append(output)
+            await asyncio.Event().wait()
+
+    with pytest.raises(ArtifactTransportError, match="staging deadline"):
+        await stage(spool, Stalled(), lease)
+    assert len(captured) == 1
+    assert captured[0].closed
+    assert not spool._entries
+    assert spool._pending == 0
+    # A provider stall must not permanently exhaust the single test slot.
+    fresh = await stage(spool, Fake(), lease)
+    assert spool.revoke(fresh["handle"])
+
+
+@pytest.mark.asyncio
+async def test_stalled_preflight_also_expires_reservation(spool, lease):
+    class Stalled(Fake):
+        async def get_pull_request(self, *_):
+            await asyncio.Event().wait()
+
+    with pytest.raises(ArtifactTransportError, match="staging deadline"):
+        await stage(spool, Stalled(), lease)
+    assert not spool._entries
+    assert spool._pending == 0
+
+
+@pytest.mark.asyncio
 async def test_inspection_timeout_closes_file(spool, lease):
     fake = Fake()
     result = await stage(spool, fake, lease)

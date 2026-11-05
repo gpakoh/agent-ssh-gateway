@@ -3159,13 +3159,14 @@ class TestScheduledOpenCodeUpgradeGate:
                 None,
                 project_root=str(source),
             )
-            result = subprocess.run(
-                ["sh", "-c", script],
+            # This fixture boots the entire shell/upgrade/worker process tree
+            # twice. On a busy CI runner, 60s can expire after the fake worker
+            # has already emitted success. Bound and reap the *whole* process
+            # group instead of killing only sh (and leaking pipe descendants).
+            result = _run_bounded_shell_tree(
+                script,
                 cwd=source,
-                text=True,
-                capture_output=True,
-                check=False,
-                timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+                timeout=PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS,
             )
             assert result.returncode == 0, result.stderr or result.stdout
 

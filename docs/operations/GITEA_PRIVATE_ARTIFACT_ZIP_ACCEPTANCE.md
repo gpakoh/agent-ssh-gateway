@@ -18,9 +18,13 @@ tool, does not transmit a ZIP to a chat client, and does not publish a preview.
   Every cancellation/failure revokes the descriptor; process restart closes
   all descriptors and invalidates the process-local handle registry.
 - Limit reservations plus retained handles to at most **2** by default.
-  Successful handles expire after **120 seconds** using a scheduled callback;
-  revocation closes the file even without a later request. No filesystem
-  inventory or global cleanup is necessary.
+  The **entire staging operation** (live PR/run/artifact preflight, download,
+  validation, and live postflight) has a 120-second deadline by default, not
+  just the individual HTTP reads. A stalled provider must release its reserved
+  slot and close the unnamed inode without waiting for another request.
+  Successful handles independently expire after **120 seconds** using a
+  scheduled callback; revocation closes the file even without a later request.
+  No filesystem inventory or global cleanup is necessary.
 - Never treat `gitea_list_action_run_artifacts` metadata as download
   authorization. For every download the trusted caller must prove, using live
   Gitea reads, an **open, same-repository PR** and its exact lower-case 40-hex

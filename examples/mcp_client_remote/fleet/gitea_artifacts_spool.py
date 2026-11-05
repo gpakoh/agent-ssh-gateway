@@ -202,6 +202,25 @@ class ArtifactSpool:
     async def stage(
         self, client: Any, lease: ArtifactLease, *, redirect_origins: Collection[str]
     ) -> dict[str, Any]:
+        """Time-bound the entire preflight/transport/postflight reservation.
+
+        Per-read HTTP timeouts alone cannot bound a drip-fed archive or a
+        stalled mock/provider. No stalled reservation may pin all spool slots
+        indefinitely, even before a temporary inode has been created.
+        """
+        try:
+            async with asyncio.timeout(self._ttl_s):
+                return await self._stage_impl(
+                    client, lease, redirect_origins=redirect_origins
+                )
+        except TimeoutError:
+            raise ArtifactTransportError(
+                "Private artifact staging deadline exceeded"
+            ) from None
+
+    async def _stage_impl(
+        self, client: Any, lease: ArtifactLease, *, redirect_origins: Collection[str]
+    ) -> dict[str, Any]:
         import secrets
 
         lease.validate()
