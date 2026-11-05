@@ -109,6 +109,10 @@ class TestLiveServerToolSurface:
     TARGETS = {
         "gitea_list_commit_statuses": ["owner", "repo", "sha"],
         "gitea_create_branch_at_sha": ["owner", "repo", "branch", "expected_head_sha"],
+        "gitea_list_action_run_artifacts": [
+            "owner", "repo", "pull_number", "run_id",
+            "expected_pr_head_sha", "expected_run_attempt",
+        ],
         # A registered adapter and schema are not sufficient: the active
         # mcp_client_write allowlist must expose the tool in live tools/list.
         "gitea_close_issue": [

@@ -18,6 +18,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import uuid
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ from examples.mcp_client_remote.fleet.gitea_client import (
     GiteaActionRunResponseError,
     GiteaCommitStatusResponseError,
     GiteaMutationOutcomeUnknown,
+    validate_artifact_expires_at,
 )
 from examples.mcp_client_remote.fleet.github_client import (
     normalize_list_response,
@@ -4607,6 +4609,177 @@ async def gitea_get_action_run(owner: str, repo: str, run_id: int) -> dict[str, 
     return tool_success("gitea_get_action_run", result=data, source="gitea")
 
 
+async def gitea_list_action_run_artifacts(
+    owner: str,
+    repo: str,
+    pull_number: int,
+    run_id: int,
+    expected_pr_head_sha: str,
+    expected_run_attempt: int,
+    max_results: int = 20,
+) -> dict[str, Any]:
+    """Read-only artifact metadata fenced to a live exact PR/run.
+
+    No archive bytes, signed URLs or download capability. An artifact whose
+    individual run_attempt is absent is explicitly *not* attempt-attested.
+    Results are descriptive, not authorization to download or publish.
+    """
+    tool = "gitea_list_action_run_artifacts"
+    if (
+        type(pull_number) is not int or pull_number <= 0
+        or type(run_id) is not int or run_id <= 0
+        or type(expected_run_attempt) is not int or expected_run_attempt <= 0
+        or type(max_results) is not int or not 1 <= max_results <= 20
+        or not isinstance(expected_pr_head_sha, str)
+        or _valid_commit_sha(expected_pr_head_sha) != expected_pr_head_sha
+    ):
+        return tool_error(
+            tool=tool, code="INVALID_INPUT",
+            message="positive PR/run/attempt IDs, lowercase 40-hex HEAD and max_results 1..20 required",
+            source="gitea",
+        )
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return tool_error(
+            tool=tool, code="DEPENDENCY_MISSING",
+            message="GITEA_TOKEN not configured", source="gitea",
+        )
+
+    def check_pr(pr: Any) -> str | None:
+        if not isinstance(pr, dict) or type(pr.get("number")) is not int or pr["number"] != pull_number:
+            return "CI_EVIDENCE_INCOMPLETE"
+        if pr.get("state") != "open" or pr.get("merged") is True:
+            return "PR_NOT_OPEN"
+        head = pr.get("head")
+        if not isinstance(head, dict) or head.get("sha") != expected_pr_head_sha:
+            return "HEAD_MISMATCH"
+        head_repo = head.get("repo")
+        if not isinstance(head_repo, dict) or head_repo.get("full_name") != f"{owner}/{repo}":
+            return "POLICY_DENIED"
+        return None
+
+    def check_run(run: Any) -> str | None:
+        if not isinstance(run, dict) or type(run.get("id")) is not int or run["id"] != run_id:
+            return "CI_EVIDENCE_INCOMPLETE"
+        if (
+            run.get("head_sha") != expected_pr_head_sha
+            or type(run.get("run_attempt")) is not int
+            or run["run_attempt"] != expected_run_attempt
+        ):
+            return "CI_EVIDENCE_INCOMPLETE"
+        if (
+            run.get("event") != "pull_request"
+            or run.get("status") != "completed"
+            or run.get("conclusion") != "success"
+        ):
+            return "CI_NOT_GREEN"
+        linked_repo = run.get("repository")
+        if not isinstance(linked_repo, dict) or linked_repo.get("full_name") != f"{owner}/{repo}":
+            return "CI_EVIDENCE_INCOMPLETE"
+        return None
+
+    try:
+        async with _server_gitea_client()(token) as client:
+            pr = await client.get_pull_request(owner, repo, pull_number)
+            reason = check_pr(pr)
+            if reason:
+                return _gitea_artifact_preflight_error(tool, reason)
+            run = await client.get_action_run(owner, repo, run_id)
+            reason = check_run(run)
+            if reason:
+                return _gitea_artifact_preflight_error(tool, reason)
+            page = await client.list_action_run_artifacts(owner, repo, run_id)
+            if not isinstance(page, dict) or type(page.get("total_count")) is not int:
+                return _gitea_artifact_preflight_error(tool, "CI_EVIDENCE_INCOMPLETE")
+            total_count = page["total_count"]
+            raw_items = page.get("artifacts")
+            if total_count < 0 or not isinstance(raw_items, list) or len(raw_items) > total_count:
+                return _gitea_artifact_preflight_error(tool, "CI_EVIDENCE_INCOMPLETE")
+            items: list[dict[str, Any]] = []
+            ids: set[int] = set()
+            names: set[str] = set()
+            for artifact in raw_items:
+                if not isinstance(artifact, dict):
+                    return _gitea_artifact_preflight_error(tool, "CI_EVIDENCE_INCOMPLETE")
+                identity = artifact.get("workflow_run")
+                if not isinstance(identity, dict) or identity.get("id") != run_id:
+                    return _gitea_artifact_preflight_error(tool, "CI_EVIDENCE_INCOMPLETE")
+                if identity.get("head_sha") != expected_pr_head_sha:
+                    return _gitea_artifact_preflight_error(tool, "CI_EVIDENCE_INCOMPLETE")
+                attempt = identity.get("run_attempt")
+                if attempt is not None and (
+                    type(attempt) is not int or attempt != expected_run_attempt
+                ):
+                    return _gitea_artifact_preflight_error(tool, "CI_EVIDENCE_INCOMPLETE")
+                artifact_id = artifact.get("id")
+                name = artifact.get("name")
+                size = artifact.get("size_in_bytes")
+                expired = artifact.get("expired")
+                try:
+                    expiry = validate_artifact_expires_at(artifact.get("expires_at"))
+                except ValueError:
+                    return _gitea_artifact_preflight_error(tool, "CI_EVIDENCE_INCOMPLETE")
+                if (
+                    type(artifact_id) is not int or artifact_id <= 0 or artifact_id in ids
+                    or not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._ -]{0,127}", name) or name in names
+                    or type(size) is not int or size < 0 or type(expired) is not bool
+                ):
+                    return _gitea_artifact_preflight_error(tool, "CI_EVIDENCE_INCOMPLETE")
+                ids.add(artifact_id)
+                names.add(name)
+                if len(items) < max_results:
+                    items.append({
+                        "id": artifact_id,
+                        "name": name,
+                        "size_in_bytes": size,
+                        "expired": expired,
+                        "expires_at": expiry,
+                        "run_attempt_attested": attempt == expected_run_attempt,
+                    })
+            # Proof must still be valid *after* the private metadata fetch.
+            latest_pr = await client.get_pull_request(owner, repo, pull_number)
+            reason = check_pr(latest_pr)
+            if reason:
+                return _gitea_artifact_preflight_error(tool, reason)
+            latest_run = await client.get_action_run(owner, repo, run_id)
+            reason = check_run(latest_run)
+            if reason:
+                return _gitea_artifact_preflight_error(tool, reason)
+    except Exception as exc:
+        return _remote_api_error(tool, "gitea", exc)
+    return tool_success(
+        tool,
+        result={
+            "owner": owner,
+            "repo": repo,
+            "pull_number": pull_number,
+            "run_id": run_id,
+            "head_sha": expected_pr_head_sha,
+            "run_attempt": expected_run_attempt,
+            "total_count": total_count,
+            "artifacts": items,
+            "truncated": total_count > len(items),
+            "download_authorized": False,
+            "lease_scope": "read_only_observation_not_a_download_capability",
+        },
+        source="gitea",
+        truncated=total_count > len(items),
+    )
+
+
+def _gitea_artifact_preflight_error(tool: str, code: str) -> dict[str, Any]:
+    messages = {
+        "PR_NOT_OPEN": "Pull request is no longer open",
+        "HEAD_MISMATCH": "Pull request HEAD does not match the expected immutable SHA",
+        "POLICY_DENIED": "Only same-repository pull request heads may be inspected",
+        "CI_NOT_GREEN": "Required exact-run pull_request CI is not completed successfully",
+        "CI_EVIDENCE_INCOMPLETE": "Private artifact provenance cannot be verified from Gitea metadata",
+    }
+    return tool_error(
+        tool=tool, code=code, message=messages[code], source="gitea",
+    )
+
+
 def _action_run_id(value: Any) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         return None
@@ -6756,6 +6929,7 @@ def register_all() -> None:
     register_tool("gitea_push_local_ref")(gitea_push_local_ref)
     register_tool("gitea_push_verified_commit")(gitea_push_verified_commit)
     register_tool("gitea_list_action_runs")(gitea_list_action_runs)
+    register_tool("gitea_list_action_run_artifacts")(gitea_list_action_run_artifacts)
     register_tool("gitea_get_action_run")(gitea_get_action_run)
     register_tool("gitea_rerun_action_run")(gitea_rerun_action_run)
     register_tool("gitea_rerun_action_job")(gitea_rerun_action_job)
