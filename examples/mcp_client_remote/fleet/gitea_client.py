@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Collection
 from datetime import datetime
-from typing import Any
+from typing import Any, BinaryIO
 from urllib.parse import quote, urlsplit
 
 import httpx
 
+from .gitea_artifacts_transport import MAX_ZIP_BYTES, stream_action_artifact_zip
 from .shared import (
     minimize_action_run_payload,
     validate_repo_owner_or_name,
@@ -1811,6 +1813,30 @@ class GiteaClient:
             owner=owner,
             repo=repo,
             secretname=secret_name,
+        )
+
+    async def download_action_artifact_zip(
+        self,
+        owner: str,
+        repo: str,
+        artifact_id: int,
+        output: BinaryIO,
+        *,
+        redirect_origins: Collection[str],
+        max_bytes: int = MAX_ZIP_BYTES,
+        expected_sha256: str | None = None,
+    ) -> dict[str, Any]:
+        """Download into a caller-owned *private temporary file*, never MCP output.
+
+        This is an internal primitive, NOT a public arbitrary-file download API.
+        A higher-level caller must independently prove and re-prove the exact
+        open PR / successful run / artifact identity and private storage lease.
+        """
+        return await stream_action_artifact_zip(
+            self._client, owner, repo, artifact_id, output,
+            redirect_origins=redirect_origins,
+            max_bytes=max_bytes,
+            expected_sha256=expected_sha256,
         )
 
     async def aclose(self) -> None:

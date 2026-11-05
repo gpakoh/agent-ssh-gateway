@@ -254,15 +254,21 @@ async def test_vulnerable_server_refuses_before_issuing_signed_url():
 
     def handle(request):
         requests.append(request.url.path)
+        if request.url.path.endswith("/version"):
+            return httpx.Response(200, json={"version": "1.26.1"})
         return httpx.Response(200, content=make_zip())
 
     file = io.BytesIO()
-    async with client(handle, version={"version": "1.26.1"}) as api:
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handle),
+        base_url=SOURCE,
+        headers={"Authorization": f"token {PAT}"},
+    ) as api:
         with pytest.raises(ArtifactTransportError, match="patched server"):
             await stream_action_artifact_zip(
                 api, "gpakoh", "xloud", 17, file, redirect_origins=[],
             )
-    assert all(path.endswith("/version") for path in requests) or requests == []
+    assert requests == ["/api/v1/version"]
     assert file.getvalue() == b""
 
 
@@ -325,3 +331,36 @@ def test_case_insensitive_zip_collisions_are_rejected():
         archive.writestr("README.TXT", "second")
     with pytest.raises(ArtifactTransportError, match="unsafe member"):
         validate_zip_archive(output)
+
+@pytest.mark.asyncio
+async def test_native_gitea_client_exposes_only_a_private_destination_primitive():
+    from examples.mcp_client_remote.fleet.gitea_client import GiteaClient
+
+    data = make_zip("preview/site/index.html")
+    urls = []
+
+    def handler(req):
+        urls.append(req.url.path)
+        assert req.headers["authorization"] == f"token {PAT}"
+        if req.url.path.endswith("/version"):
+            return httpx.Response(200, json={"version": "1.26.2"})
+        return httpx.Response(200, content=data)
+
+    async with GiteaClient(PAT) as gitea:
+        await gitea._client.aclose()
+        gitea._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url=SOURCE,
+            headers={"Authorization": f"token {PAT}"},
+        )
+        destination = io.BytesIO()
+        metadata = await gitea.download_action_artifact_zip(
+            "gpakoh", "xloud", 17, destination, redirect_origins=[],
+        )
+    assert urls == [
+        "/api/v1/version",
+        "/api/v1/repos/gpakoh/xloud/actions/artifacts/17/zip",
+    ]
+    assert metadata["sha256"] == hashlib.sha256(data).hexdigest()
+    assert destination.getvalue() == data
+    assert PAT not in str(metadata)
