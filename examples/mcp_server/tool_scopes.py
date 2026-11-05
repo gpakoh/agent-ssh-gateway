@@ -181,6 +181,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "gitea_delete_branch_protection": ["mcp:repo", "mcp:admin"],
     "gitea_actions_secret_source_status": ["mcp:repo", "mcp:admin"],
     "gitea_provision_actions_secret": ["mcp:repo", "mcp:admin"],
+    "gitea_close_issue": ["mcp:repo", "mcp:admin"],
     "gitea_close_pull_request": ["mcp:repo", "mcp:admin"],
     "gitea_delete_branch": ["mcp:repo", "mcp:admin"],
     "gitea_materialize_task_candidate": ["mcp:repo", "mcp:admin"],

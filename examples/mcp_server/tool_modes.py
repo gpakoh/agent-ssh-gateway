@@ -312,6 +312,7 @@ MCP_CLIENT_WRITE_ONLY_GITEA_TOOLS: frozenset[str] = frozenset({
     "gitea_delete_branch_protection",
     "gitea_actions_secret_source_status",
     "gitea_provision_actions_secret",
+    "gitea_close_issue",
     "gitea_close_pull_request",
     "gitea_delete_branch",
     "gitea_materialize_task_candidate",
