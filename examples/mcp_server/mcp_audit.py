@@ -107,6 +107,16 @@ class McpAuditLogger:
         self._log_path = log_path
         self._recent_limit = recent_limit
         self._buffer: list[dict[str, Any]] = []
+        # Process-local evidence only: no health probe ever writes to the audit
+        # store. A past success must not authorize any future mutation.
+        self._required_write_observation: dict[str, Any] = {
+            "state": "unproven",
+            "observed_at": None,
+            "event_id": None,
+            "retryable": False,
+            "provenance": "process_local_last_required_write",
+            "authorizes_mutation": False,
+        }
 
     def _prepare_record(self, event: McpAuditEvent) -> dict[str, Any]:
         """Redact secrets and strip forbidden keys, exactly like append."""
@@ -146,6 +156,31 @@ class McpAuditLogger:
         except OSError:
             pass  # non-fatal
 
+    def _observe_required_write(self, event: McpAuditEvent, *, succeeded: bool) -> None:
+        # Only expose a fixed state, timestamp and validated opaque audit ID.
+        # Never return exception text, filesystem paths or event metadata.
+        event_id = event.event_id
+        self._required_write_observation = {
+            "state": "last_write_succeeded" if succeeded else "unavailable",
+            "observed_at": datetime.now(UTC).isoformat(),
+            "event_id": (
+                event_id
+                if isinstance(event_id, str) and re.fullmatch(r"[a-f0-9]{32}", event_id)
+                else None
+            ),
+            "retryable": not succeeded,
+            "provenance": "process_local_last_required_write",
+            "authorizes_mutation": False,
+        }
+
+    def required_write_health(self) -> dict[str, Any]:
+        """Read the last required fsync result without filesystem I/O.
+
+        This is not a writeability check: every dangerous operation still
+        has to persist its own exact intent before a remote mutation.
+        """
+        return dict(self._required_write_observation)
+
     def append_required(self, event: McpAuditEvent) -> None:
         """Append a required event: persist (and fsync) JSONL, then update the buffer.
 
@@ -158,8 +193,10 @@ class McpAuditLogger:
         try:
             self._write_record(record, durable=True)
         except OSError as exc:
+            self._observe_required_write(event, succeeded=False)
             raise AuditWriteError(str(exc)) from exc
         self._push_recent(record)
+        self._observe_required_write(event, succeeded=True)
 
     def recent(self, limit: int | None = None) -> list[dict[str, Any]]:
         """Return recent events from ring buffer."""

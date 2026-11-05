@@ -53,6 +53,41 @@ def test_health_tool_returns_mcp_and_gateway_keys():
     assert gw["version"] == "0.1.30"
 
 
+def test_health_exposes_read_only_required_audit_write_evidence(tmp_path, monkeypatch):
+    """No audit file or probe write is made by the authenticated health tool."""
+    import examples.mcp_server.server as srv
+    from examples.mcp_server.mcp_audit import McpAuditEvent, McpAuditLogger
+
+    logger = McpAuditLogger(log_path=str(tmp_path / "audit.jsonl"))
+    monkeypatch.setattr(srv, "get_audit_logger", lambda: logger)
+    mock_client = MagicMock()
+    mock_client.health.return_value = {"status": "ok", "ready": True}
+    monkeypatch.setattr(srv, "client", mock_client)
+
+    unknown = srv.gateway_health()
+    assert unknown["mcp"]["audit"]["state"] == "unproven"
+    assert unknown["gateway"]["ready"] is True
+    assert not (tmp_path / "audit.jsonl").exists()
+    logger.append_required(McpAuditEvent(event_type="mcp.gitea_destructive_intent"))
+    accepted = srv.gateway_health()
+    assert accepted["mcp"]["audit"]["state"] == "last_write_succeeded"
+    assert accepted["mcp"]["audit"]["authorizes_mutation"] is False
+    assert accepted["mcp"]["audit"] == logger.required_write_health()
+
+    def failed_write(_record, *, durable=False):
+        raise OSError("/private/secret_audit token=secret")
+
+    monkeypatch.setattr(logger, "_write_record", failed_write)
+    with pytest.raises(OSError):
+        logger.append_required(McpAuditEvent(event_type="mcp.gitea_destructive_intent"))
+    failed = srv.gateway_health()
+    assert failed["gateway"]["ready"] is True
+    assert failed["mcp"]["audit"]["state"] == "unavailable"
+    assert failed["mcp"]["audit"]["retryable"] is True
+    assert "/private" not in str(failed)
+    assert "secret" not in str(failed["mcp"]["audit"])
+
+
 def test_mcp_section_has_toolset_hash():
     """MCP section must include toolset_hash, tools_count, contract_version."""
     from examples.mcp_server.server import gateway_health

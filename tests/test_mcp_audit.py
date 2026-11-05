@@ -242,6 +242,51 @@ class TestMcpAuditLogger:
             logger.append_required(event)
         assert logger._buffer == []
 
+    def test_required_write_health_tracks_failure_then_recovery_without_probe_writes(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        logger = _tmp_logger(tmp_path)
+        first = logger.required_write_health()
+        assert first["state"] == "unproven"
+        assert first["observed_at"] is None
+        assert first["event_id"] is None
+        assert first["provenance"] == "process_local_last_required_write"
+        assert first["authorizes_mutation"] is False
+        assert not (tmp_path / "audit.jsonl").exists()
+
+        original = logger._write_record
+
+        def unavailable(_record, *, durable=False):
+            raise OSError("/private/audit.log token=top-secret fsync unavailable")
+
+        monkeypatch.setattr(logger, "_write_record", unavailable)
+        with pytest.raises(AuditWriteError):
+            logger.append_required(McpAuditEvent(event_type="mcp.gitea_destructive_intent"))
+        failed = logger.required_write_health()
+        assert failed["state"] == "unavailable"
+        assert failed["retryable"] is True
+        assert failed["event_id"] is not None
+        assert failed["observed_at"]
+        assert logger.recent() == []
+        assert "/private" not in str(failed)
+        assert "top-secret" not in str(failed)
+        assert "fsync unavailable" not in str(failed)
+
+        # A read of the health receipt never attempts to open, write or fsync.
+        assert logger.required_write_health() == failed
+        monkeypatch.setattr(logger, "_write_record", original)
+        logger.append(McpAuditEvent(event_type="mcp.read_only"))
+        assert logger.required_write_health() == failed
+        logger.append_required(McpAuditEvent(event_type="mcp.gitea_destructive_intent"))
+        recovered = logger.required_write_health()
+        assert recovered["state"] == "last_write_succeeded"
+        assert recovered["retryable"] is False
+        assert recovered["event_id"] != failed["event_id"]
+        assert recovered["observed_at"]
+        assert recovered["authorizes_mutation"] is False
+        assert recovered["provenance"] == "process_local_last_required_write"
+        assert logger.required_write_health() == recovered
+
     def test_append_required_is_oserror_subclass(self) -> None:
         assert issubclass(AuditWriteError, OSError)
 
