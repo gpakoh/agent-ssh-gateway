@@ -2359,10 +2359,21 @@ def _agent_startup_diagnostics(
     # A typed pre-useful-work failure is authoritative. The runner itself
     # emits final report/diff artifacts on every terminal path, so their mere
     # existence cannot retroactively prove that the model or a tool did work.
+    # The legacy startup-exhaustion path has no failure sidecar: the terminal
+    # status and the validated proxy outcome must also defeat report-size
+    # inference. Do not override a valid runtime classifier on the latter path.
     if (
-        failure
-        and failure.get("valid") is True
-        and failure.get("phase") == "pre_useful_work"
+        status == "startup-timeout"
+        or (
+            proxy_sidecar_observed
+            and proxy_outcome in {"startup_exhausted", "upstream_error_exhausted"}
+            and not runtime_classifier_seen
+        )
+        or (
+            failure
+            and failure.get("valid") is True
+            and failure.get("phase") == "pre_useful_work"
+        )
     ):
         useful_agent_activity_seen = False
     dead_time_kind = None
@@ -2373,10 +2384,26 @@ def _agent_startup_diagnostics(
         if startup_timeout or dead_time_kind == "opencode_startup" or (active and not useful_agent_activity_seen)
         else None
     )
-    elapsed_seconds = _elapsed_since_earliest_artifact(
-        files,
-        now_epoch,
-        ("status", "log", "heartbeat", "runtime_status", "attempt_state", "proxy_status"),
+    # A completed task must not accumulate "startup elapsed" for hours after
+    # the runner stopped. Terminal agent-status.md is the bounded end marker;
+    # when its mtime is unavailable/invalid, report unknown rather than
+    # fabricate an ever-growing duration from the current wall clock.
+    elapsed_until: int | None = now_epoch
+    if status in _AGENT_TERMINAL_STATUSES:
+        terminal_mtime = (files.get("status") or {}).get("mtime_epoch")
+        elapsed_until = (
+            terminal_mtime
+            if type(terminal_mtime) is int and 0 <= terminal_mtime <= now_epoch
+            else None
+        )
+    elapsed_seconds = (
+        _elapsed_since_earliest_artifact(
+            files,
+            elapsed_until,
+            ("status", "log", "heartbeat", "runtime_status", "attempt_state", "proxy_status"),
+        )
+        if elapsed_until is not None
+        else None
     )
     last_message = _last_startup_message(combined)
     if last_message is None:
