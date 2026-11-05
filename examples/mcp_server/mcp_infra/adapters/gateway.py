@@ -296,6 +296,7 @@ def gateway_health() -> dict[str, Any]:
             "toolset_hash": toolset_hash,
             "tools_count": tools_count,
             "contract_version": "1",
+            "audit": server_attr("get_audit_logger")().required_write_health(),
         },
         "gateway": gateway_data,
     }
