@@ -1,9 +1,9 @@
 {
   "mode": "mcp_client",
   "safe_mode": true,
-  "expected_safe_count": 94,
+  "expected_safe_count": 95,
   "expected_blocked_count": 38,
-  "expected_mcp_client_full_count": 131,
+  "expected_mcp_client_full_count": 132,
   "must_include": [
     "docker_network_ls",
     "docker_network_inspect",
@@ -16,6 +16,7 @@
     "scan_command",
     "gitea_get_branch_protection",
     "gitea_list_commit_statuses",
+    "gitea_list_action_run_artifacts",
     "tools_manifest",
     "coord_inbox",
     "coord_open",
