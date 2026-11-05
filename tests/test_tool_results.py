@@ -141,6 +141,7 @@ class TestToolError:
             "CANDIDATE_VOLUME_SUBPATH_INVALID",
             "VERIFIER_BOOTSTRAP_FAILED",
             "VERIFIER_ENV_UNAVAILABLE",
+            "VERIFIER_LOCK_BUSY",
             "REQUIRED_CHECK_FAILED",
         ):
             result = tool_error("gitea_materialize_task_candidate", code, "nope")

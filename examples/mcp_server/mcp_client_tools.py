@@ -350,6 +350,31 @@ def _verifier_root_bootstrap(root_abs: str) -> list[str]:
     ]
 
 
+_VERIFIER_LOCK_WAIT_SECONDS = 12
+_VERIFIER_LOCK_BUSY_EXIT_CODE = 91
+
+
+def _verifier_lock_acquire_script() -> list[str]:
+    """Bound lock wait so one unresponsive verifier cannot starve later checks."""
+    return [
+        'if ! command -v flock >/dev/null 2>&1; then',
+        '  echo "VERIFIER_BOOTSTRAP_FAILED: flock executable unavailable" >&2',
+        '  exit 90',
+        'fi',
+        # BusyBox flock (used on the SSH executor) has -n but not -w.
+        # Poll a bounded number of times without a shell timeout or process kill.
+        '_mcp_verifier_wait=0',
+        'while ! flock -n 9 2>/dev/null; do',
+        '  _mcp_verifier_wait=$((_mcp_verifier_wait + 1))',
+        f'  if [ "$_mcp_verifier_wait" -ge {_VERIFIER_LOCK_WAIT_SECONDS} ]; then',
+        '    echo "VERIFIER_LOCK_BUSY: verifier synchronization is occupied" >&2',
+        f'    exit {_VERIFIER_LOCK_BUSY_EXIT_CODE}',
+        '  fi',
+        '  sleep 1',
+        'done',
+    ]
+
+
 def _verifier_project_prologue(proj_root_abs: str) -> list[str]:
     """Create and lock one per-project verifier subroot safely."""
     q = shlex.quote(proj_root_abs)
@@ -368,7 +393,7 @@ def _verifier_project_prologue(proj_root_abs: str) -> list[str]:
         'fi',
         'LOCK="$PPROJ/.sync.lock"',
         'exec 9>"$LOCK"',
-        'flock 9',
+        *_verifier_lock_acquire_script(),
     ]
 
 
@@ -395,7 +420,7 @@ def _tool_cache_args(tool: str, project_dir: str) -> list[str]:
     return []
 
 
-_ENV_FAIL_EXIT_CODES = frozenset({2, 3, 6, 90, 127})
+_ENV_FAIL_EXIT_CODES = frozenset({2, 3, 6, 90, 91, 127})
 
 
 def _classify_env_failure(stderr: str | None, exit_code: int | None) -> str | None:
@@ -403,6 +428,8 @@ def _classify_env_failure(stderr: str | None, exit_code: int | None) -> str | No
     if not stderr or exit_code is None or exit_code not in _ENV_FAIL_EXIT_CODES:
         return None
     low = stderr.lower()
+    if exit_code == _VERIFIER_LOCK_BUSY_EXIT_CODE:
+        return "VERIFIER_LOCK_BUSY" if "verifier_lock_busy:" in low else None
     env_markers = (
         ".venv/.lock",
         "failed to create virtualenv",
@@ -1035,7 +1062,7 @@ def _build_readonly_fallback_script(
         'if [ ! -d "$TMP_ROOT" ]; then echo "VERIFIER_ROOT_UNSAFE: per-project root is not a directory: $TMP_ROOT" >&2; exit 90; fi',
         'LOCK="$TMP_ROOT/.sync.lock"',
         'exec 9>"$LOCK"',
-        'flock 9',
+        *_verifier_lock_acquire_script(),
         'SOURCE_META="$TMP_ROOT/.source-pyproject.toml"',
         'SOURCE_META_NEW="$TMP_ROOT/.source-pyproject.toml.new"',
         'SOURCE_LOCK="$TMP_ROOT/.source-uv.lock"',
@@ -1200,6 +1227,12 @@ def _fallback_result(
         return tool_error(
             code=env_failure,
             message=f"{tool_key} could not run in an isolated environment (exit code {r2.get('exit_code', -1)})",
+            retryable=env_failure == "VERIFIER_LOCK_BUSY",
+            hint=(
+                "A verifier may still own the isolated environment. Check the prior job's "
+                "terminal state before retrying; do not remove lock files or kill unknown processes."
+                if env_failure == "VERIFIER_LOCK_BUSY" else None
+            ),
             result=build_command_result(
                 outcome="error",
                 exit_code=r2.get("exit_code", -1),
@@ -1457,6 +1490,12 @@ def _run_uv_tool(
         return tool_error(
             code=env_failure,
             message=f"{tool_key} could not run in an isolated environment (exit code {raw.get('exit_code', -1)})",
+            retryable=env_failure == "VERIFIER_LOCK_BUSY",
+            hint=(
+                "A verifier may still own the isolated environment. Check the prior job's "
+                "terminal state before retrying; do not remove lock files or kill unknown processes."
+                if env_failure == "VERIFIER_LOCK_BUSY" else None
+            ),
             result=build_command_result(
                 outcome="error",
                 exit_code=raw.get("exit_code", -1),

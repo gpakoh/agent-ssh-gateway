@@ -108,16 +108,17 @@ def test_project_prologue_rejects_symlink_and_serializes(mcp_tools):
     assert '-L "$PPROJ"' in script
     assert "per-project root is a symlink" in script
     assert 'exec 9>"$LOCK"' in script
-    assert "flock 9" in script
+    assert "flock -n 9" in script
+    assert "VERIFIER_LOCK_BUSY" in script
 
 
 def test_primary_script_validates_root_and_serializes_before_uv(mcp_tools):
     script = mcp_tools._build_primary_script("pytest", "/work/proj", ["tests/"])
     assert "VERIFIER_ROOT_UNSAFE" in script
-    assert "flock 9" in script
+    assert "flock -n 9" in script
     assert "UV_PROJECT_ENVIRONMENT=/var/lib/mcp-agent/verifier/" in script
     assert "PYTHONPYCACHEPREFIX=/var/lib/mcp-agent/verifier/" in script
-    assert script.index("flock 9") < script.index("uv run")
+    assert script.index("flock -n 9") < script.index("uv run")
 
 
 def test_fallback_script_keeps_mutable_state_under_verifier_root(mcp_tools):
@@ -126,7 +127,7 @@ def test_fallback_script_keeps_mutable_state_under_verifier_root(mcp_tools):
     assert "/tmp/.mcp-test" not in script
     assert "/tmp/.mcp-pytest-cache" not in script
     assert "cache_dir=/var/lib/mcp-agent/verifier/" in script
-    assert "flock 9" in script
+    assert "flock -n 9" in script
     assert "flock -u 9" in script
 
 
@@ -135,6 +136,9 @@ def test_fallback_script_keeps_mutable_state_under_verifier_root(mcp_tools):
     [
         ("uv: error: Failed to remove '/srv/verifier/x/.venv/.lock': Permission denied", 2, "VERIFIER_ENV_UNAVAILABLE"),
         ("VERIFIER_ROOT_UNSAFE: wrong owner", 90, "VERIFIER_BOOTSTRAP_FAILED"),
+        ("VERIFIER_LOCK_BUSY: verifier synchronization is occupied", 91, "VERIFIER_LOCK_BUSY"),
+        ("VERIFIER_LOCK_BUSY: spurious check error", 1, None),
+        ("wrong command exit", 91, None),
         ("read-only file system", 2, "VERIFIER_ENV_UNAVAILABLE"),
         ("FAILED Permission denied", 1, None),
         ("no tests ran Permission denied: .venv/.lock", 5, None),
@@ -165,6 +169,111 @@ def test_fallback_result_preserves_real_test_failure(mcp_tools):
     )
     assert result["ok"] is False
     assert result["error"]["code"] == "CHECK_FAILED"
+
+
+def test_lock_contention_exits_before_verifier_timeout_without_deleting_lock(
+    mcp_tools, monkeypatch, tmp_path
+):
+    """Exercise the shell boundary with an actual held flock, not a fake exit code."""
+    import fcntl
+    import shutil
+    import subprocess
+    import time
+
+    if shutil.which("flock") is None:
+        pytest.skip("flock unavailable on this verifier host")
+    monkeypatch.setattr(mcp_tools, "_VERIFIER_LOCK_WAIT_SECONDS", 1)
+    verifier_dir = tmp_path / "single-project"
+    verifier_dir.mkdir()
+    script = "set -eu\n" + "\n".join(
+        mcp_tools._verifier_project_prologue(str(verifier_dir))
+    ) + "\nflock -u 9"
+    lock_file = verifier_dir / ".sync.lock"
+    with lock_file.open("a+", encoding="utf-8") as holder:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        started = time.monotonic()
+        blocked = subprocess.run(
+            ["sh", "-c", script],
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+        assert blocked.returncode == 91
+        assert "VERIFIER_LOCK_BUSY" in blocked.stderr
+        assert str(verifier_dir) not in blocked.stderr
+        assert time.monotonic() - started < 4
+        assert lock_file.exists()
+        fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+
+    available = subprocess.run(
+        ["sh", "-c", script],
+        text=True,
+        capture_output=True,
+        timeout=5,
+        check=False,
+    )
+    assert available.returncode == 0, available.stderr
+    assert lock_file.exists()
+
+
+def test_both_verifier_paths_use_the_same_bounded_lock_guard(mcp_tools):
+    primary = mcp_tools._build_primary_script("pytest", "/work/proj", ["tests/"])
+    fallback = mcp_tools._build_readonly_fallback_script(
+        "pytest", "/work/proj", ["tests/"]
+    )
+    for script in (primary, fallback):
+        assert "flock -n 9" in script
+        assert "VERIFIER_LOCK_BUSY" in script
+        assert script.index("flock -n 9") < script.index("uv run")
+
+
+def test_fallback_result_surfaces_lock_contention_as_retryable(mcp_tools):
+    result = mcp_tools._fallback_result(
+        "ruff",
+        "run_ruff",
+        {
+            "exit_code": 91,
+            "stdout": "",
+            "stderr": "VERIFIER_LOCK_BUSY: verifier synchronization is occupied",
+        },
+        "/work/proj",
+    )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "VERIFIER_LOCK_BUSY"
+    assert result["error"]["retryable"] is True
+    assert "lock files" in result["error"]["hint"]
+
+
+def test_run_uv_tool_surfaces_primary_lock_contention_as_retryable(
+    mcp_tools, monkeypatch
+):
+    monkeypatch.setattr(mcp_tools, "_resolve_project", lambda _: Path("/work/proj"))
+
+    class Client:
+        def execute_raw(self, command, **kwargs):
+            if command == "command -v uv":
+                return {"job_id": "which-uv"}
+            assert command == "sh"
+            assert "flock -n 9" in kwargs.get("stdin", "")
+            return {"job_id": "run"}
+
+        def wait_job(self, job_id, **kwargs):
+            if job_id == "which-uv":
+                return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
+            assert job_id == "run"
+            return {
+                "exit_code": 91,
+                "stdout": "",
+                "stderr": "VERIFIER_LOCK_BUSY: verifier synchronization is occupied",
+            }
+
+    result = mcp_tools._run_uv_tool(
+        Client(), "project", "pytest", "run_pytest", ["tests/"]
+    )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "VERIFIER_LOCK_BUSY"
+    assert result["error"]["retryable"] is True
 
 
 def test_run_uv_tool_surfaces_primary_bootstrap_failure(mcp_tools, monkeypatch):
