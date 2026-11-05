@@ -354,6 +354,7 @@ TOOL_NAMES_BY_MODE["mcp_client_write"] = (
     "gitea_delete_branch_protection",
     "gitea_actions_secret_source_status",
     "gitea_provision_actions_secret",
+    "gitea_close_issue",
     "gitea_close_pull_request",
     "gitea_delete_branch",
     "gitea_materialize_task_candidate",
