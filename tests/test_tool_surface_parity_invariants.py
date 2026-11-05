@@ -109,6 +109,11 @@ class TestLiveServerToolSurface:
     TARGETS = {
         "gitea_list_commit_statuses": ["owner", "repo", "sha"],
         "gitea_create_branch_at_sha": ["owner", "repo", "branch", "expected_head_sha"],
+        # A registered adapter and schema are not sufficient: the active
+        # mcp_client_write allowlist must expose the tool in live tools/list.
+        "gitea_close_issue": [
+            "owner", "repo", "issue_number", "expected_updated_at", "reason",
+        ],
         "gitea_set_default_branch": [
             "owner",
             "repo",
@@ -172,6 +177,12 @@ class TestLiveServerToolSurface:
 
             importlib.reload(srv)
             return srv
+
+    def test_gitea_issue_close_is_write_mode_only(self) -> None:
+        from examples.mcp_server.tool_modes import TOOL_NAMES_BY_MODE
+
+        assert "gitea_close_issue" in TOOL_NAMES_BY_MODE["mcp_client_write"]
+        assert "gitea_close_issue" not in TOOL_NAMES_BY_MODE["mcp_client"]
 
     def test_guarded_tools_registered_with_exact_schema(self, live_server: Any) -> None:
         tools = {t.name: t for t in live_server.mcp._tool_manager.list_tools()}
