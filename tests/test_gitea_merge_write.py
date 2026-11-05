@@ -165,6 +165,7 @@ class FakeMergeClient:
         self.operations: list[str] = []
         self.workflow_reads = 0
         self.pr_reads = 0
+        self._last_ci_run: dict[str, object] | None = None
 
     async def __aenter__(self):
         return self
@@ -231,7 +232,15 @@ class FakeMergeClient:
                 "status": "completed",
                 "conclusion": self.ci_conclusion,
             }
+        run = {**run, "run_attempt": run.get("run_attempt", 1)}
+        self._last_ci_run = run
         return {"total_count": 1, "workflow_runs": [run]}
+
+    async def get_action_run(self, owner: str, repo: str, run_id: int):
+        assert (owner, repo) == ("owner", "repo")
+        assert self._last_ci_run is not None
+        assert self._last_ci_run["id"] == run_id
+        return dict(self._last_ci_run)
 
     async def compare_commits(self, owner: str, repo: str, *, base: str, head: str):
         self.compare_calls.append((base, head))
@@ -269,6 +278,7 @@ def _ci_run(
 ) -> dict[str, object]:
     return {
         "id": run_id,
+        "run_attempt": 1,
         "event": event,
         "head_sha": head_sha,
         "status": status,
@@ -318,6 +328,21 @@ async def _ci_evidence_status(
         else workflow_payload
     )
     client.list_action_runs.side_effect = action_pages
+    # Gitea exposes a separate exact-run read; default the fake to the
+    # qualifying run at the same attempt unless a test overrides the lookup.
+    candidates = [
+        run
+        for page in action_pages
+        if isinstance(page, dict) and isinstance(page.get("workflow_runs"), list)
+        for run in page["workflow_runs"]
+        if isinstance(run, dict)
+        and run.get("event") == "pull_request"
+        and run.get("head_sha") == SHA
+    ]
+    if candidates:
+        client.get_action_run.return_value = max(
+            candidates, key=lambda run: run.get("id") if type(run.get("id")) is int else -1
+        )
     status = await remote._gitea_ci_evidence(
         client, "owner", "repo", SHA, branch_ci_policy
     )
@@ -704,6 +729,82 @@ async def test_ci_evidence_rejects_page_one_reread_drift(reread):
     assert status == "CI_EVIDENCE_INCOMPLETE"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"run_attempt": 2},
+        {"status": "in_progress", "conclusion": None},
+        {"conclusion": "failure"},
+        {"head_sha": "b" * 40},
+        {"event": "push"},
+        {"id": 12},
+    ],
+)
+async def test_ci_evidence_denies_same_run_id_attempt_or_state_drift(changed):
+    """A rerun keeps its Gitea run ID, so page-ID reconciliation alone is unsafe."""
+    original = _ci_run(11)
+    page = _ci_page([original])
+    client = AsyncMock()
+    client.list_workflows.return_value = {"total_count": 1, "workflows": [{}]}
+    client.list_action_runs.side_effect = [page, page]
+    client.get_action_run.return_value = {**original, **changed}
+
+    status = await remote._gitea_ci_evidence(client, "owner", "repo", SHA)
+
+    assert status == "CI_EVIDENCE_INCOMPLETE"
+    client.get_action_run.assert_awaited_once_with("owner", "repo", 11)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attempt", [None, 0, -1, True, "1", 1.5])
+async def test_ci_evidence_rejects_missing_or_untyped_attempt_before_green(attempt):
+    run = {**_ci_run(12), "run_attempt": attempt}
+    page = _ci_page([run])
+    client = AsyncMock()
+    client.list_workflows.return_value = {"total_count": 1, "workflows": [{}]}
+    client.list_action_runs.side_effect = [page, page]
+
+    status = await remote._gitea_ci_evidence(client, "owner", "repo", SHA)
+
+    assert status == "CI_EVIDENCE_INCOMPLETE"
+    client.get_action_run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ci_evidence_revalidates_exact_run_even_when_found_on_page_two():
+    first_page = _ci_descending_page(100, 50, total_count=51)
+    original = _ci_run(50)
+    second_page = _ci_page([original], total_count=51)
+    client = AsyncMock()
+    client.list_workflows.return_value = {"total_count": 1, "workflows": [{}]}
+    client.list_action_runs.side_effect = [first_page, second_page, first_page]
+    client.get_action_run.return_value = {**original, "run_attempt": 2}
+
+    status = await remote._gitea_ci_evidence(client, "owner", "repo", SHA)
+
+    assert status == "CI_EVIDENCE_INCOMPLETE"
+    assert [call.kwargs["page"] for call in client.list_action_runs.await_args_list] == [
+        1, 2, 1,
+    ]
+    client.get_action_run.assert_awaited_once_with("owner", "repo", 50)
+
+
+@pytest.mark.asyncio
+async def test_ci_evidence_refuses_unavailable_exact_run_revalidation():
+    run = _ci_run(5)
+    page = _ci_page([run])
+    client = AsyncMock()
+    client.list_workflows.return_value = {"total_count": 1, "workflows": [{}]}
+    client.list_action_runs.side_effect = [page, page]
+    client.get_action_run.side_effect = RuntimeError("private upstream failure")
+
+    status = await remote._gitea_ci_evidence(client, "owner", "repo", SHA)
+
+    assert status == "CI_EVIDENCE_INCOMPLETE"
+    assert "private upstream failure" not in status
+
+
 @pytest.mark.parametrize(
     ("status", "retryable"),
     [
@@ -723,6 +824,30 @@ def test_ci_evidence_tool_error_maps_status_and_retryability(status, retryable):
     assert result["error"]["retryable"] is retryable
     assert result["meta"]["source"] == "gitea"
     assert "token" not in repr(result).lower()
+
+
+@pytest.mark.asyncio
+async def test_merge_gate_never_posts_when_green_attempt_is_rerun(monkeypatch):
+    """A same-ID newer attempt must block the actual mutation boundary."""
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient("token")
+    actual_get_run = client.get_action_run
+
+    async def rerun_between_list_and_exact_read(owner, repo, run_id):
+        original = await actual_get_run(owner, repo, run_id)
+        return {**original, "run_attempt": 2}
+
+    client.get_action_run = rerun_between_list_and_exact_read
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request(
+        "owner", "repo", 25, SHA, expected_base_sha=BASE_SHA,
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CI_EVIDENCE_INCOMPLETE"
+    assert client.merge_calls == []
+    assert "merge" not in client.operations
 
 
 @pytest.mark.asyncio

@@ -763,6 +763,38 @@ _CI_EVIDENCE_ERROR_POLICIES: dict[str, tuple[str, bool, str]] = {
 }
 
 
+def _ci_run_attempt_receipt(run: Any) -> tuple[int, int, str, str, str, str] | None:
+    """Exact run/attempt identity, excluding mutable or private provider metadata.
+
+    A workflow rerun reuses the run ID. Its new attempt and execution state
+    must not inherit the old attempt's green result during a guarded merge.
+    """
+    if not isinstance(run, dict):
+        return None
+    run_id = run.get("id")
+    attempt = run.get("run_attempt")
+    if type(run_id) is not int or run_id <= 0:
+        return None
+    if type(attempt) is not int or attempt <= 0:
+        return None
+    event = run.get("event")
+    head_sha = run.get("head_sha")
+    status = run.get("status")
+    conclusion = run.get("conclusion")
+    if (
+        not isinstance(event, str)
+        or not event
+        or not isinstance(head_sha, str)
+        or not head_sha
+        or not isinstance(status, str)
+        or not status
+        or not isinstance(conclusion, str)
+        or not conclusion
+    ):
+        return None
+    return (run_id, attempt, event, head_sha, status, conclusion)
+
+
 async def _gitea_ci_evidence(
     client: Any,
     owner: str,
@@ -869,6 +901,20 @@ async def _gitea_ci_evidence(
         or latest_exact_head_run.get("conclusion") != "success"
     ):
         return "CI_NOT_GREEN"
+
+    # The page-1 reread above proves no new run IDs appeared, but does not
+    # prove that an existing run ID is still the same attempt/state. Gitea
+    # reruns preserve the ID and increment run_attempt; re-read the exact run
+    # before granting CI_GREEN, including when found on an older page.
+    original_receipt = _ci_run_attempt_receipt(latest_exact_head_run)
+    if original_receipt is None:
+        return "CI_EVIDENCE_INCOMPLETE"
+    try:
+        current_run = await client.get_action_run(owner, repo, original_receipt[0])
+    except Exception:
+        return "CI_EVIDENCE_INCOMPLETE"
+    if _ci_run_attempt_receipt(current_run) != original_receipt:
+        return "CI_EVIDENCE_INCOMPLETE"
     return "CI_GREEN"
 
 
