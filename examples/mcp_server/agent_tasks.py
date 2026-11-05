@@ -2432,6 +2432,32 @@ def _agent_startup_diagnostics(
     }
 
 
+def _terminal_pre_useful_activity(
+    semantic_activity: dict[str, Any],
+    *,
+    terminal: bool,
+    startup: dict[str, Any],
+    proxy_status: dict[str, Any],
+) -> dict[str, Any]:
+    """Do not count a runner-written terminal status as model progress.
+
+    The wrapper creates agent-status.md and agent-report.md even after all
+    startup attempts fail. Preserve ordinary artifact progress unless this is
+    a terminal, explicitly identified *pre-useful* startup failure. A past
+    sidecar without validated provenance must not erase actual useful work.
+    """
+    if terminal and startup.get("useful_agent_activity_seen") is False:
+        known_exhaustion = bool(
+            proxy_status.get("exists") is True
+            and proxy_status.get("valid") is True
+            and proxy_status.get("final_outcome")
+            in {"startup_exhausted", "upstream_error_exhausted"}
+        )
+        if startup.get("startup_timeout") is True or known_exhaustion:
+            return {"source": None, "mtime_epoch": None, "age_seconds": None}
+    return semantic_activity
+
+
 _REASONING_LOOP_FILLER_WORDS = _FUNCTION_WORDS | frozenset(
     {
         "again",
@@ -3027,6 +3053,13 @@ def agent_task_status(
         runtime_status=runtime_status,
         failure=failure,
     )
+    semantic_activity = _terminal_pre_useful_activity(
+        semantic_activity,
+        terminal=terminal,
+        startup=startup,
+        proxy_status=proxy_status,
+    )
+    reconciliation["last_useful_activity"] = semantic_activity
     likely_hung = bool(active and not terminal and isinstance(semantic_age, int) and semantic_age >= stale_after_seconds)
     if reconciliation.get("state") is not None:
         likely_hung = True
@@ -3321,6 +3354,13 @@ def inspect_agent_task(
         runtime_status=runtime_status,
         failure=failure,
     )
+    semantic_activity = _terminal_pre_useful_activity(
+        semantic_activity,
+        terminal=terminal,
+        startup=startup,
+        proxy_status=proxy_status,
+    )
+    reconciliation["last_useful_activity"] = semantic_activity
     reasoning_loop = _detect_agent_reasoning_loop(
         log_stdout=str(log.get("stdout", "")),
         files=files,
