@@ -1231,6 +1231,206 @@ async def gitea_get_issue(owner: str, repo: str, issue_number: int) -> dict[str,
     return tool_success("gitea_get_issue", result=data, source="gitea")
 
 
+def _issue_is_pull_request(issue: dict[str, Any]) -> bool:
+    # The Gitea Issues endpoint also serves pull requests. State mutation
+    # here must NEVER close a PR through that overlapping endpoint.
+    return (
+        issue.get("pull_request") is not None
+        or issue.get("item_type") == "pull_request"
+        or issue.get("is_pull") is True
+    )
+
+
+async def gitea_close_issue(
+    owner: str,
+    repo: str,
+    issue_number: int,
+    expected_updated_at: str,
+    reason: str,
+) -> dict[str, Any]:
+    """Guarded Issue-only close with last-read version and durable intent.
+
+    Gitea does not expose an atomic Issue version-conditional PATCH. We
+    minimize the race with two exact updated_at reads immediately before
+    append_required + close, then independently confirm the final state.
+    An ambiguous outcome must be reconciled through GET, not retried blind.
+    The only remote write is state=closed; no labels/body/title/PR writes.
+    """
+    tool = "gitea_close_issue"
+    if type(issue_number) is not int or issue_number < 1:
+        return tool_error(
+            tool=tool, code="INVALID_INPUT",
+            message="issue_number must be a positive integer", source="gitea",
+        )
+    if not isinstance(expected_updated_at, str) or not (19 <= len(expected_updated_at) <= 48):
+        return tool_error(
+            tool=tool, code="INVALID_INPUT",
+            message="expected_updated_at must be the exact RFC3339 timestamp from gitea_get_issue",
+            source="gitea",
+        )
+    try:
+        from datetime import datetime
+
+        date = datetime.fromisoformat(expected_updated_at.replace("Z", "+00:00"))
+        if date.tzinfo is None or date.utcoffset() is None:
+            raise ValueError
+    except ValueError:
+        return tool_error(
+            tool=tool, code="INVALID_INPUT",
+            message="expected_updated_at must be a timezone-aware RFC3339 timestamp",
+            source="gitea",
+        )
+    if not isinstance(reason, str) or not (20 <= len(reason.strip()) <= 500) or _contains_ascii_control(reason):
+        return tool_error(
+            tool=tool, code="INVALID_INPUT",
+            message="reason must be 20..500 characters without control characters",
+            source="gitea",
+        )
+    reason = reason.strip()
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return tool_error(
+            tool=tool, code="DEPENDENCY_MISSING",
+            message="GITEA_TOKEN not configured", source="gitea",
+        )
+
+    try:
+        async with _server_gitea_client()(token) as client:
+            issue = await client.get_issue(owner, repo, issue_number)
+            if not isinstance(issue, dict) or type(issue.get("number")) is not int or issue["number"] != issue_number:
+                return tool_error(
+                    tool=tool, code="REMOTE_SCHEMA_INVALID",
+                    message="Gitea returned an issue with unverifiable identity",
+                    source="gitea",
+                )
+            if _issue_is_pull_request(issue):
+                return tool_error(
+                    tool=tool, code="POLICY_DENIED",
+                    message="Issue-state close refuses pull requests",
+                    source="gitea",
+                )
+            if issue.get("state") == "closed":
+                return tool_success(
+                    tool, result={
+                        "number": issue_number,
+                        "closed": True,
+                        "already_closed": True,
+                        "verified": True,
+                        "html_url": issue.get("html_url"),
+                    }, source="gitea",
+                )
+            if issue.get("state") != "open":
+                return tool_error(
+                    tool=tool, code="ISSUE_NOT_OPEN",
+                    message="Issue state is neither open nor closed", source="gitea",
+                )
+            if issue.get("updated_at") != expected_updated_at:
+                return tool_error(
+                    tool=tool, code="STALE_ISSUE",
+                    message="Issue updated since caller evidence; read current issue and re-evaluate close",
+                    source="gitea",
+                )
+            identity = await _require_gitea_identity(client)
+            if identity is None:
+                return tool_error(
+                    tool=tool, code="AUTH_ERROR",
+                    message="Gitea identity and authenticated caller fingerprint required",
+                    source="gitea",
+                )
+            # Recheck after identity resolution and immediately before intent.
+            fresh = await client.get_issue(owner, repo, issue_number)
+            if (
+                not isinstance(fresh, dict)
+                or type(fresh.get("number")) is not int
+                or fresh["number"] != issue_number
+                or _issue_is_pull_request(fresh)
+                or fresh.get("state") != "open"
+                or fresh.get("updated_at") != expected_updated_at
+            ):
+                return tool_error(
+                    tool=tool, code="STALE_ISSUE",
+                    message="Issue changed during close preflight; no mutation issued",
+                    source="gitea",
+                )
+            username, fingerprint = identity
+            correlation_id = uuid.uuid4().hex
+            metadata = {
+                "owner": owner,
+                "repo": repo,
+                "issue_number": issue_number,
+                "expected_updated_at": expected_updated_at,
+                "gitea_username": username,
+                "caller_fingerprint": fingerprint,
+                "correlation_id": correlation_id,
+            }
+            try:
+                _get_gitea_audit_logger().append_required(
+                    McpAuditEvent(
+                        event_type="mcp.gitea_destructive_intent",
+                        tool=tool,
+                        action="close_issue",
+                        decision="allow",
+                        reason=reason,
+                        metadata=metadata,
+                    )
+                )
+            except (AuditWriteError, OSError):
+                return tool_error(
+                    tool=tool, code="AUDIT_UNAVAILABLE",
+                    message="Audit log unavailable; issue close refused",
+                    source="gitea",
+                )
+            # The PATCH may have taken effect even if the network dies: never
+            # tell a caller to blindly replay an outcome-unknown close.
+            try:
+                await client.close_coord_issue(owner, repo, issue_number)
+                confirmed = await client.get_issue(owner, repo, issue_number)
+            except Exception:
+                return tool_error(
+                    tool=tool, code="MUTATION_OUTCOME_UNKNOWN",
+                    message="Issue close outcome unknown; reconcile by reading the Issue",
+                    retryable=False, source="gitea",
+                )
+            if (
+                not isinstance(confirmed, dict)
+                or confirmed.get("state") != "closed"
+                or type(confirmed.get("number")) is not int
+                or confirmed["number"] != issue_number
+                or _issue_is_pull_request(confirmed)
+            ):
+                return tool_error(
+                    tool=tool, code="MUTATION_OUTCOME_UNKNOWN",
+                    message="Issue close not independently confirmed; reconcile by reading the Issue",
+                    retryable=False, source="gitea",
+                )
+            try:
+                _get_gitea_audit_logger().append(
+                    McpAuditEvent(
+                        event_type="mcp.gitea_destructive_success",
+                        tool=tool,
+                        action="close_issue",
+                        decision="allow",
+                        reason=reason,
+                        metadata=metadata,
+                    )
+                )
+            except Exception:
+                pass  # Success audit is best effort; required intent was durable.
+            return tool_success(
+                tool, result={
+                    "number": issue_number,
+                    "closed": True,
+                    "already_closed": False,
+                    "verified": True,
+                    "expected_updated_at": expected_updated_at,
+                    "observed_updated_at": confirmed.get("updated_at"),
+                    "html_url": confirmed.get("html_url"),
+                }, source="gitea",
+            )
+    except Exception as exc:
+        return _remote_api_error(tool, "gitea", exc)
+
+
 async def gitea_list_pull_requests(
     owner: str, repo: str, state: str = "open", limit: int = 30
 ) -> dict[str, Any]:
@@ -6538,6 +6738,7 @@ def register_all() -> None:
     register_tool("gitea_get_file")(gitea_get_file)
     register_tool("gitea_list_issues")(gitea_list_issues)
     register_tool("gitea_get_issue")(gitea_get_issue)
+    register_tool("gitea_close_issue")(gitea_close_issue)
     register_tool("gitea_list_pull_requests")(gitea_list_pull_requests)
     register_tool("gitea_get_pull_request")(gitea_get_pull_request)
     register_tool("gitea_create_pull_request")(gitea_create_pull_request)

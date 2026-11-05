@@ -647,6 +647,7 @@ gitea_list_commit_statuses = remote.gitea_list_commit_statuses
 gitea_get_file = remote.gitea_get_file
 gitea_list_issues = remote.gitea_list_issues
 gitea_get_issue = remote.gitea_get_issue
+gitea_close_issue = remote.gitea_close_issue
 gitea_list_pull_requests = remote.gitea_list_pull_requests
 gitea_get_pull_request = remote.gitea_get_pull_request
 gitea_list_action_runs = remote.gitea_list_action_runs
