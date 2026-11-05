@@ -2163,6 +2163,42 @@ class TestAgentStartupDiagnostics:
         assert result["useful_agent_activity_seen"] is False
         assert result["elapsed_seconds"] == 300
 
+    @pytest.mark.parametrize(
+        "terminal,startup_timeout,useful,sidecar_valid,outcome,erased",
+        [
+            (True, True, False, False, None, True),
+            (True, False, False, True, "upstream_error_exhausted", True),
+            (True, False, False, False, "startup_exhausted", False),
+            (True, False, False, True, "rotating", False),
+            (False, True, False, True, "startup_exhausted", False),
+            (True, True, True, True, "startup_exhausted", False),
+            (True, False, True, True, "completed", False),
+        ],
+    )
+    def test_last_useful_activity_requires_terminal_pre_useful_evidence(
+        self, terminal, startup_timeout, useful, sidecar_valid, outcome, erased
+    ):
+        from examples.mcp_server.agent_tasks import _terminal_pre_useful_activity
+
+        original = {"source": "status", "mtime_epoch": 1_400, "age_seconds": 600}
+        result = _terminal_pre_useful_activity(
+            original,
+            terminal=terminal,
+            startup={
+                "startup_timeout": startup_timeout,
+                "useful_agent_activity_seen": useful,
+            },
+            proxy_status={
+                "exists": bool(outcome),
+                "valid": sidecar_valid,
+                "final_outcome": outcome,
+            },
+        )
+        if erased:
+            assert result == {"source": None, "mtime_epoch": None, "age_seconds": None}
+        else:
+            assert result is original
+
     def test_real_completed_report_still_counts_as_useful_work(self):
         from examples.mcp_server.agent_tasks import _agent_startup_diagnostics
 
@@ -2283,6 +2319,17 @@ class TestInspectAgentTask:
                 assert snapshot["startup"]["phase"] == "startup"
                 assert snapshot["startup"]["elapsed_seconds"] == 400
                 assert snapshot["startup"]["useful_agent_activity_seen"] is False
+                # The wrapper writes terminal status/report AFTER no model
+                # progress. It is activity, never evidence of useful work.
+                assert snapshot["last_activity"]["source"] == "status"
+                assert snapshot["last_useful_activity"] == {
+                    "source": None,
+                    "mtime_epoch": None,
+                    "age_seconds": None,
+                }
+                assert snapshot["reconciliation"]["last_useful_activity"] == snapshot[
+                    "last_useful_activity"
+                ]
                 assert snapshot["startup"]["proxy_rotation"]["attempt"] == 6
                 assert snapshot["startup"]["proxy_rotation"]["count"] == 5
             assert compact["log_included"] is False
