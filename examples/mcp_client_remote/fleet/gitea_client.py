@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
+from datetime import datetime
 from typing import Any
 from urllib.parse import quote, urlsplit
 
@@ -23,7 +25,28 @@ MAX_FILE_SIZE = 256 * 1024
 DEFAULT_GET_FILE_MAX_CONTENT_BYTES = 16 * 1024
 DEFAULT_ACTION_JOB_LOG_MAX_BYTES = 64 * 1024
 MAX_ACTION_JOB_LOG_BYTES = 256 * 1024
+MAX_ACTION_ARTIFACT_METADATA_BYTES = 256 * 1024
+MAX_ACTION_ARTIFACT_ITEMS = 64
+_ARTIFACT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}$")
+_ARTIFACT_EXPIRY_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})"
+)
 REQUEST_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+
+
+def validate_artifact_expires_at(value: Any) -> str | None:
+    """Only publish a real RFC3339 expiry, never arbitrary provider strings."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or len(value) > 64 or not _ARTIFACT_EXPIRY_RE.fullmatch(value):
+        raise ValueError("Gitea artifact metadata has invalid expiry timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.utcoffset() is None:
+            raise ValueError
+    except ValueError as exc:
+        raise ValueError("Gitea artifact metadata has invalid expiry timestamp") from exc
+    return value
 
 # Gitea's Actions run-list API accepts `in_progress`, while the operator-facing
 # tool historically documented `running`. Normalize that alias locally so callers
@@ -68,6 +91,7 @@ ALLOWED_ENDPOINTS = frozenset(
         "/repos/{owner}/{repo}/actions/runs",
         "/repos/{owner}/{repo}/actions/runs/{run_id}",
         "/repos/{owner}/{repo}/actions/runs/{run_id}/jobs",
+        "/repos/{owner}/{repo}/actions/runs/{run_id}/artifacts",
         "/repos/{owner}/{repo}/actions/jobs",
         "/repos/{owner}/{repo}/actions/jobs/{job_id}",
         "/repos/{owner}/{repo}/actions/jobs/{job_id}/logs",
@@ -1560,6 +1584,101 @@ class GiteaClient:
             run_id=run_id,
         )
         return minimize_action_run_payload(run)
+
+    async def list_action_run_artifacts(
+        self, owner: str, repo: str, run_id: int
+    ) -> dict[str, Any]:
+        """Bounded private run metadata; never follow artifact/blob URLs.
+
+        This endpoint is NOT a ZIP downloader. The raw response is capped
+        before JSON parsing, redirects are denied, and only safe scalar
+        metadata is returned. Caller still must authenticate a live PR/run.
+        """
+        run_id = _validate_positive_int(run_id, "run_id")
+        validate_repo_owner_or_name(owner, label="owner")
+        validate_repo_owner_or_name(repo, label="repo")
+        path = f"/repos/{owner}/{repo}/actions/runs/{run_id}/artifacts"
+        if "/repos/{owner}/{repo}/actions/runs/{run_id}/artifacts" not in ALLOWED_ENDPOINTS:
+            raise ValueError("artifact metadata endpoint not permitted")
+        async with self._client.stream("GET", path, follow_redirects=False) as response:
+            if 300 <= response.status_code < 400:
+                raise ValueError("artifact metadata redirect refused")
+            if response.status_code in (401, 403):
+                raise PermissionError("Gitea artifact metadata authentication denied")
+            if response.status_code != 200:
+                raise httpx.HTTPStatusError(
+                    f"gitea api {path}: unexpected status {response.status_code}",
+                    request=response.request, response=response,
+                )
+            parts: list[bytes] = []
+            total_bytes = 0
+            async for chunk in response.aiter_bytes(chunk_size=8192):
+                total_bytes += len(chunk)
+                if total_bytes > MAX_ACTION_ARTIFACT_METADATA_BYTES:
+                    raise ValueError("Gitea artifact metadata response too large")
+                parts.append(chunk)
+        try:
+            data = json.loads(b"".join(parts))
+        except (ValueError, UnicodeError) as exc:
+            raise ValueError("Gitea artifact metadata is not valid JSON") from exc
+        if not isinstance(data, dict):
+            raise ValueError("Gitea artifact metadata must be a JSON object")
+        count = data.get("total_count")
+        items = data.get("artifacts")
+        if type(count) is not int or count < 0 or not isinstance(items, list):
+            raise ValueError("Gitea artifact metadata has invalid collection shape")
+        if len(items) > count or len(items) > MAX_ACTION_ARTIFACT_ITEMS:
+            raise ValueError("Gitea artifact metadata exceeds the bounded collection limit")
+        seen_ids: set[int] = set()
+        seen_names: set[str] = set()
+        minimized: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                raise ValueError("Gitea artifact metadata item must be an object")
+            artifact_id = item.get("id")
+            name = item.get("name")
+            size = item.get("size_in_bytes")
+            expired = item.get("expired")
+            workflow = item.get("workflow_run")
+            expiry = item.get("expires_at")
+            if type(artifact_id) is not int or artifact_id <= 0 or artifact_id in seen_ids:
+                raise ValueError("Gitea artifact metadata has invalid or duplicate ID")
+            if not isinstance(name, str) or not _ARTIFACT_NAME_RE.fullmatch(name) or name in seen_names:
+                raise ValueError("Gitea artifact metadata has invalid or duplicate name")
+            if type(size) is not int or size < 0 or type(expired) is not bool:
+                raise ValueError("Gitea artifact metadata has invalid size or expiry")
+            expiry = validate_artifact_expires_at(expiry)
+            if not isinstance(workflow, dict):
+                raise ValueError("Gitea artifact metadata is missing workflow identity")
+            linked_run_id = workflow.get("id")
+            if type(linked_run_id) is not int or linked_run_id != run_id:
+                raise ValueError("Gitea artifact metadata belongs to a different run")
+            linked_head = workflow.get("head_sha")
+            if linked_head is not None and (
+                not isinstance(linked_head, str)
+                or not re.fullmatch(r"[0-9a-f]{40}", linked_head)
+            ):
+                raise ValueError("Gitea artifact metadata has invalid workflow head")
+            linked_attempt = workflow.get("run_attempt")
+            if linked_attempt is not None and (
+                type(linked_attempt) is not int or linked_attempt <= 0
+            ):
+                raise ValueError("Gitea artifact metadata has invalid workflow attempt")
+            seen_ids.add(artifact_id)
+            seen_names.add(name)
+            minimized.append({
+                "id": artifact_id,
+                "name": name,
+                "size_in_bytes": size,
+                "expired": expired,
+                "expires_at": expiry,
+                "workflow_run": {
+                    "id": linked_run_id,
+                    "head_sha": linked_head,
+                    "run_attempt": linked_attempt,
+                },
+            })
+        return {"total_count": count, "artifacts": minimized}
 
     async def list_action_run_jobs(
         self,

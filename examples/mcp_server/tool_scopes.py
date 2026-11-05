@@ -189,6 +189,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "gitea_push_verified_commit": ["mcp:repo", "mcp:admin"],
     "gitea_list_action_runs": ["mcp:repo"],
     "gitea_get_action_run": ["mcp:repo"],
+    "gitea_list_action_run_artifacts": ["mcp:repo"],
     "gitea_list_action_run_jobs": ["mcp:repo"],
     "gitea_list_action_jobs": ["mcp:repo"],
     "gitea_get_action_job_logs": ["mcp:repo"],

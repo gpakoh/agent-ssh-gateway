@@ -651,6 +651,7 @@ gitea_close_issue = remote.gitea_close_issue
 gitea_list_pull_requests = remote.gitea_list_pull_requests
 gitea_get_pull_request = remote.gitea_get_pull_request
 gitea_list_action_runs = remote.gitea_list_action_runs
+gitea_list_action_run_artifacts = remote.gitea_list_action_run_artifacts
 gitea_get_action_run = remote.gitea_get_action_run
 gitea_rerun_action_run = remote.gitea_rerun_action_run
 gitea_cancel_action_run = remote.gitea_cancel_action_run
