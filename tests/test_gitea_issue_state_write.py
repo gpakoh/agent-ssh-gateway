@@ -215,4 +215,3 @@ async def test_bad_input_rejected_without_remote_calls(monkeypatch, updated, rea
     assert client.patches == 0
     assert not audit.intents
 
-
