@@ -22,6 +22,7 @@ Usage:
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -48,6 +49,24 @@ def _docker_exec(*args: str) -> str:
     ).stdout.strip()
 
 
+_SAFE_SMOKE_STAGES = frozenset({
+    "register", "authorize", "consent", "token", "initialize",
+    "tools_list", "git_status", "cleanup", "mcp_other",
+})
+
+
+def _last_safe_smoke_stage(output: bytes | str | None) -> str:
+    """Only reflect exact static stage names, never captured passwords or bodies."""
+    if isinstance(output, bytes):
+        output = output.decode("utf-8", errors="replace")
+    if not isinstance(output, str):
+        return "unknown"
+    stages = re.findall(
+        r"(?m)^mcp_oauth_black_box_smoke: stage=([a-z_]+)\s*$", output
+    )
+    return next((s for s in reversed(stages) if s in _SAFE_SMOKE_STAGES), "unknown")
+
+
 def test_mcp_oauth_black_box_smoke_full_flow():
     """Full OAuth flow + git_status must succeed against the live stack."""
     if not _docker_available():
@@ -61,16 +80,24 @@ def test_mcp_oauth_black_box_smoke_full_flow():
     env.setdefault("MCP_SMOKE_TIMEOUT", "90")
     env["MCP_SMOKE_REQUIRED_TOOL"] = "gitea_rerun_action_job"
     env["MCP_SMOKE_REQUIRED_INPUTS"] = "owner,repo,run_id,job_id,expected_head_sha"
-    result = subprocess.run(
-        [sys.executable, str(SCRIPT)],
-        capture_output=True,
-        text=True,
-        timeout=90,
-        env=env,
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT)],
+            capture_output=True,
+            text=True,
+            timeout=90,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # Never emit raw partial stdout/stderr: they may contain session data.
+        pytest.fail(
+            "OAuth black-box subprocess timed out after 90s; "
+            f"last_stage={_last_safe_smoke_stage(exc.stderr)}",
+            pytrace=False,
+        )
     assert result.returncode == 0, (
-        f"black-box smoke failed ({result.returncode})\n"
-        f"stdout: {result.stdout}\n"
-        f"stderr: {result.stderr}"
+        f"black-box smoke failed ({result.returncode}); "
+        f"last_stage={_last_safe_smoke_stage(result.stderr)} "
+        "(raw output withheld)"
     )
-    assert "OK" in result.stdout, f"unexpected stdout: {result.stdout}"
+    assert "OK" in result.stdout, "smoke succeeded without expected OK marker"
