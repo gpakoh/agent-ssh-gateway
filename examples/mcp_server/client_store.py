@@ -17,11 +17,19 @@ import json
 import os
 import stat
 import tempfile
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from examples.mcp_server.oauth_provider import StoredClient
+
+CLIENT_STORE_LOCK_TIMEOUT_SECONDS = 5.0
+CLIENT_STORE_LOCK_POLL_SECONDS = 0.05
+
+
+class ClientStoreBusyError(TimeoutError):
+    """Durable OAuth client registration cannot acquire its store lock."""
 
 
 def _default_store_path() -> str:
@@ -121,8 +129,21 @@ class _LockedStore:
 
     def __enter__(self) -> _LockedStore:
         self._lf = open(self._store._lock_path, "w")
-        fcntl.flock(self._lf.fileno(), fcntl.LOCK_EX)
-        return self
+        deadline = time.monotonic() + CLIENT_STORE_LOCK_TIMEOUT_SECONDS
+        try:
+            while True:
+                try:
+                    fcntl.flock(self._lf.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return self
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ClientStoreBusyError("OAuth client store temporarily busy") from None
+                    time.sleep(min(remaining, CLIENT_STORE_LOCK_POLL_SECONDS))
+        except BaseException:
+            # __exit__ is not called when context-manager entry fails.
+            self._lf.close()
+            raise
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         try:

@@ -6,6 +6,7 @@ storage. Supports PKCE S256, public DCR, and scoped access.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import secrets
@@ -390,9 +391,12 @@ class GatewayOAuthProvider:
             token_endpoint_auth_method=token_endpoint_auth_method,
             scopes=parsed_scopes,
         )
-        self._clients[client_id] = client
         if self._client_store:
-            self._client_store.add(client)
+            # Lock acquisition and fsync are blocking filesystem operations.
+            # Never stall the OAuth/MCP event loop while another writer holds
+            # the store lock. Expose this client only after durable persistence.
+            await asyncio.to_thread(self._client_store.add, client)
+        self._clients[client_id] = client
 
         client_info.client_id = client_id
         client_info.client_id_issued_at = int(client.created_at)
