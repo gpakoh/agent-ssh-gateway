@@ -81,6 +81,90 @@ def test_register_client_persists_to_store(store_path):
     assert loaded[0].redirect_uris == ["https://chat.example.com/callback"]
 
 
+def test_client_store_lock_contention_fails_closed_and_recovers(
+    store_path, monkeypatch
+):
+    """A stuck writer cannot hold registration indefinitely or corrupt data."""
+    import fcntl
+    import time
+
+    from examples.mcp_server import client_store as store_module
+
+    monkeypatch.setattr(store_module, "CLIENT_STORE_LOCK_TIMEOUT_SECONDS", 0.15)
+    store = ClientStore(store_path)
+    client = StoredClient(client_id="mcp_client_busy", redirect_uris=["https://example.com/cb"])
+    with open(store_path + ".lock", "w") as held:
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        began = time.monotonic()
+        with pytest.raises(store_module.ClientStoreBusyError, match="temporarily busy"):
+            store.add(client)
+        assert time.monotonic() - began < 2
+        assert store.load() == []
+        fcntl.flock(held.fileno(), fcntl.LOCK_UN)
+
+    store.add(client)
+    assert len(store.load()) == 1
+    assert store.load()[0].client_id == "mcp_client_busy"
+
+
+@pytest.mark.asyncio
+async def test_register_client_store_write_does_not_block_oauth_event_loop(
+    store_path,
+):
+    """A stalled filesystem writer must not prevent another OAuth coroutine."""
+    import threading
+
+    class DelayedStore(ClientStore):
+        def __init__(self, path):
+            super().__init__(path)
+            self.entered = threading.Event()
+            self.release = threading.Event()
+
+        def add(self, client):
+            self.entered.set()
+            self.release.wait(timeout=4)
+            super().add(client)
+
+    store = DelayedStore(store_path)
+    provider = GatewayOAuthProvider()
+    provider.set_client_store(store)
+    info = _client_info("concurrent-oauth")
+    task = asyncio.create_task(provider.register_client(info))
+    try:
+        # With the old synchronous call in the event loop, add() would block
+        # this coroutine until its 4-second emergency release elapsed.
+        assert await asyncio.wait_for(asyncio.to_thread(store.entered.wait, 2), 3)
+        assert not task.done()
+        assert "client_id" not in vars(info)
+        await asyncio.wait_for(asyncio.sleep(0), 1)
+    finally:
+        store.release.set()
+    await asyncio.wait_for(task, 4)
+    assert await provider.get_client(info.client_id) is not None
+    assert len(ClientStore(store_path).load()) == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_client_store_write_does_not_publish_ephemeral_client(
+    store_path, monkeypatch
+):
+    from examples.mcp_server.client_store import ClientStoreBusyError
+
+    store = ClientStore(store_path)
+
+    def refused(_client):
+        raise ClientStoreBusyError("OAuth client store temporarily busy")
+
+    monkeypatch.setattr(store, "add", refused)
+    provider = GatewayOAuthProvider()
+    provider.set_client_store(store)
+    info = _client_info("failed-oauth")
+    with pytest.raises(ClientStoreBusyError):
+        await provider.register_client(info)
+    assert not provider._clients
+    assert "client_id" not in vars(info)
+
+
 def test_client_survives_provider_restart(store_path):
     """The actual bug scenario: register a client on one provider
     instance, then simulate a process restart (a brand-new provider +
