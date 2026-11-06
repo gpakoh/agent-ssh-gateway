@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -333,6 +334,62 @@ async def test_timeout_matrix_non_mcp_route_stays_bounded(srv, monkeypatch):
         assert isinstance(t, httpx.Timeout)
         assert t.read is not None
         assert isinstance(t.read, float) and t.read > 0
+
+
+@pytest.mark.asyncio
+async def test_dcr_proxy_trace_correlates_bounded_phases_without_secrets(srv, caplog):
+    """Trace the actual /register ASGI path without emitting its client metadata."""
+    client = _FakeClient()
+    client.responses = [_FakeResp(201, {"content-type": "application/json"}, b'{"client_id":"opaque"}')]
+    srv._UPSTREAM_CLIENT = client
+    marker = b'{"client_secret":"do-not-echo-secret","client_name":"private-name"}'
+    with caplog.at_level("INFO", logger="mcp_client_remote"):
+        response = await _drive(srv.create_proxy_app(), "POST", "/register", body=marker)
+    assert response.status == 201
+    traces = [
+        record.getMessage() for record in caplog.records
+        if record.name == "mcp_client_remote" and record.getMessage().startswith("DCR_TRACE ")
+    ]
+    matches = [
+        re.fullmatch(r"DCR_TRACE id=([a-f0-9]{12}) phase=([a-z_]+) elapsed_ms=(\d+)", line)
+        for line in traces
+    ]
+    assert all(match is not None for match in matches)
+    assert [match.group(2) for match in matches] == [
+        "received", "body_read", "upstream_send", "upstream_headers"
+    ]
+    assert len({match.group(1) for match in matches}) == 1
+    assert [int(match.group(3)) for match in matches] == sorted(
+        int(match.group(3)) for match in matches
+    )
+    all_logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "do-not-echo-secret" not in all_logs
+    assert "private-name" not in all_logs
+    assert "client_secret" not in all_logs
+
+
+@pytest.mark.asyncio
+async def test_dcr_proxy_trace_marks_upstream_connect_failure_without_log_leak(srv, caplog):
+    class BrokenClient(_FakeClient):
+        async def send(self, req, stream=False):
+            raise httpx.ConnectError("upstream-secret-password")
+
+    srv._UPSTREAM_CLIENT = BrokenClient()
+    with caplog.at_level("INFO", logger="mcp_client_remote"):
+        response = await _drive(
+            srv.create_proxy_app(), "POST", "/register", body=b'{"token":"private-token"}'
+        )
+    assert response.status == 502
+    traces = [
+        record.getMessage() for record in caplog.records
+        if record.getMessage().startswith("DCR_TRACE ")
+    ]
+    assert [re.search(r"phase=([a-z_]+)", line).group(1) for line in traces] == [
+        "received", "body_read", "upstream_send", "upstream_error"
+    ]
+    all_logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "upstream-secret-password" not in all_logs
+    assert "private-token" not in all_logs
 
 
 async def _count_admitted_real_streams(srv, attempts: int) -> int:
