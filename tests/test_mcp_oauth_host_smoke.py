@@ -67,6 +67,26 @@ def _last_safe_smoke_stage(output: bytes | str | None) -> str:
     return next((s for s in reversed(stages) if s in _SAFE_SMOKE_STAGES), "unknown")
 
 
+_SAFE_HTTP_PHASES = frozenset({"send", "headers", "body", "parse"})
+
+
+def _last_safe_http_phase(output: bytes | str | None) -> str:
+    """Reduce untrusted stderr to a fixed phase label and bounded elapsed ms."""
+    if isinstance(output, bytes):
+        output = output.decode("utf-8", errors="replace")
+    if not isinstance(output, str):
+        return "unknown"
+    progress = re.findall(
+        r"(?m)^mcp_oauth_black_box_smoke: stage=([a-z_]+) "
+        r"phase=([a-z_]+) elapsed_ms=([0-9]{1,7})$",
+        output,
+    )
+    for stage, phase, elapsed_ms in reversed(progress):
+        if stage in _SAFE_SMOKE_STAGES and phase in _SAFE_HTTP_PHASES:
+            return f"{phase}:{int(elapsed_ms)}ms"
+    return "unknown"
+
+
 def test_mcp_oauth_black_box_smoke_full_flow():
     """Full OAuth flow + git_status must succeed against the live stack."""
     if not _docker_available():
@@ -92,12 +112,14 @@ def test_mcp_oauth_black_box_smoke_full_flow():
         # Never emit raw partial stdout/stderr: they may contain session data.
         pytest.fail(
             "OAuth black-box subprocess timed out after 90s; "
-            f"last_stage={_last_safe_smoke_stage(exc.stderr)}",
+            f"last_stage={_last_safe_smoke_stage(exc.stderr)} "
+            f"last_phase={_last_safe_http_phase(exc.stderr)}",
             pytrace=False,
         )
     assert result.returncode == 0, (
         f"black-box smoke failed ({result.returncode}); "
         f"last_stage={_last_safe_smoke_stage(result.stderr)} "
+        f"last_phase={_last_safe_http_phase(result.stderr)} "
         "(raw output withheld)"
     )
     assert "OK" in result.stdout, "smoke succeeded without expected OK marker"

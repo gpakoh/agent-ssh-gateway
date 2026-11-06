@@ -102,15 +102,22 @@ def _clear_schema_requirement(monkeypatch):
 
 class TestSmokeStageDeadlines:
     def test_timeout_stage_extractor_never_prints_captured_credentials(self):
-        from tests.test_mcp_oauth_host_smoke import _last_safe_smoke_stage
+        from tests.test_mcp_oauth_host_smoke import (
+            _last_safe_http_phase,
+            _last_safe_smoke_stage,
+        )
 
         lines = (
             b"mcp_oauth_black_box_smoke: stage=initialize\n"
             b"private-bearer-token=never-leak\n"
             b"mcp_oauth_black_box_smoke: stage=git_status\n"
+            b"mcp_oauth_black_box_smoke: stage=git_status phase=headers elapsed_ms=138\n"
             b"mcp_oauth_black_box_smoke: stage=private_bearer_token\n"
+            b"mcp_oauth_black_box_smoke: stage=register phase=private_token elapsed_ms=999\n"
         )
         assert _last_safe_smoke_stage(lines) == "git_status"
+        assert _last_safe_http_phase(lines) == "headers:138ms"
+        assert _last_safe_http_phase(b"phase=headers Bearer private-token") == "unknown"
         assert _last_safe_smoke_stage(b"password=secret") == "unknown"
         assert _last_safe_smoke_stage(None) == "unknown"
 
@@ -128,6 +135,7 @@ class TestSmokeStageDeadlines:
                 timeout=kwargs.get("timeout", 90),
                 stderr=(
                     b"mcp_oauth_black_box_smoke: stage=git_status\n"
+                    b"mcp_oauth_black_box_smoke: stage=git_status phase=body elapsed_ms=14000\n"
                     b"Bearer super-private-token password=secret-password\n"
                 ),
             )
@@ -135,6 +143,7 @@ class TestSmokeStageDeadlines:
         monkeypatch.setattr(host.subprocess, "run", timeout_run)
         with pytest.raises(pytest.fail.Exception, match="last_stage=git_status") as exc:
             host.test_mcp_oauth_black_box_smoke_full_flow()
+        assert "last_phase=body:14000ms" in str(exc.value)
         assert "super-private-token" not in str(exc.value)
         assert "secret-password" not in str(exc.value)
 
@@ -211,6 +220,8 @@ class TestSmokeStageDeadlines:
             assert time.monotonic() - start < 4.5
             output = capsys.readouterr().err
             assert "stage=register" in output
+            assert "phase=headers" in output
+            assert "phase=body" not in output
             assert "never-echo-secret" not in output
         finally:
             release.set()
@@ -251,7 +262,9 @@ class TestSmokeStageDeadlines:
         assert time.monotonic() - start < 4.5
         assert signal.getsignal(signal.SIGALRM) is previous
         assert signal.getitimer(signal.ITIMER_REAL)[0] == 0
-        assert "very-secret-token" not in capsys.readouterr().err
+        output = capsys.readouterr().err
+        assert "phase=body" in output
+        assert "very-secret-token" not in output
 
     def test_main_resets_deadline_and_does_not_echo_exception_secrets(
         self, monkeypatch, capsys
