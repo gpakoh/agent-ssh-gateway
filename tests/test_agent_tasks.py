@@ -2093,6 +2093,9 @@ class TestAgentStartupDiagnostics:
         assert result["opencode_startup_stalled"] is True
         assert result["useful_agent_activity_seen"] is False
         assert result["dead_time_kind"] == "opencode_startup"
+        # A running status with an exhausted prior proxy sidecar is not a
+        # verified terminal upstream failure of the current attempt.
+        assert result["failure_kind"] is None
         assert result["phase"] == "startup"
 
     def test_zero_byte_terminal_artifacts_do_not_prove_useful_work(self):
@@ -2224,6 +2227,59 @@ class TestAgentStartupDiagnostics:
         )
         assert result["useful_agent_activity_seen"] is True
         assert result["elapsed_seconds"] == 200
+
+
+@pytest.mark.parametrize(
+    ("status", "outcome", "error", "valid", "failure", "runtime", "expected"),
+    [
+        ("startup-timeout", None, None, False, None, False, "watchdog_timeout"),
+        ("failed", "upstream_error_exhausted", "opencode_server_error", True, None, False, "upstream_server_error"),
+        ("failed", "startup_exhausted", "startup_stalled", True, None, False, "no_useful_response"),
+        ("failed", "upstream_error_exhausted", "startup_stalled", True, None, False, None),
+        ("failed", "startup_exhausted", "opencode_server_error", True, None, False, None),
+        ("failed", "startup_exhausted", "startup_stalled", False, None, False, None),
+        ("running", "rotating", "opencode_server_error", True, None, False, None),
+        ("running", "upstream_error_exhausted", "opencode_server_error", True, None, False, None),
+        ("running", None, None, False, {"valid": True, "phase": "pre_useful_work", "reason": "opencode_server_error"}, False, None),
+        ("needs-review", "upstream_error_exhausted", "opencode_server_error", True, None, False, None),
+        ("needs-review-warning", "startup_exhausted", "startup_stalled", True, None, False, None),
+        ("completed", "startup_exhausted", "startup_stalled", True, None, False, None),
+        ("failed", "upstream_error_exhausted", "opencode_server_error", True, None, True, None),
+        ("failed", None, None, False, {"valid": True, "phase": "pre_useful_work", "reason": "opencode_server_error"}, False, "upstream_server_error"),
+        ("failed", None, None, False, {"valid": True, "phase": "pre_useful_work", "reason": "opencode_server_error"}, True, "upstream_server_error"),
+        ("failed", None, None, False, {"valid": False, "phase": "pre_useful_work", "reason": "opencode_server_error"}, False, None),
+        ("failed", None, None, False, {"valid": True, "phase": "runtime", "reason": "opencode_server_error"}, False, None),
+    ],
+)
+def test_startup_failure_kind_is_evidence_bound_and_backward_compatible(
+    status, outcome, error, valid, failure, runtime, expected
+):
+    from examples.mcp_server.agent_tasks import _agent_startup_diagnostics
+
+    result = _agent_startup_diagnostics(
+        status=status,
+        status_text=f"Status: {status}\n",
+        log_stdout="",
+        files={"status": {"mtime_epoch": 1_900}},
+        active=status == "running",
+        now_epoch=2_000,
+        proxy_status={
+            "exists": bool(outcome),
+            "valid": valid,
+            "final_outcome": outcome,
+            "last_error_class": error,
+        },
+        failure=failure,
+        runtime_status={
+            "exists": runtime, "valid": runtime,
+            "source": "private_output_classifier" if runtime else None,
+        },
+    )
+    assert result["failure_kind"] == expected
+    assert result["startup_timeout"] is (status == "startup-timeout")
+    # Additive diagnostics: existing long-standing verdict inputs are intact.
+    assert "dead_time_kind" in result
+    assert "opencode_startup_stalled" in result
 
 
 class TestProxyDiagnosticSensitiveFieldNames:
@@ -2881,6 +2937,7 @@ class TestInspectAgentTask:
             "elapsed_seconds": 90,
             "last_startup_message": "OpenCode startup stalled; rotating proxy (attempt 3/4)",
             "startup_timeout": False,
+            "failure_kind": None,
             "opencode_startup_stalled": True,
             "proxy_rotation": {
                 "observed": True,
