@@ -2093,7 +2093,9 @@ class TestAgentStartupDiagnostics:
         assert result["opencode_startup_stalled"] is True
         assert result["useful_agent_activity_seen"] is False
         assert result["dead_time_kind"] == "opencode_startup"
-        assert result["failure_kind"] == "upstream_server_error"
+        # A running status with an exhausted prior proxy sidecar is not a
+        # verified terminal upstream failure of the current attempt.
+        assert result["failure_kind"] is None
         assert result["phase"] == "startup"
 
     def test_zero_byte_terminal_artifacts_do_not_prove_useful_work(self):
@@ -2237,11 +2239,14 @@ class TestAgentStartupDiagnostics:
         ("failed", "startup_exhausted", "opencode_server_error", True, None, False, None),
         ("failed", "startup_exhausted", "startup_stalled", False, None, False, None),
         ("running", "rotating", "opencode_server_error", True, None, False, None),
+        ("running", "upstream_error_exhausted", "opencode_server_error", True, None, False, None),
+        ("running", None, None, False, {"valid": True, "phase": "pre_useful_work", "reason": "opencode_server_error"}, False, None),
         ("needs-review", "upstream_error_exhausted", "opencode_server_error", True, None, False, None),
         ("needs-review-warning", "startup_exhausted", "startup_stalled", True, None, False, None),
         ("completed", "startup_exhausted", "startup_stalled", True, None, False, None),
         ("failed", "upstream_error_exhausted", "opencode_server_error", True, None, True, None),
         ("failed", None, None, False, {"valid": True, "phase": "pre_useful_work", "reason": "opencode_server_error"}, False, "upstream_server_error"),
+        ("failed", None, None, False, {"valid": True, "phase": "pre_useful_work", "reason": "opencode_server_error"}, True, "upstream_server_error"),
         ("failed", None, None, False, {"valid": False, "phase": "pre_useful_work", "reason": "opencode_server_error"}, False, None),
         ("failed", None, None, False, {"valid": True, "phase": "runtime", "reason": "opencode_server_error"}, False, None),
     ],

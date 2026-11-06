@@ -2325,12 +2325,12 @@ def _confirmed_startup_failure_kind(
     """
     if status == "startup-timeout":
         return "watchdog_timeout"
-    # Never label an accepted/completed run as failed because an earlier
-    # attempt left a valid but stale failure or proxy status sidecar.
-    if status in {"needs-review", "needs-review-warning", "completed"}:
+    # A cached failure sidecar or proxy exhaustion is not proof of a live
+    # attempt's failure. Only attribute a completed, unsuccessful startup.
+    if status != "failed":
         return None
-    if runtime_classifier_seen:
-        return None
+    # The typed runner failure is authoritative even if a stale runtime
+    # marker exists. Otherwise, runtime progress defeats proxy-only evidence.
     if (
         failure
         and failure.get("valid") is True
@@ -2338,6 +2338,8 @@ def _confirmed_startup_failure_kind(
         and failure.get("reason") == "opencode_server_error"
     ):
         return "upstream_server_error"
+    if runtime_classifier_seen:
+        return None
     if proxy_status.get("exists") is not True or proxy_status.get("valid") is not True:
         return None
     outcome = proxy_status.get("final_outcome")

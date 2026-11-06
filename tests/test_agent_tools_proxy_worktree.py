@@ -679,14 +679,16 @@ class TestBuildOpencodeScriptProxy:
         monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
         monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "false")
         monkeypatch.setenv("OPENCODE_STARTUP_RESERVE_BYTES", "0")
+        monkeypatch.setenv("OPENCODE_STARTUP_RESERVE_SECONDS", "0")
+        monkeypatch.setenv("OPENCODE_UPGRADE_GATE_ENABLED", "false")
         # This runtime-marker test is not an admission-capacity test.
         # Never inherit the production 300-second admission wait on a busy runner.
         monkeypatch.setenv("OPENCODE_ADMISSION_WAIT_SECONDS", "0")
         monkeypatch.setenv("OPENCODE_ADMISSION_POLL_SECONDS", "1")
         # The test waits for actual fake executor readiness. Shared CI load
         # must not burn the startup watchdog budget before that point.
-        monkeypatch.setenv("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "30")
-        monkeypatch.setenv("OPENCODE_RUN_TIMEOUT_SECONDS", "30")
+        monkeypatch.setenv("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "120")
+        monkeypatch.setenv("OPENCODE_RUN_TIMEOUT_SECONDS", "120")
 
         script = _build_opencode_script(
             str(artifacts), TASK_ID, None, project_root=str(source)
@@ -739,11 +741,25 @@ class TestBuildOpencodeScriptProxy:
             # process launch. Wait for the fake process itself before sending
             # useful output, or an overloaded shared CI host can exhaust the
             # test's 8s marker deadline before the executor even exists.
-            deadline = time.monotonic() + 20
+            # Runner preflight may be delayed by concurrent Python/Docker CI
+            # shards. This test checks private activity classification, not
+            # a strict 20-second boot SLA; keep one bounded harness budget.
+            deadline = time.monotonic() + RUNNER_HARNESS_TIMEOUT_SECONDS
             while not fake_ready.exists() and time.monotonic() < deadline:
                 assert process.poll() is None, "runner exited before OpenCode launch"
                 time.sleep(0.05)
-            assert fake_ready.exists(), "fake OpenCode never started"
+            if not fake_ready.exists():
+                last_heartbeat = {}
+                if heartbeat_path.exists():
+                    try:
+                        last_heartbeat = json.loads(heartbeat_path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        pass
+                pytest.fail(
+                    "fake OpenCode never started within test harness bound; "
+                    f"runner_exit={process.poll()!r}, "
+                    f"heartbeat_phase={last_heartbeat.get('phase')!r}"
+                )
 
             activity_trigger.write_text("go\n", encoding="utf-8")
             runtime = wait_for_runtime_marker()
