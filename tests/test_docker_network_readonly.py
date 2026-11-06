@@ -176,11 +176,15 @@ async def test_network_inspect_sanitizes_privacy_and_proves_attachment_ids(monke
 
 
 @pytest.mark.asyncio
-async def test_network_inspect_proven_absent_is_not_a_weak_error_match(monkeypatch):
+@pytest.mark.parametrize("diagnostic", [
+    "docker exited 1: Error: No such network: missing",
+    "docker exited 1: Error response from daemon: network missing not found",
+])
+async def test_network_inspect_proven_absent_is_not_a_weak_error_match(monkeypatch, diagnostic):
     client = DockerClient()
 
     async def absent(_argv):
-        raise RuntimeError("docker exited 1: Error: No such network: missing")
+        raise RuntimeError(diagnostic)
 
     monkeypatch.setattr(client, "_run", absent)
     assert await client.network_inspect("missing") == {
@@ -285,14 +289,21 @@ async def test_network_inspect_rejects_more_than_100_attachments(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_network_not_found_error_requires_exact_target(monkeypatch):
+@pytest.mark.parametrize("diagnostic", [
+    "docker exited 1: Error: No such network: missing2",
+    "docker exited 1: Error response from daemon: network missing2 not found",
+    "docker exited 2: Error response from daemon: network missing not found",
+    "docker exited 1: Error response from daemon: network missing not found; connection lost",
+    "Command timed out after 30s: docker network inspect missing",
+])
+async def test_network_not_found_error_requires_exact_target(monkeypatch, diagnostic):
     client = DockerClient()
 
-    async def prefix_collision(_argv):
-        raise RuntimeError("docker exited 1: Error: No such network: missing2")
+    async def uncertain(_argv):
+        raise RuntimeError(diagnostic)
 
-    monkeypatch.setattr(client, "_run", prefix_collision)
-    with pytest.raises(RuntimeError, match="missing2"):
+    monkeypatch.setattr(client, "_run", uncertain)
+    with pytest.raises(RuntimeError):
         await client.network_inspect("missing")
 
 
