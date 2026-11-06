@@ -3,6 +3,17 @@
 Status: **internal staging primitives only**. This code is not an MCP ZIP read
 tool, does not transmit a ZIP to a chat client, and does not publish a preview.
 
+## Internal module ownership
+
+- `gitea_client.py` owns authenticated Gitea API requests and minimal metadata.
+- `gitea_artifacts_provenance.py` owns the immutable lease identity and live
+  exact PR/run/attempt/artifact proof. It does not store or fetch archive bytes.
+- `gitea_artifacts_transport.py` owns bounded credential-isolated ZIP streaming
+  and archive-directory safety checks, without extracting files.
+- `gitea_artifacts_spool.py` owns ephemeral private inodes, capacity,
+  deadlines, inspection and revocation. It imports provenance rather than
+  duplicating Gitea policy; the former `ArtifactLease` import stays available.
+
 ## Trust boundary and preflight
 
 - Do not accept arbitrary URLs, shell commands, filesystem paths, or destination
