@@ -21,6 +21,7 @@ from control_plane_git import git_fetch_ref_control_plane, git_push_control_plan
 from gateway_client import GatewayClient, GatewayClientError, _script_stdin_wrapper
 from git_write_capabilities import probe_git_refresh_worktree_paths, probe_git_write_capabilities
 from tool_results import build_command_result, tool_error, tool_success
+from verifier_lock_policy import LOCK_BUSY_EXIT_CODE, lock_acquire_script
 
 
 def _resolve_project(project_name: str) -> Path:
@@ -351,31 +352,19 @@ def _verifier_root_bootstrap(root_abs: str) -> list[str]:
 
 
 _VERIFIER_LOCK_WAIT_SECONDS = 12
-_VERIFIER_LOCK_BUSY_EXIT_CODE = 91
+_VERIFIER_LOCK_BUSY_EXIT_CODE = LOCK_BUSY_EXIT_CODE
 
 
-def _verifier_lock_acquire_script() -> list[str]:
-    """Bound lock wait so one unresponsive verifier cannot starve later checks."""
-    return [
-        'if ! command -v flock >/dev/null 2>&1; then',
-        '  echo "VERIFIER_BOOTSTRAP_FAILED: flock executable unavailable" >&2',
-        '  exit 90',
-        'fi',
-        # BusyBox flock (used on the SSH executor) has -n but not -w.
-        # Poll a bounded number of times without a shell timeout or process kill.
-        '_mcp_verifier_wait=0',
-        'while ! flock -n 9 2>/dev/null; do',
-        '  _mcp_verifier_wait=$((_mcp_verifier_wait + 1))',
-        f'  if [ "$_mcp_verifier_wait" -ge {_VERIFIER_LOCK_WAIT_SECONDS} ]; then',
-        '    echo "VERIFIER_LOCK_BUSY: verifier synchronization is occupied" >&2',
-        f'    exit {_VERIFIER_LOCK_BUSY_EXIT_CODE}',
-        '  fi',
-        '  sleep 1',
-        'done',
-    ]
+def _verifier_lock_acquire_script(project_identity: str) -> list[str]:
+    """Render one shared bounded-lock policy for primary and fallback checks."""
+    return lock_acquire_script(
+        project_identity, wait_seconds=_VERIFIER_LOCK_WAIT_SECONDS
+    )
 
 
-def _verifier_project_prologue(proj_root_abs: str) -> list[str]:
+def _verifier_project_prologue(
+    proj_root_abs: str, *, project_identity: str | None = None
+) -> list[str]:
     """Create and lock one per-project verifier subroot safely."""
     q = shlex.quote(proj_root_abs)
     return [
@@ -393,7 +382,7 @@ def _verifier_project_prologue(proj_root_abs: str) -> list[str]:
         'fi',
         'LOCK="$PPROJ/.sync.lock"',
         'exec 9>"$LOCK"',
-        *_verifier_lock_acquire_script(),
+        *_verifier_lock_acquire_script(project_identity or proj_root_abs),
     ]
 
 
@@ -493,7 +482,7 @@ def _build_primary_script(tool: str, project_dir: str, targets: list[str]) -> st
     target_args = " ".join(shlex.quote(t) for t in validated)
     lines = ["set -eu"]
     lines += _verifier_root_bootstrap(base)
-    lines += _verifier_project_prologue(proj_root)
+    lines += _verifier_project_prologue(proj_root, project_identity=project_dir)
     lines += [
         f"export UV_PROJECT_ENVIRONMENT={shlex.quote(venv)}",
         f"export PYTHONPYCACHEPREFIX={shlex.quote(_verifier_project_cache_root(project_dir) + '/pycache')}",
@@ -1062,7 +1051,7 @@ def _build_readonly_fallback_script(
         'if [ ! -d "$TMP_ROOT" ]; then echo "VERIFIER_ROOT_UNSAFE: per-project root is not a directory: $TMP_ROOT" >&2; exit 90; fi',
         'LOCK="$TMP_ROOT/.sync.lock"',
         'exec 9>"$LOCK"',
-        *_verifier_lock_acquire_script(),
+        *_verifier_lock_acquire_script(project_dir),
         'SOURCE_META="$TMP_ROOT/.source-pyproject.toml"',
         'SOURCE_META_NEW="$TMP_ROOT/.source-pyproject.toml.new"',
         'SOURCE_LOCK="$TMP_ROOT/.source-uv.lock"',
