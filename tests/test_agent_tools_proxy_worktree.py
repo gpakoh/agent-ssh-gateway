@@ -1060,13 +1060,10 @@ def test_full_script_reports_needs_review_warning_when_check_tool_missing(tmp_pa
         worktree_path=str(workspace),
         required_checks=["mcp-definitely-missing-tool --version"],
     )
-    result = subprocess.run(
-        ["sh", "-c", script],
+    result = _run_bounded_shell_tree(
+        script,
         cwd=source,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+        timeout=PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS,
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
@@ -1122,13 +1119,10 @@ def test_full_script_warns_but_runs_checks_when_dev_bootstrap_unavailable(
         worktree_path=str(workspace),
         required_checks=[f"touch {shlex.quote(str(check_marker))}"],
     )
-    result = subprocess.run(
-        ["sh", "-c", script],
+    result = _run_bounded_shell_tree(
+        script,
         cwd=source,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+        timeout=PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS,
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
@@ -1173,13 +1167,10 @@ def test_existing_clean_workspace_rejects_base_ref_drift(tmp_path, monkeypatch):
         worktree_path=str(workspace),
         base_ref=pinned_head,
     )
-    result = subprocess.run(
-        ["sh", "-c", script],
+    result = _run_bounded_shell_tree(
+        script,
         cwd=source,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+        timeout=PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS,
     )
 
     assert result.returncode != 0
@@ -1229,13 +1220,10 @@ def test_managed_clone_executes_without_creating_source_worktree_metadata(tmp_pa
         managed_source_path=str(source_bundle),
         managed_source_sha256=hashlib.sha256(source_bundle.read_bytes()).hexdigest(),
     )
-    result = subprocess.run(
-        ["sh", "-c", script],
+    result = _run_bounded_shell_tree(
+        script,
         cwd=source,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+        timeout=PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS,
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
@@ -1296,13 +1284,10 @@ def test_managed_clone_rejects_existing_workspace_with_remote(tmp_path, monkeypa
         managed_source_path=str(source_bundle),
         managed_source_sha256=hashlib.sha256(source_bundle.read_bytes()).hexdigest(),
     )
-    result = subprocess.run(
-        ["sh", "-c", script],
+    result = _run_bounded_shell_tree(
+        script,
         cwd=source,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+        timeout=PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS,
     )
 
     assert result.returncode != 0
@@ -1347,13 +1332,10 @@ def test_managed_clone_rejects_symlink_workspace(tmp_path, monkeypatch):
         managed_source_path=str(source_bundle),
         managed_source_sha256=hashlib.sha256(source_bundle.read_bytes()).hexdigest(),
     )
-    result = subprocess.run(
-        ["sh", "-c", script],
+    result = _run_bounded_shell_tree(
+        script,
         cwd=source,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+        timeout=PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS,
     )
 
     assert result.returncode != 0
@@ -1450,13 +1432,10 @@ def _run_proxy_preflight_script(tmp_path: Path, monkeypatch, *, provider_body: s
         provider.write_text(provider_body, encoding="utf-8")
         monkeypatch.setenv("OPENCODE_PROXY_PROVIDER_URL", provider.as_uri())
     script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
-    result = subprocess.run(
-        ["sh", "-c", script],
+    result = _run_bounded_shell_tree(
+        script,
         cwd=source,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+        timeout=PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS,
     )
     return result, artifacts, marker
 
@@ -1584,13 +1563,10 @@ def test_rate_limited_run_persists_redacted_terminal_proxy_status(tmp_path, monk
     monkeypatch.setenv("OPENCODE_ADMISSION_WAIT_SECONDS", "0")
 
     script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
-    result = subprocess.run(
-        ["sh", "-c", script],
+    result = _run_bounded_shell_tree(
+        script,
         cwd=source,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+        timeout=PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS,
     )
 
     assert result.returncode == 77, result.stderr or result.stdout
@@ -2718,13 +2694,10 @@ class TestSupervisorPostrunEvidence:
         )
 
         assert str(source) not in script
-        result = subprocess.run(
-            ["sh", "-c", script],
+        result = _run_bounded_shell_tree(
+            script,
             cwd=tmp_path,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+            timeout=PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS,
         )
 
         assert result.returncode == 0, result.stderr or result.stdout
@@ -2861,13 +2834,10 @@ def test_worker_cannot_spoof_canonical_gates_or_gate_ledger(tmp_path, monkeypatc
         gates=gates,
         task_contract_sha256="f" * 64,
     )
-    result = subprocess.run(
-        ["sh", "-c", script],
+    result = _run_bounded_shell_tree(
+        script,
         cwd=source,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+        timeout=PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS,
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
@@ -2917,13 +2887,10 @@ def _run_fake_opencode_failure(
     monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "false")
 
     script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
-    result = subprocess.run(
-        ["sh", "-c", script],
+    result = _run_bounded_shell_tree(
+        script,
         cwd=source,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+        timeout=PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS,
     )
     return result, artifacts
 
@@ -3159,13 +3126,14 @@ class TestScheduledOpenCodeUpgradeGate:
                 None,
                 project_root=str(source),
             )
-            result = subprocess.run(
-                ["sh", "-c", script],
+            # This fixture boots the entire shell/upgrade/worker process tree
+            # twice. On a busy CI runner, 60s can expire after the fake worker
+            # has already emitted success. Bound and reap the *whole* process
+            # group instead of killing only sh (and leaking pipe descendants).
+            result = _run_bounded_shell_tree(
+                script,
                 cwd=source,
-                text=True,
-                capture_output=True,
-                check=False,
-                timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+                timeout=PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS,
             )
             assert result.returncode == 0, result.stderr or result.stdout
 
@@ -3628,13 +3596,10 @@ class TestScheduledOpenCodeUpgradeGate:
         script = _build_opencode_script(
             str(artifacts), TASK_ID, None, project_root=str(source)
         )
-        result = subprocess.run(
-            ["sh", "-c", script],
+        result = _run_bounded_shell_tree(
+            script,
             cwd=source,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+            timeout=PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS,
         )
 
         assert result.returncode == 0, result.stderr or result.stdout
@@ -3695,13 +3660,10 @@ class TestScheduledOpenCodeUpgradeGate:
             None,
             project_root=str(source),
         )
-        result = subprocess.run(
-            ["sh", "-c", script],
+        result = _run_bounded_shell_tree(
+            script,
             cwd=source,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+            timeout=PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS,
         )
 
         assert result.returncode == 80, result.stderr or result.stdout
