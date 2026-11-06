@@ -2311,6 +2311,46 @@ def _latest_activity(files: dict[str, dict[str, Any]], now_epoch: int) -> dict[s
 
 
 
+def _confirmed_startup_failure_kind(
+    *,
+    status: str | None,
+    proxy_status: dict[str, Any],
+    failure: dict[str, Any] | None,
+    runtime_classifier_seen: bool,
+) -> str | None:
+    """Attribute pre-useful failure only from validated, runner-owned evidence.
+
+    Do not infer a provider fault from log text or an unvalidated sidecar;
+    post-retry useful activity defeats stale proxy exhaustion evidence.
+    """
+    if status == "startup-timeout":
+        return "watchdog_timeout"
+    # A cached failure sidecar or proxy exhaustion is not proof of a live
+    # attempt's failure. Only attribute a completed, unsuccessful startup.
+    if status != "failed":
+        return None
+    # The typed runner failure is authoritative even if a stale runtime
+    # marker exists. Otherwise, runtime progress defeats proxy-only evidence.
+    if (
+        failure
+        and failure.get("valid") is True
+        and failure.get("phase") == "pre_useful_work"
+        and failure.get("reason") == "opencode_server_error"
+    ):
+        return "upstream_server_error"
+    if runtime_classifier_seen:
+        return None
+    if proxy_status.get("exists") is not True or proxy_status.get("valid") is not True:
+        return None
+    outcome = proxy_status.get("final_outcome")
+    error = proxy_status.get("last_error_class")
+    if outcome == "upstream_error_exhausted" and error == "opencode_server_error":
+        return "upstream_server_error"
+    if outcome == "startup_exhausted" and error == "startup_stalled":
+        return "no_useful_response"
+    return None
+
+
 def _agent_startup_diagnostics(
     *,
     status: str | None,
@@ -2391,6 +2431,12 @@ def _agent_startup_diagnostics(
         )
     ):
         useful_agent_activity_seen = False
+    failure_kind = _confirmed_startup_failure_kind(
+        status=status,
+        proxy_status=proxy_status,
+        failure=failure,
+        runtime_classifier_seen=runtime_classifier_seen,
+    )
     dead_time_kind = None
     if active and opencode_startup_stalled and not useful_agent_activity_seen:
         dead_time_kind = "opencode_startup"
@@ -2430,6 +2476,7 @@ def _agent_startup_diagnostics(
         "elapsed_seconds": elapsed_seconds,
         "last_startup_message": last_message,
         "startup_timeout": startup_timeout,
+        "failure_kind": failure_kind,
         "opencode_startup_stalled": opencode_startup_stalled,
         "proxy_rotation": {
             "observed": bool(rotation_matches or proxy_sidecar_observed),
