@@ -30,13 +30,18 @@ Exit code:
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import http.client
 import json
 import os
 import secrets
+import signal
 import sys
+import threading
+import time
 import urllib.parse
+from collections.abc import Iterator
 from typing import Any
 
 TIMEOUT = float(os.environ.get("MCP_SMOKE_TIMEOUT", "90"))
@@ -126,6 +131,76 @@ def _read_response_body(resp: http.client.HTTPResponse) -> bytes:
     return bytes(chunks)
 
 
+# A single stalled HTTP request must not consume the host-smoke's entire
+# subprocess deadline. Leave time for bounded session cleanup and diagnostics.
+MAX_HTTP_STAGE_SECONDS = 20.0
+MAX_CLEANUP_SECONDS = 8.0
+_SMOKE_DEADLINE: float | None = None
+_LAST_STAGE = "not_started"
+
+
+def _http_stage(method: str, path: str, body: dict[str, Any] | None) -> str:
+    """Return only a fixed, non-secret stage name (never reflect URLs)."""
+    if method == "POST" and path == "/register":
+        return "register"
+    if method == "GET" and path.startswith("/authorize?"):
+        return "authorize"
+    if method == "POST" and path == "/oauth/consent":
+        return "consent"
+    if method == "POST" and path == "/token":
+        return "token"
+    if method == "DELETE" and path == "/mcp":
+        return "cleanup"
+    if method == "POST" and path == "/mcp":
+        raw_name = (body or {}).get("method")
+        name = raw_name if isinstance(raw_name, str) else ""
+        return {
+            "initialize": "initialize",
+            "tools/list": "tools_list",
+            "tools/call": "git_status",
+        }.get(name, "mcp_other")
+    return "unknown"
+
+
+def _request_timeout(stage: str) -> float:
+    """One socket step cannot monopolize the whole black-box smoke budget."""
+    if stage == "cleanup":
+        return min(TIMEOUT, MAX_CLEANUP_SECONDS)
+    remaining = (
+        TIMEOUT if _SMOKE_DEADLINE is None
+        else _SMOKE_DEADLINE - time.monotonic()
+    )
+    if remaining <= 0:
+        raise SmokeError("smoke request deadline exhausted")
+    return min(TIMEOUT, MAX_HTTP_STAGE_SECONDS, remaining)
+
+
+@contextlib.contextmanager
+def _bounded_http_stage(seconds: float) -> Iterator[None]:
+    """Enforce a hard POSIX wall-clock bound, even on slow-dripping streams.
+
+    HTTPConnection timeout controls each socket operation, not the whole
+    request/response exchange. The smoke runs on Linux, in its own main-thread
+    process; refuse a conflicting alarm rather than override another owner.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        raise SmokeError("HTTP smoke stage timer requires main thread")
+    if signal.getitimer(signal.ITIMER_REAL)[0] > 0:
+        raise SmokeError("HTTP smoke stage timer conflict")
+    old_handler = signal.getsignal(signal.SIGALRM)
+
+    def _expire(_signal_number: int, _frame: Any) -> None:
+        raise TimeoutError("MCP smoke HTTP stage wall-clock limit exceeded")
+
+    signal.signal(signal.SIGALRM, _expire)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, seconds)
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_handler)
+
+
 def _req(method: str, path: str, body: dict[str, Any] | None = None, form: bool = False,
          sid: str | None = None, token: str | None = None) -> tuple[int, dict[str, Any], str, str]:
     headers = {"Accept": "application/json, text/event-stream"}
@@ -141,11 +216,19 @@ def _req(method: str, path: str, body: dict[str, Any] | None = None, form: bool 
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
-    conn = http.client.HTTPConnection(BASE_HOST, BASE_PORT, timeout=TIMEOUT)
+    global _LAST_STAGE
+    stage = _http_stage(method, path, body)
+    _LAST_STAGE = stage
+    # Flush before a potentially blocking socket call: TimeoutExpired should
+    # retain the last static phase without leaking tokens, URLs or bodies.
+    print(f"mcp_oauth_black_box_smoke: stage={stage}", file=sys.stderr, flush=True)
+    budget = _request_timeout(stage)
+    conn = http.client.HTTPConnection(BASE_HOST, BASE_PORT, timeout=budget)
     try:
-        conn.request(method, path, data, headers)
-        resp = conn.getresponse()
-        raw = _read_response_body(resp).decode("utf-8", errors="replace")
+        with _bounded_http_stage(budget):
+            conn.request(method, path, data, headers)
+            resp = conn.getresponse()
+            raw = _read_response_body(resp).decode("utf-8", errors="replace")
         payload: dict[str, Any] = {}
         for line in raw.split("\n"):
             if line.startswith("data:"):
@@ -267,6 +350,12 @@ def main() -> int:
     outcome: Any = None
     exit_code: Any = None
     rc = 1
+    global _SMOKE_DEADLINE, _LAST_STAGE
+    previous_deadline = _SMOKE_DEADLINE
+    _SMOKE_DEADLINE = time.monotonic() + max(
+        0.1, TIMEOUT - min(10.0, TIMEOUT / 5)
+    )
+    _LAST_STAGE = "not_started"
     try:
         required_tool, _ = _required_schema()
         client_id = _register_client()
@@ -309,20 +398,25 @@ def main() -> int:
         if outcome != "passed" or exit_code != 0:
             raise SmokeError(f"git_status unexpected result: {payload}")
         rc = 0
-    except SmokeError as exc:
-        print(f"mcp_oauth_black_box_smoke: {exc}", file=sys.stderr)
+    except SmokeError:
+        # Error payloads (including raw upstream JSON) are not safe to echo.
+        print(f"mcp_oauth_black_box_smoke: stage={_LAST_STAGE} error=SmokeError",
+              file=sys.stderr, flush=True)
     except Exception as exc:
-        print(f"mcp_oauth_black_box_smoke: {exc}", file=sys.stderr)
+        print(f"mcp_oauth_black_box_smoke: stage={_LAST_STAGE} "
+              f"error={type(exc).__name__}", file=sys.stderr, flush=True)
     finally:
         if token and sid:
             try:
                 _terminate_session(token, sid)
             except Exception as exc:
                 print(
-                    f"mcp_oauth_black_box_smoke: session cleanup failed: {exc}",
-                    file=sys.stderr,
+                    f"mcp_oauth_black_box_smoke: session cleanup failed: "
+                    f"{type(exc).__name__}",
+                    file=sys.stderr, flush=True,
                 )
                 rc = 1
+        _SMOKE_DEADLINE = previous_deadline
 
     if rc == 0:
         print(f"mcp_oauth_black_box_smoke: OK client={client_id} "

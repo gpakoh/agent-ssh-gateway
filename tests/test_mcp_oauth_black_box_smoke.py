@@ -100,6 +100,176 @@ def _clear_schema_requirement(monkeypatch):
     monkeypatch.delenv("MCP_SMOKE_REQUIRED_INPUTS", raising=False)
 
 
+class TestSmokeStageDeadlines:
+    def test_timeout_stage_extractor_never_prints_captured_credentials(self):
+        from tests.test_mcp_oauth_host_smoke import _last_safe_smoke_stage
+
+        lines = (
+            b"mcp_oauth_black_box_smoke: stage=initialize\n"
+            b"private-bearer-token=never-leak\n"
+            b"mcp_oauth_black_box_smoke: stage=git_status\n"
+            b"mcp_oauth_black_box_smoke: stage=private_bearer_token\n"
+        )
+        assert _last_safe_smoke_stage(lines) == "git_status"
+        assert _last_safe_smoke_stage(b"password=secret") == "unknown"
+        assert _last_safe_smoke_stage(None) == "unknown"
+
+    def test_host_smoke_timeout_reports_only_safe_stage(self, monkeypatch):
+        import subprocess
+
+        from tests import test_mcp_oauth_host_smoke as host
+
+        monkeypatch.setattr(host, "_docker_available", lambda: True)
+        monkeypatch.setattr(host, "_docker_exec", lambda *_args: "secret-password")
+
+        def timeout_run(*args, **kwargs):
+            raise subprocess.TimeoutExpired(
+                cmd=args[0],
+                timeout=kwargs.get("timeout", 90),
+                stderr=(
+                    b"mcp_oauth_black_box_smoke: stage=git_status\n"
+                    b"Bearer super-private-token password=secret-password\n"
+                ),
+            )
+
+        monkeypatch.setattr(host.subprocess, "run", timeout_run)
+        with pytest.raises(pytest.fail.Exception, match="last_stage=git_status") as exc:
+            host.test_mcp_oauth_black_box_smoke_full_flow()
+        assert "super-private-token" not in str(exc.value)
+        assert "secret-password" not in str(exc.value)
+
+    def test_stage_names_do_not_reflect_private_urls_or_bodies(self, capsys):
+        assert smoke._http_stage(
+            "GET", "/authorize?state=private-token&code=private-code", None
+        ) == "authorize"
+        assert smoke._http_stage(
+            "POST", "/mcp", {"method": "tools/call", "token": "private-secret"}
+        ) == "git_status"
+        assert smoke._http_stage(
+            "GET", "/unknown/private-secret?token=private-token", None
+        ) == "unknown"
+        connection = MagicMock()
+        connection.getresponse.return_value = _FakeResponse(
+            302, b"", location="http://localhost/callback"
+        )
+        with patch.object(smoke.http.client, "HTTPConnection", return_value=connection):
+            smoke._req("GET", "/authorize?state=private-token&code=private-code")
+        output = capsys.readouterr().err
+        assert "stage=authorize" in output
+        assert "private-token" not in output
+        assert "private-code" not in output
+
+    def test_stage_timeout_is_smaller_than_outer_subprocess_budget(self, monkeypatch):
+        monkeypatch.setattr(smoke, "TIMEOUT", 90.0)
+        monkeypatch.setattr(smoke, "_SMOKE_DEADLINE", None)
+        assert smoke._request_timeout("register") == smoke.MAX_HTTP_STAGE_SECONDS
+        assert smoke._request_timeout("cleanup") == smoke.MAX_CLEANUP_SECONDS
+        monkeypatch.setattr(smoke, "_SMOKE_DEADLINE", smoke.time.monotonic() - 1)
+        with pytest.raises(smoke.SmokeError, match="deadline"):
+            smoke._request_timeout("register")
+
+    def test_real_stalled_header_raises_bounded_timeout_and_marks_stage(
+        self, monkeypatch, capsys
+    ):
+        import http.server
+        import threading
+        import time
+
+        release = threading.Event()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *_args):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                release.wait(8.0)
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Length", "2")
+                    self.end_headers()
+                    self.wfile.write(b"{}")
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            monkeypatch.setattr(smoke, "BASE_HOST", "127.0.0.1")
+            monkeypatch.setattr(smoke, "BASE_PORT", server.server_port)
+            monkeypatch.setattr(smoke, "TIMEOUT", 5.0)
+            monkeypatch.setattr(smoke, "MAX_HTTP_STAGE_SECONDS", 0.3)
+            monkeypatch.setattr(smoke, "_SMOKE_DEADLINE", None)
+            start = time.monotonic()
+            with pytest.raises(TimeoutError):
+                smoke._req("POST", "/register", {"password": "never-echo-secret"})
+            # Socket budget is 0.3s; allow substantial CI scheduling jitter
+            # while still proving we did not wait for the 5s outer timeout.
+            assert time.monotonic() - start < 4.5
+            output = capsys.readouterr().err
+            assert "stage=register" in output
+            assert "never-echo-secret" not in output
+        finally:
+            release.set()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_heartbeat_trickle_cannot_extend_absolute_http_deadline(
+        self, monkeypatch, capsys
+    ):
+        import signal
+        import time
+
+        response = MagicMock()
+        response.getheader.return_value = "text/event-stream"
+        reads = 0
+
+        def trickle(_size):
+            nonlocal reads
+            time.sleep(0.07)
+            reads += 1
+            return b": ping\n\n" if reads < 20 else b""
+
+        response.read1.side_effect = trickle
+        conn = MagicMock()
+        conn.getresponse.return_value = response
+        monkeypatch.setattr(smoke, "TIMEOUT", 5.0)
+        monkeypatch.setattr(smoke, "MAX_HTTP_STAGE_SECONDS", 0.3)
+        monkeypatch.setattr(smoke, "_SMOKE_DEADLINE", None)
+        previous = signal.getsignal(signal.SIGALRM)
+        with patch.object(smoke.http.client, "HTTPConnection", return_value=conn):
+            start = time.monotonic()
+            with pytest.raises(TimeoutError, match="wall-clock"):
+                smoke._req(
+                    "POST", "/mcp",
+                    {"method": "initialize", "token": "very-secret-token"},
+                )
+        assert time.monotonic() - start < 4.5
+        assert signal.getsignal(signal.SIGALRM) is previous
+        assert signal.getitimer(signal.ITIMER_REAL)[0] == 0
+        assert "very-secret-token" not in capsys.readouterr().err
+
+    def test_main_resets_deadline_and_does_not_echo_exception_secrets(
+        self, monkeypatch, capsys
+    ):
+        monkeypatch.setenv("MCP_AUTHORIZE_PASSWORD", "private-password")
+        monkeypatch.setattr(smoke, "_SMOKE_DEADLINE", None)
+        with patch.object(
+            smoke, "_register_client",
+            side_effect=RuntimeError("Bearer private-token private-password"),
+        ):
+            assert smoke.main() == 1
+        assert smoke._SMOKE_DEADLINE is None
+        output = capsys.readouterr().err
+        assert "error=RuntimeError" in output
+        assert "private-password" not in output
+        assert "private-token" not in output
+
+
 class TestPersistentMcpSse:
     def test_returns_first_event_without_waiting_for_eof(self):
         event = b'data: {"jsonrpc":"2.0","id":1,"result":{}}\n\n'
