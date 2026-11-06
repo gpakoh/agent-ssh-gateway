@@ -486,7 +486,15 @@ class DockerClient:
         try:
             output = await self._run([DOCKER_BIN, "network", "inspect", name])
         except RuntimeError as exc:
-            if str(exc).strip().endswith(f"No such network: {name}"):
+            # Docker CLI versions report missing networks in two documented
+            # forms. Only an exact exit-1 error for the requested identity
+            # proves absence. Timeouts, daemon errors and prefix collisions
+            # must remain UNKNOWN rather than fabricated absence.
+            diagnostic = str(exc).strip()
+            if diagnostic in {
+                f"docker exited 1: Error: No such network: {name}",
+                f"docker exited 1: Error response from daemon: network {name} not found",
+            }:
                 self.last_truncated = False
                 return {"status": "absent", "network": None}
             raise
