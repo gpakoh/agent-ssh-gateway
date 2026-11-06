@@ -19,6 +19,7 @@ import logging
 import os
 import secrets
 import sys
+import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -523,16 +524,35 @@ async def _proxy_401(request: Request, resp: httpx.Response, client: httpx.Async
         logger.warning(f"PROXY 401 method={request.method} path={request.url.path}")
 
 
+_DCR_PROXY_PHASES = frozenset({
+    "received", "body_read", "upstream_send", "upstream_headers", "upstream_error"
+})
+
+
+def _log_dcr_proxy_phase(trace_id: str, phase: str, started_at: float) -> None:
+    """Safe, correlated registration transport milestones (no request data)."""
+    if phase not in _DCR_PROXY_PHASES:
+        raise ValueError("unknown DCR transport phase")
+    elapsed_ms = max(0, int((time.monotonic() - started_at) * 1000))
+    logger.info("DCR_TRACE id=%s phase=%s elapsed_ms=%d", trace_id, phase, elapsed_ms)
+
+
 async def proxy_request(request: Request) -> StreamingResponse | JSONResponse | Response:
     """Proxy an HTTP request to the internal MCP server."""
     target_path = request.url.path
     if target_path == "/":
         target_path = "/mcp"
+    dcr_trace = secrets.token_hex(6) if request.method == "POST" and target_path == "/register" else None
+    dcr_started = time.monotonic() if dcr_trace else 0.0
+    if dcr_trace:
+        _log_dcr_proxy_phase(dcr_trace, "received", dcr_started)
     url = f"{MCP_INTERNAL_URL}{target_path}"
     if request.url.query:
         url = f"{url}?{request.url.query}"
 
     body = await request.body()
+    if dcr_trace:
+        _log_dcr_proxy_phase(dcr_trace, "body_read", dcr_started)
     headers = dict(request.headers)
     headers.pop("host", None)
 
@@ -546,15 +566,21 @@ async def proxy_request(request: Request) -> StreamingResponse | JSONResponse | 
     if auth_token and "authorization" not in {k.lower() for k in headers}:
         headers["Authorization"] = f"Bearer {auth_token}"
 
+    if dcr_trace:
+        _log_dcr_proxy_phase(dcr_trace, "upstream_send", dcr_started)
     upstream = await _proxy_upstream(
         request, url, body, headers, target_path=target_path
     )
     if upstream is None:
+        if dcr_trace:
+            _log_dcr_proxy_phase(dcr_trace, "upstream_error", dcr_started)
         return JSONResponse(
             {"error": "Upstream unreachable: transport error"},
             status_code=502,
         )
     client, resp = upstream
+    if dcr_trace:
+        _log_dcr_proxy_phase(dcr_trace, "upstream_headers", dcr_started)
 
     _log_proxy_path_only(request, resp)
 
