@@ -201,6 +201,22 @@ def _bounded_http_stage(seconds: float) -> Iterator[None]:
         signal.signal(signal.SIGALRM, old_handler)
 
 
+_SAFE_HTTP_PHASES = frozenset({"send", "headers", "body", "parse"})
+
+
+def _log_http_phase(stage: str, phase: str, started_at: float) -> None:
+    """Emit only static phase and elapsed time, not request/response data."""
+    if phase not in _SAFE_HTTP_PHASES:
+        raise ValueError("invalid smoke HTTP diagnostic phase")
+    elapsed_ms = max(0, int((time.monotonic() - started_at) * 1000))
+    print(
+        f"mcp_oauth_black_box_smoke: stage={stage} "
+        f"phase={phase} elapsed_ms={elapsed_ms}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def _req(method: str, path: str, body: dict[str, Any] | None = None, form: bool = False,
          sid: str | None = None, token: str | None = None) -> tuple[int, dict[str, Any], str, str]:
     headers = {"Accept": "application/json, text/event-stream"}
@@ -224,11 +240,16 @@ def _req(method: str, path: str, body: dict[str, Any] | None = None, form: bool 
     print(f"mcp_oauth_black_box_smoke: stage={stage}", file=sys.stderr, flush=True)
     budget = _request_timeout(stage)
     conn = http.client.HTTPConnection(BASE_HOST, BASE_PORT, timeout=budget)
+    stage_started = time.monotonic()
     try:
         with _bounded_http_stage(budget):
+            _log_http_phase(stage, "send", stage_started)
             conn.request(method, path, data, headers)
+            _log_http_phase(stage, "headers", stage_started)
             resp = conn.getresponse()
+            _log_http_phase(stage, "body", stage_started)
             raw = _read_response_body(resp).decode("utf-8", errors="replace")
+        _log_http_phase(stage, "parse", stage_started)
         payload: dict[str, Any] = {}
         for line in raw.split("\n"):
             if line.startswith("data:"):
