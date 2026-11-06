@@ -1714,6 +1714,25 @@ _AGENT_PROXY_STATUS_INT_FIELDS = (
     "finished_epoch",
 )
 
+# Diagnostic evidence may include untrusted JSON key *names*. Only these
+# canonical labels are safe to echo; an arbitrary key can contain a secret.
+_SAFE_PROXY_REDACTED_FIELD_NAMES = frozenset({
+    "access_token", "api_key", "credential", "password", "passwd",
+    "proxy_url", "secret", "token", "url",
+})
+_SENSITIVE_PROXY_FIELD_RE = re.compile(
+    r"(?i)(url|token|secret|password|passwd|credential|api[_-]?key)"
+)
+
+
+def _safe_proxy_redacted_field_names(data: dict[str, Any]) -> list[str]:
+    """Report sensitive-field presence without reflecting arbitrary JSON keys."""
+    return sorted({
+        key if key in _SAFE_PROXY_REDACTED_FIELD_NAMES else "other_sensitive_field"
+        for key in data
+        if _SENSITIVE_PROXY_FIELD_RE.search(key)
+    })
+
 
 def _sanitize_agent_diagnostic_text(value: str, *, max_chars: int = 240) -> str:
     """Return a bounded diagnostic string without URLs, credentials, or tokens."""
@@ -1924,11 +1943,7 @@ def _read_agent_proxy_status(
         summary["age_seconds"] = max(0, now_epoch - updated_epoch)
     else:
         summary["age_seconds"] = None
-    redacted_fields = sorted(
-        key
-        for key in data
-        if re.search(r"(?i)(url|token|secret|password|passwd|credential|api[_-]?key)", str(key))
-    )
+    redacted_fields = _safe_proxy_redacted_field_names(data)
     if redacted_fields:
         summary["redacted_fields"] = redacted_fields
     return summary

@@ -2226,6 +2226,48 @@ class TestAgentStartupDiagnostics:
         assert result["elapsed_seconds"] == 200
 
 
+class TestProxyDiagnosticSensitiveFieldNames:
+    def test_secret_embedded_in_field_name_never_escapes_diagnostics(self, monkeypatch):
+        from examples.mcp_server import agent_tasks
+
+        leaked_key = "token_private_credential_very-sensitive-value"
+        opaque_key = "proxy_url_https://user:password@private.example"
+        payload = {
+            "version": 1,
+            "attempt": 2,
+            "last_error_class": "startup_stalled",
+            "access_token": "redacted-value",
+            "proxy_url": "https://proxy.example/path",
+            leaked_key: "redacted-value",
+            opaque_key: "redacted-value",
+        }
+        monkeypatch.setattr(
+            agent_tasks,
+            "read_agent_task_file",
+            lambda *_args, **_kwargs: {"stdout": json.dumps(payload)},
+        )
+
+        result = agent_tasks._read_agent_proxy_status(
+            lambda *_args, **_kwargs: {},
+            project="my-proj",
+            task_id="a12345678901",
+            now_epoch=2_000,
+        )
+        assert result["valid"] is True
+        assert result["attempt"] == 2
+        assert result["last_error_class"] == "startup_stalled"
+        assert result["redacted_fields"] == [
+            "access_token",
+            "other_sensitive_field",
+            "proxy_url",
+        ]
+        serialized = json.dumps(result, ensure_ascii=False)
+        assert leaked_key not in serialized
+        assert opaque_key not in serialized
+        assert "very-sensitive-value" not in serialized
+        assert "private.example" not in serialized
+
+
 class TestInspectAgentTask:
     @staticmethod
     def _shell_runner(cwd):
