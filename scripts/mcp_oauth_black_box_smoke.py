@@ -30,14 +30,18 @@ Exit code:
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import http.client
 import json
 import os
 import secrets
+import signal
 import sys
+import threading
 import time
 import urllib.parse
+from collections.abc import Iterator
 from typing import Any
 
 TIMEOUT = float(os.environ.get("MCP_SMOKE_TIMEOUT", "90"))
@@ -171,6 +175,32 @@ def _request_timeout(stage: str) -> float:
     return min(TIMEOUT, MAX_HTTP_STAGE_SECONDS, remaining)
 
 
+@contextlib.contextmanager
+def _bounded_http_stage(seconds: float) -> Iterator[None]:
+    """Enforce a hard POSIX wall-clock bound, even on slow-dripping streams.
+
+    HTTPConnection timeout controls each socket operation, not the whole
+    request/response exchange. The smoke runs on Linux, in its own main-thread
+    process; refuse a conflicting alarm rather than override another owner.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        raise SmokeError("HTTP smoke stage timer requires main thread")
+    if signal.getitimer(signal.ITIMER_REAL)[0] > 0:
+        raise SmokeError("HTTP smoke stage timer conflict")
+    old_handler = signal.getsignal(signal.SIGALRM)
+
+    def _expire(_signal_number: int, _frame: Any) -> None:
+        raise TimeoutError("MCP smoke HTTP stage wall-clock limit exceeded")
+
+    signal.signal(signal.SIGALRM, _expire)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, seconds)
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_handler)
+
+
 def _req(method: str, path: str, body: dict[str, Any] | None = None, form: bool = False,
          sid: str | None = None, token: str | None = None) -> tuple[int, dict[str, Any], str, str]:
     headers = {"Accept": "application/json, text/event-stream"}
@@ -192,11 +222,13 @@ def _req(method: str, path: str, body: dict[str, Any] | None = None, form: bool 
     # Flush before a potentially blocking socket call: TimeoutExpired should
     # retain the last static phase without leaking tokens, URLs or bodies.
     print(f"mcp_oauth_black_box_smoke: stage={stage}", file=sys.stderr, flush=True)
-    conn = http.client.HTTPConnection(BASE_HOST, BASE_PORT, timeout=_request_timeout(stage))
+    budget = _request_timeout(stage)
+    conn = http.client.HTTPConnection(BASE_HOST, BASE_PORT, timeout=budget)
     try:
-        conn.request(method, path, data, headers)
-        resp = conn.getresponse()
-        raw = _read_response_body(resp).decode("utf-8", errors="replace")
+        with _bounded_http_stage(budget):
+            conn.request(method, path, data, headers)
+            resp = conn.getresponse()
+            raw = _read_response_body(resp).decode("utf-8", errors="replace")
         payload: dict[str, Any] = {}
         for line in raw.split("\n"):
             if line.startswith("data:"):

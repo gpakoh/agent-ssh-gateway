@@ -218,6 +218,41 @@ class TestSmokeStageDeadlines:
             server.server_close()
             thread.join(timeout=2)
 
+    def test_heartbeat_trickle_cannot_extend_absolute_http_deadline(
+        self, monkeypatch, capsys
+    ):
+        import signal
+        import time
+
+        response = MagicMock()
+        response.getheader.return_value = "text/event-stream"
+        reads = 0
+
+        def trickle(_size):
+            nonlocal reads
+            time.sleep(0.07)
+            reads += 1
+            return b": ping\n\n" if reads < 20 else b""
+
+        response.read1.side_effect = trickle
+        conn = MagicMock()
+        conn.getresponse.return_value = response
+        monkeypatch.setattr(smoke, "TIMEOUT", 5.0)
+        monkeypatch.setattr(smoke, "MAX_HTTP_STAGE_SECONDS", 0.3)
+        monkeypatch.setattr(smoke, "_SMOKE_DEADLINE", None)
+        previous = signal.getsignal(signal.SIGALRM)
+        with patch.object(smoke.http.client, "HTTPConnection", return_value=conn):
+            start = time.monotonic()
+            with pytest.raises(TimeoutError, match="wall-clock"):
+                smoke._req(
+                    "POST", "/mcp",
+                    {"method": "initialize", "token": "very-secret-token"},
+                )
+        assert time.monotonic() - start < 4.5
+        assert signal.getsignal(signal.SIGALRM) is previous
+        assert signal.getitimer(signal.ITIMER_REAL)[0] == 0
+        assert "very-secret-token" not in capsys.readouterr().err
+
     def test_main_resets_deadline_and_does_not_echo_exception_secrets(
         self, monkeypatch, capsys
     ):
