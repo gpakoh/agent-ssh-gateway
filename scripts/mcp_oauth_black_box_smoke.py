@@ -88,6 +88,44 @@ def _validate_required_tool_schema(tools: Any) -> None:
         )
 
 
+MAX_SMOKE_RESPONSE_BYTES = 256 * 1024
+
+
+def _has_complete_sse_data_event(buffer: bytearray) -> bool:
+    """Ignore completed SSE comment/keepalive frames before the JSON-RPC data."""
+    normalized = bytes(buffer).replace(b"\r\n", b"\n")
+    return any(
+        any(line.startswith(b"data:") for line in frame.split(b"\n"))
+        for frame in normalized.split(b"\n\n")[:-1]
+    )
+
+
+def _read_response_body(resp: http.client.HTTPResponse) -> bytes:
+    """Read a finite JSON body or one SSE event from a persistent MCP stream.
+
+    HTTPResponse.read(n) can wait to fill n bytes on a non-terminating
+    event-stream. read1(n) returns data from one socket read instead, so a
+    short SSE event is actionable without waiting for the connection to close.
+    Fail closed on incomplete/oversize responses.
+    """
+    kind = (resp.getheader("Content-Type", "") or "").lower()
+    is_sse = "text/event-stream" in kind
+    read_chunk = resp.read1 if is_sse else resp.read
+    chunks = bytearray()
+    while True:
+        chunk = read_chunk(8192)
+        if not chunk:
+            break
+        chunks.extend(chunk)
+        if len(chunks) > MAX_SMOKE_RESPONSE_BYTES:
+            raise SmokeError("MCP smoke response exceeds byte limit")
+        if is_sse and _has_complete_sse_data_event(chunks):
+            return bytes(chunks)
+    if is_sse:
+        raise SmokeError("MCP smoke SSE stream ended before a complete event")
+    return bytes(chunks)
+
+
 def _req(method: str, path: str, body: dict[str, Any] | None = None, form: bool = False,
          sid: str | None = None, token: str | None = None) -> tuple[int, dict[str, Any], str, str]:
     headers = {"Accept": "application/json, text/event-stream"}
@@ -107,15 +145,7 @@ def _req(method: str, path: str, body: dict[str, Any] | None = None, form: bool 
     try:
         conn.request(method, path, data, headers)
         resp = conn.getresponse()
-        buf = b""
-        while True:
-            chunk = resp.read(8192)
-            if not chunk:
-                break
-            buf += chunk
-            if b"\n\n" in buf and path.startswith("/mcp"):
-                break
-        raw = buf.decode("utf-8", errors="replace")
+        raw = _read_response_body(resp).decode("utf-8", errors="replace")
         payload: dict[str, Any] = {}
         for line in raw.split("\n"):
             if line.startswith("data:"):

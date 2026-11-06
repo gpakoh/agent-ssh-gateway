@@ -100,6 +100,100 @@ def _clear_schema_requirement(monkeypatch):
     monkeypatch.delenv("MCP_SMOKE_REQUIRED_INPUTS", raising=False)
 
 
+class TestPersistentMcpSse:
+    def test_returns_first_event_without_waiting_for_eof(self):
+        event = b'data: {"jsonrpc":"2.0","id":1,"result":{}}\n\n'
+        response = MagicMock()
+        response.getheader.return_value = "text/event-stream; charset=utf-8"
+        response.read1.return_value = event
+        response.read.side_effect = AssertionError("read() waits for EOF on SSE")
+        assert smoke._read_response_body(response) == event
+        response.read1.assert_called_once_with(8192)
+        response.read.assert_not_called()
+
+    def test_keepalive_before_data_does_not_terminate_stream(self):
+        response = MagicMock()
+        response.getheader.return_value = "text/event-stream"
+        response.read1.side_effect = [
+            b": ping\n\n",
+            b'data: {"jsonrpc":"2.0","id":1,"result":{}}\n\n',
+            AssertionError("must stop after first completed data frame"),
+        ]
+        data = smoke._read_response_body(response)
+        assert data.startswith(b": ping\n\n")
+        assert data.endswith(b"}\n\n")
+        assert response.read1.call_count == 2
+
+    def test_fragmented_crlf_event_is_recognized(self):
+        response = MagicMock()
+        response.getheader.return_value = "text/event-stream"
+        response.read1.side_effect = [
+            b'data: {"result":{}}\r\n',
+            b"\r\n",
+            AssertionError("reader must stop after complete SSE event"),
+        ]
+        assert smoke._read_response_body(response).endswith(b"\r\n\r\n")
+        assert response.read1.call_count == 2
+
+    def test_incomplete_sse_event_fails_closed(self):
+        response = MagicMock()
+        response.getheader.return_value = "text/event-stream"
+        response.read1.side_effect = [b"data: {", b""]
+        with pytest.raises(smoke.SmokeError, match="complete event"):
+            smoke._read_response_body(response)
+
+    def test_large_sse_stream_fails_closed(self):
+        response = MagicMock()
+        response.getheader.return_value = "text/event-stream"
+        response.read1.return_value = b"x" * (smoke.MAX_SMOKE_RESPONSE_BYTES + 1)
+        with pytest.raises(smoke.SmokeError, match="byte limit"):
+            smoke._read_response_body(response)
+
+    def test_real_chunked_sse_with_open_connection_returns_first_event(self, monkeypatch):
+        """Real HTTPResponse must not wait for an SSE stream's EOF or 8192 bytes."""
+        import http.server
+        import threading
+        import time
+
+        release = threading.Event()
+        event = b'data: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}\n\n'
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *_args):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.send_header("Mcp-Session-Id", "test-session")
+                self.end_headers()
+                self.wfile.write(f"{len(event):x}\r\n".encode() + event + b"\r\n")
+                self.wfile.flush()
+                release.wait(2.5)
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            monkeypatch.setattr(smoke, "BASE_HOST", "127.0.0.1")
+            monkeypatch.setattr(smoke, "BASE_PORT", server.server_port)
+            monkeypatch.setattr(smoke, "TIMEOUT", 1.5)
+            start = time.monotonic()
+            status, result, _, sid = smoke._req("POST", "/mcp", {"jsonrpc": "2.0"})
+            assert time.monotonic() - start < 1.5
+            assert status == 200 and sid == "test-session"
+            assert result == {"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}
+        finally:
+            release.set()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+
 class TestMcpOauthBlackBoxSmoke:
     def test_default_project_matches_registered_gateway_project(self):
         assert smoke.DEFAULT_PROJECT == "agent-ssh-gateway"
