@@ -195,7 +195,6 @@ class GatewayClient:
     _SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
     _CONNECT_GOVERNOR_LOCK = threading.Lock()
     _connect_retry_not_before = 0.0
-    _CONNECT_COOLDOWN_SECONDS = 6.0
 
     def __init__(
         self,
@@ -371,10 +370,11 @@ class GatewayClient:
             except httpx.RequestError as exc:
                 raise _transport_error(exc) from exc
             if response.status_code >= 400:
-                cooldown = GatewayClient._CONNECT_COOLDOWN_SECONDS
+                cooldown: int | None = None
                 if response.status_code == 429:
-                    # Retry-After also permits HTTP-date syntax; only a bounded
-                    # decimal delta is safe to consume without clock ambiguity.
+                    # A session-cap 429 often has no Retry-After; blocking all
+                    # other MCP sessions would prevent recovery when a slot frees.
+                    # Only a bounded numeric provider delay owns the governor.
                     raw_wait = response.headers.get("Retry-After", "")
                     if (
                         isinstance(raw_wait, str)
@@ -384,7 +384,7 @@ class GatewayClient:
                         and int(raw_wait) <= 86400
                     ):
                         cooldown = max(int(raw_wait), 1)
-                    GatewayClient._connect_retry_not_before = time.monotonic() + cooldown
+                        GatewayClient._connect_retry_not_before = time.monotonic() + cooldown
                 body: dict[str, Any] = {}
                 try:
                     parsed = response.json()
@@ -407,10 +407,11 @@ class GatewayClient:
                     if not isinstance(err_body.get("detail"), dict):
                         err_body.setdefault("code", "RATE_LIMIT_EXCEEDED")
                         err_body["retryable"] = True
-                    details = err_body.get("details")
-                    safe_details = dict(details) if isinstance(details, dict) else {}
-                    safe_details["retry_after_seconds"] = math.ceil(cooldown)
-                    err_body["details"] = safe_details
+                    if cooldown is not None:
+                        details = err_body.get("details")
+                        safe_details = dict(details) if isinstance(details, dict) else {}
+                        safe_details["retry_after_seconds"] = cooldown
+                        err_body["details"] = safe_details
                 code = err_body.get("code") or "HTTP_ERROR"
                 raise GatewayClientError(
                     f"auto-reconnect failed: {response.status_code} ({code})",
