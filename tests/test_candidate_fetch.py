@@ -327,11 +327,58 @@ def test_dirty_candidate_is_rejected_without_publishing(managed):
     assert run(managed.root, "rev-parse", "HEAD") == managed.head
 
 
-def test_unpushed_feature_is_rejected(managed):
-    commit(managed.root, "unpublished.txt", "unpublished")
-    result = fetch(managed)
-    assert not result["ok"] and result["error"]["code"] == "HEAD_MISMATCH"
-    assert not managed.published
+def test_default_import_preserves_clean_local_commits_ahead_of_remote_feature(managed):
+    m = managed
+    m.head = commit(m.root, "unpublished.txt", "preserve local feature work\n")
+    original_index = (m.root / ".git/index").read_bytes()
+    original_config = (m.root / ".git/config").read_bytes()
+
+    result = fetch(m)
+
+    assert result["ok"], result
+    receipt = result["result"]
+    assert receipt["remote_feature_head"] == run(m.upstream, "rev-parse", f"refs/heads/{m.feature}")
+    assert receipt["feature_head_relation"] == "local_ahead"
+    assert receipt["feature_head"] == m.head
+    assert run(m.root, "rev-parse", "refs/remotes/origin/main") == m.target
+    assert (m.root / "unpublished.txt").read_text() == "preserve local feature work\n"
+    assert (m.root / ".git/index").read_bytes() == original_index
+    assert (m.root / ".git/config").read_bytes() == original_config
+    assert_preserved(m)
+    assert fetch(m)["ok"]
+
+    # Normal guarded merge can now combine the published main and all local work.
+    run(
+        m.root,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "merge",
+        "--no-edit",
+        "refs/remotes/origin/main",
+    )
+    run(m.root, "merge-base", "--is-ancestor", m.head, "HEAD")
+    run(m.root, "merge-base", "--is-ancestor", m.target, "HEAD")
+    assert (m.root / "unpublished.txt").read_text() == "preserve local feature work\n"
+
+
+def test_default_import_rejects_divergent_remote_feature_even_if_local_clean(managed):
+    m = managed
+    m.head = commit(m.root, "unpublished.txt", "local commit\n")
+    run(m.upstream, "checkout", "-qb", "alternate", m.base)
+    diverged = commit(m.upstream, "divergent.txt", "different remote feature\n")
+    run(m.upstream, "update-ref", f"refs/heads/{m.feature}", diverged)
+    run(m.upstream, "checkout", "-q", "main")
+
+    result = fetch(m)
+
+    assert not result["ok"]
+    assert result["error"]["code"] == "GIT_NON_FAST_FORWARD"
+    assert result["error"]["details"]["stage"] == "remote_feature_ancestry"
+    assert not m.published
+    assert run(m.root, "rev-parse", "refs/remotes/origin/main") == m.base
+    assert_preserved(m)
 
 
 @pytest.mark.parametrize("race", ["remote_base", "remote_feature", "local_head", "tracking_ref"])
