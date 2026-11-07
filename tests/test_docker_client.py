@@ -1014,7 +1014,7 @@ async def test_logs_oversize_preserves_latest_stderr_dcr_trace(tmp_path, monkeyp
     fake_docker.write_text(
         f"#!{sys.executable}\n"
         "import sys\n"
-        "sys.stdout.write('old-marker\\n' + 'x' * 53000 + '\\n')\n"
+        "sys.stdout.write('old-marker\\nTOKEN=' + 'opaque-secret-' * 4000 + '\\n')\n"
         "sys.stdout.flush()\n"
         "print('DCR_TRACE id=abcdef012345 phase=upstream_send elapsed_ms=15', "
         "file=sys.stderr, flush=True)\n",
@@ -1026,6 +1026,7 @@ async def test_logs_oversize_preserves_latest_stderr_dcr_trace(tmp_path, monkeyp
     result = await _client().logs("mcp-oauth", tail=1000)
     assert result["truncated"] is True
     assert "old-marker" not in "\n".join(result["lines"])
+    assert "opaque-secret" not in "\n".join(result["lines"])
     assert result["lines"][0] == "[output truncated]"
     assert any("phase=upstream_send" in line for line in result["lines"])
 

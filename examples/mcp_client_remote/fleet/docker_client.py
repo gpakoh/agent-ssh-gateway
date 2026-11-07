@@ -246,8 +246,13 @@ class DockerClient:
         self.last_output_truncated = len(result) > MAX_OUTPUT_BYTES
         if self.last_output_truncated:
             if merge_stderr:
-                # Keep the newest log evidence, not the oldest 50 KiB.
-                result = "[output truncated]\n" + result[-MAX_OUTPUT_BYTES:]
+                # Keep recent complete lines. A suffix can begin inside a
+                # secret value without its TOKEN= prefix; never expose that
+                # unrecognizable fragment to the log-line sanitizer.
+                suffix = result[-MAX_OUTPUT_BYTES:]
+                boundary = suffix.find("\n")
+                suffix = suffix[boundary + 1:] if boundary >= 0 else ""
+                result = "[output truncated]\n" + suffix
             else:
                 result = result[:MAX_OUTPUT_BYTES] + "\n[output truncated]"
         return result
