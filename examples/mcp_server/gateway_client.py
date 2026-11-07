@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import math
 import os
 import threading
 import time
@@ -347,8 +348,18 @@ class GatewayClient:
             payload["idle_timeout_seconds"] = self._idle_timeout_seconds
 
         with GatewayClient._CONNECT_GOVERNOR_LOCK:
-            if time.monotonic() < GatewayClient._connect_retry_not_before:
-                raise GatewayClientError("auto-reconnect cooldown active after 429")
+            remaining = GatewayClient._connect_retry_not_before - time.monotonic()
+            if remaining > 0:
+                raise GatewayClientError(
+                    "auto-reconnect cooldown active after 429",
+                    status_code=429,
+                    body={
+                        "message": "Gateway connection rate limit active",
+                        "code": "RATE_LIMIT_EXCEEDED",
+                        "retryable": True,
+                        "details": {"retry_after_seconds": math.ceil(remaining)},
+                    },
+                )
             try:
                 response = httpx.post(
                     f"{self.base_url}/api/ssh/connect",
@@ -360,12 +371,19 @@ class GatewayClient:
             except httpx.RequestError as exc:
                 raise _transport_error(exc) from exc
             if response.status_code >= 400:
-                retry_after = response.headers.get("Retry-After")
-                if response.status_code == 429 and retry_after is not None:
-                    try:
-                        cooldown = max(float(retry_after), 1.0)
-                    except ValueError:
-                        cooldown = GatewayClient._CONNECT_COOLDOWN_SECONDS
+                cooldown = GatewayClient._CONNECT_COOLDOWN_SECONDS
+                if response.status_code == 429:
+                    # Retry-After also permits HTTP-date syntax; only a bounded
+                    # decimal delta is safe to consume without clock ambiguity.
+                    raw_wait = response.headers.get("Retry-After", "")
+                    if (
+                        isinstance(raw_wait, str)
+                        and len(raw_wait) <= 5
+                        and raw_wait.isascii()
+                        and raw_wait.isdecimal()
+                        and int(raw_wait) <= 86400
+                    ):
+                        cooldown = max(int(raw_wait), 1)
                     GatewayClient._connect_retry_not_before = time.monotonic() + cooldown
                 body: dict[str, Any] = {}
                 try:
@@ -375,11 +393,24 @@ class GatewayClient:
                 except Exception:
                     pass
                 err_body = body or {
-                    "message": "Gateway returned an error",
-                    "code": "HTTP_ERROR",
-                    "retryable": response.status_code >= 500,
+                    "message": "Gateway connection rate limit exceeded"
+                    if response.status_code == 429
+                    else "Gateway returned an error",
+                    "code": "RATE_LIMIT_EXCEEDED"
+                    if response.status_code == 429
+                    else "HTTP_ERROR",
+                    "retryable": response.status_code == 429 or response.status_code >= 500,
                     "http_status": response.status_code,
                 }
+                if response.status_code == 429:
+                    err_body = dict(err_body)
+                    if not isinstance(err_body.get("detail"), dict):
+                        err_body.setdefault("code", "RATE_LIMIT_EXCEEDED")
+                        err_body["retryable"] = True
+                    details = err_body.get("details")
+                    safe_details = dict(details) if isinstance(details, dict) else {}
+                    safe_details["retry_after_seconds"] = math.ceil(cooldown)
+                    err_body["details"] = safe_details
                 code = err_body.get("code") or "HTTP_ERROR"
                 raise GatewayClientError(
                     f"auto-reconnect failed: {response.status_code} ({code})",
