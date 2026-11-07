@@ -337,24 +337,28 @@ async def test_timeout_matrix_non_mcp_route_stays_bounded(srv, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_dcr_proxy_trace_correlates_bounded_phases_without_secrets(srv, caplog):
-    """Trace the actual /register ASGI path without emitting its client metadata."""
+async def test_dcr_proxy_trace_visible_with_production_warning_log_level(
+    srv, capsys, monkeypatch
+):
+    """Actual /register emits flushed stderr even when INFO logs are suppressed."""
+    monkeypatch.setattr(srv.logger, "level", 30)  # standard root WARNING
     client = _FakeClient()
-    client.responses = [_FakeResp(201, {"content-type": "application/json"}, b'{"client_id":"opaque"}')]
+    client.responses = [
+        _FakeResp(201, {"content-type": "application/json"}, b'{"client_id":"opaque"}')
+    ]
     srv._UPSTREAM_CLIENT = client
     marker = b'{"client_secret":"do-not-echo-secret","client_name":"private-name"}'
-    with caplog.at_level("INFO", logger="mcp_client_remote"):
-        response = await _drive(srv.create_proxy_app(), "POST", "/register", body=marker)
+    response = await _drive(srv.create_proxy_app(), "POST", "/register", body=marker)
     assert response.status == 201
-    traces = [
-        record.getMessage() for record in caplog.records
-        if record.name == "mcp_client_remote" and record.getMessage().startswith("DCR_TRACE ")
-    ]
+    stderr = capsys.readouterr().err
+    traces = [line for line in stderr.splitlines() if line.startswith("DCR_TRACE ")]
     matches = [
-        re.fullmatch(r"DCR_TRACE id=([a-f0-9]{12}) phase=([a-z_]+) elapsed_ms=(\d+)", line)
+        re.fullmatch(
+            r"DCR_TRACE id=([a-f0-9]{12}) phase=([a-z_]+) elapsed_ms=(\d+)", line
+        )
         for line in traces
     ]
-    assert all(match is not None for match in matches)
+    assert len(matches) == 4 and all(match is not None for match in matches)
     assert [match.group(2) for match in matches] == [
         "received", "body_read", "upstream_send", "upstream_headers"
     ]
@@ -362,34 +366,40 @@ async def test_dcr_proxy_trace_correlates_bounded_phases_without_secrets(srv, ca
     assert [int(match.group(3)) for match in matches] == sorted(
         int(match.group(3)) for match in matches
     )
-    all_logs = "\n".join(record.getMessage() for record in caplog.records)
-    assert "do-not-echo-secret" not in all_logs
-    assert "private-name" not in all_logs
-    assert "client_secret" not in all_logs
+    assert "do-not-echo-secret" not in stderr
+    assert "private-name" not in stderr
+    assert "client_secret" not in stderr
 
 
 @pytest.mark.asyncio
-async def test_dcr_proxy_trace_marks_upstream_connect_failure_without_log_leak(srv, caplog):
+async def test_dcr_proxy_trace_marks_upstream_failure_without_log_leak(
+    srv, capsys, monkeypatch
+):
     class BrokenClient(_FakeClient):
         async def send(self, req, stream=False):
             raise httpx.ConnectError("upstream-secret-password")
 
+    monkeypatch.setattr(srv.logger, "level", 30)
     srv._UPSTREAM_CLIENT = BrokenClient()
-    with caplog.at_level("INFO", logger="mcp_client_remote"):
-        response = await _drive(
-            srv.create_proxy_app(), "POST", "/register", body=b'{"token":"private-token"}'
-        )
+    response = await _drive(
+        srv.create_proxy_app(), "POST", "/register", body=b'{"token":"private-token"}'
+    )
     assert response.status == 502
-    traces = [
-        record.getMessage() for record in caplog.records
-        if record.getMessage().startswith("DCR_TRACE ")
-    ]
+    stderr = capsys.readouterr().err
+    traces = [line for line in stderr.splitlines() if line.startswith("DCR_TRACE ")]
     assert [re.search(r"phase=([a-z_]+)", line).group(1) for line in traces] == [
         "received", "body_read", "upstream_send", "upstream_error"
     ]
-    all_logs = "\n".join(record.getMessage() for record in caplog.records)
-    assert "upstream-secret-password" not in all_logs
-    assert "private-token" not in all_logs
+    assert "upstream-secret-password" not in stderr
+    assert "private-token" not in stderr
+
+
+def test_dcr_trace_rejects_untrusted_identifier_and_phase_without_output(srv, capsys):
+    with pytest.raises(ValueError, match="identifier"):
+        srv._log_dcr_proxy_phase("bad\ncredentials", "received", 0.0)
+    with pytest.raises(ValueError, match="phase"):
+        srv._log_dcr_proxy_phase("a" * 12, "token", 0.0)
+    assert capsys.readouterr().err == ""
 
 
 async def _count_admitted_real_streams(srv, attempts: int) -> int:
