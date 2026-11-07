@@ -78,6 +78,12 @@ _SECRET_DICT_KEY_RE = re.compile(
 # password is redacted even when it appears inside a value whose own key name
 # doesn't look secret-ish (e.g. DATABASE_URL, REDIS_URL).
 _DSN_CREDENTIAL_RE = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://[^:/\s@]+:)([^@\s]+)(@)")
+# Container stderr can include credential-bearing HTTP headers and inline
+# key/value traces, not just the env-style lines handled above.
+_LOG_BEARER_RE = re.compile(r"(?i)(\b(?:Bearer|Basic)\s+)\S+")
+_LOG_INLINE_SECRET_RE = re.compile(
+    r"(?i)(\b(?:token|password|secret|client_secret|api_key|authorization|cookie|session)\s*=\s*)[^\s,;]+"
+)
 
 # Values that carry host/CI topology but are not filesystem paths: URLs to
 # CI/registry services, email addresses, and commit/revision SHAs embedded in
@@ -209,11 +215,15 @@ class DockerClient:
         self,
         argv: list[str],
         timeout: float = SUBPROCESS_TIMEOUT,
+        merge_stderr: bool = False,
     ) -> str:
         proc = await asyncio.create_subprocess_exec(
             *argv,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=(
+                asyncio.subprocess.STDOUT if merge_stderr
+                else asyncio.subprocess.PIPE
+            ),
         )
         try:
             stdout, stderr = await asyncio.wait_for(
@@ -226,13 +236,25 @@ class DockerClient:
             raise RuntimeError(f"Command timed out after {timeout}s: {shlex.join(argv)}") from None
 
         if proc.returncode != 0:
+            if merge_stderr:
+                # This stream may contain OAuth credentials from the container.
+                raise RuntimeError(f"docker logs exited {proc.returncode}")
             err = stderr.decode("utf-8", errors="replace").strip()
             raise RuntimeError(f"docker exited {proc.returncode}: {err}")
 
         result = stdout.decode("utf-8", errors="replace")
         self.last_output_truncated = len(result) > MAX_OUTPUT_BYTES
         if self.last_output_truncated:
-            result = result[:MAX_OUTPUT_BYTES] + "\n[output truncated]"
+            if merge_stderr:
+                # Keep recent complete lines. A suffix can begin inside a
+                # secret value without its TOKEN= prefix; never expose that
+                # unrecognizable fragment to the log-line sanitizer.
+                suffix = result[-MAX_OUTPUT_BYTES:]
+                boundary = suffix.find("\n")
+                suffix = suffix[boundary + 1:] if boundary >= 0 else ""
+                result = "[output truncated]\n" + suffix
+            else:
+                result = result[:MAX_OUTPUT_BYTES] + "\n[output truncated]"
         return result
 
     async def _run_with_result(
@@ -826,14 +848,20 @@ class DockerClient:
         self._validate_container_name(container)
         tail = max(1, min(tail, 1000))
         argv = [DOCKER_BIN, "logs", "--tail", str(tail), container]
-        result = await self._run(argv)
-        # Container log lines are one of the most likely places for an
-        # application to have accidentally printed a real secret (an
-        # Authorization header, a DSN with an embedded password, ...) --
-        # reuse the same DSN/KEY=value redaction docker_inspect already
-        # applies, rather than returning raw log text unredacted.
-        lines = [self._sanitize_string(line) for line in result.splitlines()]
-        return {"lines": lines, "count": len(lines)}
+        # docker logs sends container stdout to CLI stdout and container stderr
+        # to CLI stderr. DCR_TRACE is intentionally written to the latter.
+        # Merge at the pipe, retaining the original event ordering.
+        result = await self._run(argv, merge_stderr=True)
+        lines = []
+        for line in result.splitlines():
+            safe = self._sanitize_string(line)
+            safe = _LOG_BEARER_RE.sub(rf"\1{REDACTED}", safe)
+            safe = _LOG_INLINE_SECRET_RE.sub(rf"\1{REDACTED}", safe)
+            lines.append(safe)
+        output = {"lines": lines, "count": len(lines)}
+        if self.last_output_truncated:
+            output["truncated"] = True
+        return output
 
     async def stats(
         self,
