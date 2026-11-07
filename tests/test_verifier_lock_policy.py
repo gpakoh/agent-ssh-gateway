@@ -34,6 +34,7 @@ def test_scope_is_deterministic_opaque_and_never_written_as_path():
     assert f"scope={key}" in script
     assert "VERIFIER_LOCK_WAIT:" in script
     assert "VERIFIER_LOCK_BUSY:" in script
+    assert "VERIFIER_LOCK_ACQUIRED:" in script
     assert "waited_s=$_mcp_verifier_wait" in script
     assert "flock -n 9" in script
 
@@ -54,9 +55,35 @@ def test_primary_and_fallback_identify_the_same_source_without_leaking_it():
             line for line in script.splitlines()
             if "VERIFIER_LOCK_" in line and "echo" in line
         ]
-        assert len(diagnostic_lines) == 2
+        assert len(diagnostic_lines) == 3
         assert all(expected in line for line in diagnostic_lines)
         assert all(identity not in line for line in diagnostic_lines)
+
+
+def test_primary_and_fallback_emit_safe_execution_phase_after_lock():
+    import mcp_client_tools
+
+    identity = "/secret/long-running candidate with token=private-value"
+    primary = mcp_client_tools._build_primary_script("pytest", identity, ["tests"])
+    fallback = mcp_client_tools._build_readonly_fallback_script(
+        "pytest", identity, ["tests"]
+    )
+    for script in (primary, fallback):
+        assert script.index("VERIFIER_LOCK_ACQUIRED:") < script.index(
+            "VERIFIER_CHECK_PHASE: execute"
+        )
+        phase_lines = [
+            line for line in script.splitlines()
+            if "VERIFIER_CHECK_PHASE:" in line and "echo" in line
+        ]
+        assert phase_lines
+        assert all("private-value" not in line for line in phase_lines)
+        assert all("candidate" not in line for line in phase_lines)
+    assert "VERIFIER_CHECK_PHASE: sync" not in primary
+    assert "VERIFIER_CHECK_PHASE: sync" in fallback
+    assert fallback.index("VERIFIER_CHECK_PHASE: sync") < fallback.index(
+        "VERIFIER_CHECK_PHASE: execute"
+    )
 
 
 @pytest.mark.parametrize("wait_seconds", [True, -1, 0, 61, 1.2])
@@ -103,6 +130,7 @@ def test_one_active_holder_only_blocks_its_own_project_and_then_releases(tmp_pat
         assert time.monotonic() - started < 3.5
         assert "VERIFIER_LOCK_WAIT:" in blocked.stderr
         assert "VERIFIER_LOCK_BUSY:" in blocked.stderr
+        assert "VERIFIER_LOCK_ACQUIRED:" not in blocked.stderr
         assert f"scope={lock_scope_id(str(first))}" in blocked.stderr
         assert "waited_s=1" in blocked.stderr
         assert str(first) not in blocked.stderr
@@ -113,6 +141,8 @@ def test_one_active_holder_only_blocks_its_own_project_and_then_releases(tmp_pat
             capture_output=True, text=True, timeout=4, check=False,
         )
         assert independent.returncode == 0, independent.stderr
+        assert "VERIFIER_LOCK_ACQUIRED:" in independent.stderr
+        assert "waited_s=0" in independent.stderr
         holder.communicate(timeout=4)
         assert holder.returncode == 0
 
@@ -121,4 +151,5 @@ def test_one_active_holder_only_blocks_its_own_project_and_then_releases(tmp_pat
         capture_output=True, text=True, timeout=4, check=False,
     )
     assert released.returncode == 0, released.stderr
+    assert "VERIFIER_LOCK_ACQUIRED:" in released.stderr
     assert lock_file.is_file()

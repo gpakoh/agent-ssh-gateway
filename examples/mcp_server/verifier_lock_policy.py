@@ -43,4 +43,8 @@ def lock_acquire_script(project_identity: str, *, wait_seconds: int = 12) -> lis
         '  sleep 1',
         '  _mcp_verifier_wait=$((_mcp_verifier_wait + 1))',
         'done',
+        # The acquired milestone distinguishes bootstrap/test execution from
+        # a blocked flock, even when the outer SSH job later times out.
+        # Scope is an opaque digest, never a source path.
+        f'echo "VERIFIER_LOCK_ACQUIRED: scope={scope} waited_s=$_mcp_verifier_wait" >&2',
     ]

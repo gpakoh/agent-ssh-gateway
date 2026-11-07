@@ -503,6 +503,7 @@ def _build_primary_script(tool: str, project_dir: str, targets: list[str]) -> st
             f"uv run --frozen --all-extras --directory {shlex.quote(proj)} -- "
             f"{cmd_s} {cache_s} -- {target_args}"
         )
+    lines.append('echo "VERIFIER_CHECK_PHASE: execute" >&2')
     lines.append(run + " 2>&1")
     lines.append("flock -u 9")
     return "\n".join(lines)
@@ -1098,6 +1099,7 @@ def _build_readonly_fallback_script(
         '  rm -f "$STAMP"',
         "fi",
         "if [ $NEED_SYNC -eq 1 ]; then",
+        '  echo "VERIFIER_CHECK_PHASE: sync" >&2',
         "  if [ $HAS_LOCK -eq 1 ]; then",
         # The real project can be installed into the external venv safely:
         # --frozen forbids lock mutation and UV_PROJECT_ENVIRONMENT prevents
@@ -1141,6 +1143,7 @@ def _build_readonly_fallback_script(
     # All tools run from the real checkout. --no-sync is important here:
     # dependency synchronization was completed above and a subsequent uv run
     # must not decide to mutate project metadata or recreate a source-local env.
+    lines.append('echo "VERIFIER_CHECK_PHASE: execute" >&2')
     run_prefix = 'uv run --project "$SYNC_PROJECT" --no-sync'
     cache_root = _verifier_project_cache_root(project_dir)
     if tool_key == "pytest":
