@@ -83,6 +83,7 @@
 
 - [ ] **P2-11: Prevent candidate worktree drift after verified delivery.** (legacy #44)
   A verified candidate must remain byte-for-byte consistent with its Git HEAD unless an explicit write operation mutates it. In a JS Chat Engine delivery, remote exact head `ac66a850673cc0383163298e337fe2e3f0b96ec1` retained `_MIGRATION_LOCK_WAIT_SECONDS = 5.0`, while the registered candidate later showed that tracked line deleted without a session write call, producing false local test failures until restored. Add post-delivery worktree==HEAD proof, identify/remove the mutation path, and fail closed with attributed evidence if drift is detected.
+  **2026-11-07 scoped fix:** trusted `gitea_push_verified_commit` rechecks the SAME registered workspace after a proven exact remote push; a dirty, changed, or unverifiable post-push candidate fails closed with `WORKSPACE_CONTENDED`, `mutation_occurred=true`, exact published SHA, and an explicit no-retry hint. Remaining: identify the underlying uncommanded mutation path and prove long-lived worktree integrity across process boundaries.
   **Acceptance:** exact HEAD/worktree integrity across process boundaries; unexpected tracked edits block delivery/cleanup and get audit provenance.
 
 - [ ] **P2-13: Expose bounded destructive-audit health and recovery evidence.** (legacy #49; open Issue #788)

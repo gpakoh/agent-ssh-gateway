@@ -6701,6 +6701,45 @@ async def gitea_push_verified_commit(
             },
             source="gitea",
         )
+    # The remote branch is now proven published. Re-check the original
+    # registered workspace, which may have drifted during the network push.
+    # A failed local check must never suggest retrying the already-applied push.
+    post_push_workspace_code: str | None = None
+    try:
+        proof_published = await asyncio.to_thread(
+            verify_registered_delivery_workspace,
+            project_root=project_root,
+            expected_base_sha=expected_base_sha,
+            expected_head_sha=expected_head_sha,
+            allowed_files=allowed,
+        )
+        if proof_published != proof_after:
+            post_push_workspace_code = "WORKSPACE_PROOF_CHANGED"
+    except VerifiedWorkspaceError as exc:
+        post_push_workspace_code = exc.code
+    except Exception:
+        post_push_workspace_code = "WORKSPACE_VERIFICATION_FAILED"
+    if post_push_workspace_code is not None:
+        return tool_error(
+            tool="gitea_push_verified_commit",
+            code="WORKSPACE_CONTENDED",
+            message="Remote commit is published, but the candidate changed or could not be reverified",
+            retryable=False,
+            hint=(
+                "Do not repeat the push: the remote branch already matches expected_head_sha. "
+                "Preserve the candidate and inspect its workspace integrity before cleanup."
+            ),
+            details={
+                "phase": "candidate_post_push",
+                "mutation_started": True,
+                "mutation_occurred": True,
+                "expected_head_sha": expected_head,
+                "remote_observed_sha": observed_sha,
+                "branch": destination_branch,
+                "workspace_check_code": post_push_workspace_code,
+            },
+            source="gitea",
+        )
     return tool_success(
         "gitea_push_verified_commit",
         result={
@@ -6717,6 +6756,7 @@ async def gitea_push_verified_commit(
             "scope_verified": True,
             "checks_verified": True,
             "remote_observed_sha": observed_sha,
+            "candidate_verified_after_push": True,
             "outcome": (
                 "completed_after_ambiguous_response"
                 if mutation_error is not None
