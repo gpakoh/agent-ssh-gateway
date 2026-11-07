@@ -530,11 +530,22 @@ _DCR_PROXY_PHASES = frozenset({
 
 
 def _log_dcr_proxy_phase(trace_id: str, phase: str, started_at: float) -> None:
-    """Safe, correlated registration transport milestones (no request data)."""
+    """Emit fixed, credential-free DCR phases to the container's stderr.
+
+    The application logger may inherit WARNING in the Uvicorn process;
+    an INFO-only trace is silently suppressed unless a test configures caplog.
+    Direct, flushed stderr keeps evidence available on a hung registration.
+    """
     if phase not in _DCR_PROXY_PHASES:
         raise ValueError("unknown DCR transport phase")
-    elapsed_ms = max(0, int((time.monotonic() - started_at) * 1000))
-    logger.info("DCR_TRACE id=%s phase=%s elapsed_ms=%d", trace_id, phase, elapsed_ms)
+    if len(trace_id) != 12 or any(ch not in "0123456789abcdef" for ch in trace_id):
+        raise ValueError("invalid DCR trace identifier")
+    elapsed_ms = min(9_999_999, max(0, int((time.monotonic() - started_at) * 1000)))
+    print(
+        f"DCR_TRACE id={trace_id} phase={phase} elapsed_ms={elapsed_ms}",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 async def proxy_request(request: Request) -> StreamingResponse | JSONResponse | Response:
