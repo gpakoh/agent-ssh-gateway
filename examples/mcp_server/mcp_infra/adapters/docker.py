@@ -906,12 +906,37 @@ async def _docker_compose_build_impl(
 ) -> str:
     client = _docker_client()
     resolved_project_dir = _resolve_compose_project_dir(project_dir, client)
-    return await client.compose_build(
-        project_dir=resolved_project_dir,
-        services=services,
-        no_cache=no_cache,
-        timeout=timeout,
-    )
+    try:
+        return await client.compose_build(
+            project_dir=resolved_project_dir,
+            services=services,
+            no_cache=no_cache,
+            timeout=timeout,
+        )
+    except RuntimeError as exc:
+        # Compose/buildx may report absolute host paths and environment-derived
+        # values. Only classify explicit read-only failures; do not echo stderr.
+        diagnostic = str(exc).lower()
+        if "read-only file system" not in diagnostic:
+            raise
+        if "/.docker/buildx" in diagnostic:
+            surface = "client_buildx_home"
+            hint = "Provide an approved writable HOME/Buildx state for the managed Compose runner."
+        elif "/.cache/buildx" in diagnostic or "/.cache/buildkit" in diagnostic:
+            surface = "builder_cache"
+            hint = "Provide an approved writable builder cache for the managed Compose runner."
+        else:
+            surface = "unclassified"
+            hint = "Inspect the approved Compose context and builder mounts; do not alter host paths blindly."
+        return tool_error(
+            tool="docker_compose_build",
+            code="DOCKER_COMMAND_FAILED",
+            message="Docker Compose build attempted a write to a read-only filesystem",
+            retryable=False,
+            hint=hint,
+            details={"failure_class": "read_only_fs", "write_surface": surface},
+            source="docker",
+        )
 
 async def _docker_rmi_impl(images: list[str]) -> RunResult:
     return await _docker_client().rmi(images)

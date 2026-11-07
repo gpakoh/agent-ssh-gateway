@@ -340,6 +340,67 @@ class TestComposeConfirmFlow:
             mock_instance.compose_build.assert_called_once()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("failure_text", "expected_surface"),
+        [
+            (
+                "failed to mkdir /hidden/operator/.docker/buildx: read-only file system; TOKEN=SECRET_456",
+                "client_buildx_home",
+            ),
+            (
+                "failed to write /hidden/operator/.cache/buildkit/state: read-only file system; TOKEN=SECRET_456",
+                "builder_cache",
+            ),
+            (
+                "failed to write /hidden/operator/context: read-only file system; TOKEN=SECRET_456",
+                "unclassified",
+            ),
+        ],
+    )
+    async def test_compose_build_readonly_failure_has_redacted_write_surface(
+        self, clean_confirm_store, failure_text, expected_surface
+    ):
+        action = await docker_compose_build(project_dir=None, services=["web"])
+        assert action["ok"] is True
+        with patch("examples.mcp_server.server.DockerClient") as mock_dc:
+            mock_instance = AsyncMock()
+            mock_instance.compose_build.side_effect = RuntimeError(failure_text)
+            mock_dc.return_value = mock_instance
+            result = await confirm_operation(token=action["result"]["confirm_token"])
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "DOCKER_COMMAND_FAILED"
+        assert result["error"]["retryable"] is False
+        assert result["error"]["details"] == {
+            "failure_class": "read_only_fs",
+            "write_surface": expected_surface,
+        }
+        if expected_surface != "unclassified":
+            assert "writable" in result["error"]["hint"]
+        assert "/hidden/operator" not in json.dumps(result)
+        assert "SECRET_456" not in json.dumps(result)
+        json.dumps(result)
+
+    @pytest.mark.asyncio
+    async def test_compose_build_non_readonly_failure_keeps_existing_error(
+        self, clean_confirm_store
+    ):
+        action = await docker_compose_build(project_dir=None)
+        assert action["ok"] is True
+        with patch("examples.mcp_server.server.DockerClient") as mock_dc:
+            mock_instance = AsyncMock()
+            mock_instance.compose_build.side_effect = RuntimeError(
+                "docker build failed: invalid Dockerfile"
+            )
+            mock_dc.return_value = mock_instance
+            result = await confirm_operation(token=action["result"]["confirm_token"])
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "DOCKER_COMMAND_FAILED"
+        assert result["error"]["message"] == "docker build failed: invalid Dockerfile"
+        assert "details" not in result["error"]
+
+    @pytest.mark.asyncio
     async def test_run_result_success_is_json_serializable(self, clean_confirm_store):
         action = _confirm_store.create_action(
             "docker_rm",
