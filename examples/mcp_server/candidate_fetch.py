@@ -1,10 +1,10 @@
 """Import trusted exact remote refs into an existing managed candidate.
 
-The default branch import requires a matching published feature HEAD. A
-separate feature-head import permits ONLY a verified fast-forward from the
-candidate's clean local feature branch. Neither operation mutates the
-candidate feature branch, worktree or origin; callers can use the existing
-guarded git_refresh_branch_to_head after importing a remote feature.
+The default branch import requires the published feature HEAD to match or
+be an ancestor of the candidate's clean local HEAD. A separate feature-head
+import permits ONLY a verified fast-forward from the local feature branch.
+Neither operation mutates the feature branch, worktree or origin; callers can
+use guarded git_refresh_branch_to_head after importing a remote feature.
 """
 
 from __future__ import annotations
@@ -248,7 +248,16 @@ def fetch_managed_candidate_base(
             stage = "remote_lease"
             lease = _remote_lease(source, feature, branch, expected, token)
             if not feature_import and lease[2] != head:
-                raise FetchRefError("HEAD_MISMATCH")
+                # Unpublished local commits are safe to retain if the published
+                # feature tip is an exact ancestor. Divergent or unavailable
+                # objects must not authorize importing a new default base.
+                stage = "remote_feature_ancestry"
+                ancestor = git._run_git(
+                    ["git", "merge-base", "--is-ancestor", lease[2], head],
+                    cwd=root,
+                )
+                if ancestor.returncode != 0:
+                    raise FetchRefError("GIT_NON_FAST_FORWARD")
             if _is_symbolic_ref(root, tracking):
                 raise FetchRefError("WORKSPACE_CONTENDED")
             previous = git._read_ref(root, tracking)
@@ -326,6 +335,12 @@ def fetch_managed_candidate_base(
                     "source_project": identity["source_project"],
                     "feature_branch": feature,
                     "feature_head": head,
+                    "remote_feature_head": lease[2],
+                    "feature_head_relation": (
+                        "feature_fast_forward"
+                        if feature_import
+                        else "matching" if head == lease[2] else "local_ahead"
+                    ),
                     "owner": lease[0],
                     "repo": lease[1],
                     "local_ref": tracking,
