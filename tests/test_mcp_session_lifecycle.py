@@ -80,6 +80,13 @@ def live_server() -> Any:
     return server_module()
 
 
+@pytest.fixture(autouse=True)
+def _reset_connect_rate_governor(monkeypatch: pytest.MonkeyPatch, live_server: Any) -> None:
+    # The governor is process-global in production, but each independent
+    # lifecycle test must start from a fresh rate-limit window.
+    monkeypatch.setattr(live_server.GatewayClient, "_connect_retry_not_before", 0.0)
+
+
 def _base_client(live_server: Any) -> Any:
     return live_server.GatewayClient(
         base_url="http://gateway.invalid",

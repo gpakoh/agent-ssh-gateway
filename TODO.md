@@ -67,6 +67,7 @@
 
 - [ ] **P2-06: Add retry metadata and coalescing for rate-limit responses.** (legacy #26)
   Rate-limit errors should expose retry-after, bucket identity and lower-cost alternate read guidance. Repeated schema/status reads should be coalesced where possible to avoid making contention worse.
+  **2026-11-07 scoped subcase:** MCP GatewayClient preserves typed `RATE_LIMIT_EXCEEDED` with remaining finite `retry_after_seconds` during an explicit bounded numeric `Retry-After` cooldown. Absent/invalid headers (including capacity 429) never impose a global reconnect block on other sessions; verified by real Streamable HTTP dual-pool lifecycle regression. Remaining: shared per-bucket coalescing and other rate-limit sources; this item is not closed.
 
 - [ ] **P2-07: Diagnose Docker build read-only path failures precisely.** (legacy #27)
   Docker/Compose build failures should identify whether the read-only path is the compose context, HOME/buildx/cache, builder state or daemon namespace, and offer a sanctioned writable-builder-cache recovery path.

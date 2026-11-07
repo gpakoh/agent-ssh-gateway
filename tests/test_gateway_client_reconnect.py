@@ -32,6 +32,11 @@ def _client(**overrides: str) -> GatewayClient:
         return GatewayClient()
 
 
+@pytest.fixture(autouse=True)
+def _reset_connect_governor(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(GatewayClient, "_connect_retry_not_before", 0.0)
+
+
 # ── _require_session_id ────────────────────────────────────────
 
 
@@ -145,14 +150,17 @@ class TestReconnectSession:
 
         err = exc_info.value
         assert err.status_code == 429
-        assert err.body == body
+        assert err.body is not None
+        assert {k: v for k, v in err.body.items() if k != "details"} == body
+        assert err.body["details"] == {"retry_after_seconds": 7}
         assert "429" in str(err)
         assert "RATE_LIMIT_EXCEEDED" in str(err)
 
     def test_raises_structured_error_on_429_without_retry_after(self):
-        """429 without a Retry-After header still surfaces the structured
-        error (code + body preserved); the governor falls back to its
-        default cooldown internally."""
+        """429 without a Retry-After header must not poison other sessions.
+
+        Session-cap 429s can recover as soon as a slot is released.
+        """
         GatewayClient._connect_retry_not_before = 0.0
         client = _client()
         body = {
@@ -172,7 +180,65 @@ class TestReconnectSession:
         err = exc_info.value
         assert err.status_code == 429
         assert err.body == body
+        assert GatewayClient._connect_retry_not_before == 0.0
         assert "RATE_LIMIT_EXCEEDED" in str(err)
+        with patch("gateway_client.httpx.post") as second_post:
+            second_post.return_value.status_code = 200
+            second_post.return_value.json.return_value = {"session_id": "available-sid"}
+            client._reconnect_session()
+            second_post.assert_called_once()
+        assert client.session_id == "available-sid"
+
+    def test_cooldown_returns_rate_limit_without_second_http(self, monkeypatch):
+        from examples.mcp_server.mcp_infra.gateway_errors import (
+            _classify_gateway_error,
+            _gateway_error_details,
+        )
+
+        client = _client()
+        monkeypatch.setattr("gateway_client.time.monotonic", lambda: 100.0)
+        with patch("gateway_client.httpx.post") as post:
+            post.return_value.status_code = 429
+            post.return_value.headers = {"Retry-After": "7"}
+            post.return_value.json.return_value = {
+                "code": "RATE_LIMIT_EXCEEDED",
+                "message": "Too many requests",
+                "retryable": True,
+            }
+            with pytest.raises(GatewayClientError) as first:
+                client._reconnect_session()
+            post.assert_called_once()
+        assert first.value.status_code == 429
+        assert _gateway_error_details(first.value)["retry_after_seconds"] == 7
+
+        monkeypatch.setattr("gateway_client.time.monotonic", lambda: 102.0)
+        with patch("gateway_client.httpx.post") as post:
+            with pytest.raises(GatewayClientError) as second:
+                client._reconnect_session()
+            post.assert_not_called()
+        assert second.value.status_code == 429
+        assert _classify_gateway_error(second.value) == ("RATE_LIMIT_EXCEEDED", True)
+        assert _gateway_error_details(second.value)["retry_after_seconds"] == 5
+
+    @pytest.mark.parametrize(
+        "header", ["NaN", "inf", "-1", "1.5", "100000", "secret=123"]
+    )
+    def test_invalid_retry_after_does_not_hold_global_governor(self, monkeypatch, header):
+        client = _client()
+        monkeypatch.setattr("gateway_client.time.monotonic", lambda: 200.0)
+        with patch("gateway_client.httpx.post") as post:
+            post.return_value.status_code = 429
+            post.return_value.headers = {"Retry-After": header}
+            post.return_value.json.return_value = {}
+            with pytest.raises(GatewayClientError) as captured:
+                client._reconnect_session()
+        err = captured.value
+        assert err.status_code == 429
+        assert err.body["code"] == "RATE_LIMIT_EXCEEDED"
+        assert err.body["retryable"] is True
+        assert "details" not in err.body
+        assert GatewayClient._connect_retry_not_before == 0.0
+        assert header not in str(err)
 
     def test_custom_port(self):
         client = _client(GATEWAY_SSH_PORT="2222")
