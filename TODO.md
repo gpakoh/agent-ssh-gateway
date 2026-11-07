@@ -1,6 +1,6 @@
 # Agent SSH Gateway — TODO
 
-**Reconciled:** 2026-11-07 against protected `master@8e360f8af397ecf2babb06f8b888fffe33a9f546`, exact production build, CI, real tools and live Gitea. PR #810 post-merge CI #23411 SUCCESS (build/deploy/host-smoke); Gateway and MCP both healthy at exact SHA. PR #809 and #808 previously deployed successfully. PR #811 is OPEN at `502191c51c82a7b5d52ab53cbc4fbc6c52b49e64`, CI #23432 still in progress at reconciliation, not in master. Previous baseline: 2026-11-05.
+**Reconciled:** 2026-11-07 against protected `master@af232e84d396fba054f956829cf58665dccb34cf` (one-file verifier PR #811 accepted: exact-head CI #23432 SUCCESS 20/20, guarded merge and matching Git blob). Post-merge CI #23447 is pending; **last independently accepted production remains `8e360f8af397ecf2babb06f8b888fffe33a9f546`** (PR #810, push CI #23411 build/deploy/host-smoke SUCCESS, Gateway/MCP healthy at exact SHA). PR #809/#808 also deployed. **Open PR #812** is the separate TODO reconciliation. Previous baseline: 2026-11-05.
 
 **Open local engineering outcomes: 30 (P1 9 / P2 13 / P3 8). Gitea Issues: 30 OPEN; PRs: 1 OPEN.** Inventories overlap; do NOT add together. Full acceptance, not a narrow PR or a clean test alone, closes a checkbox. Gitea issue.state is authoritative for open/closed; coordination state is separate.
 
@@ -52,7 +52,7 @@
 - [ ] **P2-02: Make verification helpers honor project environments and CI-equivalent toolchains.** (legacy #14)
   `run_pytest`, `run_ruff`, `run_mypy` and verifier containers should not fail falsely on unreadable `.venv`, missing `uv.lock`, unwritable caches, monorepo collection collisions, or verifier/CI tool-version drift. A 2026-10-08 Kojo verified-push attempt additionally proved the trusted verifier image could use `/usr/bin/python` without `pytest`, while the repository verifier could execute the targeted tests. Expose candidate-verifier versus Actions-plane capability provenance explicitly; advertised checks must either run in the selected plane or return a typed environment/bootstrap diagnostic instead of code failure.
   **New confirmed cases:** two `deep-researcher` pip-only candidates fail `run_pytest`/`run_ruff` on mandatory `uv --frozen` with missing `uv.lock`; treat as *one* contract alongside existing env/cache/interpreter parity, with pip/requirements support and CI-equivalent checks.
-  **2026-11-07 verifier #784:** bounded per-candidate flock and redacted phase markers have shipped (#808), while open PR #811 adds a kernel child-FD9 lifetime regression (10/10 local tests PASS, exact CI #23432 pending). Real SSH timeout/cancel process-tree teardown still lacks authorized proof; no lock-inode deletion or speculative FD change.
+  **2026-11-07 verifier #784:** bounded per-candidate flock and redacted phase markers shipped (#808). One-file kernel child-FD9 lifetime regression PR #811 passed 10/10 native tests, exact-head CI #23432 20/20 SUCCESS and protected merge to `af232e84`; post-merge #23447 still pending. Real SSH timeout/cancel descendant teardown lacks authorized proof; no lock-inode deletion or speculative FD change.
   **2026-10-31 scoped progress (not closure):** isolated requirements-only projects without `pyproject.toml` now receive a verifier-only temporary metadata file under the guarded external verifier root; original source remains unchanged, `uv.lock` is never fabricated. Projects with neither supported requirements nor `pyproject.toml` fail with typed `VERIFIER_BOOTSTRAP_FAILED`, not a false pytest failure. Gateway regression covers requirements-only and pyproject-without-lock cases and missing metadata. Full P2-02 remains open for native NOD/Deep Researcher runtime acceptance, CI interpreter/version parity and reliable bootstrap diagnostics; related narrower Gitea Issue #654 was closed on 2026-11-04, which is not acceptance of all P2-02 criteria.
 
 - [ ] **P2-03: Make agent cancellation and submission atomic/reconcilable.** (legacy #15)
@@ -129,7 +129,7 @@
 
 ## Gitea Issues — authoritative coordination index (2026-11-07)
 
-**30 open Gitea Issues; 1 open PR #811.** These overlap the 30 local outcomes, NOT 60 tasks. #801 is the new independent local outcome (P1-10); #806 is a consumer gate under P1-01, #784 under P2-02, #792 under P2-08. #650 and #651 are Gitea-CLOSED and omitted. An unclassified issue title is not implicitly P3.
+**30 open Gitea Issues; 1 open PR #812.** These overlap the 30 local outcomes, NOT 60 tasks. #801 is the new independent local outcome (P1-10); #806 is a consumer gate under P1-01, #784 under P2-02, #792 under P2-08. #650 and #651 are Gitea-CLOSED and omitted. An unclassified issue title is not implicitly P3.
 
 ### P0 operator safety (1)
 
@@ -147,7 +147,7 @@
 ### P2 explicitly marked (10)
 
 - [ ] [#788](https://git.xloud.ru/gpakoh/agent-ssh-gateway/issues/788) **P2-49: staging acceptance for mandatory audit outage/recovery after shipped health evidence** — Isolated audit outage/recovery staging acceptance missing.
-- [ ] [#784](https://git.xloud.ru/gpakoh/agent-ssh-gateway/issues/784) **P2 verifier: unbounded per-candidate flock after timed-out pytest masks test results** — Bounded flock/phase logs deployed, #811 kernel canary CI pending, real SSH cancellation not proven.
+- [ ] [#784](https://git.xloud.ru/gpakoh/agent-ssh-gateway/issues/784) **P2 verifier: unbounded per-candidate flock after timed-out pytest masks test results** — Bounded flock/phase logs deployed, #811 kernel canary merged after 20/20 CI; post-merge #23447 pending, real SSH cancellation not proven.
 - [ ] [#768](https://git.xloud.ru/gpakoh/agent-ssh-gateway/issues/768) **P2: existing Kojo #687 managed candidate cannot import verified current Gitea refs** — Kojo original candidate exact feature/default import acceptance outstanding.
 - [ ] [#742](https://git.xloud.ru/gpakoh/agent-ssh-gateway/issues/742) **P2: read-only host port/PID diagnostics via SSH Gateway (ss, docker-proxy owner, docker port)**
 - [ ] [#688](https://git.xloud.ru/gpakoh/agent-ssh-gateway/issues/688) **P2 [BACKLOG] SSH через HTTP CONNECT + ключи/пароли: полный контракт MCP и маршрутизации**
