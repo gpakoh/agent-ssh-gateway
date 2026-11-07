@@ -965,6 +965,93 @@ async def test_logs_redacts_secrets_in_lines():
 
 
 @pytest.mark.asyncio
+async def test_logs_merges_real_subprocess_stderr_and_redacts_oauth_secrets(
+    tmp_path, monkeypatch
+):
+    """DCR phases are on container stderr, not CLI stdout."""
+    from fleet import docker_client as docker_module
+
+    fake_docker = tmp_path / "docker-stub"
+    fake_docker.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "print('stdout-before', flush=True)\n"
+        "print('DCR_TRACE id=abcdef012345 phase=received elapsed_ms=7', "
+        "file=sys.stderr, flush=True)\n"
+        "print('Authorization: Bearer opaque-bearer', "
+        "file=sys.stderr, flush=True)\n"
+        "print('Authorization: Basic opaque-basic', file=sys.stderr, flush=True)\n"
+        "print('WARN token=opaque-inline', file=sys.stderr, flush=True)\n"
+        "print('WARN cookie=opaque-cookie', file=sys.stderr, flush=True)\n"
+        "print('DATABASE_URL=postgresql://user:opaque-dsn@db.example/app', "
+        "file=sys.stderr, flush=True)\n"
+        "print('stdout-after', flush=True)\n",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o700)
+    monkeypatch.setattr(docker_module, "DOCKER_BIN", str(fake_docker))
+
+    result = await _client().logs("mcp-oauth", tail=20)
+    text = "\n".join(result["lines"])
+    assert result["count"] == 8
+    assert "stdout-before" in text and "stdout-after" in text
+    assert "DCR_TRACE id=abcdef012345 phase=received elapsed_ms=7" in text
+    assert "Authorization: Bearer <redacted>" in text
+    assert "Authorization: Basic <redacted>" in text
+    assert "WARN token=<redacted>" in text
+    assert "WARN cookie=<redacted>" in text
+    assert "DATABASE_URL=<redacted>" in text
+    for secret in ("opaque-bearer", "opaque-basic", "opaque-inline", "opaque-cookie", "opaque-dsn"):
+        assert secret not in text
+
+
+@pytest.mark.asyncio
+async def test_logs_oversize_preserves_latest_stderr_dcr_trace(tmp_path, monkeypatch):
+    """The newest DCR evidence must survive the 50-KiB output bound."""
+    from fleet import docker_client as docker_module
+
+    fake_docker = tmp_path / "docker-stub"
+    fake_docker.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "sys.stdout.write('old-marker\\nTOKEN=' + 'opaque-secret-' * 4000 + '\\n')\n"
+        "sys.stdout.flush()\n"
+        "print('DCR_TRACE id=abcdef012345 phase=upstream_send elapsed_ms=15', "
+        "file=sys.stderr, flush=True)\n",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o700)
+    monkeypatch.setattr(docker_module, "DOCKER_BIN", str(fake_docker))
+
+    result = await _client().logs("mcp-oauth", tail=1000)
+    assert result["truncated"] is True
+    assert "old-marker" not in "\n".join(result["lines"])
+    assert "opaque-secret" not in "\n".join(result["lines"])
+    assert result["lines"][0] == "[output truncated]"
+    assert any("phase=upstream_send" in line for line in result["lines"])
+
+
+@pytest.mark.asyncio
+async def test_logs_cli_failure_does_not_expose_stderr(tmp_path, monkeypatch):
+    from fleet import docker_client as docker_module
+
+    fake_docker = tmp_path / "docker-stub"
+    fake_docker.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "print('PASSWORD=opaque-private', file=sys.stderr, flush=True)\n"
+        "sys.exit(17)\n",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o700)
+    monkeypatch.setattr(docker_module, "DOCKER_BIN", str(fake_docker))
+
+    with pytest.raises(RuntimeError, match="docker logs exited 17") as err:
+        await _client().logs("mcp-oauth")
+    assert "opaque-private" not in str(err.value)
+
+
+@pytest.mark.asyncio
 async def test_compose_services_returns_structured_list():
     c = _client()
 
