@@ -753,7 +753,8 @@ async def test_verified_workspace_adapter_rechecks_then_pushes_exact_sha(
     )
 
     assert result["ok"] is True
-    assert captured["proof_calls"] == 2
+    assert captured["proof_calls"] == 3
+    assert result["result"]["candidate_verified_after_push"] is True
     assert captured["checks"] == {
         "workspace_root": tmp_path,
         "expected_sha": SHA,
@@ -832,6 +833,70 @@ def _delivery_proof() -> dict[str, Any]:
         "changed_files": ["app/a.py", "tests/test_a.py"],
         "allowed_files": ["app/**"],
         "scope_verified": True,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "check_code"),
+    [
+        ("dirty", "WORKSPACE_DIRTY"),
+        ("proof_changed", "WORKSPACE_PROOF_CHANGED"),
+        ("unavailable", "WORKSPACE_VERIFICATION_FAILED"),
+    ],
+)
+async def test_verified_push_reports_candidate_drift_after_remote_publication(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str, check_code: str
+) -> None:
+    state = {"checks": 0, "pushes": 0}
+
+    def verify_workspace(**_kwargs: Any) -> dict[str, Any]:
+        state["checks"] += 1
+        if state["checks"] == 3:
+            if failure == "dirty":
+                raise remote.VerifiedWorkspaceError(
+                    "WORKSPACE_DIRTY", "candidate became dirty after push"
+                )
+            if failure == "unavailable":
+                raise OSError("private host path must not leak")
+            return {**_delivery_proof(), "status_sha256": "f" * 64}
+        return _delivery_proof()
+
+    def push(**_kwargs: Any) -> None:
+        state["pushes"] += 1
+
+    monkeypatch.setenv("GITEA_TOKEN", "managed-token")
+    monkeypatch.setenv("GITEA_GIT_BASE", "https://git.example.test")
+    monkeypatch.setattr(remote, "_server_workspace_registry", lambda: _Registry(tmp_path))
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: _FakeGiteaClient)
+    monkeypatch.setattr(remote, "verify_registered_delivery_workspace", verify_workspace)
+    monkeypatch.setattr(remote, "verify_workspace_via_docker", lambda **_kwargs: None)
+    monkeypatch.setattr(remote, "push_exact_sha", push)
+
+    result = await remote.gitea_push_verified_commit(
+        project="gpt-browser-bridge-hardening",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_base_sha="0" * 40,
+        expected_head_sha=SHA,
+        allowed_files="app/**",
+        required_checks="pytest -q",
+    )
+    assert state == {"checks": 3, "pushes": 1}
+    assert result["ok"] is False
+    assert result["error"]["code"] == "WORKSPACE_CONTENDED"
+    assert result["error"]["retryable"] is False
+    assert "private host path" not in str(result)
+    assert "Do not repeat the push" in result["error"]["hint"]
+    assert result["error"]["details"] == {
+        "phase": "candidate_post_push",
+        "mutation_started": True,
+        "mutation_occurred": True,
+        "expected_head_sha": SHA,
+        "remote_observed_sha": SHA,
+        "branch": "hardening/runtime-deploy",
+        "workspace_check_code": check_code,
     }
 
 
