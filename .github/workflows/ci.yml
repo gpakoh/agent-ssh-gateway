@@ -2112,6 +2112,14 @@ jobs:
           log_file="$(mktemp)"
           if ! /media/1TB/Anaconda/bin/uv run pytest tests/test_mcp_oauth_host_smoke.py -v --tb=short >"$log_file" 2>&1; then
             cat "$log_file"
+            echo "::group::Recent OAuth DCR phases (fixed-shape only)"
+            # Strict fixed-shape filter: never print raw Docker logs or secrets.
+            if ! docker logs --since 3m --tail 3000 mcp-oauth 2>&1 \
+              | grep -E '^DCR_TRACE id=[0-9a-f]{12} phase=(received|body_read|upstream_send|upstream_headers|upstream_error) elapsed_ms=[0-9]{1,7}$' \
+              | tail -n 80; then
+              echo "::notice::No bounded DCR phases available (or Docker log read unavailable)"
+            fi
+            echo "::endgroup::"
             exit 1
           fi
           cat "$log_file"
@@ -2141,7 +2149,19 @@ jobs:
         run: bash scripts/ci-sshd-live-auth-check.sh "${{ github.sha }}"
 
       - name: Make host-smoke (full suite)
-        run: /media/1TB/Anaconda/bin/uv run make host-smoke
+        run: |
+          set -euo pipefail
+          if ! /media/1TB/Anaconda/bin/uv run make host-smoke; then
+            echo "::group::Recent OAuth DCR phases (fixed-shape only)"
+            # Strict fixed-shape filter: never print raw Docker logs or secrets.
+            if ! docker logs --since 3m --tail 3000 mcp-oauth 2>&1 \
+              | grep -E '^DCR_TRACE id=[0-9a-f]{12} phase=(received|body_read|upstream_send|upstream_headers|upstream_error) elapsed_ms=[0-9]{1,7}$' \
+              | tail -n 80; then
+              echo "::notice::No bounded DCR phases available (or Docker log read unavailable)"
+            fi
+            echo "::endgroup::"
+            exit 1
+          fi
 
       - name: Report
         run: |
