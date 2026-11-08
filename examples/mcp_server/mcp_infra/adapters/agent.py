@@ -18,6 +18,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from agent_tasks import _validate_allowed_backends as _validate_allowed_backends
 from agent_tasks import (
     agent_task_status as _agent_task_status,
 )
@@ -54,6 +55,8 @@ from agent_tasks import (
 from agent_tasks import (
     read_agent_task_file as _read_agent_task_file,
 )
+from agent_tasks import validate_acceptance_criteria as _validate_acceptance_criteria
+from agent_tasks import validate_base_ref as _validate_base_ref
 from agent_tasks import validate_required_checks as _validate_required_checks
 from agent_tasks import validate_scope_contract as _validate_scope_contract
 from agent_tasks import (
@@ -475,6 +478,12 @@ def gateway_write_agent_task(
         parsed_checks = _split_lines(required_checks) or []
         _validate_scope_contract(parsed_allowed, parsed_forbidden)
         _validate_required_checks(parsed_checks)
+        # This schema is already enforced by build_task_json(), but that runs
+        # only AFTER source publication. Fail before any bundle or task writes.
+        _validate_base_ref(base_ref)
+        _validate_allowed_backends(agent, None)
+        parsed_acceptance = _split_lines(acceptance_criteria)
+        _validate_acceptance_criteria(parsed_acceptance)
 
         # Publish exact committed source in the trusted control plane before
         # the task becomes runnable. The executor only consumes this root RO.
@@ -534,7 +543,7 @@ def gateway_write_agent_task(
             allowed_files=parsed_allowed,
             forbidden_files=parsed_forbidden,
             required_checks=parsed_checks,
-            acceptance_criteria=_split_lines(acceptance_criteria),
+            acceptance_criteria=parsed_acceptance,
             commit_message=commit_message,
             constraints=constraints,
             worktree_path=worktree_path,
