@@ -325,8 +325,11 @@ def test_webui_e2e_remote_fixture_readiness_has_shared_runner_headroom_and_diagn
 def test_webui_e2e_remote_mode_collects_all_browser_tests_without_local_toolchain() -> None:
     env = os.environ.copy()
     env["SELENIUM_REMOTE_URL"] = "http://selenium.invalid:4444/wd/hub"
+    # Collection only needs pytest-asyncio for project config, not all plugins.
+    # Avoid plugin auto-discovery contention inside parallel CI unit shards.
+    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", "--collect-only", "-q", "tests/test_webui_e2e.py"],
+        [sys.executable, "-m", "pytest", "-p", "pytest_asyncio.plugin", "--collect-only", "-q", "tests/test_webui_e2e.py"],
         cwd=ROOT,
         env=env,
         text=True,
