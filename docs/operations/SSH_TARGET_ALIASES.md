@@ -39,12 +39,12 @@ expand target CIDRs to `0.0.0.0/0` just to reach LXC104.
    root commands. Install its *public* key in the target's
    `~/.ssh/authorized_keys`; do not send private keys to chat, Git or logs.
 3. Keep the authoritative SSH private keys in a protected operator location
-   (e.g. under `/root/.ssh/` on LXC103). The **mcp-oauth** container runs as
+   (in the host administrator's protected SSH key directory). The **mcp-oauth** container runs as
    **UID/GID 1000**, so an untouched root-owned 0600 key mounted read-only
    will NOT be readable by it. Provision a separate narrowly mounted
    0600 copy owned by uid 1000 in an operator-only directory, or an
    equivalent narrowly scoped root-managed credential mount. Never mount
-   the entire `/root` or `/root/.ssh` directory into the MCP container.
+   the host administrator's entire home or SSH key directory into the MCP container.
    The feature refuses group/world-readable key files and symlinks.
 4. Verify the host **public-key fingerprint out of band** (from the Proxmox
    console or SSH host-key files). Register the corresponding host key in
