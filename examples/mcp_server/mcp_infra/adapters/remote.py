@@ -939,6 +939,53 @@ def _valid_commit_sha(value: Any) -> str | None:
     return text
 
 
+async def _concurrent_merge_after_incomplete_ci(
+    client: Any,
+    owner: str,
+    repo: str,
+    pull_number: int,
+    expected_head_sha: str,
+) -> dict[str, Any] | None:
+    """Read-only, exact-head observation; never turn missing CI into merge permission.
+
+    An independent actor may merge while our CI evidence is being read.
+    Report that observed state without claiming this invocation performed a
+    merge, and without repeating a mutation or accepting unproved receipts.
+    """
+    try:
+        observed = await client.get_pull_request(owner, repo, pull_number)
+    except Exception:
+        return None
+    if not isinstance(observed, dict):
+        return None
+    head = observed.get("head")
+    merge_sha = _valid_commit_sha(observed.get("merge_commit_sha"))
+    if (
+        type(observed.get("number")) is not int
+        or observed["number"] != pull_number
+        or observed.get("state") != "closed"
+        or observed.get("merged") is not True
+        or not isinstance(head, dict)
+        or _valid_commit_sha(head.get("sha")) != expected_head_sha
+        or merge_sha is None
+    ):
+        return None
+    return tool_error(
+        tool="gitea_merge_pull_request",
+        code="PR_NOT_OPEN",
+        message="pull request became merged while CI evidence was incomplete; no merge mutation was issued",
+        retryable=False,
+        hint="Verify the observed merge commit and current master independently; do not repeat the merge.",
+        details={
+            "expected_head_sha": expected_head_sha,
+            "observed_merge_commit_sha": merge_sha,
+            "concurrent_merge_observed": True,
+            "mutation_started": False,
+        },
+        source="gitea",
+    )
+
+
 def _merge_exception_is_ambiguous(exc: BaseException) -> bool:
     """Return whether a failed merge request may still have mutated Gitea."""
     if isinstance(
@@ -1729,6 +1776,12 @@ async def gitea_merge_pull_request(
                 branch_ci_policy,
             )
             if ci_status != "CI_GREEN":
+                if ci_status == "CI_EVIDENCE_INCOMPLETE":
+                    concurrent = await _concurrent_merge_after_incomplete_ci(
+                        client, owner, repo, pull_number, expected_head_sha
+                    )
+                    if concurrent is not None:
+                        return concurrent
                 return _ci_evidence_tool_error(ci_status)
 
             latest_pr = await client.get_pull_request(owner, repo, pull_number)
@@ -1832,6 +1885,12 @@ async def gitea_merge_pull_request(
                 latest_branch_ci_policy,
             )
             if ci_status != "CI_GREEN":
+                if ci_status == "CI_EVIDENCE_INCOMPLETE":
+                    concurrent = await _concurrent_merge_after_incomplete_ci(
+                        client, owner, repo, pull_number, expected_head_sha
+                    )
+                    if concurrent is not None:
+                        return concurrent
                 return _ci_evidence_tool_error(ci_status)
 
             mutation_error: BaseException | None = None

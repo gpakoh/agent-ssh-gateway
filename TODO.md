@@ -96,6 +96,7 @@
 
 - [ ] **P2-17: Reconcile ambiguous merge attempts when CI evidence read fails but PR becomes merged.** (legacy #4)
   Father UI PR #48 returned `CI_EVIDENCE_INCOMPLETE` while later observed merged; resolve stale/ambiguous responses by exact post-state/head/base/job audit before retries.
+  **2026-11-08 scoped subcase:** before either CI-evidence gate returns `CI_EVIDENCE_INCOMPLETE`, a single read-only PR recheck can identify a concurrent merge with exact expected HEAD and valid merge commit SHA. It reports `PR_NOT_OPEN` plus a bounded observed merge receipt explicitly stating `mutation_started=false`, never reports this call as the writer and never relaxes CI green requirements. Missing, changing or untrusted post-state retains the original incomplete CI failure; next step remains independent base/job-state attestation and all other ambiguous mutation paths.
 
 ## P3 — Optional capabilities and ergonomics (8)
 
