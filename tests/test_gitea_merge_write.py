@@ -984,6 +984,99 @@ async def test_adapter_fails_closed_on_unprovable_workflow_inventory(
 
 
 @pytest.mark.asyncio
+async def test_merge_ci_incomplete_observes_concurrent_merge_without_mutating(monkeypatch):
+    """An external merge during our first CI read is not our own success."""
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient("token", workflow_payload=None)
+    original = client.list_workflows
+
+    async def concurrent_merge(*args):
+        client.merged = True
+        return await original(*args)
+
+    client.list_workflows = concurrent_merge
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request("owner", "repo", 25, SHA)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "PR_NOT_OPEN"
+    assert result["error"]["retryable"] is False
+    assert result["error"]["details"] == {
+        "expected_head_sha": SHA,
+        "observed_merge_commit_sha": "b" * 40,
+        "concurrent_merge_observed": True,
+        "mutation_started": False,
+    }
+    assert client.merge_calls == []
+    assert client.pr_reads == 2
+    assert client.action_run_pages == []
+
+
+@pytest.mark.asyncio
+async def test_merge_ci_incomplete_second_read_observes_external_merge(monkeypatch):
+    """A concurrent merge between two CI attestations remains read-only."""
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient("token")
+    original = client.list_workflows
+
+    async def second_workflow_becomes_unprovable(*args):
+        response = await original(*args)
+        if client.workflow_reads == 2:
+            client.merged = True
+            return {}
+        return response
+
+    client.list_workflows = second_workflow_becomes_unprovable
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request("owner", "repo", 25, SHA)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "PR_NOT_OPEN"
+    assert result["error"]["details"]["mutation_started"] is False
+    assert result["error"]["details"]["observed_merge_commit_sha"] == "b" * 40
+    assert client.merge_calls == []
+    assert client.pr_reads == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("untrusted_poststate", ["invalid_merge_sha", "changed_head", "read_failure"])
+async def test_merge_ci_incomplete_never_accepts_unproven_external_merge(
+    monkeypatch, untrusted_poststate
+):
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient("token", workflow_payload=None)
+    original_workflows = client.list_workflows
+    original_pr_read = client.get_pull_request
+
+    async def concurrent_merge(*args):
+        client.merged = True
+        return await original_workflows(*args)
+
+    async def untrusted_read(*args):
+        if client.pr_reads >= 1 and untrusted_poststate == "read_failure":
+            raise httpx.ReadTimeout("private-stderr-content")
+        result = await original_pr_read(*args)
+        if client.pr_reads >= 2 and untrusted_poststate == "invalid_merge_sha":
+            result["merge_commit_sha"] = "invalid"
+        if client.pr_reads >= 2 and untrusted_poststate == "changed_head":
+            result["head"]["sha"] = "c" * 40
+        return result
+
+    client.list_workflows = concurrent_merge
+    client.get_pull_request = untrusted_read
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request("owner", "repo", 25, SHA)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CI_EVIDENCE_INCOMPLETE"
+    assert client.merge_calls == []
+    assert "private-stderr-content" not in repr(result)
+
+
+@pytest.mark.asyncio
 async def test_adapter_merges_bootstrap_pull_request_with_no_configured_workflows(monkeypatch):
     monkeypatch.setenv("GITEA_TOKEN", "token")
     client = FakeMergeClient("token", workflow_payload={"total_count": 0, "workflows": []})
