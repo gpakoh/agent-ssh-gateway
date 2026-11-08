@@ -67,6 +67,24 @@ expand target CIDRs to `0.0.0.0/0` just to reach LXC104.
    environment values name files on the LXC103 *Docker host*. Never set
    them from a request or print their contents. The main Compose file
    remains unchanged until an operator deliberately includes the override.
+   To **persist** this across CI deployments, put the following entries in
+   the operator-owned `docker/.env` on the deployment host (never in Git):
+
+   ```dotenv
+   SSH_TARGETS_OVERLAY_ENABLED=true
+   MCP_SSH_TARGETS_CONFIG_SOURCE=/srv/gateway-ssh-targets/targets.json
+   MCP_SSH_LXC103_KEY_SOURCE=/srv/gateway-ssh-targets/keys/lxc103
+   MCP_SSH_LXC104_KEY_SOURCE=/srv/gateway-ssh-targets/keys/lxc104
+   ```
+
+   The reviewed `scripts/deploy-from-registry.sh` applies this fixed
+   read-only overlay during normal rollout **and rollback**. Before pulling
+   images it rejects missing/symlinked/relative files, a group/world-writable
+   config, keys not owned by host UID 1000 with mode 0600, and invalid Compose
+   configuration. `SSH_TARGETS_OVERLAY_ENABLED=false` (the default)
+   uses the original Compose model. A one-off Compose override would be
+   lost on the next CI deployment. If the optional Media API overlay is
+   also enabled, both fixed overlays compose together.
 7. Start only the affected MCP adapter via the existing guarded,
    immutable-image deployment path. Verify the exact build SHA, then
    `list_ssh_targets` and harmless `hostname`/`id -un`/health

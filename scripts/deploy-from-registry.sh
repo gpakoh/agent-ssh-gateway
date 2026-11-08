@@ -55,6 +55,53 @@ case "$SITE_MEDIA_OVERLAY_ENABLED" in
     ;;
 esac
 
+# Persistent, operator-only LXC SSH target mounts.  The opt-in belongs in
+# docker/.env because CI invokes this script afresh on every rollout; a one-off
+# `docker compose -f ...` command would be lost at the next deploy/rollback.
+# Fail before any image pull or container replacement when local credentials
+# are missing or unexpectedly readable by other host users.
+SSH_TARGETS_OVERLAY_ENABLED="${SSH_TARGETS_OVERLAY_ENABLED:-false}"
+case "$SSH_TARGETS_OVERLAY_ENABLED" in
+  true)
+    if [ "$COMPOSE" != "$BASE_COMPOSE" ] &&
+       [ "$SITE_MEDIA_OVERLAY_ENABLED" = "false" ]; then
+      echo "SSH targets overlay: NO-GO (custom COMPOSE override is not allowed)" >&2
+      exit 1
+    fi
+    for variable in MCP_SSH_TARGETS_CONFIG_SOURCE MCP_SSH_LXC103_KEY_SOURCE MCP_SSH_LXC104_KEY_SOURCE; do
+      source_file="${!variable:-}"
+      if [[ "$source_file" != /* ]] || [ ! -f "$source_file" ] || [ -L "$source_file" ]; then
+        echo "SSH targets overlay: NO-GO (missing, symlinked or non-absolute $variable)" >&2
+        exit 1
+      fi
+    done
+    config_mode=$(stat -c '%a' "$MCP_SSH_TARGETS_CONFIG_SOURCE")
+    if [[ ! "$config_mode" =~ ^[0-7]{3,4}$ ]] || (( (8#$config_mode & 8#022) != 0 )); then
+      echo "SSH targets overlay: NO-GO (unsafe config permissions)" >&2
+      exit 1
+    fi
+    for variable in MCP_SSH_LXC103_KEY_SOURCE MCP_SSH_LXC104_KEY_SOURCE; do
+      source_file="${!variable}"
+      read -r key_owner key_mode < <(stat -c '%u %a' "$source_file")
+      if [ "$key_owner" != "1000" ] || [ "$key_mode" != "600" ]; then
+        echo "SSH targets overlay: NO-GO (key must be uid 1000 mode 0600: $variable)" >&2
+        exit 1
+      fi
+    done
+    COMPOSE="$COMPOSE -f docker/compose.ssh-targets.example.yml"
+    if ! $COMPOSE config -q >/dev/null 2>&1; then
+      echo "SSH targets overlay: NO-GO (Compose configuration invalid)" >&2
+      exit 1
+    fi
+    ;;
+  false)
+    ;;
+  *)
+    echo "SSH targets overlay: NO-GO (SSH_TARGETS_OVERLAY_ENABLED must be true or false)" >&2
+    exit 1
+    ;;
+esac
+
 GATEWAY_REPO="${WEB_SSH_GATEWAY_REPO:?set WEB_SSH_GATEWAY_REPO in docker/.env}"
 MCP_REPO="${MCP_SERVER_REPO:?set MCP_SERVER_REPO in docker/.env}"
 # CI publishes the executor next to the gateway artifact.
