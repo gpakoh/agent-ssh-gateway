@@ -1,9 +1,9 @@
 {
   "mode": "mcp_client",
   "safe_mode": true,
-  "expected_safe_count": 95,
-  "expected_blocked_count": 38,
-  "expected_mcp_client_full_count": 132,
+  "expected_safe_count": 96,
+  "expected_blocked_count": 39,
+  "expected_mcp_client_full_count": 133,
   "must_include": [
     "docker_network_ls",
     "docker_network_inspect",
@@ -23,7 +23,8 @@
     "coord_board",
     "docker_recovery_catalog",
     "gateway_catalog",
-    "gateway_skill"
+    "gateway_skill",
+    "list_ssh_targets"
   ],
   "must_exclude": [
     "docker_compose_up",
@@ -31,6 +32,7 @@
     "docker_migrate_content_harvester",
     "docker_prepare_site_audit_lkg_recovery",
     "docker_exec",
+    "execute_target_argv",
     "apply_patch",
     "run_agent",
     "run_agents",

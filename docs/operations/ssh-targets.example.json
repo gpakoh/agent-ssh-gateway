@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "targets": {
+    "lxc103": {
+      "host": "192.0.2.103",
+      "port": 22,
+      "username": "gatewayops",
+      "key_file": "lxc103"
+    },
+    "lxc104": {
+      "host": "192.0.2.104",
+      "port": 22,
+      "username": "mailops",
+      "key_file": "lxc104"
+    }
+  }
+}

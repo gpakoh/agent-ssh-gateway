@@ -83,6 +83,7 @@ from examples.mcp_server.mcp_infra.tool_registry import (
     run_tool,
     run_tool_async,
 )
+from examples.mcp_server.ssh_targets import TargetConfigError, execute_target, target_inventory
 
 _classify_gateway_error = gateway_errors._classify_gateway_error
 _gateway_error_message = gateway_errors._gateway_error_message
@@ -796,6 +797,64 @@ def gateway_execute_argv(
             stderr=raw.get("stderr", ""),
             execution_duration_ms=int(raw.get("duration", 0) * 1000),
         ),
+        source="gateway",
+    )
+
+
+def gateway_list_ssh_targets() -> dict[str, Any]:
+    """List operator-approved SSH host aliases without revealing key paths."""
+    try:
+        items = target_inventory()
+    except (OSError, TargetConfigError):
+        return tool_error(
+            tool="list_ssh_targets", code="TARGET_CONFIG_INVALID",
+            message="SSH target configuration is unavailable or invalid",
+            retryable=False, source="gateway", read_only=True,
+        )
+    return tool_success(
+        tool="list_ssh_targets",
+        result={"targets": items, "count": len(items)},
+        read_only=True,
+        source="gateway",
+    )
+
+
+def gateway_execute_target_argv(
+    target: str,
+    argv: list[str],
+    stdin: str = "",
+    timeout_s: int = 30,
+) -> dict[str, Any]:
+    """Execute argv on a pre-approved LXC host by name, using a pinned SSH key.
+
+    Caller cannot select an arbitrary IP, username or key. Every command runs
+    through the regular Gateway /execute-argv route and its mandatory policy
+    and audit. The target session is ephemeral and disconnected after use.
+    """
+    try:
+        raw = execute_target(
+            target=target, argv=argv, stdin=stdin, timeout_s=timeout_s
+        )
+    except TargetConfigError:
+        return tool_error(
+            tool="execute_target_argv", code="TARGET_CONFIG_INVALID",
+            message="Unknown SSH target or invalid operator configuration",
+            retryable=False, source="gateway",
+        )
+    except GatewayClientError as exc:
+        return _gateway_client_tool_error("execute_target_argv", exc)
+    return tool_success(
+        tool="execute_target_argv",
+        result={
+            "target": target,
+            **build_command_result(
+                outcome="passed" if raw.get("exit_code", 1) == 0 else "failed",
+                exit_code=raw.get("exit_code", -1),
+                stdout=raw.get("stdout", ""),
+                stderr=raw.get("stderr", ""),
+                execution_duration_ms=int(raw.get("duration", 0) * 1000),
+            ),
+        },
         source="gateway",
     )
 
@@ -1576,6 +1635,8 @@ def register_all() -> None:
     register_tool("session_health")(gateway_session_health)
     register_tool("execute_restricted")(gateway_execute_restricted)
     register_tool("execute_argv")(gateway_execute_argv)
+    register_tool("list_ssh_targets")(gateway_list_ssh_targets)
+    register_tool("execute_target_argv")(gateway_execute_target_argv)
     register_tool("apply_patch")(instrumented("apply_patch")(gateway_apply_patch))
     register_tool("job_status")(gateway_job_status_protocol)
     register_tool("job_result")(gateway_job_result_protocol)

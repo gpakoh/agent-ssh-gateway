@@ -1,0 +1,13 @@
+# Operator opt-in only:
+# docker compose -f docker/docker-compose.yml -f docker/compose.ssh-targets.example.yml ...
+# This file alone does NOT enable SSH access, open firewall ports, or
+# install keys on LXC103/LXC104. The source paths are required at invocation.
+services:
+  mcp-oauth:
+    environment:
+      - MCP_SSH_TARGETS_FILE=/run/ssh-targets/targets.json
+      - MCP_SSH_TARGET_KEY_DIR=/run/ssh-targets/keys
+    volumes:
+      - ${MCP_SSH_TARGETS_CONFIG_SOURCE:?operator-owned JSON file required}:/run/ssh-targets/targets.json:ro
+      - ${MCP_SSH_LXC103_KEY_SOURCE:?operator-owned file readable by container uid 1000 required}:/run/ssh-targets/keys/lxc103:ro
+      - ${MCP_SSH_LXC104_KEY_SOURCE:?operator-owned file readable by container uid 1000 required}:/run/ssh-targets/keys/lxc104:ro

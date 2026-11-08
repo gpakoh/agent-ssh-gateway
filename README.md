@@ -230,6 +230,7 @@ Start with:
 - [MCP server guide](examples/mcp_server/README.md)
 - [Remote MCP adapter](examples/mcp_client_remote/README.md)
 - [MCP operator runbook](docs/operations/MCP_OPERATOR_RUNBOOK.md)
+- [Managed SSH target aliases for LXC103/LXC104](docs/operations/SSH_TARGET_ALIASES.md)
 - [ChatGPT attachment guide](docs/operations/CHATGPT_TOOL_ATTACH.md)
 
 ## Agent handoff
