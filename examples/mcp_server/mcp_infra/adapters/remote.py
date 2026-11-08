@@ -1642,37 +1642,80 @@ async def gitea_merge_pull_request(
     allow_outdated_base: bool = False,
 ) -> dict[str, Any]:
     """Merge an open, mergeable PR only when its expected head has green CI and current base."""
-    token = os.environ.get("GITEA_TOKEN", "")
-    if not token:
+    # Reject malformed arguments before token lookup or remote I/O. In particular,
+    # non-string SHA/method values must not raise a raw AttributeError/TypeError.
+    if type(pull_number) is not int or pull_number < 1:
         return tool_error(
             tool="gitea_merge_pull_request",
-            code="DEPENDENCY_MISSING",
-            message="GITEA_TOKEN not configured",
+            code="INVALID_INPUT",
+            message="pull_number must be a positive integer",
+            retryable=False,
+            details={"field": "pull_number", "min_value": 1},
             source="gitea",
         )
-
+    if not isinstance(expected_head_sha, str):
+        return tool_error(
+            tool="gitea_merge_pull_request",
+            code="INVALID_INPUT",
+            message="expected_head_sha must be a 40-character SHA-1",
+            retryable=False,
+            details={"field": "expected_head_sha"},
+            source="gitea",
+        )
     expected_head_sha = expected_head_sha.strip().lower()
     if len(expected_head_sha) != 40 or any(c not in "0123456789abcdef" for c in expected_head_sha):
         return tool_error(
             tool="gitea_merge_pull_request",
             code="INVALID_INPUT",
             message="expected_head_sha must be a 40-character SHA-1",
+            retryable=False,
+            details={"field": "expected_head_sha"},
             source="gitea",
         )
     if expected_base_sha is not None:
+        if not isinstance(expected_base_sha, str):
+            return tool_error(
+                tool="gitea_merge_pull_request",
+                code="INVALID_INPUT",
+                message="expected_base_sha must be a 40-character SHA-1 when provided",
+                retryable=False,
+                details={"field": "expected_base_sha"},
+                source="gitea",
+            )
         expected_base_sha = expected_base_sha.strip().lower()
         if len(expected_base_sha) != 40 or any(c not in "0123456789abcdef" for c in expected_base_sha):
             return tool_error(
                 tool="gitea_merge_pull_request",
                 code="INVALID_INPUT",
                 message="expected_base_sha must be a 40-character SHA-1 when provided",
+                retryable=False,
+                details={"field": "expected_base_sha"},
                 source="gitea",
             )
-    if method not in {"merge", "squash"}:
+    if not isinstance(method, str) or method not in {"merge", "squash"}:
         return tool_error(
             tool="gitea_merge_pull_request",
             code="INVALID_INPUT",
             message="merge method must be one of: merge, squash",
+            retryable=False,
+            details={"field": "method", "allowed_values": ["merge", "squash"]},
+            source="gitea",
+        )
+    if type(allow_outdated_base) is not bool:
+        return tool_error(
+            tool="gitea_merge_pull_request",
+            code="INVALID_INPUT",
+            message="allow_outdated_base must be a boolean",
+            retryable=False,
+            details={"field": "allow_outdated_base"},
+            source="gitea",
+        )
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return tool_error(
+            tool="gitea_merge_pull_request",
+            code="DEPENDENCY_MISSING",
+            message="GITEA_TOKEN not configured",
             source="gitea",
         )
 

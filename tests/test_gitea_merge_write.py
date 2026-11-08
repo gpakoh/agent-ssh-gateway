@@ -1353,6 +1353,63 @@ async def test_adapter_passes_squash_through_existing_merge_guards(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("overrides", "field"),
+    [
+        ({"pull_number": True}, "pull_number"),
+        ({"pull_number": 0}, "pull_number"),
+        ({"pull_number": "25"}, "pull_number"),
+        ({"expected_head_sha": None}, "expected_head_sha"),
+        ({"expected_head_sha": "not-a-sha"}, "expected_head_sha"),
+        ({"expected_base_sha": False}, "expected_base_sha"),
+        ({"expected_base_sha": "not-a-sha"}, "expected_base_sha"),
+        ({"method": []}, "method"),
+        ({"method": "rebase"}, "method"),
+        ({"allow_outdated_base": 1}, "allow_outdated_base"),
+    ],
+)
+async def test_merge_input_validation_precedes_auth_and_remote_reads(
+    monkeypatch, overrides, field
+):
+    """Malformed inputs fail locally, even while Gitea credentials are absent."""
+    monkeypatch.delenv("GITEA_TOKEN", raising=False)
+
+    def fail_if_remote_called():
+        raise AssertionError("Remote client must not be created for malformed input")
+
+    monkeypatch.setattr(remote, "_server_gitea_client", fail_if_remote_called)
+    options = {
+        "owner": "owner",
+        "repo": "repo",
+        "pull_number": 25,
+        "expected_head_sha": SHA,
+        "expected_base_sha": BASE_SHA,
+        "method": "merge",
+        "allow_outdated_base": False,
+    }
+    options.update(overrides)
+
+    result = await remote.gitea_merge_pull_request(**options)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INVALID_INPUT"
+    assert result["error"]["retryable"] is False
+    assert result["error"]["details"]["field"] == field
+    if field == "method":
+        assert result["error"]["details"]["allowed_values"] == ["merge", "squash"]
+
+
+@pytest.mark.asyncio
+async def test_merge_valid_input_still_requires_gitea_token_before_remote_reads(monkeypatch):
+    monkeypatch.delenv("GITEA_TOKEN", raising=False)
+    result = await remote.gitea_merge_pull_request(
+        "owner", "repo", 25, SHA, expected_base_sha=BASE_SHA
+    )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "DEPENDENCY_MISSING"
+
+
+@pytest.mark.asyncio
 async def test_adapter_rejects_unsupported_merge_method_before_remote_reads(monkeypatch):
     monkeypatch.setenv("GITEA_TOKEN", "token")
     client = FakeMergeClient("token")
