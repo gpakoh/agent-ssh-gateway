@@ -44,6 +44,50 @@ def test_write_agent_task_publishes_source_before_remote_write(monkeypatch, tmp_
     assert events == ["publish-source", "write-task"]
 
 
+@pytest.mark.parametrize(
+    ("invalid_inputs", "expected_error"),
+    [
+        ({"base_ref": "master"}, "Invalid base_ref"),
+        ({"agent": "unsupported-backend"}, "known concrete backend"),
+        ({"acceptance_criteria": "x" * 1001}, "acceptance_criteria[0]"),
+        (
+            {"source_mode": "dirty_worktree_snapshot", "base_ref": "master"},
+            "Invalid base_ref",
+        ),
+    ],
+)
+def test_schema_errors_refuse_source_publication_and_task_write(
+    monkeypatch, invalid_inputs, expected_error
+):
+    """Local contract errors must not invoke slow SSH or source publication."""
+    import examples.mcp_server.mcp_infra.adapters.agent as adapter
+
+    published_committed = MagicMock()
+    published_dirty = MagicMock()
+    recorded = MagicMock()
+    written = MagicMock()
+    monkeypatch.setattr(adapter, "ensure_managed_source_bundle", published_committed)
+    monkeypatch.setattr(adapter, "ensure_dirty_worktree_review_bundle", published_dirty)
+    monkeypatch.setattr(adapter, "record_task_delivery_contract", recorded)
+    monkeypatch.setattr(adapter, "_write_agent_task", written)
+    args = {
+        "project": "nod",
+        "task_id": "schema-preflight-001",
+        "agent": "opencode",
+        "task": "Review the task locally",
+        "base_ref": "a" * 40,
+    }
+    args.update(invalid_inputs)
+
+    result = adapter.gateway_write_agent_task(**args)
+    assert result["ok"] is False
+    assert expected_error in result["error"]["message"]
+    published_committed.assert_not_called()
+    published_dirty.assert_not_called()
+    recorded.assert_not_called()
+    written.assert_not_called()
+
+
 def test_source_publication_failure_leaves_no_runnable_task(monkeypatch):
     import examples.mcp_server.mcp_infra.adapters.agent as adapter
     import examples.mcp_server.server as server_mod

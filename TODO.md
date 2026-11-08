@@ -67,6 +67,7 @@
 
 - [ ] **P2-05: Fail schema validation quickly before slow control-plane work.** (legacy #24)
   Pure local/schema errors such as invalid enum values should return near the API boundary with allowed values and typed diagnostics, not after long router or backend latency.
+  **2026-11-08 scoped subcase:** `gateway_write_agent_task` now validates the exact `base_ref`, known agent backend and bounded `acceptance_criteria` before source-bundle publication or task/delivery-record writes, extending its existing early checks for task id, source mode, workflow phase, scopes and executable commands. Regression proves invalid inputs cannot publish, record or write a task. Remaining: audit other slow router/tool surfaces and ensure typed near-boundary errors across the control plane; item stays open.
 
 - [ ] **P2-06: Add retry metadata and coalescing for rate-limit responses.** (legacy #26)
   Rate-limit errors should expose retry-after, bucket identity and lower-cost alternate read guidance. Repeated schema/status reads should be coalesced where possible to avoid making contention worse.
