@@ -1073,6 +1073,10 @@ class TestFleetPostgresCiGate:
         assert "POSTGRES_PASSWORD=fleet-ci-only" in run
         assert "POSTGRES_DB=fleet_test" in run
         assert "pg_isready -U postgres -d fleet_test" in run
+        # Keep a finite readiness budget yet tolerate the measured slow
+        # startup on a heavily loaded CI Docker host. Never bypass pg_isready.
+        assert "for i in $(seq 1 180); do" in run
+        assert 'if [ "$ready" != "1" ]; then' in run
         assert "Fleet postgres vanished before readiness" in run
         assert "Fleet postgres exited before readiness" in run
         assert "docker inspect --format '{{json .State}}'" in run

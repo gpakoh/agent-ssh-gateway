@@ -994,8 +994,12 @@ jobs:
             -e POSTGRES_DB=fleet_test \
             pgvector/pgvector:pg16 >/dev/null
 
+          # On the shared runner CI #23890 spent >3 minutes creating and
+          # initializing a healthy PostgreSQL image; the old 90x2s loop
+          # expired just as postmaster started. Preserve real pg_isready and
+          # state checks; allow six bounded minutes for initialization.
           ready=""
-          for i in $(seq 1 90); do
+          for i in $(seq 1 180); do
             if docker exec "$pg_name" pg_isready -U postgres -d fleet_test -h 127.0.0.1 >/dev/null 2>&1; then
               ready=1
               break
