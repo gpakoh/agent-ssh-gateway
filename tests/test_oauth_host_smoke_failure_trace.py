@@ -31,7 +31,7 @@ def _dcr_filter() -> str:
         assert "|| true" not in run
         assert "No bounded DCR phases available" in run
         assert run.index("if ! ") < run.index("docker logs") < run.index("exit 1")
-        assert "::group::Recent OAuth DCR phases (fixed-shape only)" in run
+        assert "::group::Recent OAuth DCR/provisioning phases (fixed-shape only)" in run
         syntax = subprocess.run(
             ["bash", "-n"], input=run, text=True, capture_output=True, timeout=5
         )
@@ -48,6 +48,10 @@ def test_host_smoke_failure_logs_only_fixed_shape_dcr_phases() -> None:
     safe = (
         "DCR_TRACE id=abcdef012345 phase=received elapsed_ms=2\n"
         "DCR_TRACE id=abcdef012345 phase=upstream_send elapsed_ms=119\n"
+        "DCR_STORE_TRACE id=fedcba987654 phase=begin elapsed_ms=0\n"
+        "DCR_STORE_TRACE id=fedcba987654 phase=lock_acquired elapsed_ms=5\n"
+        "DCR_STORE_TRACE id=fedcba987654 phase=loaded elapsed_ms=7\n"
+        "DCR_STORE_TRACE id=fedcba987654 phase=persisted elapsed_ms=42\n"
     )
     unsafe = (
         "Authorization: Bearer opaque-bearer\n"
@@ -57,6 +61,10 @@ def test_host_smoke_failure_logs_only_fixed_shape_dcr_phases() -> None:
         "DCR_TRACE id=abcdef012345 phase=received elapsed_ms=2\rSECRET=private\n"
         "DCR_TRACE id=abcdef012345 phase=upstream_headers elapsed_ms=1000000000\n"
         "DCR_TRACE id=abcdef012345 phase=received elapsed_ms=2 /private/path\n"
+        "DCR_STORE_TRACE id=fedcba987654 phase=begin elapsed_ms=2 client_id=private\n"
+        "DCR_STORE_TRACE id=fedcba987654 phase=unknown elapsed_ms=5\n"
+        "DCR_STORE_TRACE id=fedcba987654 phase=loaded elapsed_ms=2\rTOKEN=private\n"
+        "DCR_STORE_TRACE id=fedcba987654 phase=persisted elapsed_ms=100000000\n"
     )
     filtered = subprocess.run(
         ["grep", "-E", pattern],

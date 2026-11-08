@@ -10,6 +10,7 @@ connection itself had changed.
 
 import asyncio
 import os
+import re
 import tempfile
 
 import pytest
@@ -79,6 +80,74 @@ def test_register_client_persists_to_store(store_path):
     assert len(loaded) == 1
     assert loaded[0].client_id == client_id
     assert loaded[0].redirect_uris == ["https://chat.example.com/callback"]
+
+
+def test_client_store_phase_trace_never_emits_client_data_or_paths(store_path, capsys):
+    """A registration's bounded store phases are safe to retain in CI."""
+    store = ClientStore(store_path)
+    client = StoredClient(
+        client_id="mcp_client_secret-value-should-not-log",
+        redirect_uris=["https://callback.example.com/?token=secret-should-not-log"],
+    )
+    store.add(client)
+    lines = capsys.readouterr().err.splitlines()
+
+    assert len(lines) == 4
+    expected_phases = ("begin", "lock_acquired", "loaded", "persisted")
+    ids = set()
+    for line, phase in zip(lines, expected_phases, strict=True):
+        match = re.fullmatch(
+            rf"DCR_STORE_TRACE id=([0-9a-f]{{12}}) phase={phase} elapsed_ms=([0-9]{{1,7}})",
+            line,
+        )
+        assert match is not None
+        ids.add(match.group(1))
+    assert len(ids) == 1
+    assert all("secret" not in line and store_path not in line for line in lines)
+    assert len(store.load()) == 1
+
+
+def test_failed_store_phase_trace_is_sanitized_and_preserves_error(
+    store_path, monkeypatch, capsys
+):
+    store = ClientStore(store_path)
+
+    def fail_persist(_clients):
+        raise PermissionError("client_secret=never-print-this-or-store-path " + store_path)
+
+    monkeypatch.setattr(store, "_write", fail_persist)
+    with pytest.raises(PermissionError, match="client_secret="):
+        store.add(StoredClient(client_id="test-failed", redirect_uris=["https://a.example/cb"]))
+    lines = capsys.readouterr().err.splitlines()
+    assert len(lines) == 4
+    assert [re.search(r" phase=([a-z_]+) ", line).group(1) for line in lines] == [
+        "begin", "lock_acquired", "loaded", "failed"
+    ]
+    assert all(
+        re.fullmatch(
+            r"DCR_STORE_TRACE id=[0-9a-f]{12} phase=[a-z_]+ elapsed_ms=[0-9]{1,7}",
+            line,
+        )
+        for line in lines
+    )
+    assert "never-print-this" not in "\n".join(lines)
+    assert store_path not in "\n".join(lines)
+    assert store.load() == []
+
+
+def test_client_store_trace_sink_failure_does_not_break_persistence(
+    store_path, monkeypatch
+):
+    """Best-effort phase logging cannot change the durable store contract."""
+    from examples.mcp_server import client_store as store_module
+
+    def broken_sink(*_args, **_kwargs):
+        raise OSError("stderr unavailable")
+
+    monkeypatch.setattr(store_module, "print", broken_sink, raising=False)
+    store = ClientStore(store_path)
+    store.add(StoredClient(client_id="test-trace-sink", redirect_uris=["https://example.com/cb"]))
+    assert len(store.load()) == 1
 
 
 def test_client_store_lock_contention_fails_closed_and_recovers(
