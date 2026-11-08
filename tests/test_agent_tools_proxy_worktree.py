@@ -1681,11 +1681,14 @@ def test_parallel_runners_receive_distinct_proxy_leases(tmp_path, monkeypatch):
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     env=os.environ.copy(),
+                    start_new_session=True,
                 )
             )
 
         results = [
-            proc.communicate(timeout=RUNNER_HARNESS_TIMEOUT_SECONDS) + (proc.returncode,)
+            _communicate_bounded_shell_tree(
+                proc, timeout=RUNNER_HARNESS_TIMEOUT_SECONDS
+            ) + (proc.returncode,)
             for proc in processes
         ]
         assert all(item[2] == 0 for item in results), results
@@ -1695,14 +1698,7 @@ def test_parallel_runners_receive_distinct_proxy_leases(tmp_path, monkeypatch):
         assert set(proxies) == set(_ProxyPoolHandler.proxies)
     finally:
         for proc in processes:
-            if proc.poll() is None:
-                proc.terminate()
-        for proc in processes:
-            try:
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
+            _terminate_bounded_shell_tree(proc)
             if proc.stdout is not None:
                 proc.stdout.close()
             if proc.stderr is not None:
@@ -2053,13 +2049,8 @@ def test_startup_retry_stops_at_configured_attempt_limit(tmp_path, monkeypatch):
         monkeypatch.setenv("OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS", "3")
 
         script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
-        result = subprocess.run(
-            ["sh", "-c", script],
-            cwd=source,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=PROXY_RETRY_HARNESS_TIMEOUT_SECONDS,
+        result = _run_bounded_shell_tree(
+            script, cwd=source, timeout=PROXY_RETRY_HARNESS_TIMEOUT_SECONDS
         )
 
         assert result.returncode == 78

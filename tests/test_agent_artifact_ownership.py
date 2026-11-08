@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -49,15 +50,56 @@ def _init_repo(root: Path) -> str:
     return _git(root, "rev-parse", "HEAD")
 
 
+def _kill_owned_shell_group(proc: subprocess.Popen[str]) -> None:
+    """Reap the isolated runner tree, not just the parent holding one pipe."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _communicate_owned_shell(
+    proc: subprocess.Popen[str], *, timeout: float
+) -> tuple[str, str]:
+    try:
+        return proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_owned_shell_group(proc)
+        # Never emit the generated shell source or internal test data in CI.
+        raise subprocess.TimeoutExpired(["sh", "-c", "<redacted runner>"], timeout) from None
+
+
 def _run_shell(script: str, *, cwd: Path, timeout: int = 10) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    with subprocess.Popen(
         ["sh", "-c", script],
         cwd=cwd,
         text=True,
-        capture_output=True,
-        check=False,
-        timeout=timeout,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    ) as proc:
+        stdout, stderr = _communicate_owned_shell(proc, timeout=timeout)
+    return subprocess.CompletedProcess(
+        ["sh", "-c", "<redacted runner>"], proc.returncode, stdout, stderr
     )
+
+
+def test_owned_shell_timeout_kills_pipe_holding_descendants(tmp_path: Path) -> None:
+    """A background child must not strand communicate() after parent timeout."""
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired) as exc_info:
+        _run_shell(
+            "sleep 30 & wait # private-in-test-script",
+            cwd=tmp_path,
+            timeout=1,
+        )
+    assert time.monotonic() - started < 8
+    assert "private-in-test-script" not in str(exc_info.value)
+    assert "<redacted runner>" in str(exc_info.value)
 
 
 def test_append_is_copy_on_write_for_preexisting_hardlink(tmp_path: Path) -> None:
@@ -256,6 +298,7 @@ def test_runner_publishes_attempt_local_log_before_opencode_exits(
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        start_new_session=True,
     )
     live_text = ""
     seen_while_running = False
@@ -277,12 +320,12 @@ def test_runner_publishes_attempt_local_log_before_opencode_exits(
                     break
             time.sleep(0.1)
         release.touch()
-        stdout, stderr = proc.communicate(timeout=RUNNER_HARNESS_TIMEOUT_SECONDS)
+        stdout, stderr = _communicate_owned_shell(
+            proc, timeout=RUNNER_HARNESS_TIMEOUT_SECONDS
+        )
     finally:
         release.touch(exist_ok=True)
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait(timeout=5)
+        _kill_owned_shell_group(proc)
 
     assert seen_while_running, live_text
     assert "previous-attempt" not in live_text
@@ -420,6 +463,7 @@ def test_sentence_like_model_prose_transitions_proxy_to_runtime(
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        start_new_session=True,
     )
     seen_running = False
     deadline = time.monotonic() + RUNNER_HARNESS_TIMEOUT_SECONDS
@@ -433,12 +477,12 @@ def test_sentence_like_model_prose_transitions_proxy_to_runtime(
                     break
             time.sleep(0.1)
         release.touch()
-        stdout, stderr = proc.communicate(timeout=RUNNER_HARNESS_TIMEOUT_SECONDS)
+        stdout, stderr = _communicate_owned_shell(
+            proc, timeout=RUNNER_HARNESS_TIMEOUT_SECONDS
+        )
     finally:
         release.touch(exist_ok=True)
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait(timeout=5)
+        _kill_owned_shell_group(proc)
 
     assert seen_running is True
     assert proc.returncode == 0, stderr or stdout
