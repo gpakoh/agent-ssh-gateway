@@ -15,7 +15,9 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import secrets
 import stat
+import sys
 import tempfile
 import time
 from dataclasses import asdict
@@ -26,6 +28,29 @@ from examples.mcp_server.oauth_provider import StoredClient
 
 CLIENT_STORE_LOCK_TIMEOUT_SECONDS = 5.0
 CLIENT_STORE_LOCK_POLL_SECONDS = 0.05
+_DCR_STORE_PHASES = frozenset({"begin", "lock_acquired", "loaded", "persisted", "failed"})
+
+
+def _trace_client_store_phase(trace_id: str, phase: str, started: float) -> None:
+    """Emit bounded, credential-free client-store latency phases.
+
+    Never include the client ID, redirect URI, store path, exception or
+    serialized JSON. The fixed shape is safe to capture on failed host-smoke.
+    """
+    if phase not in _DCR_STORE_PHASES:
+        raise ValueError("unknown DCR store phase")
+    if len(trace_id) != 12 or any(c not in "0123456789abcdef" for c in trace_id):
+        raise ValueError("invalid DCR store trace id")
+    elapsed_ms = min(9_999_999, max(0, int((time.monotonic() - started) * 1000)))
+    try:
+        print(
+            f"DCR_STORE_TRACE id={trace_id} phase={phase} elapsed_ms={elapsed_ms}",
+            file=sys.stderr,
+            flush=True,
+        )
+    except OSError:
+        # Diagnostic stderr must never make OAuth registration fail.
+        pass
 
 
 class ClientStoreBusyError(TimeoutError):
@@ -86,11 +111,22 @@ class ClientStore:
         return [StoredClient(**c) for c in data.get("clients", [])]
 
     def add(self, client: StoredClient) -> None:
-        """Persist a newly registered client (locked read-modify-write)."""
-        with self._locked():
-            clients = [c for c in self.load() if c.client_id != client.client_id]
-            clients.append(client)
-            self._write(clients)
+        """Persist a new client, leaving fixed-shape evidence of blocking stages."""
+        trace_id = secrets.token_hex(6)
+        started = time.monotonic()
+        _trace_client_store_phase(trace_id, "begin", started)
+        try:
+            with self._locked():
+                _trace_client_store_phase(trace_id, "lock_acquired", started)
+                clients = [c for c in self.load() if c.client_id != client.client_id]
+                _trace_client_store_phase(trace_id, "loaded", started)
+                clients.append(client)
+                self._write(clients)
+                _trace_client_store_phase(trace_id, "persisted", started)
+        except Exception:
+            # No exception text or filesystem path in public CI evidence.
+            _trace_client_store_phase(trace_id, "failed", started)
+            raise
 
     def _locked(self) -> _LockedStore:
         """Acquire an exclusive lock over the whole read-modify-write cycle."""

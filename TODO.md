@@ -44,7 +44,8 @@
 - [ ] **P1-10: Localize intermittent OAuth /register stall on repeated DCR→SSH requests.** (Issue #801)
   **Done:** #807/#809 deployed redacted fixed-shape DCR trace independent of logger level; #23389 and #23411 each proved two consecutive successful OAuth→MCP→SSH host smoke invocations.
   **2026-11-08 diagnostic correction:** `docker_logs` read Docker CLI stdout only, while `DCR_TRACE` is emitted on container stderr. The scoped fix merges both streams with redaction, preserves recent messages under the output bound, and marks truncation; real-subprocess regression proves the formerly missing trace is now retrievable. This restores visibility, **not** the cause of the registration stall. #23532 attempts 1 and 2 both failed `/register` awaiting response headers despite healthy exact-SHA containers; do not treat retries as GO.
-  **Remaining:** collect safe ingress/upstream timing on recurrence using corrected stderr visibility, isolate the intermittent root cause, then minimal regression and change. Repeated green smoke is not cause proof.
+  **2026-11-08 scoped follow-up:** post-merge #23632 reproduced the stall after proxy `upstream_send`: one request obtained `upstream_headers` at 13,617 ms, the next lacked `upstream_headers` before the bounded client timeout. Add fixed-shape `DCR_STORE_TRACE` milestones around the existing client-store lock/read/persist path to the same failure-only sanitized host-smoke evidence. This is stage attribution, **not** a fix to the underlying latency; local and runner resource contention still require proof.
+  **Remaining:** correlate a real recurrence's proxy and store stages to distinguish handler dispatch, lock/read, filesystem write/fsync, or upstream response, then implement a minimal root-cause fix and regression. Repeated green smoke is not cause proof.
 
 ## P2 — Reliability and engineering throughput (13)
 
