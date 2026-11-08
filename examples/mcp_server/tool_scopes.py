@@ -69,6 +69,8 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "session_health": ["mcp:read"],
     "execute_restricted": ["mcp:execute"],
     "execute_argv": ["mcp:execute"],
+    "list_ssh_targets": ["mcp:read"],
+    "execute_target_argv": ["mcp:execute", "mcp:admin"],
     "job_status": ["mcp:read"],
     "job_result": ["mcp:read"],
     "job_cancel": ["mcp:agent-run"],
