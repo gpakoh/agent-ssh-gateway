@@ -343,6 +343,7 @@ TOOL_NAMES_BY_MODE["mcp_client_write"] = (
     "git_create_branch",
     "git_fetch_ref",
     "git_refresh_branch_to_head",
+    "git_switch_existing_branch",
     "git_update_branch_by_merge",
     "git_push",
     "coord_create",

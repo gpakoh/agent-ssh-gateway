@@ -38,6 +38,7 @@ from mcp_client_tools import (
     git_refresh_branch_to_head,
     git_set_gitlink,
     git_status,
+    git_switch_existing_branch,
     git_update_branch_by_merge,
     git_write_capabilities,
     info,
@@ -1300,6 +1301,33 @@ def gateway_git_refresh_branch_to_head(
     )
 
 
+def gateway_git_switch_existing_branch(
+    project: str,
+    branch: str,
+    expected_current_branch: str,
+    expected_current_head: str,
+    expected_target_head: str,
+    expected_status_sha256: str,
+    expected_index_sha256: str,
+) -> dict[str, Any]:
+    """Switch a clean existing branch under exact Git state leases."""
+    return run_tool(
+        tool="git_switch_existing_branch",
+        title="git switch existing branch",
+        fn=lambda: git_switch_existing_branch(
+            _server_client(),
+            project,
+            branch,
+            expected_current_branch,
+            expected_current_head,
+            expected_target_head,
+            expected_status_sha256,
+            expected_index_sha256,
+        ),
+        success_text="Switched existing local branch under exact Git leases.",
+    )
+
+
 def gateway_git_create_branch(project: str, branch: str) -> dict[str, Any]:
     """Create and switch to a new non-protected local branch."""
     return run_tool(
@@ -1657,6 +1685,7 @@ def register_all() -> None:
     register_tool("git_create_branch")(gateway_git_create_branch)
     register_tool("git_fetch_ref")(gateway_git_fetch_ref)
     register_tool("git_refresh_branch_to_head")(gateway_git_refresh_branch_to_head)
+    register_tool("git_switch_existing_branch")(gateway_git_switch_existing_branch)
     register_tool("git_update_branch_by_merge")(gateway_git_update_branch_by_merge)
     register_tool("git_push")(gateway_git_push)
     register_tool("run_tests")(gateway_run_tests)
