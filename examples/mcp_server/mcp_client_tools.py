@@ -21,7 +21,12 @@ from control_plane_git import git_fetch_ref_control_plane, git_push_control_plan
 from gateway_client import GatewayClient, GatewayClientError, _script_stdin_wrapper
 from git_write_capabilities import probe_git_refresh_worktree_paths, probe_git_write_capabilities
 from tool_results import build_command_result, tool_error, tool_success
-from verifier_child_policy import owned_uv_guard_lines
+from verifier_child_policy import (
+    _VERIFIER_CHILD_SECONDS,
+    VERIFIER_SYNC_COMMAND_TIMEOUT_S,
+    VERIFIER_SYNC_WAIT_TIMEOUT_S,
+    owned_uv_guard_lines,
+)
 from verifier_lock_policy import LOCK_BUSY_EXIT_CODE, lock_acquire_script
 
 
@@ -487,7 +492,9 @@ def _build_uv_argv(tool: str, project_dir: str, targets: list[str]) -> list[str]
     return uv_args + ["--directory", project_dir, "--"] + cmd + ["--"] + validated
 
 
-def _build_primary_script(tool: str, project_dir: str, targets: list[str]) -> str:
+def _build_primary_script(
+    tool: str, project_dir: str, targets: list[str], *, timeout_seconds: int = _VERIFIER_CHILD_SECONDS
+) -> str:
     """Build a primary verifier script with trusted-root validation and locking."""
     validated = _validate_targets(project_dir, targets)
     proj = str(Path(project_dir))
@@ -495,7 +502,7 @@ def _build_primary_script(tool: str, project_dir: str, targets: list[str]) -> st
     proj_root = _verifier_project_root(project_dir)
     venv = f"{proj_root}/.venv"
     target_args = " ".join(shlex.quote(t) for t in validated)
-    lines = ["set -eu", *owned_uv_guard_lines()]
+    lines = ["set -eu", *owned_uv_guard_lines(timeout_seconds=timeout_seconds)]
     lines += _verifier_root_bootstrap(base)
     lines += _verifier_project_prologue(proj_root, project_identity=project_dir)
     lines += [
@@ -1005,6 +1012,8 @@ def _build_readonly_fallback_script(
     tool_key: str,
     project_dir: str,
     targets: list[str],
+    *,
+    timeout_seconds: int = _VERIFIER_CHILD_SECONDS,
 ) -> str:
     """Build a check script whose mutable environment lives outside source.
 
@@ -1048,7 +1057,7 @@ def _build_readonly_fallback_script(
 
     lines = [
         "set -eu",
-        *owned_uv_guard_lines(),
+        *owned_uv_guard_lines(timeout_seconds=timeout_seconds),
         '_MCP_UID="$(id -u)"',
         '_MCP_USER="$(id -un)"',
         f"PROJECT_DIR={project_q}",
@@ -1345,7 +1354,14 @@ def _run_uv_tool(
     except ValueError as e:
         code, msg = str(e).split(":", 1) if ":" in str(e) else ("INVALID_INPUT", str(e))
         return tool_error(code=code.strip(), message=msg.strip(), tool_name=tool_name)
-    script = _build_primary_script(tool_key, str(project_dir), targets)
+    # Sync verifiers get a 240s shared uv budget within a 270s SSH command.
+    # Async suites can use their longer externally configured job budget,
+    # retaining a 30s margin for the owned process-group cleanup.
+    deadline_s = (
+        min(3600, max(1, int(client.async_job_timeout) - 30))
+        if async_submit else _VERIFIER_CHILD_SECONDS
+    )
+    script = _build_primary_script(tool_key, str(project_dir), targets, timeout_seconds=deadline_s)
 
     check_result = client.execute_raw("command -v uv")
     check_job = client.wait_job(check_result["job_id"])
@@ -1377,7 +1393,9 @@ def _run_uv_tool(
             elif not _venv_usable_on_target(client, str(project_dir)):
                 fallback_reason = "Read-only or unusable project venv detected"
             if fallback_reason is not None:
-                script = _build_readonly_fallback_script(tool_key, str(project_dir), targets)
+                script = _build_readonly_fallback_script(
+                    tool_key, str(project_dir), targets, timeout_seconds=deadline_s,
+                )
                 r2 = client.execute_project_script_async(project, script)
                 return tool_success(
                     tool=tool_name,
@@ -1398,7 +1416,7 @@ def _run_uv_tool(
         "sh",
         stdin=_script_stdin_wrapper(script),
         redact_path_prefix=str(project_dir),
-        timeout_s=client.async_job_timeout if async_submit else None,
+        timeout_s=client.async_job_timeout if async_submit else VERIFIER_SYNC_COMMAND_TIMEOUT_S,
     )
 
     if async_submit:
@@ -1416,7 +1434,7 @@ def _run_uv_tool(
             ],
         )
 
-    raw = client.wait_job(result["job_id"])
+    raw = client.wait_job(result["job_id"], timeout_sec=VERIFIER_SYNC_WAIT_TIMEOUT_S)
 
     # Identity boundary: ``result["job_id"]`` is what wait_job was polled
     # with, so it stays authoritative when the payload omits its own
