@@ -1840,6 +1840,15 @@ def test_proxy_transport_marker_after_real_progress_does_not_retry(tmp_path, mon
 
 
 def test_startup_stall_retries_with_different_proxy(tmp_path, monkeypatch):
+    # This harness shares the executor-local proxy lease namespace with other
+    # concurrent CI shards. Unique synthetic URLs prevent cross-test lease
+    # collisions while still proving rotation to a DISTINCT second proxy.
+    original_proxies = list(_ProxyPoolHandler.proxies)
+    lease_namespace = hashlib.sha256(str(tmp_path).encode()).hexdigest()[:12]
+    _ProxyPoolHandler.proxies = [
+        f"http://127.0.0.1:19001/{lease_namespace}",
+        f"http://127.0.0.1:19002/{lease_namespace}",
+    ]
     _ProxyPoolHandler.reports = []
     _ProxyPoolHandler.get_count = 0
     _ProxyPoolHandler.fail_get_after_first = True
@@ -1862,7 +1871,7 @@ def test_startup_stall_retries_with_different_proxy(tmp_path, monkeypatch):
             "#!/bin/sh\n"
             'printf "%s\\n" "$HTTP_PROXY" >> "$PROXY_CAPTURE"\n'
             'case "$HTTP_PROXY" in\n'
-            '  *:19001) printf "\\033[0m\\n> build · big-pickle\\n\\033[0m"; sleep 10 ;;\n'
+            '  *:19001/*) printf "\\033[0m\\n> build · big-pickle\\n\\033[0m"; sleep 10 ;;\n'
             '  *) printf "\\033[0m\\n> build · big-pickle\\n\\033[0m\\n→ Read current-plan.md\\n"; exit 0 ;;\n'
             "esac\n",
             encoding="utf-8",
@@ -1903,6 +1912,7 @@ def test_startup_stall_retries_with_different_proxy(tmp_path, monkeypatch):
         report = (artifacts / "agent-report.md").read_text(encoding="utf-8")
         assert "Failure reason: none" in report
     finally:
+        _ProxyPoolHandler.proxies = original_proxies
         _ProxyPoolHandler.fail_get_after_first = False
         server.shutdown()
         server.server_close()
