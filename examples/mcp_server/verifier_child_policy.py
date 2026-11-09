@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import shlex
 
-_VERIFIER_CHILD_SECONDS = 110
+_VERIFIER_CHILD_SECONDS = 240
+_VERIFIER_CHILD_MAX_SECONDS = 3600
+VERIFIER_SYNC_COMMAND_TIMEOUT_S = 270
+VERIFIER_SYNC_WAIT_TIMEOUT_S = 295
 VERIFIER_CHILD_TIMEOUT_EXIT_CODE = 124
 
 # Executed only from the trusted verifier script after 'exec 9>"$LOCK"'.
@@ -33,7 +36,7 @@ try:
 except (ValueError, IndexError):
     remaining = float("nan")
 argv = sys.argv[2:]
-if not math.isfinite(remaining) or remaining > 110 or not argv:
+if not math.isfinite(remaining) or remaining > 3600 or not argv:
     sys.stderr.write("VERIFIER_CHILD_LAUNCH_FAILED: invalid bounded command\\n")
     raise SystemExit(90)
 if remaining <= 0:
@@ -90,8 +93,8 @@ def owned_uv_guard_lines(*, timeout_seconds: int = _VERIFIER_CHILD_SECONDS) -> l
     ordinary long-running uv/pytest check cannot consume the full SSH job
     deadline and strand the verifier's lock in its descendants.
     """
-    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 110:
-        raise ValueError("verifier child timeout must be an integer from 1 to 110")
+    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= _VERIFIER_CHILD_MAX_SECONDS:
+        raise ValueError("verifier child timeout must be an integer from 1 to 3600")
     deadline_source = f"import time; print(time.monotonic() + {timeout_seconds})"
     return [
         # Evaluate once, before acquiring FD 9. This bounds cumulative sync,

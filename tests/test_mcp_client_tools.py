@@ -98,7 +98,7 @@ class _FakeClient:
         self.commands.append(command)
         return {"job_id": f"job-{len(self.commands)}"}
 
-    def wait_job(self, job_id: str) -> dict:
+    def wait_job(self, job_id: str, **kwargs) -> dict:
         return {
             "job_id": job_id,
             "exit_code": 0,

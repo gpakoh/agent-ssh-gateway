@@ -125,7 +125,7 @@ def test_compileall_syntax_failure_retains_product_failure_classification(
             self.commands.append((command, kwargs))
             return {"job_id": str(len(self.commands))}
 
-        def wait_job(self, job_id):
+        def wait_job(self, job_id, **kwargs):
             if job_id == "1":
                 return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
             return {
@@ -2017,6 +2017,8 @@ class TestAsyncRunTestsReadonlyFallback:
         captured: dict[str, str] = {}
 
         class CapturingClient:
+            async_job_timeout = 3600
+
             def execute_raw(self, cmd, **kw):
                 if cmd == "command -v uv":
                     return {"job_id": "j-check"}

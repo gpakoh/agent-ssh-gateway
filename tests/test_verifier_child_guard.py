@@ -26,7 +26,7 @@ def _script(lock, *, seconds: int, command: str) -> str:
     )
 
 
-@pytest.mark.parametrize("bad", [True, False, 0, -1, 111, "5", None])
+@pytest.mark.parametrize("bad", [True, False, 0, -1, 3601, "5", None])
 def test_guard_rejects_non_bounded_deadlines(bad):
     with pytest.raises(ValueError, match="timeout"):
         owned_uv_guard_lines(timeout_seconds=bad)
@@ -201,3 +201,91 @@ def test_both_verifier_paths_guard_all_uv_commands():
     assert "verifier_uv uv sync --all-extras --no-install-project" in fallback
     assert 'verifier_uv uv pip install --python "$UV_PROJECT_ENVIRONMENT/bin/python3"' in fallback
     assert fallback.index("flock -n 9") < fallback.index("verifier_uv uv sync")
+
+
+def test_real_verifier_sync_job_has_bounded_child_command_and_wait_budgets(monkeypatch):
+    """No 110s mypy false timeout, and the server command outlives its child."""
+    from pathlib import Path
+
+    import mcp_client_tools as tools
+    from verifier_child_policy import (
+        _VERIFIER_CHILD_SECONDS,
+        VERIFIER_SYNC_COMMAND_TIMEOUT_S,
+        VERIFIER_SYNC_WAIT_TIMEOUT_S,
+    )
+
+    assert 110 < _VERIFIER_CHILD_SECONDS < VERIFIER_SYNC_COMMAND_TIMEOUT_S
+    assert VERIFIER_SYNC_COMMAND_TIMEOUT_S < VERIFIER_SYNC_WAIT_TIMEOUT_S <= 300
+    monkeypatch.setattr(tools, "_resolve_project", lambda _: Path("/work/proj"))
+
+    class Client:
+        def __init__(self):
+            self.shell_kwargs = None
+            self.wait_kwargs = None
+
+        def execute_raw(self, command, **kwargs):
+            if command == "command -v uv":
+                return {"job_id": "uv-check"}
+            assert command == "sh"
+            self.shell_kwargs = kwargs
+            return {"job_id": "mypy-check"}
+
+        def wait_job(self, job_id, **kwargs):
+            if job_id == "uv-check":
+                return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
+            self.wait_kwargs = kwargs
+            return {"job_id": job_id, "exit_code": 0, "stdout": "Success", "stderr": ""}
+
+    client = Client()
+    result = tools._run_uv_tool(client, "project", "mypy", "run_mypy", ["app/security.py"])
+    assert result["ok"]
+    assert client.shell_kwargs["timeout_s"] == VERIFIER_SYNC_COMMAND_TIMEOUT_S
+    assert f"time.monotonic() + {_VERIFIER_CHILD_SECONDS}" in client.shell_kwargs["stdin"]
+    assert client.wait_kwargs["timeout_sec"] == VERIFIER_SYNC_WAIT_TIMEOUT_S
+
+
+def test_async_verifier_uses_own_long_job_budget_not_sync_cap(monkeypatch):
+    """Long-running async pytest must not silently inherit the sync 240s cutoff."""
+    from pathlib import Path
+
+    import mcp_client_tools as tools
+
+    monkeypatch.setattr(tools, "_resolve_project", lambda _: Path("/work/proj"))
+    monkeypatch.setattr(tools, "_project_has_uv_lock", lambda _: True)
+    monkeypatch.setattr(tools, "_venv_usable_on_target", lambda *args: True)
+
+    class Client:
+        async_job_timeout = 3600
+
+        def __init__(self):
+            self.kwargs = None
+            self.fallback = None
+
+        def execute_raw(self, command, **kwargs):
+            if command == "command -v uv":
+                return {"job_id": "uv-check"}
+            self.kwargs = kwargs
+            return {"job_id": "queued-suite"}
+
+        def wait_job(self, job_id, **kwargs):
+            assert job_id == "uv-check"
+            return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
+
+        def execute_project_script_async(self, project, script):
+            self.fallback = script
+            return {"job_id": "queued-fallback"}
+
+    client = Client()
+    result = tools._run_uv_tool(
+        client, "project", "pytest", "run_tests", ["tests"], async_submit=True
+    )
+    assert result["ok"]
+    assert client.kwargs["timeout_s"] == 3600
+    assert "time.monotonic() + 3570" in client.kwargs["stdin"]
+    monkeypatch.setattr(tools, "_project_has_uv_lock", lambda _: False)
+    result = tools._run_uv_tool(
+        client, "project", "pytest", "run_tests", ["tests"], async_submit=True
+    )
+    assert result["ok"]
+    assert result["result"]["job_id"] == "queued-fallback"
+    assert "time.monotonic() + 3570" in client.fallback
