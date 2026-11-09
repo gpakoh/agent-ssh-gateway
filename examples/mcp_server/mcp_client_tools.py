@@ -3327,7 +3327,7 @@ def git_switch_existing_branch(
             98: ("GIT_WRITE_PREFLIGHT_UNAVAILABLE", False),
             99: ("WORKSPACE_VERIFICATION_FAILED", "unknown"),
         }
-        kind, mutation = failure.get(code, ("GIT_COMMAND_FAILED", "unknown"))
+        kind, mutation = failure.get(code, ("GIT_OPERATION_FAILED", "unknown"))
         return tool_error(
             tool="git_switch_existing_branch", code=kind,
             message="Guarded local branch switch failed; no automatic rollback or retry",

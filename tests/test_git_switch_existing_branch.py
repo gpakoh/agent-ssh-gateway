@@ -40,6 +40,7 @@ class Client:
         self.root = root
         self.scripts: list[str] = []
         self.before_switch = None
+        self.fail_switch = False
 
     def execute_project_script(
         self, project: str, script: str, timeout_s: int = 30
@@ -49,6 +50,8 @@ class Client:
         if "TARGET_BRANCH=" in script and "flock -n 9" in script:
             if self.before_switch is not None:
                 self.before_switch()
+            if self.fail_switch:
+                return {"exit_code": 128, "stdout": "", "stderr": "fatal: rejected"}
         result = subprocess.run(
             ["sh"], input=script, cwd=self.root, capture_output=True,
             text=True, check=False, timeout=timeout_s
@@ -123,6 +126,20 @@ def test_missing_or_changed_target_is_fail_closed(tmp_path: Path, monkeypatch):
         assert result["error"]["code"] == "GIT_LOCAL_REF_MISSING"
         assert result["error"]["details"]["mutation_occurred"] is False
     assert not client.scripts
+    assert _git(root, "rev-parse", "HEAD") == master
+
+
+def test_failed_git_switch_command_has_declared_typed_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root, master, _feature = _repo(tmp_path)
+    monkeypatch.setattr(tools, "_resolve_project", lambda _project: root)
+    client = Client(root)
+    client.fail_switch = True
+    result = _switch(client, root)
+    assert result["error"]["code"] == "GIT_OPERATION_FAILED"
+    assert result["error"]["details"]["mutation_occurred"] == "unknown"
+    assert result["error"]["retryable"] is False
     assert _git(root, "rev-parse", "HEAD") == master
 
 
