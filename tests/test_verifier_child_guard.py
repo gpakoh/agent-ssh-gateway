@@ -290,4 +290,3 @@ def test_async_verifier_uses_own_long_job_budget_not_sync_cap(monkeypatch):
     assert result["result"]["job_id"] == "queued-fallback"
     assert "time.monotonic() + 3570" in client.fallback
 
-
