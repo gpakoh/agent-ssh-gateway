@@ -350,7 +350,7 @@ curl -s -H "X-API-Key: $API_KEY" \
 
 | File | Safe to delete? | Condition |
 |------|----------------|-----------|
-| `logs/audit.log` | ✅ Yes | After rotation/backup. Gateway recreates on next event. |
+| `logs/audit.log` | Only after approved retention/backup | The security logger preserves the existing inode and reopens after external rotation; do not delete active evidence. |
 | `data/audit/events.jsonl` | ✅ Yes | After rotation/backup. Gateway recreates on next event. |
 | `data/audit/events.jsonl.*` (rotated) | ✅ Yes | After confirming backup is valid. |
 | In-memory ring buffer | ✅ Yes | Automatic on restart. No manual action needed. |
@@ -410,7 +410,7 @@ cp logs/audit.log logs/audit.log.$(date +%Y%m%d)
 gzip logs/audit.log.$(date +%Y%m%d)
 ```
 
-Same `copytruncate` requirement — `AuditLogger` holds a `FileHandler` open.
+The security `AuditLogger` uses a strict `WatchedFileHandler`: it opens only a single owner-controlled regular file with mode `0600`, refuses symlinks/hardlinks and an unexpected owner, and repairs legacy loose file permissions in place **without truncating or moving existing bytes**. An externally renamed/recreated log is automatically reopened and the new inode is checked and set to `0600` before appending. The example `copytruncate` configuration remains supported, but it is **not required** for this logger (unlike the separate structured JSONL logger). For rename-style rotation, the operator must configure `create 0600` with the actual service UID/GID and verify the staging permissions; do not assume the host has a user named `appuser`. No automatic deletion, truncation, or in-app rotation of the historical production journal is performed.
 
 ### Workspace audit (configurable JSONL)
 
