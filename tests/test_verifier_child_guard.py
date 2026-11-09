@@ -132,30 +132,43 @@ def test_signal_to_owned_shell_group_cancels_its_separate_uv_group(tmp_path):
 
 
 def test_multiple_uv_calls_share_one_verifier_deadline(tmp_path):
-    """A slow fallback sync cannot give a later tool an extra timeout budget."""
+    """All invocations use one deadline, even on a heavily contended CI runner.
+
+    Avoid a one-second startup race: a short Python subprocess may not even
+    launch in that window when unit shards run concurrently. The first command
+    is a quick external executable, while the second must time out and leave
+    no marker or inherited lock.
+    """
     lock = tmp_path / ".sync.lock"
     completed = tmp_path / "completed"
     late = tmp_path / "late"
+    guard_lines = owned_uv_guard_lines(timeout_seconds=8)
+    assert sum("_MCP_VERIFIER_DEADLINE=" in line for line in guard_lines) == 1
+    assert '"$_MCP_VERIFIER_DEADLINE" "$@"' in guard_lines[-2]
     script = "\n".join(
         [
             "set -eu",
             f"exec 9>{shlex.quote(str(lock))}",
             "flock -n 9",
-            *owned_uv_guard_lines(timeout_seconds=1),
-            f"verifier_uv python3 -c {shlex.quote('import time; time.sleep(0.3)')}",
+            *guard_lines,
+            "verifier_uv true",
             f"touch {shlex.quote(str(completed))}",
-            f"verifier_uv python3 -c {shlex.quote('import time; time.sleep(3)')}",
+            "verifier_uv sleep 30",
             f"touch {shlex.quote(str(late))}",
         ]
     )
     started = time.monotonic()
     result = subprocess.run(
-        ["sh", "-c", script], capture_output=True, text=True, timeout=6, check=False,
+        ["sh", "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
     )
     assert result.returncode == 124, result.stderr
-    assert completed.exists()
+    assert completed.exists(), "first short command did not finish"
     assert not late.exists()
-    assert time.monotonic() - started < 3
+    assert time.monotonic() - started < 18
     assert "VERIFIER_CHILD_TIMEOUT:" in result.stderr
     with lock.open("a+") as probe:
         fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
