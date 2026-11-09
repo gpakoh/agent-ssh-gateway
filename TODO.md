@@ -98,7 +98,7 @@
   Father UI PR #48 returned `CI_EVIDENCE_INCOMPLETE` while later observed merged; resolve stale/ambiguous responses by exact post-state/head/base/job audit before retries.
   **2026-11-08 scoped subcase:** before either CI-evidence gate returns `CI_EVIDENCE_INCOMPLETE`, a single read-only PR recheck can identify a concurrent merge with exact expected HEAD and valid merge commit SHA. It reports `PR_NOT_OPEN` plus a bounded observed merge receipt explicitly stating `mutation_started=false`, never reports this call as the writer and never relaxes CI green requirements. Missing, changing or untrusted post-state retains the original incomplete CI failure; next step remains independent base/job-state attestation and all other ambiguous mutation paths.
 
-## P3 — Optional capabilities and ergonomics (8)
+## P3 — Optional capabilities and ergonomics (7)
 
 - [ ] **P3-01: Make candidate preparation observable and cancellable.** (legacy #36)
   Slow `prepare_candidate_clone` calls should support async mode, progress phases, cancellation before registration, and idempotent retry while keeping the current synchronous path for small clones.
@@ -121,17 +121,15 @@
 - [ ] **P3-08: Add guarded bulk tree / multi-file candidate bootstrap.** (legacy #53)
   Greenfield packages currently require many sequential single-file workspace writes and pre-created directories. Add a bounded `workspace_apply_tree` or equivalent patchset/materialization primitive with file-count/byte limits, project-relative path validation, parent creation under policy, aggregate and per-file hashes, dry-run support and atomic/fail-closed semantics. Acceptance includes a ≥10-file bootstrap plus traversal/oversize/partial-failure tests.
 
-- [ ] **P3-09: Recover and review the local Selenium session reaper before worktree cleanup.** (legacy #54)
-  <!-- gateway-todo-key: local-selenium-session-reaper-unreviewed --> **Severity:** P3
-  **Acceptance:** determine if retained local unique commit `4fc863ef` is safe and still applicable; qualify isolated regressions and deliver via reviewed PR or preserve/archive it with provenance before guarded cleanup.
-
 ## External tracking (not counted twice)
 
 - Coordination browser [#636](https://git.xloud.ru/gpakoh/agent-ssh-gateway/issues/636): MCP board/inbox already released; operator-only read-only PAT and live browser acceptance are outstanding. Former 500+ Issues blanket read failure was addressed by merged PR #633; do not restore the closed intake.
 - Candidate terminal clearance: [#634](https://git.xloud.ru/gpakoh/agent-ssh-gateway/issues/634), [#640](https://git.xloud.ru/gpakoh/agent-ssh-gateway/issues/640), PR #643 — covered by P1-01; diagnostic-only PR is not cleanup approval.
 - Executor: [#639](https://git.xloud.ru/gpakoh/agent-ssh-gateway/issues/639), [#642](https://git.xloud.ru/gpakoh/agent-ssh-gateway/issues/642) — covered by P1-09; failed historical canary must not be rerun blindly.
 
-**Reconciled/omitted as already closed on master:** local stale former #23 (candidate-verifier concurrency), #33 (agent envelope), #35 (project catalog), #46 (`info` command), #50 (guarded parent creation), old coordination 500-row blanket issue. Two pip-only verifier reports were merged into former #14; `source_mode` callable enum into former #6. No user source files or other repositories are modified by this TODO update.
+**Reconciled/omitted as already closed on master:** local stale former #23 (candidate-verifier concurrency), #33 (agent envelope), #35 (project catalog), #46 (`info` command), #50 (guarded parent creation), old coordination 500-row blanket issue. Two pip-only verifier reports were merged into former #14; `source_mode` callable enum into former #6.
+
+**2026-11-09 P3-09 acceptance (closed, without destructive local worktree cleanup):** The retained local merge commit `4fc863ef7e0719135b21bacb1c4e4ef055b5ad04` (branch `fix/selenium-session-reaper-20261003`) is still readable in the canonical repository. Its first parent `01d4fb7e8fb38d83ccc63c9a7388a58d43335ddd` contains the Selenium idle-session fix, already delivered via merged PR #435 (`master@ccc380ef96f19fd522590f8090fcbee3c7d53b54`). Current master preserves `SE_OPTS="--session-timeout 840"` in both Grid start paths, the bounded page-load timeout, and the reaper/page-load/job-budget contract. The retained merge also added legacy sibling-origin trust checks (8-hop bound, symlink/cycle/foreign-repo fail-closed), which exist in current `candidate_clone.py` (blob `7487548e`) and five corresponding tests in `test_candidate_clone.py` (blob `9a52a821`). Six focused tests passed on exact `master@a23be44c73e7954475218a2671ef9dae39d8ff3c`: one Selenium configuration contract and five sibling-origin tests. No missing source diff needs replay; do not discard the historical local Git ref or modify the dirty canonical workspace to satisfy this closeout.
 
 **Closure rule:** Remove an item only with exact-revision acceptance evidence in PR/Issue history and, for deploy/security behavior, verified running-state evidence. Keep historical test logs and finished steps out of the active TODO.
 
@@ -183,9 +181,9 @@
 
 ### Verified recent completions and remaining gates
 
-- **Deployed:** #808 verifier phase diagnostics, #809 DCR trace visibility and #810 local-ahead candidate base import, with protected PR and post-merge checks. The latest exact live Gateway/MCP SHA is `8e360f8a…`, post-merge #23411 SUCCESS.
+- **Deployed:** #808 verifier phase diagnostics, #809 DCR trace visibility and #810 local-ahead candidate base import have protected PR and post-merge evidence. Newer #829, #831 and #832 are merged and released; the latest independently checked Gateway/MCP SHA is `a23be44c73e7954475218a2671ef9dae39d8ff3c`, post-merge CI #24165 SUCCESS (build, deploy and host-smoke).
 - **#651 CLOSED:** actual `candidate_discard_untracked_file` false-SHA rejection, 74-byte SHA-bound archive, repeat denial and guarded scratch cleanup proven; **#650 CLOSED:** Docker network inventory delivered. These are not active Issues.
-- **Current callable surface:** live Gateway server registry and this client each show 184 tools, including previously missing discard/network/issue-close methods. P1-02/P3-06 remain open for complete schema lease/caching/invalidation guarantees; matching counts alone do not prove them.
+- **2026-11-09 callable surface:** live `health().mcp.tools_count` and connected ChatGPT SSH Gateway catalog each show **186** tools, including the approved LXC103/LXC104 target methods. P1-02/P3-06 remain OPEN for complete schema lease/caching/invalidation guarantees; equal counts alone do not prove schema parity.
 - **Overlaps:** P1-01 ↔ #634/#640/#656/#744/#806; P1-03 ↔ #645; P1-07 ↔ #646/#679; P1-09/P2-03 ↔ #638/#639/#642/#684; P1-10 ↔ #801; P2-02 ↔ #784; P2-08 ↔ #792; P2-13 ↔ #788; P2-10 ↔ #641.
-- **Preservation:** historical dirty Gateway candidates #792/#733 still contain original unintegrated data, not junk. Canonical root workspace is stale and has unrelated dirty `projects.yaml`; no writes/resets there.
+- **2026-11-09 Gateway candidate preservation:** four historical Gateway candidates retired after exact proof. #792 original commit `d9f765bb` survives in `archive/candidate-gateway-gitea-artifact-792-d9f765bb-20261109`; #733's three original acceptance images (byte SHA-256 recorded in Git commit `3f15b782`) survive in `archive/candidate-gateway-media-acceptance-733-20261031`. #801 and SSH overlay code already shipped through PRs #825/#827/#828 with exact current-main blob checks. All four used guarded `candidate_cleanup`, and `project_list` reports zero registered `candidate-agent-ssh-gateway` clones. The canonical root workspace remains stale and dirty only in `projects.yaml`; its historical Selenium Git ref is deliberately preserved, with no write/reset.
 - **Closeout:** only after exact-HEAD tests, mandatory CI, protected merge, runtime smoke where applicable and SHA-guarded cleanup. A closed PR alone is not completion.
