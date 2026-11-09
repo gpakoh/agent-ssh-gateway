@@ -4,9 +4,12 @@ import hashlib
 import hmac
 import ipaddress
 import logging
+import os
 import re
 import secrets
 import socket
+import stat
+from logging.handlers import WatchedFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -390,6 +393,50 @@ def redact_secrets(value: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 
+class _SecureAuditFileHandler(WatchedFileHandler):
+    """Append to an owned regular 0600 audit inode, including after logrotate.
+
+    Opening never follows a final symlink, silently creates world-writable
+    logs, truncates prior audit data, or modifies a foreign-owned inode.
+    WatchedFileHandler reopens only when external rotation replaces the inode;
+    the same strict creation check then applies to the replacement.
+    """
+
+    def _open(self):
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        if not nofollow or not hasattr(os, "O_DIRECTORY"):
+            raise OSError("secure audit log open requires POSIX nofollow")
+        filename = Path(self.baseFilename)
+        parent_fd = os.open(
+            filename.parent,
+            os.O_RDONLY | os.O_DIRECTORY | nofollow | os.O_CLOEXEC,
+        )
+        try:
+            fd = os.open(
+                filename.name,
+                os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NONBLOCK
+                | nofollow | os.O_CLOEXEC,
+                0o600,
+                dir_fd=parent_fd,
+            )
+        finally:
+            os.close(parent_fd)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise PermissionError("audit file must be one regular inode")
+            if info.st_uid != os.geteuid():
+                raise PermissionError("audit file owner differs from process UID")
+            # The operator's existing >1 GiB journal stays on the same inode;
+            # fchmod fixes legacy 0606 permissions without truncation/copy.
+            if stat.S_IMODE(info.st_mode) != 0o600:
+                os.fchmod(fd, 0o600)
+            return os.fdopen(fd, self.mode, encoding=self.encoding, errors=self.errors)
+        except BaseException:
+            os.close(fd)
+            raise
+
+
 class AuditLogger:
     """Audit logger for security events."""
 
@@ -397,13 +444,19 @@ class AuditLogger:
         self.logger = logging.getLogger("audit")
         log_path = Path(log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        if any(
-            isinstance(existing, logging.FileHandler)
-            and Path(existing.baseFilename) == log_path.resolve()
-            for existing in self.logger.handlers
-        ):
-            return
-        handler = logging.FileHandler(log_file)
+        # Compare normalized absolute paths WITHOUT following symlinks.
+        # Reusing a pre-upgrade FileHandler would bypass the secure 0600
+        # creation/reopen policy, so fail closed rather than silently keep it.
+        absolute_path = Path(os.path.abspath(log_file))
+        for existing in self.logger.handlers:
+            if (
+                isinstance(existing, logging.FileHandler)
+                and Path(existing.baseFilename) == absolute_path
+            ):
+                if not isinstance(existing, _SecureAuditFileHandler):
+                    raise PermissionError("insecure legacy audit file handler is active")
+                return
+        handler = _SecureAuditFileHandler(log_file)
         formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
         handler.setFormatter(formatter)
         self.logger.addHandler(handler)
