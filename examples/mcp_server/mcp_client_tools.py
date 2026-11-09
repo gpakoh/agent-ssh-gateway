@@ -3176,6 +3176,187 @@ def git_refresh_branch_to_head(
     }
 
 
+
+def git_switch_existing_branch(
+    client: GatewayClient,
+    project: str,
+    branch: str,
+    expected_current_branch: str,
+    expected_current_head: str,
+    expected_target_head: str,
+    expected_status_sha256: str,
+    expected_index_sha256: str,
+) -> dict[str, Any]:
+    """Switch a clean workspace to an existing, exact-SHA local branch.
+
+    Both preflight and the target-side switch recheck source/target identity,
+    index bytes and clean worktree. No creation, fetch, reset or forced checkout.
+    An unexpected result is reported, never repaired by a destructive retry.
+    """
+    project = _validate_project(project)
+    branch = _validate_git_name(branch, "branch")
+    expected_current_branch = _validate_git_name(expected_current_branch, "expected_current_branch")
+    if any(
+        name in {"HEAD", ".", ".."} or name.startswith("refs/")
+        or ".." in name or "//" in name or name.endswith(".lock")
+        for name in (branch, expected_current_branch)
+    ):
+        raise ValueError("INVALID_INPUT: expected and target branches must be literal local branch names")
+    current = _validate_expected_git_head(expected_current_head)
+    target = _validate_expected_git_head(expected_target_head)
+    if current is None or target is None:
+        raise ValueError("INVALID_INPUT: both full current and target commit IDs are required")
+    for field, value in (
+        ("expected_status_sha256", expected_status_sha256),
+        ("expected_index_sha256", expected_index_sha256),
+    ):
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise ValueError(f"INVALID_INPUT: {field} must be a lowercase SHA-256")
+
+    root = _resolve_project(project)
+    state = _project_git_state(root)
+    if not state.get("available"):
+        return tool_error(
+            tool="git_switch_existing_branch", code="CHECK_FAILED",
+            message="Current Git state unavailable; no branch switch attempted",
+            retryable=True,
+            details={"project": project, "mutation_occurred": False},
+            source="gateway",
+        )
+    mismatches = _workspace_guard_mismatches(
+        state,
+        expected_branch=expected_current_branch,
+        expected_head=current,
+        expected_status_sha256=expected_status_sha256,
+        expected_index_sha256=expected_index_sha256,
+    )
+    if state.get("dirty") or state.get("detached") or mismatches:
+        return tool_error(
+            tool="git_switch_existing_branch", code="WORKSPACE_CONTENDED",
+            message="Workspace is dirty, detached, or no longer matches its Git lease",
+            retryable=False,
+            hint="Review info(project) and tracked changes; never force-switch a contended workspace",
+            details={
+                "project": project, "dirty": state.get("dirty"),
+                "detached": state.get("detached"), "mismatches": mismatches,
+                "mutation_occurred": False,
+            }, source="gateway",
+        )
+    resolved_target = _local_git_output(
+        root, ["rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}"]
+    )
+    if resolved_target is None or resolved_target.strip().lower() != target:
+        return tool_error(
+            tool="git_switch_existing_branch", code="GIT_LOCAL_REF_MISSING",
+            message="Existing local branch was not found at the exact expected commit",
+            retryable=False,
+            details={"project": project, "branch": branch, "expected_target_head": target,
+                     "mutation_occurred": False},
+            source="gateway",
+        )
+    if branch == expected_current_branch:
+        return {
+            "outcome": "passed", "exit_code": 0, "project": project,
+            "previous_branch": branch, "branch": branch,
+            "previous_head": current, "new_head": current, "clean": True,
+            "already_current": True, "mutation_occurred": False,
+        }
+
+    error, _probe = _git_write_preflight(
+        client, project, tool_name="git_switch_existing_branch",
+        action="switch_existing_local_branch",
+        required_components=("index", "head"), branch=branch,
+    )
+    if error is not None:
+        return error
+    worktree = probe_git_refresh_worktree_paths(
+        client, project, current_head=current, target_head=target
+    )
+    if not worktree["available"] or worktree["blocked_count"]:
+        return tool_error(
+            tool="git_switch_existing_branch",
+            code=("GIT_WRITE_CAPABILITY_BLOCKED" if worktree["blocked_count"]
+                  else "GIT_WRITE_PREFLIGHT_UNAVAILABLE"),
+            message="Destination worktree path safety could not be proven; no switch attempted",
+            retryable=False, hint="Review bounded path diagnostics; never force a checkout",
+            details={
+                "project": project, "checked_count": worktree.get("checked_count"),
+                "blocked_count": worktree.get("blocked_count"),
+                "blocked_paths": worktree.get("blocked_paths"),
+                "mutation_occurred": False,
+            }, source="gateway",
+        )
+
+    quoted = shlex.quote
+    # The stable repository-directory flock serializes our own guarded branch
+    # switches without introducing or deleting an index.lock inode. Git still
+    # owns its normal index.lock during the actual switch.
+    script = "\n".join([
+        "set -eu",
+        f"EXPECTED_BRANCH={quoted(expected_current_branch)}",
+        f"EXPECTED_HEAD={quoted(current)}",
+        f"TARGET_BRANCH={quoted(branch)}",
+        f"TARGET_HEAD={quoted(target)}",
+        f"EXPECTED_INDEX={quoted(expected_index_sha256)}",
+        f"EXPECTED_STATUS={quoted(expected_status_sha256)}",
+        'GIT_DIR="$(git rev-parse --absolute-git-dir)" || exit 98',
+        'exec 9< "$GIT_DIR" || exit 98',
+        'flock -n 9 || exit 96',
+        'test "$(git symbolic-ref --quiet --short HEAD)" = "$EXPECTED_BRANCH" || exit 97',
+        'test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD" || exit 97',
+        'test "$(git rev-parse --verify "refs/heads/${TARGET_BRANCH}^{commit}")" = "$TARGET_HEAD" || exit 97',
+        'STATUS="$(GIT_OPTIONAL_LOCKS=0 git status --porcelain=v1)" || exit 98',
+        'test -z "$STATUS" || exit 97',
+        'test "$EXPECTED_STATUS" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" || exit 97',
+        'INDEX_FILE="$(mktemp "${TMPDIR:-/tmp}/mcp-switch-index.XXXXXX")" || exit 98',
+        'trap \'rm -f "$INDEX_FILE"\' EXIT',
+        'git ls-files --stage -z > "$INDEX_FILE" || exit 98',
+        'INDEX_SHA="$(sha256sum "$INDEX_FILE" | awk \'{print $1}\')" || exit 98',
+        'test "$INDEX_SHA" = "$EXPECTED_INDEX" || exit 97',
+        'git switch --no-guess -- "$TARGET_BRANCH"',
+        'test "$(git symbolic-ref --quiet --short HEAD)" = "$TARGET_BRANCH" || exit 99',
+        'test "$(git rev-parse HEAD)" = "$TARGET_HEAD" || exit 99',
+        'test -z "$(GIT_OPTIONAL_LOCKS=0 git status --porcelain=v1)" || exit 99',
+    ])
+    raw = client.execute_project_script(project, script, timeout_s=90)
+    code = int(raw.get("exit_code", -1))
+    if code != 0:
+        failure = {
+            96: ("WORKSPACE_CONTENDED", False),
+            97: ("WORKSPACE_CONTENDED", False),
+            98: ("GIT_WRITE_PREFLIGHT_UNAVAILABLE", False),
+            99: ("WORKSPACE_VERIFICATION_FAILED", "unknown"),
+        }
+        kind, mutation = failure.get(code, ("GIT_COMMAND_FAILED", "unknown"))
+        return tool_error(
+            tool="git_switch_existing_branch", code=kind,
+            message="Guarded local branch switch failed; no automatic rollback or retry",
+            retryable=False,
+            hint="Recheck info(project) and its diff before taking another action",
+            details={"project": project, "branch": branch,
+                     "mutation_occurred": mutation}, source="gateway",
+        )
+
+    final = _project_git_state(root)
+    if not final.get("available") or final.get("dirty") or (
+        final.get("branch") != branch or final.get("head") != target
+    ):
+        return tool_error(
+            tool="git_switch_existing_branch", code="WORKSPACE_VERIFICATION_FAILED",
+            message="Switch reported success, but exact final Git state is not verified",
+            retryable=False,
+            details={"project": project, "branch": branch,
+                     "mutation_occurred": "unknown"}, source="gateway",
+        )
+    return {
+        "outcome": "passed", "exit_code": 0, "project": project,
+        "previous_branch": expected_current_branch, "branch": branch,
+        "previous_head": current, "new_head": target, "clean": True,
+        "already_current": False, "mutation_occurred": True,
+        "execution_duration_ms": _execution_duration_ms(raw),
+    }
+
+
 def git_create_branch(
     client: GatewayClient,
     project: str,

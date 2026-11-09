@@ -165,6 +165,11 @@ class TestLiveServerToolSurface:
             "expected_current_head",
             "target_head",
         ],
+        "git_switch_existing_branch": [
+            "project", "branch", "expected_current_branch",
+            "expected_current_head", "expected_target_head",
+            "expected_status_sha256", "expected_index_sha256",
+        ],
     }
 
     @pytest.fixture()
