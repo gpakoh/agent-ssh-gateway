@@ -350,7 +350,7 @@ class TestReadOnlyFallbackMypyPackageBase:
 
         script = _build_readonly_fallback_script("pytest", "/project", ["tests"])
         sync_lines = [ln for ln in script.splitlines() if "uv sync" in ln]
-        assert "    uv sync --all-extras --frozen 2>&1" in sync_lines
+        assert "    verifier_uv uv sync --all-extras --frozen 2>&1" in sync_lines
         assert "--extra dev" not in script
         assert 'export UV_PROJECT_ENVIRONMENT="$TMP_ROOT/.venv"' in script
         assert 'cd "$PROJECT_DIR"' in script

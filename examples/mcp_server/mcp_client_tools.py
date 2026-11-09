@@ -21,6 +21,7 @@ from control_plane_git import git_fetch_ref_control_plane, git_push_control_plan
 from gateway_client import GatewayClient, GatewayClientError, _script_stdin_wrapper
 from git_write_capabilities import probe_git_refresh_worktree_paths, probe_git_write_capabilities
 from tool_results import build_command_result, tool_error, tool_success
+from verifier_child_policy import owned_uv_guard_lines
 from verifier_lock_policy import LOCK_BUSY_EXIT_CODE, lock_acquire_script
 
 
@@ -409,7 +410,7 @@ def _tool_cache_args(tool: str, project_dir: str) -> list[str]:
     return []
 
 
-_ENV_FAIL_EXIT_CODES = frozenset({2, 3, 6, 90, 91, 127})
+_ENV_FAIL_EXIT_CODES = frozenset({2, 3, 6, 90, 91, 124, 127})
 
 
 def _classify_env_failure(stderr: str | None, exit_code: int | None) -> str | None:
@@ -419,6 +420,20 @@ def _classify_env_failure(stderr: str | None, exit_code: int | None) -> str | No
     low = stderr.lower()
     if exit_code == _VERIFIER_LOCK_BUSY_EXIT_CODE:
         return "VERIFIER_LOCK_BUSY" if "verifier_lock_busy:" in low else None
+    if exit_code == 124:
+        # The verifier shell deliberately merges uv stderr into stdout.
+        # Require the watchdog's exact line; a plain exit(124) is not proof.
+        return (
+            "VERIFIER_CHILD_TIMEOUT"
+            if any(
+                line in {
+                    "verifier_child_timeout: owned verifier process exceeded deadline",
+                    "verifier_child_timeout: owned verifier deadline exhausted",
+                }
+                for line in low.splitlines()
+            )
+            else None
+        )
     env_markers = (
         ".venv/.lock",
         "failed to create virtualenv",
@@ -480,7 +495,7 @@ def _build_primary_script(tool: str, project_dir: str, targets: list[str]) -> st
     proj_root = _verifier_project_root(project_dir)
     venv = f"{proj_root}/.venv"
     target_args = " ".join(shlex.quote(t) for t in validated)
-    lines = ["set -eu"]
+    lines = ["set -eu", *owned_uv_guard_lines()]
     lines += _verifier_root_bootstrap(base)
     lines += _verifier_project_prologue(proj_root, project_identity=project_dir)
     lines += [
@@ -504,7 +519,10 @@ def _build_primary_script(tool: str, project_dir: str, targets: list[str]) -> st
             f"{cmd_s} {cache_s} -- {target_args}"
         )
     lines.append('echo "VERIFIER_CHECK_PHASE: execute" >&2')
-    lines.append(run + " 2>&1")
+    # FD 9 remains held in the owned uv process group until actual completion.
+    # The smaller child deadline gives the shell time to reap/fail before SSH
+    # job timeout, without racing another verifier against a still-writing uv.
+    lines.append("verifier_uv " + run + " 2>&1")
     lines.append("flock -u 9")
     return "\n".join(lines)
 
@@ -1030,6 +1048,7 @@ def _build_readonly_fallback_script(
 
     lines = [
         "set -eu",
+        *owned_uv_guard_lines(),
         '_MCP_UID="$(id -u)"',
         '_MCP_USER="$(id -un)"',
         f"PROJECT_DIR={project_q}",
@@ -1105,7 +1124,7 @@ def _build_readonly_fallback_script(
         # --frozen forbids lock mutation and UV_PROJECT_ENVIRONMENT prevents
         # .venv creation inside the source checkout.
         '    cd "$PROJECT_DIR"',
-        "    uv sync --all-extras --frozen 2>&1",
+        "    verifier_uv uv sync --all-extras --frozen 2>&1",
         '    cp "$PROJECT_DIR/uv.lock" "$SOURCE_LOCK"',
         '    SYNC_PROJECT="$PROJECT_DIR"',
         "  else",
@@ -1114,13 +1133,13 @@ def _build_readonly_fallback_script(
         '    cp "$SOURCE_META_NEW" "$TMP_ROOT/pyproject.toml"',
         '    rm -f "$TMP_ROOT/uv.lock"',
         '    cd "$TMP_ROOT"',
-        "    uv sync --all-extras --no-install-project 2>&1",
+        "    verifier_uv uv sync --all-extras --no-install-project 2>&1",
         f"    for req in {requirement_args}; do",
         '      req_src="$PROJECT_DIR/$req"',
         '      req_cache="$TMP_ROOT/.source-$(printf %s "$req" | tr / _)"',
         '      if [ -L "$req_src" ] || [ -L "$PROJECT_DIR/${req%%/*}" ]; then echo "VERIFIER_ROOT_UNSAFE: symlinked requirements source" >&2; exit 90; fi',
         '      if [ -f "$req_src" ]; then',
-        '        uv pip install --python "$UV_PROJECT_ENVIRONMENT/bin/python3" -r "$req_src" 2>&1',
+        '        verifier_uv uv pip install --python "$UV_PROJECT_ENVIRONMENT/bin/python3" -r "$req_src" 2>&1',
         '        cp "$req_src" "$req_cache"',
         "      else",
         '        rm -f "$req_cache"',
@@ -1148,15 +1167,15 @@ def _build_readonly_fallback_script(
     cache_root = _verifier_project_cache_root(project_dir)
     if tool_key == "pytest":
         lines.append(
-            f'{run_prefix} pytest -o cache_dir={cache_root}/pytest {target_args} 2>&1'
+            f'verifier_uv {run_prefix} pytest -o cache_dir={cache_root}/pytest {target_args} 2>&1'
         )
     elif tool_key == "ruff":
         lines.append(
-            f'{run_prefix} ruff check --cache-dir {cache_root}/ruff {target_args} 2>&1'
+            f'verifier_uv {run_prefix} ruff check --cache-dir {cache_root}/ruff {target_args} 2>&1'
         )
     elif tool_key == "mypy":
         lines.append(
-            f'{run_prefix} mypy --cache-dir {cache_root}/mypy {target_args} 2>&1'
+            f'verifier_uv {run_prefix} mypy --cache-dir {cache_root}/mypy {target_args} 2>&1'
         )
 
     return "\n".join(lines)
@@ -1214,7 +1233,13 @@ def _fallback_result(
     tool_key: str, tool_name: str, r2: dict[str, Any], project_dir: str = ""
 ) -> dict[str, Any]:
     """Build the tool_error/tool_success envelope for a fallback command's raw job result."""
-    env_failure = _classify_env_failure(r2.get("stderr", ""), r2.get("exit_code"))
+    env_failure = _classify_env_failure(
+        (r2.get("stderr") or "") + "\n" + (
+            (r2.get("stdout") or r2.get("output") or "")
+            if r2.get("exit_code") == 124 else ""
+        ),
+        r2.get("exit_code"),
+    )
     if env_failure:
         return tool_error(
             code=env_failure,
@@ -1477,7 +1502,13 @@ def _run_uv_tool(
             tool_name=tool_name,
         )
 
-    env_failure = _classify_env_failure(raw.get("stderr", ""), raw.get("exit_code"))
+    env_failure = _classify_env_failure(
+        (raw.get("stderr") or "") + "\n" + (
+            (raw.get("stdout") or raw.get("output") or "")
+            if raw.get("exit_code") == 124 else ""
+        ),
+        raw.get("exit_code"),
+    )
     if env_failure:
         return tool_error(
             code=env_failure,

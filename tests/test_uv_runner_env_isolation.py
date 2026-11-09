@@ -137,6 +137,9 @@ def test_fallback_script_keeps_mutable_state_under_verifier_root(mcp_tools):
         ("uv: error: Failed to remove '/srv/verifier/x/.venv/.lock': Permission denied", 2, "VERIFIER_ENV_UNAVAILABLE"),
         ("VERIFIER_ROOT_UNSAFE: wrong owner", 90, "VERIFIER_BOOTSTRAP_FAILED"),
         ("VERIFIER_LOCK_BUSY: verifier synchronization is occupied", 91, "VERIFIER_LOCK_BUSY"),
+        ("VERIFIER_CHILD_TIMEOUT: owned verifier process exceeded deadline", 124, "VERIFIER_CHILD_TIMEOUT"),
+        ("VERIFIER_CHILD_TIMEOUT: fake test output", 1, None),
+        ("some test exited with code 124", 124, None),
         ("VERIFIER_LOCK_BUSY: spurious check error", 1, None),
         ("wrong command exit", 91, None),
         ("read-only file system", 2, "VERIFIER_ENV_UNAVAILABLE"),
@@ -274,6 +277,43 @@ def test_run_uv_tool_surfaces_primary_lock_contention_as_retryable(
     assert result["ok"] is False
     assert result["error"]["code"] == "VERIFIER_LOCK_BUSY"
     assert result["error"]["retryable"] is True
+
+
+def test_timeout_marker_in_merged_stdout_is_typed_without_overriding_exit124(
+    mcp_tools, monkeypatch,
+):
+    """Original uv shell uses 2>&1, so watchdog stderr lands in stdout."""
+    marker = "VERIFIER_CHILD_TIMEOUT: owned verifier process exceeded deadline"
+    for stdout, expected in ((marker, "VERIFIER_CHILD_TIMEOUT"), ("test output", "TOOL_EXECUTION_FAILED")):
+        fallback = mcp_tools._fallback_result(
+            "ruff", "run_ruff",
+            {"exit_code": 124, "stdout": stdout, "stderr": ""},
+            "/work/proj",
+        )
+        assert fallback["error"]["code"] == expected
+
+    monkeypatch.setattr(mcp_tools, "_resolve_project", lambda _: Path("/work/proj"))
+
+    class Client:
+        def execute_raw(self, command, **kwargs):
+            if command == "command -v uv":
+                return {"job_id": "which-uv"}
+            assert command == "sh"
+            assert "verifier_uv uv run" in kwargs.get("stdin", "")
+            return {"job_id": "run"}
+
+        def wait_job(self, job_id, **kwargs):
+            if job_id == "which-uv":
+                return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
+            assert job_id == "run"
+            return {"exit_code": 124, "stdout": marker, "stderr": ""}
+
+    result = mcp_tools._run_uv_tool(
+        Client(), "project", "pytest", "run_pytest", ["tests/"],
+    )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "VERIFIER_CHILD_TIMEOUT"
+    assert result["error"]["retryable"] is False
 
 
 def test_run_uv_tool_surfaces_primary_bootstrap_failure(mcp_tools, monkeypatch):
