@@ -82,6 +82,31 @@ def test_register_client_persists_to_store(store_path):
     assert loaded[0].redirect_uris == ["https://chat.example.com/callback"]
 
 
+def test_dcr_handler_phase_trace_separates_dispatch_and_store_without_client_data(
+    store_path, capsys
+):
+    provider = GatewayOAuthProvider()
+    provider.set_client_store(ClientStore(store_path))
+    info = _client_info("private-client-name-do-not-log")
+    info.redirect_uris = ["https://example.invalid/?secret=private"]
+    asyncio.run(provider.register_client(info))
+    lines = capsys.readouterr().err.splitlines()
+    handler = [line for line in lines if line.startswith("DCR_HANDLER_TRACE ")]
+    assert len(handler) == 4
+    phases = ("entered", "store_submit", "store_done", "registered")
+    ids = set()
+    for line, phase in zip(handler, phases, strict=True):
+        match = re.fullmatch(
+            rf"DCR_HANDLER_TRACE id=([0-9a-f]{{12}}) phase={phase} elapsed_ms=([0-9]{{1,7}})",
+            line,
+        )
+        assert match is not None
+        ids.add(match.group(1))
+    assert len(ids) == 1
+    assert all("private" not in line and store_path not in line for line in lines)
+    assert len(provider.list_clients()) == 1
+
+
 def test_client_store_phase_trace_never_emits_client_data_or_paths(store_path, capsys):
     """A registration's bounded store phases are safe to retain in CI."""
     store = ClientStore(store_path)
