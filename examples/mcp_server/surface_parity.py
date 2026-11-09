@@ -105,6 +105,7 @@ def build_catalog_refresh_contract(
     *,
     server_toolset_hash: str | None,
     client_catalog_toolset_hash: str | None,
+    session_bound_reported_mismatch: bool = False,
 ) -> dict[str, Any]:
     """Type a client catalog against the live server surface.
 
@@ -127,11 +128,24 @@ def build_catalog_refresh_contract(
         state = "stale"
         stale = True
 
+    # An authenticated session-bound, *client-reported* complete names list
+    # can demonstrate a missing callable tool even when the client cannot
+    # supply its own catalog's historical hash.  That is a reason to request
+    # a client tools/list refresh, never proof of stale auth or a server-side
+    # mutation precondition.  Preserve "unproven" hash state in that case.
+    refresh_required = stale or bool(session_bound_reported_mismatch)
+    refresh_reason = (
+        "toolset_hash_mismatch" if stale
+        else "session_bound_reported_name_mismatch" if session_bound_reported_mismatch
+        else None
+    )
+
     return {
         "catalog_state": state,
         "server_toolset_hash": server_toolset_hash,
         "client_catalog_toolset_hash": client_catalog_toolset_hash,
-        "refresh_required": stale,
+        "refresh_required": refresh_required,
+        "refresh_reason": refresh_reason,
         "refresh_action": {
             "method": "mcp",
             "tool": "tools/list",
@@ -143,7 +157,9 @@ def build_catalog_refresh_contract(
             "the current server toolset hash. Re-run mcp tools/list to obtain the "
             "current callable surface; the server registers its full surface at "
             "startup, so no server-side reconnect is required. Diagnostic only: "
-            "this never gates a server mutation."
+            "this never gates a server mutation. A complete session-bound "
+            "client-reported tool-name mismatch also requests tools/list even "
+            "without a client catalog hash; that report remains unverified."
         ),
     }
 

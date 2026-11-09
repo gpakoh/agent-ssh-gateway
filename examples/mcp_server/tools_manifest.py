@@ -106,6 +106,12 @@ def _operator_surface_contract(
         "catalog_refresh": build_catalog_refresh_contract(
             server_toolset_hash=server_toolset_hash,
             client_catalog_toolset_hash=client_catalog_toolset_hash,
+            session_bound_reported_mismatch=(
+                client_observation_status == "supplied_bound"
+                and client_attestation is not None
+                and complete
+                and mismatch
+            ),
         ),
         "guard_coverage": evaluate_required_guards(client_attestation, required_guard_tools),
         "operator_guidance": "Server state is authoritative only for the local MCP tool manager. Client-visible names are client-reported and never independently verified; use missing/unexpected diagnostics to investigate the external resource catalog without treating the report as mutation authority. An externally missing tool is not proof that the MCP server failed to register it.",
