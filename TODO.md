@@ -2,7 +2,7 @@
 
 **Reconciled:** 2026-11-07 against protected `master@af232e84d396fba054f956829cf58665dccb34cf` (one-file verifier PR #811 accepted: exact-head CI #23432 SUCCESS 20/20, guarded merge and matching Git blob). Post-merge CI #23447 COMPLETED SUCCESS (build/deploy/host-smoke); live Gateway and MCP confirmed `af232e84d396fba054f956829cf58665dccb34cf` and ready. PR #809/#808 also deployed. **Open PR #812** is the separate TODO reconciliation. Previous baseline: 2026-11-05.
 
-**Open: 30 (P1 9 / P2 13 / P3 8).** Gitea Issues: **30 OPEN**; PRs: **1 OPEN** (#812 at this checkpoint). Inventories overlap; do NOT add together. Full acceptance, not a narrow PR or a clean test alone, closes a checkbox. Gitea issue.state is authoritative for open/closed; coordination state is separate.
+**Open: 29 (P1 9 / P2 13 / P3 7).** Gitea Issues: **30 OPEN**; PRs: **1 OPEN** (#812 at this checkpoint). Inventories overlap; do NOT add together. Full acceptance, not a narrow PR or a clean test alone, closes a checkbox. Gitea issue.state is authoritative for open/closed; coordination state is separate.
 
 **2026-10-30 closeout evidence (not active TODO):** P2-15 — PR #728, commit `f10b014e`, CI #21331 and post-merge #21342 SUCCESS: both `docker_ps` and `docker_images` expose configured-daemon inventory scope, endpoint identity hash and truncation/unknown host-wide completeness; this does **not** establish exhaustive host/multi-daemon discovery or real pagination. P2-16 — verified guarded `git_fetch_ref` + `git_update_branch_by_merge` on the existing #730 and #728 candidates against exact `origin/master` SHA, followed by published current-base PR heads and successful CI/merge. Remaining independent edge cases should be new scoped findings rather than re-opening accepted outcomes.
 
