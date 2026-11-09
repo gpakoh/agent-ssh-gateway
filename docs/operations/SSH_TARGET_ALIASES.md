@@ -78,13 +78,21 @@ expand target CIDRs to `0.0.0.0/0` just to reach LXC104.
    ```
 
    The reviewed `scripts/deploy-from-registry.sh` applies this fixed
-   read-only overlay during normal rollout **and rollback**. Before pulling
-   images it rejects missing/symlinked/relative files, a group/world-writable
-   config, keys not owned by host UID 1000 with mode 0600, and invalid Compose
-   configuration. `SSH_TARGETS_OVERLAY_ENABLED=false` (the default)
-   uses the original Compose model. A one-off Compose override would be
-   lost on the next CI deployment. If the optional Media API overlay is
-   also enabled, both fixed overlays compose together.
+   read-only overlay during normal rollout **and rollback**. The CI deploy
+   job is itself a container: it must **not** mount operator SSH keys into
+   its job workspace, nor pretend `/srv/gateway-ssh-targets` exists there.
+   When enabled, a disposable verifier runs on the host Docker daemon
+   from the already-installed immutable MCP image, with no network,
+   no Linux capabilities, no new privileges and read-only access only to
+   the operator target directory. It checks for missing/symlinked files,
+   group/world-writable config, exact uid 1000/mode 0600 private key files
+   and unreadable inputs without printing their bytes. The CI job only
+   receives a typed GO/NO-GO; it does not read the private key contents.
+   Compose itself must also validate successfully before any image pull.
+   `SSH_TARGETS_OVERLAY_ENABLED=false` (the default) keeps the original
+   Compose model and requires no operator key directory. A one-off Compose
+   override would be lost on the next CI deployment. If the optional
+   Media API overlay is enabled, both fixed overlays compose together.
 7. Start only the affected MCP adapter via the existing guarded,
    immutable-image deployment path. Verify the exact build SHA, then
    `list_ssh_targets` and harmless `hostname`/`id -un`/health
