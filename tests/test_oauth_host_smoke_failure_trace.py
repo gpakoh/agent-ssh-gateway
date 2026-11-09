@@ -52,6 +52,10 @@ def test_host_smoke_failure_logs_only_fixed_shape_dcr_phases() -> None:
         "DCR_STORE_TRACE id=fedcba987654 phase=lock_acquired elapsed_ms=5\n"
         "DCR_STORE_TRACE id=fedcba987654 phase=loaded elapsed_ms=7\n"
         "DCR_STORE_TRACE id=fedcba987654 phase=persisted elapsed_ms=42\n"
+        "DCR_HANDLER_TRACE id=012345abcdef phase=entered elapsed_ms=0\n"
+        "DCR_HANDLER_TRACE id=012345abcdef phase=store_submit elapsed_ms=1\n"
+        "DCR_HANDLER_TRACE id=012345abcdef phase=store_done elapsed_ms=43\n"
+        "DCR_HANDLER_TRACE id=012345abcdef phase=registered elapsed_ms=44\n"
     )
     unsafe = (
         "Authorization: Bearer opaque-bearer\n"
@@ -65,6 +69,10 @@ def test_host_smoke_failure_logs_only_fixed_shape_dcr_phases() -> None:
         "DCR_STORE_TRACE id=fedcba987654 phase=unknown elapsed_ms=5\n"
         "DCR_STORE_TRACE id=fedcba987654 phase=loaded elapsed_ms=2\rTOKEN=private\n"
         "DCR_STORE_TRACE id=fedcba987654 phase=persisted elapsed_ms=100000000\n"
+        "DCR_HANDLER_TRACE id=012345abcdef phase=entered elapsed_ms=1 client_secret=private\n"
+        "DCR_HANDLER_TRACE id=012345abcdef phase=unknown elapsed_ms=2\n"
+        "DCR_HANDLER_TRACE id=012345abcdef phase=entered elapsed_ms=1\rTOKEN=private\n"
+        "DCR_HANDLER_TRACE id=012345abcdef phase=store_submit elapsed_ms=100000000\n"
     )
     filtered = subprocess.run(
         ["grep", "-E", pattern],

@@ -11,16 +11,19 @@ test_opencode_runner_argv.py.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import shlex
 import signal
 import subprocess
+import sys
 import threading
 import time
+from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -114,25 +117,25 @@ def _communicate_bounded_shell_tree(
 def _scan_opencode_progress(
     path: Path, offset: int, skip: int
 ) -> tuple[int, int, int]:
-    """Run exactly the Python payload embedded in the shipped shell watchdog."""
+    """Execute the exact emitted Python scanner without per-poll interpreter startup.
+
+    A scanner pass is purely local, byte-bounded file I/O. These two algorithm
+    tests must not depend on whether a heavily shared CI runner can start ten
+    independent Python interpreters within five seconds apiece. Process-tree
+    timeout/termination is exercised separately by the real shell harness tests.
+    """
     lines = _opencode_startup_watchdog_script_lines("", 5, 1, 10, 10)
     start = lines.index("import os, re, sys")
     end = lines.index("OPENCODEPROGRESS_EOF", start)
-    result = subprocess.run(
-        [
-            "python3",
-            "-c",
-            "\n".join(lines[start:end]),
-            str(path),
-            str(offset),
-            str(skip),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=5,
-    )
-    parsed = tuple(int(field) for field in result.stdout.strip().split(":"))
+    payload = compile("\n".join(lines[start:end]), "<opencode-watchdog>", "exec")
+    output = io.StringIO()
+    with patch.object(
+        sys, "argv", ["opencode-watchdog", str(path), str(offset), str(skip)]
+    ):
+        with redirect_stdout(output):
+            # Repo-owned, fixed generated source; no untrusted content is executed.
+            exec(payload, {"__name__": "__main__"})  # noqa: S102
+    parsed = tuple(int(field) for field in output.getvalue().strip().split(":"))
     assert len(parsed) == 3
     return parsed
 

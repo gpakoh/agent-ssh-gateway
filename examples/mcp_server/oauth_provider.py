@@ -10,6 +10,7 @@ import asyncio
 import base64
 import hashlib
 import secrets
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -25,6 +26,31 @@ if TYPE_CHECKING:
     # module-level import here would be circular. Safe under `from
     # __future__ import annotations` (all annotations below are strings).
     from examples.mcp_server.client_store import ClientStore
+
+
+_DCR_HANDLER_PHASES = frozenset({"entered", "store_submit", "store_done", "failed", "registered"})
+
+
+def _trace_dcr_handler_phase(trace_id: str, phase: str, started: float) -> None:
+    """Record only fixed-shape DCR execution milestones, never client metadata.
+
+    This distinguishes requests stalled before provider dispatch from requests
+    delayed by durable storage, without leaking OAuth clients or credentials.
+    """
+    if phase not in _DCR_HANDLER_PHASES:
+        raise ValueError("unknown DCR handler phase")
+    if len(trace_id) != 12 or any(ch not in "0123456789abcdef" for ch in trace_id):
+        raise ValueError("invalid DCR handler trace id")
+    elapsed_ms = min(9_999_999, max(0, int((time.monotonic() - started) * 1000)))
+    try:
+        print(
+            f"DCR_HANDLER_TRACE id={trace_id} phase={phase} elapsed_ms={elapsed_ms}",
+            file=sys.stderr,
+            flush=True,
+        )
+    except OSError:
+        # Diagnostic stderr must not affect OAuth registration.
+        pass
 
 
 def hash_token(token: str) -> str:
@@ -367,6 +393,10 @@ class GatewayOAuthProvider:
         """Register a new OAuth client (DCR, RFC 7591)."""
         from mcp.server.auth.provider import RegistrationError
 
+        trace_id = secrets.token_hex(6)
+        started = time.monotonic()
+        _trace_dcr_handler_phase(trace_id, "entered", started)
+
         redirect_uris = getattr(client_info, "redirect_uris", None) or getattr(
             client_info, "redirect_uris", []
         )
@@ -395,8 +425,15 @@ class GatewayOAuthProvider:
             # Lock acquisition and fsync are blocking filesystem operations.
             # Never stall the OAuth/MCP event loop while another writer holds
             # the store lock. Expose this client only after durable persistence.
-            await asyncio.to_thread(self._client_store.add, client)
+            _trace_dcr_handler_phase(trace_id, "store_submit", started)
+            try:
+                await asyncio.to_thread(self._client_store.add, client)
+            except Exception:
+                _trace_dcr_handler_phase(trace_id, "failed", started)
+                raise
+            _trace_dcr_handler_phase(trace_id, "store_done", started)
         self._clients[client_id] = client
+        _trace_dcr_handler_phase(trace_id, "registered", started)
 
         client_info.client_id = client_id
         client_info.client_id_issued_at = int(client.created_at)
