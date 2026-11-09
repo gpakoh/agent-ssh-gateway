@@ -68,26 +68,64 @@ case "$SSH_TARGETS_OVERLAY_ENABLED" in
       echo "SSH targets overlay: NO-GO (custom COMPOSE override is not allowed)" >&2
       exit 1
     fi
+    # The CI deploy job runs inside its OWN container and intentionally
+    # does not bind the operator's private host keys into that job. Thus
+    # host paths in docker/.env cannot be stat'ed from this shell. Inspect
+    # them on the Docker HOST through the already-running, pinned MCP image
+    # in a disposable networkless/read-only verifier instead.
     for variable in MCP_SSH_TARGETS_CONFIG_SOURCE MCP_SSH_LXC103_KEY_SOURCE MCP_SSH_LXC104_KEY_SOURCE; do
       source_file="${!variable:-}"
-      if [[ "$source_file" != /* ]] || [ ! -f "$source_file" ] || [ -L "$source_file" ]; then
-        echo "SSH targets overlay: NO-GO (missing, symlinked or non-absolute $variable)" >&2
+      if [[ "$source_file" != /* ]] || [[ "$source_file" == *$'\n'* ]]; then
+        echo "SSH targets overlay: NO-GO (non-absolute or malformed $variable)" >&2
         exit 1
       fi
     done
-    config_mode=$(stat -c '%a' "$MCP_SSH_TARGETS_CONFIG_SOURCE")
-    if [[ ! "$config_mode" =~ ^[0-7]{3,4}$ ]] || (( (8#$config_mode & 8#022) != 0 )); then
-      echo "SSH targets overlay: NO-GO (unsafe config permissions)" >&2
+    operator_dir="${MCP_SSH_TARGETS_CONFIG_SOURCE%/*}"
+    if [ "$operator_dir" = "/" ] ||
+       [ "$MCP_SSH_LXC103_KEY_SOURCE" != "$operator_dir/keys/lxc103" ] ||
+       [ "$MCP_SSH_LXC104_KEY_SOURCE" != "$operator_dir/keys/lxc104" ]; then
+      echo "SSH targets overlay: NO-GO (keys must share exact operator config directory)" >&2
       exit 1
     fi
-    for variable in MCP_SSH_LXC103_KEY_SOURCE MCP_SSH_LXC104_KEY_SOURCE; do
-      source_file="${!variable}"
-      read -r key_owner key_mode < <(stat -c '%u %a' "$source_file")
-      if [ "$key_owner" != "1000" ] || [ "$key_mode" != "600" ]; then
-        echo "SSH targets overlay: NO-GO (key must be uid 1000 mode 0600: $variable)" >&2
-        exit 1
-      fi
-    done
+    live_mcp_image_id=$(docker inspect -f '{{.Image}}' mcp-oauth 2>/dev/null) || {
+      echo "SSH targets overlay: NO-GO (live MCP image unavailable)" >&2
+      exit 1
+    }
+    if [[ ! "$live_mcp_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+      echo "SSH targets overlay: NO-GO (live MCP image identity invalid)" >&2
+      exit 1
+    fi
+    if ! timeout --signal=TERM --kill-after=5s 120s \
+        docker run --rm --pull never --network none --read-only --cap-drop ALL \
+        --security-opt no-new-privileges --user 1000:1000 \
+        --mount "type=bind,source=$operator_dir,target=/operator-ssh-targets,readonly" \
+        --entrypoint python "$live_mcp_image_id" -c '
+import os
+import stat
+from pathlib import Path
+
+root = Path("/operator-ssh-targets")
+def check(path, *, uid=None, exact_mode=None):
+    entry = (root / path).lstat()
+    if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1:
+        raise ValueError("not a regular singleton file")
+    if uid is not None and entry.st_uid != uid:
+        raise ValueError("incorrect owner")
+    if exact_mode is not None and stat.S_IMODE(entry.st_mode) != exact_mode:
+        raise ValueError("incorrect permissions")
+    if not os.access(root / path, os.R_OK):
+        raise ValueError("unreadable input")
+    return entry
+
+config = check("targets.json")
+if stat.S_IMODE(config.st_mode) & 0o022:
+    raise ValueError("writable configuration")
+check("keys/lxc103", uid=1000, exact_mode=0o600)
+check("keys/lxc104", uid=1000, exact_mode=0o600)
+' >/dev/null 2>&1; then
+      echo "SSH targets overlay: NO-GO (host operator input missing or unsafe)" >&2
+      exit 1
+    fi
     COMPOSE="$COMPOSE -f docker/compose.ssh-targets.example.yml"
     if ! $COMPOSE config -q >/dev/null 2>&1; then
       echo "SSH targets overlay: NO-GO (Compose configuration invalid)" >&2
