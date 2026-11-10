@@ -338,6 +338,11 @@ class TestExternalSurfaceParityDiagnostics:
         assert contract["client_observation"]["independently_verified"] is False
         assert contract["missing_from_client"] == ["search_text"]
         assert contract["unexpected_in_client"] == ["external_only"]
+        refresh = contract["catalog_refresh"]
+        assert refresh["catalog_state"] == "unproven"
+        assert refresh["refresh_required"] is True
+        assert refresh["refresh_reason"] == "session_bound_reported_name_mismatch"
+        assert refresh["refresh_action"]["tool"] == "tools/list"
         serialized = str(contract)
         assert "opaque-auth" not in serialized
 
@@ -365,11 +370,12 @@ class TestExternalSurfaceParityDiagnostics:
         assert contract["guard_coverage"]["status"] == "unknown"
         assert contract["guard_coverage"]["reported_absent"] == []
         assert contract["guard_coverage"]["unknown"] == ["git_fetch_ref"]
+        assert contract["catalog_refresh"]["refresh_required"] is False
 
     def test_unbound_report_is_explicit_and_never_verified(
         self, sample_tools: list[FakeTool]
     ) -> None:
-        names = tuple(sorted(tool.name for tool in sample_tools))
+        names = tuple(sorted(tool.name for tool in sample_tools if tool.name != "search_text"))
         attestation = ClientSurfaceAttestation(
             auth_identity="",
             toolset_hash="toolset-hash",
@@ -388,8 +394,10 @@ class TestExternalSurfaceParityDiagnostics:
         assert contract["client_observation"]["status"] == "supplied_unbound"
         assert contract["client_observation"]["binding_status"] == "unbound"
         assert contract["external_resource_catalog_verified"] is False
-        assert contract["missing_from_client"] == []
+        assert contract["missing_from_client"] == ["search_text"]
         assert contract["unexpected_in_client"] == []
+        # Unbound reports stay diagnostic only and must not mandate refresh.
+        assert contract["catalog_refresh"]["refresh_required"] is False
 
     def test_matching_complete_report_still_never_flips_external_verification_true(
         self, sample_tools: list[FakeTool]
@@ -412,6 +420,7 @@ class TestExternalSurfaceParityDiagnostics:
         assert contract["missing_from_client"] == []
         assert contract["unexpected_in_client"] == []
         assert contract["client_observation"]["independently_verified"] is False
+        assert contract["catalog_refresh"]["refresh_required"] is False
 
 
 class TestManifestAvailability:

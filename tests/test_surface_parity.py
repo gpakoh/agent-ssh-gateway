@@ -395,6 +395,21 @@ def test_catalog_refresh_contract_types_state_and_never_filters() -> None:
     )
     assert unproven["catalog_state"] == "unproven"
     assert unproven["refresh_required"] is False
+    assert unproven["refresh_reason"] is None
+
+    # Reproduce live 187-server / 186-client catalog with no client hash:
+    # session-bound complete names attest a missing callable tool. Keep hash
+    # state unproven, but request a bounded client tools/list refresh.
+    omitted = build_catalog_refresh_contract(
+        server_toolset_hash=server_hash,
+        client_catalog_toolset_hash=None,
+        session_bound_reported_mismatch=True,
+    )
+    assert omitted["catalog_state"] == "unproven"
+    assert omitted["refresh_required"] is True
+    assert omitted["refresh_reason"] == "session_bound_reported_name_mismatch"
+    assert omitted["refresh_action"]["tool"] == "tools/list"
+    assert omitted["refresh_action"]["server_side_reconnect_required"] is False
 
 
 def test_existing_git_mutations_are_not_parity_gated_and_no_static_dependency_map_exists() -> None:
