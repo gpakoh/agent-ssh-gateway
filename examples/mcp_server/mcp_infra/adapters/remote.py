@@ -1018,24 +1018,45 @@ async def _reconcile_merge_postcondition(
         except Exception as exc:
             last_read_error_class = type(exc).__name__
         else:
-            head = pr.get("head") or {}
-            observed_head_sha = _valid_commit_sha(head.get("sha"))
-            merge_commit_sha = _valid_commit_sha(pr.get("merge_commit_sha"))
-            last_observed = {
-                "state": pr.get("state"),
-                "merged": pr.get("merged"),
-                "head_sha": observed_head_sha,
-                "merge_commit_sha": merge_commit_sha,
-            }
-            if (
-                pr.get("merged") is True
-                and observed_head_sha == expected_head_sha
-                and merge_commit_sha is not None
-            ):
-                return pr, {
-                    "reconciliation_attempts": attempts,
-                    "observed": last_observed,
+            if not isinstance(pr, dict):
+                # A truncated/malformed provider read is UNKNOWN, not a
+                # definitive merge failure or permission to replay POST.
+                last_read_error_class = "MalformedPRResponse"
+            else:
+                raw_head = pr.get("head")
+                head = raw_head if isinstance(raw_head, dict) else {}
+                raw_number = pr.get("number")
+                observed_number = (
+                    raw_number if type(raw_number) is int and raw_number > 0 else None
+                )
+                raw_state = pr.get("state")
+                observed_state = raw_state if raw_state in ("open", "closed") else None
+                raw_merged = pr.get("merged")
+                observed_merged = raw_merged if type(raw_merged) is bool else None
+                observed_head_sha = _valid_commit_sha(head.get("sha"))
+                merge_commit_sha = _valid_commit_sha(pr.get("merge_commit_sha"))
+                # Only bounded, typed fields may enter the reconciliation
+                # receipt: provider-controlled strings must never be echoed.
+                last_observed = {
+                    "number": observed_number,
+                    "state": observed_state,
+                    "merged": observed_merged,
+                    "head_sha": observed_head_sha,
+                    "merge_commit_sha": merge_commit_sha,
                 }
+                if not isinstance(raw_head, dict) or observed_number is None:
+                    last_read_error_class = "MalformedPRResponse"
+                if (
+                    observed_number == pull_number
+                    and observed_state == "closed"
+                    and observed_merged is True
+                    and observed_head_sha == expected_head_sha
+                    and merge_commit_sha is not None
+                ):
+                    return pr, {
+                        "reconciliation_attempts": attempts,
+                        "observed": last_observed,
+                    }
         if attempt + 1 < _MERGE_RECONCILE_ATTEMPTS:
             await asyncio.sleep(_MERGE_RECONCILE_DELAY_SECONDS)
 

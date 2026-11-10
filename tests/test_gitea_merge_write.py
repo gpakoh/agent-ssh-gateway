@@ -1809,3 +1809,118 @@ async def test_adapter_requires_gitea_token(monkeypatch):
     result = await remote.gitea_merge_pull_request("owner", "repo", 25, SHA)
     assert result["ok"] is False
     assert result["error"]["code"] == "DEPENDENCY_MISSING"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        None,
+        [],
+        {
+            "state": "closed",
+            "merged": True,
+            "number": 25,
+            "head": [],
+            "merge_commit_sha": "b" * 40,
+        },
+        {
+            "state": "closed",
+            "merged": True,
+            "number": 25,
+            "head": {"sha": SHA},
+            "merge_commit_sha": {"unexpected": "structure"},
+        },
+        {
+            "state": "closed",
+            "merged": True,
+            "number": 26,
+            "head": {"sha": SHA},
+            "merge_commit_sha": "b" * 40,
+        },
+        {
+            "state": "open",
+            "merged": True,
+            "number": 25,
+            "head": {"sha": SHA},
+            "merge_commit_sha": "b" * 40,
+        },
+    ],
+)
+async def test_postmerge_partial_or_wrong_pr_receipt_never_confirms_mutation(
+    monkeypatch, response
+):
+    """POST may have succeeded; malformed/wrong-identity GET must fail closed."""
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+
+    class PartialReadClient(FakeMergeClient):
+        async def get_pull_request(self, owner, repo, pull_number):
+            if self.merge_calls:
+                self.pr_reads += 1
+                return response
+            return await super().get_pull_request(owner, repo, pull_number)
+
+    client = PartialReadClient("token", apply_merge=True)
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request("owner", "repo", 25, SHA)
+    assert not result["ok"], result
+    assert result["error"]["code"] == "MUTATION_OUTCOME_UNKNOWN"
+    assert result["error"]["retryable"] is False
+    assert result["error"]["details"]["mutation_started"] is True
+    assert result["error"]["details"]["reconciliation_attempts"] == 3
+    assert len(client.merge_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_postmerge_partial_results_recover_to_exact_authoritative_readback(monkeypatch):
+    """Two partial GET responses then a real exact PR receipt: no second POST."""
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+
+    class RecoveringReadClient(FakeMergeClient):
+        def __init__(self, token):
+            super().__init__(token)
+            self.partial_reads = 0
+
+        async def get_pull_request(self, owner, repo, pull_number):
+            if self.merge_calls and self.partial_reads < 2:
+                self.partial_reads += 1
+                self.pr_reads += 1
+                return {"number": 25, "state": "closed", "merged": True, "head": []}
+            return await super().get_pull_request(owner, repo, pull_number)
+
+    client = RecoveringReadClient("token")
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+    result = await remote.gitea_merge_pull_request("owner", "repo", 25, SHA)
+    assert result["ok"], result
+    assert result["result"]["outcome"] == "completed"
+    assert result["result"]["reconciliation_attempts"] == 3
+    assert len(client.merge_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_postmerge_untrusted_status_does_not_leak_sentinel(monkeypatch):
+    """Even anomalous provider state must not echo sensitive raw fields."""
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    secret = "Bearer-private-sentinel-should-not-echo"
+
+    class UntrustedReceiptClient(FakeMergeClient):
+        async def get_pull_request(self, owner, repo, pull_number):
+            if self.merge_calls:
+                self.pr_reads += 1
+                return {
+                    "number": 25,
+                    "state": secret,
+                    "merged": True,
+                    "head": {"sha": SHA},
+                    "merge_commit_sha": "b" * 40,
+                }
+            return await super().get_pull_request(owner, repo, pull_number)
+
+    client = UntrustedReceiptClient("token")
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+    result = await remote.gitea_merge_pull_request("owner", "repo", 25, SHA)
+    assert not result["ok"]
+    assert result["error"]["code"] == "MUTATION_OUTCOME_UNKNOWN"
+    assert secret not in str(result)
+    assert len(client.merge_calls) == 1
