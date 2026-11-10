@@ -123,6 +123,14 @@ def test_registry_secret_wiring_is_typed_yaml_and_scoped_to_master_push():
         "sha256:dfd0f8d9c05f49a0b99f6812ae76809eaa79fb1c36963ca79078d2ce827caab8"
     )
     assert not build["container"].get("volumes")
+    # The image smoke step uses `set -euo pipefail`; act must invoke Bash,
+    # not the pinned container image's default /bin/sh (dash).
+    assert build["defaults"]["run"]["shell"] == "bash"
+    smoke_steps = [
+        step for step in build["steps"]
+        if "set -euo pipefail" in step.get("run", "")
+    ]
+    assert smoke_steps, "build-and-push must retain the Bash-only smoke step"
     assert all(
         "/media/1TB/Python/quart-platform/infra-quart/secrets/registry.token"
         not in mount

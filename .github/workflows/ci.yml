@@ -1457,6 +1457,12 @@ jobs:
     if: needs.scope.outputs.full_ci == 'true' && github.server_url != 'https://github.com' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository) || (github.ref_name == 'master' && github.event_name == 'push'))
     runs-on: docker-e2e-ci
     timeout-minutes: 20
+    # The pinned runner image defaults to POSIX sh (dash), but image smoke
+    # uses pipefail. Without this, PR CI #24357 built all three images then
+    # failed with `set: Illegal option -o pipefail` before exercising them.
+    defaults:
+      run:
+        shell: bash
     env:
       REGISTRY: 192.168.1.103:3005
       # Self-hosted runner pool has no direct internet; outbound egress goes
