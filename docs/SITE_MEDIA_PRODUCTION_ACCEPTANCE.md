@@ -76,6 +76,27 @@ Original, WebP and AVIF all passed independent inspect/readback SHA-256,
 correct MIME and EOF. Wrong source SHA and duplicate target without CAS
 were denied, without source or output corruption.
 
+### Historical codec acceptance outputs (archival reconciliation, 2026-11-10)
+
+The separate historical branch `archive/candidate-gateway-media-acceptance-733-20261031`
+(commit `3f15b78298fb42946e677d2e8b5f0caf79e5b00f`) held only
+three generated codec outputs, with **no source-code or test references**.
+Their archived content hashes and sizes were:
+
+| Historical output | Bytes | Archived SHA-256 |
+| --- | ---: | --- |
+| `media-acceptance-20261031.png` | 170 | `ffc1787e338c93e1526842bcc265854ed21506e6636f319cc06b542bf7110770` |
+| `media-acceptance-20261031.webp` | 220 | `d4e2609f2009772253d9c40d221a481ee9c7320530bb76086e5be7216ea51f00` |
+| `media-acceptance-20261031.avif` | 344 | `6d03460f4e3c824406b44b39d421a906c987af4773b8f52002f71fc604d06cfa` |
+
+These fingerprints preserve the historical **archive inventory**, not proof that
+the archived bytes are identical to the images used in the live conversion
+described above: its 2026-10-31 receipt did not record those SHA-256 values.
+Neither the generated binary outputs nor the old branch's unrelated parent
+history are production source changes or approved reusable test fixtures.
+Do not publish possible candidate data bytes to the main branch or count this
+metadata-only reconciliation as a new Media API end-to-end acceptance (#733).
+
 The old `app/site_media_worker/`, `docker/Dockerfile.site-media-worker`
 and Gateway codec-image CI build/push are retired after the verified live
 acceptance. The Gateway continues to test the standalone API contract and
