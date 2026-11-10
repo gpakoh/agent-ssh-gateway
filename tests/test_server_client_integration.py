@@ -23,14 +23,9 @@ pytestmark = pytest.mark.integration
 
 @pytest.fixture
 def store_path():
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-        path = f.name
-    yield path
-    if os.path.exists(path):
-        os.unlink(path)
-    lock_path = path + ".lock"
-    if os.path.exists(lock_path):
-        os.unlink(lock_path)
+    # First boot is a missing store, not a present zero-byte (corrupt) store.
+    with tempfile.TemporaryDirectory(prefix="mcp-client-store-") as directory:
+        yield os.path.join(directory, "clients.json")
 
 
 def _client_info(client_name: str = "test-connector"):
@@ -57,7 +52,7 @@ def test_load_clients_no_store():
     assert provider.load_clients() == 0
 
 
-def test_load_clients_empty_store(store_path):
+def test_load_clients_missing_store(store_path):
     provider = GatewayOAuthProvider()
     provider.set_client_store(ClientStore(store_path))
     assert provider.load_clients() == 0
@@ -302,3 +297,96 @@ def test_add_same_client_id_replaces_not_duplicates(store_path):
     loaded = store.load()
     assert len(loaded) == 1
     assert loaded[0].redirect_uris == ["https://new.example.com/cb"]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        "{\"version\":1,\"clients\":[",
+        "null",
+        "{}",
+        '{"version":1,"clients":{}}',
+        '{"version":2,"clients":[]}',
+        '{"version":1,"clients":[{"redirect_uris":[]}]}',
+    ],
+)
+def test_existing_invalid_client_store_fails_closed_without_erasing_bytes(
+    tmp_path, raw, capsys
+):
+    path = tmp_path / "clients.json"
+    path.write_text(raw, encoding="utf-8")
+    path.chmod(0o600)
+    store = ClientStore(str(path))
+    with pytest.raises(ValueError, match="OAuth client store"):
+        store.load()
+    with pytest.raises(ValueError, match="OAuth client store"):
+        store.add(StoredClient(client_id="new-client", redirect_uris=["https://example.com/cb"]))
+    assert path.read_text(encoding="utf-8") == raw
+    assert list(tmp_path.glob(".mcp_clients_*.tmp")) == []
+    assert "new-client" not in capsys.readouterr().err
+
+
+def test_corrupt_client_store_does_not_silently_load_empty_provider(tmp_path):
+    path = tmp_path / "clients.json"
+    path.write_text('{"version":1,"clients":', encoding="utf-8")
+    path.chmod(0o600)
+    provider = GatewayOAuthProvider()
+    provider.set_client_store(ClientStore(str(path)))
+    with pytest.raises(ValueError, match="OAuth client store"):
+        provider.load_clients()
+
+
+def test_client_store_fsync_error_preserves_previous_data_without_orphan_temp(
+    tmp_path, monkeypatch
+):
+    from examples.mcp_server import client_store as module
+
+    path = tmp_path / "clients.json"
+    store = ClientStore(str(path))
+    store.add(StoredClient(client_id="existing", redirect_uris=["https://example.com/old"]))
+    original = path.read_bytes()
+
+    def fail_fsync(_fd):
+        raise OSError("injected fsync failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module.os, "fsync", fail_fsync)
+        with pytest.raises(OSError, match="injected fsync"):
+            store.add(StoredClient(client_id="new", redirect_uris=["https://example.com/new"]))
+
+    assert path.read_bytes() == original
+    assert [client.client_id for client in store.load()] == ["existing"]
+    assert list(tmp_path.glob(".mcp_clients_*.tmp")) == []
+
+
+def test_client_store_short_writes_produce_complete_json(tmp_path, monkeypatch):
+    from examples.mcp_server import client_store as module
+
+    store = ClientStore(str(tmp_path / "clients.json"))
+    original_write = module.os.write
+
+    def short_write(fd, data):
+        return original_write(fd, data[: max(1, len(data) // 4)])
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module.os, "write", short_write)
+        store.add(StoredClient(client_id="short-write", redirect_uris=["https://example.com/cb"]))
+
+    assert [client.client_id for client in store.load()] == ["short-write"]
+
+
+def test_client_store_zero_byte_write_is_error_not_empty_published_file(
+    tmp_path, monkeypatch
+):
+    from examples.mcp_server import client_store as module
+
+    path = tmp_path / "clients.json"
+    store = ClientStore(str(path))
+    with monkeypatch.context() as patch:
+        patch.setattr(module.os, "write", lambda _fd, _data: 0)
+        with pytest.raises(OSError, match="client store write"):
+            store.add(StoredClient(client_id="new", redirect_uris=["https://example.com/cb"]))
+
+    assert not path.exists()
+    assert list(tmp_path.glob(".mcp_clients_*.tmp")) == []

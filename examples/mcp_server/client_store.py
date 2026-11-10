@@ -57,6 +57,10 @@ class ClientStoreBusyError(TimeoutError):
     """Durable OAuth client registration cannot acquire its store lock."""
 
 
+class ClientStoreCorruptError(ValueError):
+    """Existing OAuth registrations cannot be read safely; never replace them."""
+
+
 def _default_store_path() -> str:
     return os.environ.get(
         "MCP_CLIENT_STORE_FILE",
@@ -100,15 +104,41 @@ class ClientStore:
         _check_not_world_writable(self._path)
 
     def load(self) -> list[StoredClient]:
-        """Load all registered clients from the store file."""
+        """Load existing registrations; only a missing store is empty.
+
+        A present but truncated or invalid store must never be mistaken for
+        an empty store: the next DCR write would otherwise erase old clients.
+        """
         try:
-            with open(self._path) as f:
+            with open(self._path, encoding="utf-8") as f:
                 data = json.load(f)
         except FileNotFoundError:
             return []
-        except json.JSONDecodeError:
-            return []
-        return [StoredClient(**c) for c in data.get("clients", [])]
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise ClientStoreCorruptError("OAuth client store has invalid data") from None
+
+        if (
+            not isinstance(data, dict)
+            or type(data.get("version")) is not int
+            or data["version"] != 1
+            or not isinstance(data.get("clients"), list)
+        ):
+            raise ClientStoreCorruptError("OAuth client store has invalid data")
+
+        entries = data["clients"]
+        if any(
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("client_id"), str)
+            or not entry["client_id"]
+            or not isinstance(entry.get("redirect_uris"), list)
+            or not all(isinstance(uri, str) and uri for uri in entry["redirect_uris"])
+            for entry in entries
+        ):
+            raise ClientStoreCorruptError("OAuth client store has invalid data")
+        try:
+            return [StoredClient(**entry) for entry in entries]
+        except (TypeError, ValueError):
+            raise ClientStoreCorruptError("OAuth client store has invalid data") from None
 
     def add(self, client: StoredClient) -> None:
         """Persist a new client, leaving fixed-shape evidence of blocking stages."""
@@ -146,12 +176,28 @@ class ClientStore:
             suffix=".tmp",
         )
         try:
-            os.write(fd, raw.encode())
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        os.replace(tmp, self._path)
-        os.chmod(self._path, stat.S_IRUSR | stat.S_IWUSR)
+            try:
+                # Set permissions before publication, not after os.replace.
+                os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
+                remaining = memoryview(raw.encode("utf-8"))
+                while remaining:
+                    written = os.write(fd, remaining)
+                    if written <= 0:
+                        raise OSError("OAuth client store write made no progress")
+                    remaining = remaining[written:]
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            # Never publish a partially written or unsynced JSON file.
+            os.replace(tmp, self._path)
+        except BaseException:
+            # Keep the previous store byte-identical on pre-rename failures;
+            # do not leave credentials in abandoned temporary files.
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
 
 class _LockedStore:
