@@ -2137,7 +2137,7 @@ jobs:
             echo "::group::Recent OAuth DCR/provisioning phases (fixed-shape only)"
             # Strict fixed-shape filter: never print raw Docker logs or secrets.
             if ! docker logs --since 3m --tail 3000 mcp-oauth 2>&1 \
-              | grep -E '^(DCR_TRACE id=[0-9a-f]{12} phase=(received|body_read|upstream_send|upstream_headers|upstream_error)|DCR_STORE_TRACE id=[0-9a-f]{12} phase=(begin|lock_acquired|loaded|persisted|failed)|DCR_HANDLER_TRACE id=[0-9a-f]{12} phase=(entered|store_submit|store_done|failed|registered)) elapsed_ms=[0-9]{1,7}$' \
+              | grep -E '^(DCR_TRACE id=[0-9a-f]{12} phase=(received|body_read|upstream_send|upstream_headers|upstream_error)|DCR_STORE_TRACE id=[0-9a-f]{12} phase=(begin|lock_acquired|loaded|persisted|failed)|DCR_HANDLER_TRACE id=[0-9a-f]{12} phase=(entered|store_submit|store_done|failed|registered)|DCR_HTTP_TRACE id=[0-9a-f]{12} phase=(tcp_start|tcp_done|tcp_error|req_headers_done|req_body_done|resp_headers_wait|resp_headers_done|resp_headers_error|transport_error|cancelled)) elapsed_ms=[0-9]{1,7}$' \
               | tail -n 80; then
               echo "::notice::No bounded DCR phases available (or Docker log read unavailable)"
             fi
@@ -2177,7 +2177,7 @@ jobs:
             echo "::group::Recent OAuth DCR/provisioning phases (fixed-shape only)"
             # Strict fixed-shape filter: never print raw Docker logs or secrets.
             if ! docker logs --since 3m --tail 3000 mcp-oauth 2>&1 \
-              | grep -E '^(DCR_TRACE id=[0-9a-f]{12} phase=(received|body_read|upstream_send|upstream_headers|upstream_error)|DCR_STORE_TRACE id=[0-9a-f]{12} phase=(begin|lock_acquired|loaded|persisted|failed)|DCR_HANDLER_TRACE id=[0-9a-f]{12} phase=(entered|store_submit|store_done|failed|registered)) elapsed_ms=[0-9]{1,7}$' \
+              | grep -E '^(DCR_TRACE id=[0-9a-f]{12} phase=(received|body_read|upstream_send|upstream_headers|upstream_error)|DCR_STORE_TRACE id=[0-9a-f]{12} phase=(begin|lock_acquired|loaded|persisted|failed)|DCR_HANDLER_TRACE id=[0-9a-f]{12} phase=(entered|store_submit|store_done|failed|registered)|DCR_HTTP_TRACE id=[0-9a-f]{12} phase=(tcp_start|tcp_done|tcp_error|req_headers_done|req_body_done|resp_headers_wait|resp_headers_done|resp_headers_error|transport_error|cancelled)) elapsed_ms=[0-9]{1,7}$' \
               | tail -n 80; then
               echo "::notice::No bounded DCR phases available (or Docker log read unavailable)"
             fi

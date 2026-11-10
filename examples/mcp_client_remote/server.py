@@ -452,6 +452,8 @@ async def _proxy_upstream(
     headers: dict[str, str],
     *,
     target_path: str,
+    dcr_trace_id: str | None = None,
+    dcr_started: float = 0.0,
 ) -> tuple[httpx.AsyncClient, httpx.Response] | None:
     """Send the request upstream (streaming for GET/POST MCP hops).
 
@@ -475,10 +477,56 @@ async def _proxy_upstream(
             headers=headers,
             timeout=per_request_timeout,
         )
+        if dcr_trace_id is not None and isinstance(req, httpx.Request):
+            async def trace_httpcore(event: str, _info: dict[str, Any]) -> None:
+                phase = _DCR_HTTP_TRACE_EVENTS.get(event)
+                if phase is not None:
+                    _log_dcr_http_phase(dcr_trace_id, phase, dcr_started)
+
+            # A request-local hook does not modify the shared AsyncClient or
+            # its finite /register timeout. A fake Request has no transport.
+            req.extensions["trace"] = trace_httpcore
         resp = await client.send(req, stream=True)
+    except asyncio.CancelledError:
+        if dcr_trace_id is not None:
+            _log_dcr_http_phase(dcr_trace_id, "cancelled", dcr_started)
+        raise
     except httpx.RequestError:
+        if dcr_trace_id is not None:
+            _log_dcr_http_phase(dcr_trace_id, "transport_error", dcr_started)
         return None
     return client, resp
+
+
+_DCR_HTTP_TRACE_EVENTS = {
+    # httpx/httpcore transport trace events: only names enter the output.
+    # The callback's info mapping may hold credentials, headers and sockets.
+    "connection.connect_tcp.started": "tcp_start",
+    "connection.connect_tcp.complete": "tcp_done",
+    "connection.connect_tcp.failed": "tcp_error",
+    "http11.send_request_headers.complete": "req_headers_done",
+    "http11.send_request_body.complete": "req_body_done",
+    "http11.receive_response_headers.started": "resp_headers_wait",
+    "http11.receive_response_headers.complete": "resp_headers_done",
+    "http11.receive_response_headers.failed": "resp_headers_error",
+}
+_DCR_HTTP_TRACE_PHASES = frozenset(_DCR_HTTP_TRACE_EVENTS.values()) | {
+    "transport_error", "cancelled",
+}
+
+
+def _log_dcr_http_phase(trace_id: str, phase: str, started_at: float) -> None:
+    """Emit bounded internal transport timing with the same DCR proxy ID."""
+    if phase not in _DCR_HTTP_TRACE_PHASES:
+        raise ValueError("unknown DCR HTTP transport phase")
+    if len(trace_id) != 12 or any(ch not in "0123456789abcdef" for ch in trace_id):
+        raise ValueError("invalid DCR HTTP trace identifier")
+    elapsed_ms = min(9_999_999, max(0, int((time.monotonic() - started_at) * 1000)))
+    print(
+        f"DCR_HTTP_TRACE id={trace_id} phase={phase} elapsed_ms={elapsed_ms}",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def _log_proxy_path_only(request: Request, resp: httpx.Response) -> None:
@@ -580,7 +628,8 @@ async def proxy_request(request: Request) -> StreamingResponse | JSONResponse | 
     if dcr_trace:
         _log_dcr_proxy_phase(dcr_trace, "upstream_send", dcr_started)
     upstream = await _proxy_upstream(
-        request, url, body, headers, target_path=target_path
+        request, url, body, headers, target_path=target_path,
+        dcr_trace_id=dcr_trace, dcr_started=dcr_started,
     )
     if upstream is None:
         if dcr_trace:
