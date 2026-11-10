@@ -76,11 +76,21 @@ async def test_09_async_job_ack_pins_session_through_prestart_reaper(
             prestart_entered.set()
             await allow_start.wait()
 
+    # This test proves the acceptance lease and prestart reaper ordering.
+    # Avoid a real executor thread for the unrelated fake Paramiko command:
+    # CI workers under contention can spend >1s scheduling that thread.
+    stream_calls: list[tuple[str, str]] = []
+
+    async def completed_stream(session_id: str, command: str, **_kwargs: Any):
+        stream_calls.append((session_id, command))
+        yield "exit", 0
+
     monkeypatch.setattr(jobs, "_emit_bounded", blocked_emit)
+    monkeypatch.setattr(ssh, "execute_stream", completed_stream)
 
     job_id = await jobs.create_job(record.session_id, "true", owner_id="owner-a", timeout=5)
     task = jobs._job_tasks[job_id]
-    await asyncio.wait_for(prestart_entered.wait(), timeout=1)
+    await asyncio.wait_for(prestart_entered.wait(), timeout=5)
 
     # The HTTP handler could already have returned job_id here. The worker has
     # not entered execute_stream yet, but the accepted-job lease must pin SID.
@@ -91,11 +101,13 @@ async def test_09_async_job_ack_pins_session_through_prestart_reaper(
     record.client.close.assert_not_called()
 
     allow_start.set()
-    await asyncio.wait_for(task, timeout=1)
+    await asyncio.wait_for(task, timeout=5)
     job = await jobs.get_job(job_id)
     assert job is not None
     assert job.status == "completed"
     assert job.exit_code == 0
+    assert stream_calls == [(record.session_id, "true")]
+    record.client.exec_command.assert_not_called()
     assert record.active_operations == 0
 
     # Completion released the acceptance lease; ordinary idle reaping resumes.

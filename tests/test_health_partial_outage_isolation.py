@@ -16,6 +16,7 @@ no structured ``components`` dict).  After the fix each test must pass.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -357,8 +358,11 @@ class TestAggregateHealthBudget:
         from app.routers.system import _deep_ssh_check
 
         mock_client = MagicMock()
+        loop_thread = threading.get_ident()
+        connect_threads: list[int] = []
 
         def stalled_connect(*_args, **_kwargs):
+            connect_threads.append(threading.get_ident())
             time.sleep(0.25)
             raise TimeoutError("simulated deep ssh timeout")
 
@@ -369,13 +373,14 @@ class TestAggregateHealthBudget:
         ):
             mock_settings.ssh_health_user = "health"
             mock_settings.ssh_health_password = "pass"
-            probe_task = asyncio.create_task(_deep_ssh_check("localhost", 22))
-            started = time.monotonic()
-            await asyncio.sleep(0.05)
-            loop_delay = time.monotonic() - started
-            result = await probe_task
+            result = await _deep_ssh_check("localhost", 22)
 
-        assert loop_delay < 0.15, f"deep SSH probe blocked event loop for {loop_delay:.3f}s"
+        # Verify the actual isolation boundary, not a 0.15-second sleep
+        # deadline that can expire under unrelated parallel CI CPU load.
+        # A synchronous Paramiko connect on the event-loop thread fails this
+        # even if a slow runner would make wall-clock jitter misleading.
+        assert connect_threads, "deep SSH test never exercised Paramiko connect"
+        assert all(ident != loop_thread for ident in connect_threads)
         assert result is False
 
 
