@@ -123,6 +123,9 @@ def test_registry_secret_wiring_is_typed_yaml_and_scoped_to_master_push():
         "sha256:dfd0f8d9c05f49a0b99f6812ae76809eaa79fb1c36963ca79078d2ce827caab8"
     )
     assert not build["container"].get("volumes")
+    # Production deploy cannot rely on mutable/nonexistent local :latest.
+    assert deploy["container"]["image"] == build["container"]["image"]
+    assert deploy["container"]["image"].startswith("sha256:")
     # The image smoke step uses `set -euo pipefail`; act must invoke Bash,
     # not the pinned container image's default /bin/sh (dash).
     assert build["defaults"]["run"]["shell"] == "bash"

@@ -1733,7 +1733,10 @@ jobs:
     runs-on: docker-e2e-ci
     timeout-minutes: 15
     container:
-      image: nod-ci-docker-e2e:latest
+      # Exact local runner image ID, independently inventoried on the Docker
+      # host. Never resolve a mutable or missing :latest tag at release time.
+      # Same operator-controlled image as the preceding build-and-push job.
+      image: sha256:dfd0f8d9c05f49a0b99f6812ae76809eaa79fb1c36963ca79078d2ce827caab8
       volumes:
         # Deployment code must come from this workflow's exact checkout, not
         # from a mutable host working tree. Only runtime-only state is mounted
