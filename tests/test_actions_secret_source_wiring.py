@@ -10,7 +10,13 @@ def test_deploy_provisions_actions_secret_source_volume_without_exposing_host_pa
 
     assert "MCP_ACTIONS_SECRET_SOURCE_VOLUME: mcp-actions-secret-sources" in workflow
     assert "- name: Provision approved Actions secret source volume" in workflow
-    assert "source_file=/deploy/secrets/registry.token" in workflow
+    assert "source_streamer=scripts/ci-registry-token-stream.sh" in workflow
+    assert 'bash "$source_streamer" | docker run --rm -i' in workflow
+    assert "source_file=/deploy/secrets/registry.token" not in workflow
+    assert ":/deploy/secrets/registry.token:ro" not in workflow
+    assert workflow.count(
+        "bash scripts/ci-registry-token-stream.sh | bash scripts/ci-docker-login-retry.sh"
+    ) == 2
     assert 'docker volume create "$source_volume"' in workflow
     assert '-v "$source_volume:/secret-sources"' in workflow
     assert "chown 1000:1000" in workflow

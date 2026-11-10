@@ -1857,7 +1857,8 @@ class TestPrBuildsAndSmokeTestsDockerArtifact:
             run = step["run"]
             assert "ci-docker-login-retry.sh" in run
             assert "--password-stdin" not in run
-            assert "/deploy/secrets/registry.token" in run
+            assert "scripts/ci-registry-token-stream.sh" in run
+            assert "/deploy/secrets/registry.token" not in run
 
         script = REGISTRY_LOGIN_RETRY_SCRIPT.read_text(encoding="utf-8")
         assert 'IFS= read -r password' in script
