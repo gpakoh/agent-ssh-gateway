@@ -2019,3 +2019,107 @@ async def test_direct_opencode_not_accepted_result_is_outer_failure(monkeypatch)
     assert result["error"]["code"] == "AGENT_SUBMISSION_FAILED"
     assert result["result"] == raw
     assert "success_text" not in result["meta"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool,raw",
+    [
+        ("run_agent", {
+            "task_id": "single", "status": "blocked", "job_id": None,
+            "error": "fleet pool at capacity", "retryable": True,
+        }),
+        ("run_agent", {
+            "task_id": "single", "status": "blocked", "job_id": "previous-job",
+            "error": "terminal replay blocked", "retryable": True,
+        }),
+        ("run_agent", {
+            "task_id": "single", "status": "needs-review", "job_id": None,
+            "attempt_id": "attempt-42", "retryable": True,
+        }),
+        ("run_agent", {
+            "task_id": "single", "status": "error", "job_id": "old-job",
+            "error": "pre-submit validation failure",
+        }),
+        ("run_opencode", {
+            "task_id": "single", "status": "not-accepted", "job_id": None,
+            "error": "executor admission denied", "retryable": True,
+        }),
+    ],
+)
+async def test_canonical_success_contradicting_inner_submission_is_rejected(
+    monkeypatch, tool, raw
+):
+    """An already-wrapped ok=true cannot override explicit non-acceptance."""
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    monkeypatch.setenv("MCP_GATEWAY_WRITE_MODE", "handoff")
+    wrapped = {
+        "ok": True,
+        "tool": tool,
+        "result": dict(raw),
+        "error": None,
+        "meta": {"success_text": "Submitted agent task.", "source": "agent"},
+    }
+
+    if tool == "run_agent":
+        async def submit(**_kwargs):
+            return wrapped
+
+        monkeypatch.setattr(agent_adapter, "_submit_agent_with_fleet", submit)
+        result = await agent_adapter.gateway_run_agent(
+            "test", "single", async_submit=True
+        )
+    else:
+        monkeypatch.delenv("MCP_OPENCODE_FLEET_ADMISSION_ENABLED", raising=False)
+        monkeypatch.setattr(
+            agent_adapter, "_project_run_opencode",
+            lambda *_args, **_kwargs: wrapped,
+        )
+        result = await agent_adapter.gateway_run_opencode(
+            "test", "single", async_submit=True
+        )
+
+    assert result["ok"] is False, result
+    assert result["error"]["code"] == "AGENT_SUBMISSION_FAILED"
+    assert result["result"] == raw
+    assert "success_text" not in result["meta"]
+    if raw["status"] == "needs-review":
+        assert result["error"]["retryable"] is False
+        assert result["result"]["attempt_id"] == "attempt-42"
+    elif raw.get("job_id") == "previous-job":
+        assert result["error"]["retryable"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,exit_code,job_id", [
+    ("needs-review", None, "durable-job"),
+    ("blocked", 1, "terminal-job"),
+])
+async def test_canonical_success_with_evidenced_job_is_left_intact(
+    monkeypatch, status, exit_code, job_id
+):
+    """Do not reject genuine accepted/terminal results or rewrite their metadata."""
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    monkeypatch.setenv("MCP_GATEWAY_WRITE_MODE", "handoff")
+    raw = {"task_id": "single", "status": status, "job_id": job_id}
+    if exit_code is not None:
+        raw["exit_code"] = exit_code
+    wrapped = {
+        "ok": True,
+        "tool": "run_agent",
+        "result": raw,
+        "error": None,
+        "meta": {"source": "agent", "idempotency": "original"},
+    }
+
+    async def submit(**_kwargs):
+        return wrapped
+
+    monkeypatch.setattr(agent_adapter, "_submit_agent_with_fleet", submit)
+    result = await agent_adapter.gateway_run_agent(
+        "test", "single", async_submit=True
+    )
+    assert result is wrapped
+    assert result["meta"]["idempotency"] == "original"
