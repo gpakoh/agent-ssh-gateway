@@ -230,6 +230,7 @@ def fetch_managed_candidate_base(
     tracking = f"refs/remotes/{remote}/{branch}"
     staging = f"refs/mcp-fetch/{uuid.uuid4().hex}"
     update_attempted = False
+    postcondition_reconciled = False
     stage = "input_validation"
     try:
         if not expected:
@@ -309,8 +310,22 @@ def fetch_managed_candidate_base(
                     raise FetchRefError("WORKSPACE_CONTENDED")
                 stage = "tracking_publication"
                 update_attempted = True
-                if not _publish(root, feature, head, tracking, expected, previous):
-                    raise FetchRefError("WORKSPACE_CONTENDED")
+                try:
+                    published = _publish(root, feature, head, tracking, expected, previous)
+                except (OSError, subprocess.TimeoutExpired):
+                    # update-ref may have committed before its acknowledgment
+                    # was lost. Inspect the exact ref; never replay the CAS.
+                    published = False
+                if not published:
+                    stage = "tracking_reconciliation"
+                    if (
+                        _is_symbolic_ref(root, tracking)
+                        or git._read_ref(root, tracking) != expected
+                        or _clean_head(root, feature) != head
+                        or _remote_lease(source, feature, branch, expected, token) != lease
+                    ):
+                        raise FetchRefError("WORKSPACE_CONTENDED")
+                    postcondition_reconciled = True
             stage = "postverification"
             try:
                 if git._read_ref(root, tracking) != expected or _clean_head(root, feature) != head:
@@ -354,6 +369,7 @@ def fetch_managed_candidate_base(
                     ),
                     "worktree_unchanged": True,
                     "origin_unchanged": True,
+                    "tracking_postcondition_reconciled": postcondition_reconciled,
                 },
                 source="gitea",
             )
