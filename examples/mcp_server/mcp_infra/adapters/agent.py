@@ -363,11 +363,12 @@ def _normalize_single_agent_submission(tool: str, result: dict[str, Any]) -> dic
     receipts. A raw ``status=error`` means no successful submission contract
     exists and must not be wrapped by run_tool_async as ``ok=true`` merely
     because no Python exception was raised. The same fail-closed rule extends
-    to every other confirmed or unproven non-submission outcome: pre-submit
+    to other confirmed or unproven non-submission outcomes: pre-submit
     validation failures, backend/fleet ``blocked`` replays, ``not-accepted``
-    submits, and ``running``/``unknown`` receipts that carry no job identity
-    all prove that no runnable job was accepted, so they must never surface
-    as outer ``ok=true`` with the submission success text.
+    submits, and ``running``/``unknown`` receipts without a job identity.
+    An unbound unknown outcome does NOT prove that no job was accepted; it
+    requires read-only attempt reconciliation, never blind resubmission.
+    None may surface as outer ``ok=true`` with submission success text.
 
     A receipt that carries an accepted ``job_id`` -- an accepted async
     submission, a wait-timeout durable receipt, or an idempotent replay of a
@@ -383,36 +384,47 @@ def _normalize_single_agent_submission(tool: str, result: dict[str, Any]) -> dic
     if "ok" in result:
         return result
     status = str(result.get("status") or "")
-    if status == "error":
-        raw_message = result.get("error")
-        message = (
-            raw_message.strip()
-            if isinstance(raw_message, str) and raw_message.strip()
-            else "Agent submission failed before a runnable job was accepted."
-        )
-    else:
-        job_id = result.get("job_id")
-        has_accepted_job = isinstance(job_id, str) and bool(job_id.strip())
-        exit_code = result.get("exit_code")
-        has_evidenced_exit = isinstance(exit_code, int) and not isinstance(exit_code, bool)
-        if has_accepted_job or has_evidenced_exit:
-            # The backend accepted a job identity (or the legacy blocking
-            # path produced an evidenced terminal outcome): the submission
-            # contract exists, so wait/terminal/idempotent-replay semantics
-            # pass through unchanged.
-            return result
-        raw_message = result.get("error")
-        message = (
-            raw_message.strip()
-            if isinstance(raw_message, str) and raw_message.strip()
+    job_id = result.get("job_id")
+    has_accepted_job = isinstance(job_id, str) and bool(job_id.strip())
+    exit_code = result.get("exit_code")
+    has_evidenced_exit = isinstance(exit_code, int) and not isinstance(exit_code, bool)
+    rejected_submission = status in {"blocked", "not-accepted"}
+    if status != "error" and (
+        has_evidenced_exit or (has_accepted_job and not rejected_submission)
+    ):
+        # An actual terminal result, or an accepted job, is evidence of the
+        # original attempt; preserve its status/identity for reconciliation.
+        return result
+    # A Fleet terminal replay may say blocked AND carry the *old* job_id.
+    # That old job is inspectable but does not prove a NEW submission.
+    # Conversely, an unknown/unbound attempt is not proof of rejection:
+    # don't advertise retry even if its raw receipt accidentally requests it.
+    unbound_unknown = (
+        status in {"unknown", "needs-review", "running"}
+        and not has_accepted_job
+        and not has_evidenced_exit
+    )
+    raw_message = result.get("error")
+    message = (
+        raw_message.strip()
+        if isinstance(raw_message, str) and raw_message.strip()
+        else (
+            f"Agent submission outcome is unverified (status={status}); "
+            "inspect the attempt before retry."
+            if unbound_unknown
             else f"Agent task was not submitted (status={status or 'missing'})."
         )
+    )
     return tool_error(
         tool=tool,
         code="AGENT_SUBMISSION_FAILED",
         message=message,
         result=result,
-        retryable=bool(result.get("retryable")),
+        retryable=(
+            bool(result.get("retryable"))
+            and not unbound_unknown
+            and not (rejected_submission and has_accepted_job)
+        ),
         source="agent",
     )
 

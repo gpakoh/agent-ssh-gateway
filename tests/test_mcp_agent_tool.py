@@ -1803,7 +1803,7 @@ class TestGatewayRunAgents:
 
     @pytest.mark.parametrize(
         "status",
-        ["blocked", "rate-limited", "startup-timeout", "run-timeout", "needs-review"],
+        ["rate-limited", "startup-timeout", "run-timeout", "needs-review"],
     )
     def test_single_submission_normalizer_does_not_reclassify_non_error_receipts(
         self, status
@@ -1902,3 +1902,120 @@ class TestGatewayArchiveAgentTaskScriptTransport:
         assert 'mv -T -- "$src" "$dst"' in script
         client.execute_project_command.assert_not_called()
         client.execute_argv.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {
+            "task_id": "single", "status": "blocked", "job_id": None,
+            "error": "Fleet worker pool is at capacity",
+            "error_code": "FLEET_CAPACITY_EXHAUSTED",
+            "retryable": True, "retry_after_seconds": 12,
+            "fleet": {"available": 0},
+        },
+        {
+            "task_id": "single", "status": "not-accepted",
+            "job_id": None, "attempt_id": "attempt-1",
+            "retryable": True,
+            "error": "no accepted submission was proven",
+        },
+        {
+            "task_id": "single", "status": "blocked",
+            "job_id": "old-job", "error": "task already terminal",
+            "retryable": True,
+            "fleet": {"terminal": True, "job_id": "old-job"},
+        },
+        {
+            "task_id": "single", "status": "rate-limited",
+            "job_id": None, "retry_after_seconds": 32,
+            "error": "backend admission denied",
+        },
+        {
+            "task_id": "single", "status": "not-accepted",
+            "job_id": "previous-job", "retryable": True,
+            "error": "inconsistent non-accepted receipt",
+        },
+    ],
+)
+async def test_single_agent_nonaccepted_contract_is_outer_failure(monkeypatch, raw):
+    """No accepted new job must never have outer ok=true or submitted text."""
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    monkeypatch.setenv("MCP_GATEWAY_WRITE_MODE", "handoff")
+
+    async def submit(**_kwargs):
+        return dict(raw)
+
+    monkeypatch.setattr(agent_adapter, "_submit_agent_with_fleet", submit)
+    result = await agent_adapter.gateway_run_agent("test", "single", async_submit=True)
+
+    assert result["ok"] is False, result
+    assert result["error"]["code"] == "AGENT_SUBMISSION_FAILED"
+    assert result["result"] == raw
+    assert result["error"]["retryable"] is (raw.get("retryable") is True and raw.get("job_id") is None)
+    assert "success_text" not in result["meta"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["needs-review", "unknown", "running"])
+async def test_single_agent_unknown_unbound_is_not_treated_as_submitted(monkeypatch, status):
+    """Indeterminate state without job_id must not recommend a blind retry."""
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    monkeypatch.setenv("MCP_GATEWAY_WRITE_MODE", "handoff")
+
+    raw = {"task_id": "single", "status": status, "job_id": None,
+           "attempt_id": "claim-1", "retryable": True,
+           "error": "admission state indeterminate"}
+
+    async def submit(**_kwargs):
+        return dict(raw)
+
+    monkeypatch.setattr(agent_adapter, "_submit_agent_with_fleet", submit)
+    result = await agent_adapter.gateway_run_agent("test", "single", async_submit=True)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "AGENT_SUBMISSION_FAILED"
+    assert result["error"]["retryable"] is False
+    assert result["result"] == raw
+    assert "success_text" not in result["meta"]
+
+
+@pytest.mark.asyncio
+async def test_known_job_uncertain_result_preserves_submission_receipt(monkeypatch):
+    """Accepted job_id makes transport-unknown state inspectable, not a retry cue."""
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    monkeypatch.setenv("MCP_GATEWAY_WRITE_MODE", "handoff")
+
+    raw = {"task_id": "single", "status": "needs-review",
+           "job_id": "accepted-job", "attempt_id": "claim-1"}
+
+    async def submit(**_kwargs):
+        return dict(raw)
+
+    monkeypatch.setattr(agent_adapter, "_submit_agent_with_fleet", submit)
+    result = await agent_adapter.gateway_run_agent("test", "single", async_submit=True)
+    assert result["ok"] is True
+    assert result["result"]["job_id"] == "accepted-job"
+    assert result["result"]["status"] == "needs-review"
+
+
+@pytest.mark.asyncio
+async def test_direct_opencode_not_accepted_result_is_outer_failure(monkeypatch):
+    """Direct run_opencode uses the same no-success-before-submit contract."""
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    monkeypatch.setenv("MCP_GATEWAY_WRITE_MODE", "handoff")
+
+    raw = {"task_id": "single", "status": "not-accepted",
+           "job_id": None, "error": "async submit did not produce job",
+           "retryable": True}
+    monkeypatch.delenv("MCP_OPENCODE_FLEET_ADMISSION_ENABLED", raising=False)
+    monkeypatch.setattr(agent_adapter, "_project_run_opencode", lambda *_a, **_k: dict(raw))
+    result = await agent_adapter.gateway_run_opencode("test", "single", async_submit=True)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "AGENT_SUBMISSION_FAILED"
+    assert result["result"] == raw
+    assert "success_text" not in result["meta"]
