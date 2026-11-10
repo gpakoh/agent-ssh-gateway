@@ -1457,6 +1457,12 @@ jobs:
     if: needs.scope.outputs.full_ci == 'true' && github.server_url != 'https://github.com' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository) || (github.ref_name == 'master' && github.event_name == 'push'))
     runs-on: docker-e2e-ci
     timeout-minutes: 20
+    # The pinned runner image defaults to POSIX sh (dash), but image smoke
+    # uses pipefail. Without this, PR CI #24357 built all three images then
+    # failed with `set: Illegal option -o pipefail` before exercising them.
+    defaults:
+      run:
+        shell: bash
     env:
       REGISTRY: 192.168.1.103:3005
       # Self-hosted runner pool has no direct internet; outbound egress goes
@@ -1470,8 +1476,11 @@ jobs:
       DOCKER_HTTPS_PROXY: ${{ vars.CI_DOCKER_HTTPS_PROXY }}
       DOCKER_NO_PROXY: ${{ vars.CI_DOCKER_NO_PROXY }}
     container:
-      volumes:
-        - /media/1TB/Python/quart-platform/infra-quart/secrets/registry.token:/deploy/secrets/registry.token:ro
+      # Use the same operator-controlled image as the deploy job. Never
+      # mount the registry token into an unmerged pull-request build.
+      # Exact local image ID attested by docker-e2e-ci run #24337;
+      # never let this workflow resolve a mutable helper tag.
+      image: sha256:dfd0f8d9c05f49a0b99f6812ae76809eaa79fb1c36963ca79078d2ce827caab8
     steps:
       - uses: actions/checkout@v7
       - name: Log in to the Gitea container registry
@@ -1480,7 +1489,8 @@ jobs:
         # need the shared registry credential available to it.
         if: github.event_name == 'push'
         run: |
-          printf '%s\n' "$(cat /deploy/secrets/registry.token)" | bash scripts/ci-docker-login-retry.sh "$REGISTRY" gpakoh
+          set -euo pipefail
+          bash scripts/ci-registry-token-stream.sh | bash scripts/ci-docker-login-retry.sh "$REGISTRY" gpakoh
       - name: Build web-ssh-gateway image
         run: |
           bash scripts/ci-docker-build-retry.sh -f docker/Dockerfile \
@@ -1723,7 +1733,10 @@ jobs:
     runs-on: docker-e2e-ci
     timeout-minutes: 15
     container:
-      image: nod-ci-docker-e2e:latest
+      # Exact local runner image ID, independently inventoried on the Docker
+      # host. Never resolve a mutable or missing :latest tag at release time.
+      # Same operator-controlled image as the preceding build-and-push job.
+      image: sha256:dfd0f8d9c05f49a0b99f6812ae76809eaa79fb1c36963ca79078d2ce827caab8
       volumes:
         # Deployment code must come from this workflow's exact checkout, not
         # from a mutable host working tree. Only runtime-only state is mounted
@@ -1732,7 +1745,6 @@ jobs:
         # Dedicated Docker volume: never bind the writable host checkout's
         # legacy .state to the authority used for rollback.
         - ssh-gateway-deploy-state:/deploy/web-ssh-gateway-state
-        - /media/1TB/Python/quart-platform/infra-quart/secrets/registry.token:/deploy/secrets/registry.token:ro
     env:
       REGISTRY: 192.168.1.103:3005
       # Non-secret selector consumed by mcp-oauth/Compose. The credential itself
@@ -1762,8 +1774,13 @@ jobs:
       # Each job gets its own fresh container — build-and-push's docker
       # login doesn't carry over, even on the same runner.
       - name: Log in to the Gitea container registry
+        # Root-only credential streaming uses Bash pipefail so an upstream
+        # helper failure can never be masked by a successful docker-login.
+        # Without explicit shell, act runs this job step under POSIX sh.
+        shell: bash
         run: |
-          printf '%s\n' "$(cat /deploy/secrets/registry.token)" | bash scripts/ci-docker-login-retry.sh "$REGISTRY" gpakoh
+          set -euo pipefail
+          bash scripts/ci-registry-token-stream.sh | bash scripts/ci-docker-login-retry.sh "$REGISTRY" gpakoh
       - name: Provision Compose registry auth volume
         shell: bash
         run: |
@@ -1808,8 +1825,10 @@ jobs:
         run: |
           set -euo pipefail
           source_volume="${MCP_ACTIONS_SECRET_SOURCE_VOLUME:?MCP_ACTIONS_SECRET_SOURCE_VOLUME must be set}"
-          source_file=/deploy/secrets/registry.token
-          test -s "$source_file"
+          # Do not make the root-owned host secret readable in this job.
+          # Only a constrained root-only helper streams it to stdin.
+          source_streamer=scripts/ci-registry-token-stream.sh
+          test -f "$source_streamer"
           : "${REGISTRY:?REGISTRY must be set}"
 
           # Reuse the exact MCP artifact from this workflow run as an immutable
@@ -1832,13 +1851,12 @@ jobs:
           }
 
           docker volume create "$source_volume" >/dev/null
-          docker run --rm -i \
+          bash "$source_streamer" | docker run --rm -i \
             --user 0:0 \
             -v "$source_volume:/secret-sources" \
             --entrypoint /bin/sh \
             "$runner_ref" \
-            -c 'set -eu; umask 077; tmp=/secret-sources/.registry_token.tmp; trap '\''rm -f "$tmp"'\'' EXIT; cat > "$tmp"; test -s "$tmp"; chown 1000:1000 "$tmp"; chmod 400 "$tmp"; mv -f "$tmp" /secret-sources/registry_token; trap - EXIT' \
-            < "$source_file"
+            -c 'set -eu; umask 077; tmp=/secret-sources/.registry_token.tmp; trap '\''rm -f "$tmp"'\'' EXIT; cat > "$tmp"; test -s "$tmp"; chown 1000:1000 "$tmp"; chmod 400 "$tmp"; mv -f "$tmp" /secret-sources/registry_token; trap - EXIT'
       - name: Provision ownership of empty dedicated LKG volume
         shell: bash
         env:
