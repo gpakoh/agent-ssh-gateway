@@ -266,3 +266,110 @@ async def test_streamed_metadata_enforces_response_cap_before_json_and_denies_re
         assert len(paths) == 1
         assert paths[0][0].startswith("https://git.example/api/v1/repos/gpakoh/xloud/actions/runs/200/artifacts")
         assert paths[0][1] == "token PRIVATE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "artifacts",
+    [
+        [{**ARTIFACT, "workflow_run": {"id": 200, "head_sha": "b" * 40, "run_attempt": 2}}],
+        [{**ARTIFACT, "workflow_run": {"id": 200, "head_sha": HEAD, "run_attempt": 3}}],
+        [{**ARTIFACT, "size_in_bytes": -1}],
+        [{**ARTIFACT, "size_in_bytes": True}],
+        [{**ARTIFACT, "expired": "false"}],
+        [{**ARTIFACT, "expired": 0}],
+        [{**ARTIFACT, "id": 457, "name": "same"}, {**ARTIFACT, "id": 458, "name": "same"}],
+    ],
+    ids=[
+        "other-head", "other-attempt", "negative-size", "boolean-size",
+        "string-expired", "int-expired", "duplicate-artifact-name",
+    ],
+)
+async def test_archived_malformed_metadata_shapes_fail_closed(monkeypatch, artifacts):
+    """Preserve distinct negative cases from archive #792 against live v2 contract.
+
+    A malformed artifact must never result in a partially trusted inventory
+    or leak URL, private token, or provider-controlled identity fields.
+    """
+    fake = Fake(artifacts=artifacts)
+    response = await fetch(fake, monkeypatch)
+    assert response["ok"] is False, response
+    serialized = json.dumps(response)
+    assert response["result"] is None
+    for secret in ("evil.example", "internal.example", "PRIVATE", "secret@example.com"):
+        assert secret not in serialized
+    assert fake.calls[:3] == ["pr", "run", "artifacts"]
+
+
+@pytest.mark.asyncio
+async def test_archived_inconsistent_total_count_cannot_authorize_phantom_artifact(monkeypatch):
+    """A metadata page claiming zero artifacts must not return one usable artifact."""
+    fake = Fake()
+    fake.list_action_run_artifacts = AsyncMock(
+        side_effect=lambda *_args, **_kwargs: {
+            "total_count": 0,
+            "artifacts": [ARTIFACT],
+        }
+    )
+    response = await fetch(fake, monkeypatch)
+    assert response["ok"] is False
+    assert "evil.example" not in json.dumps(response)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"total_count": 1, "artifacts": [{**ARTIFACT, "size_in_bytes": -1}]},
+        {"total_count": 1, "artifacts": [{**ARTIFACT, "size_in_bytes": True}]},
+        {"total_count": 1, "artifacts": [{**ARTIFACT, "expired": "false"}]},
+        {"total_count": 1, "artifacts": [{**ARTIFACT, "expired": 0}]},
+        {"total_count": 2, "artifacts": [
+            {**ARTIFACT, "id": 1, "name": "same"},
+            {**ARTIFACT, "id": 2, "name": "same"},
+        ]},
+        {"total_count": 1, "artifacts": [
+            {**ARTIFACT, "workflow_run": {"id": True, "head_sha": HEAD, "run_attempt": 2}},
+        ]},
+        {"total_count": 1, "artifacts": [
+            {**ARTIFACT, "workflow_run": {"id": 200, "head_sha": "x", "run_attempt": 2}},
+        ]},
+        {"total_count": 0, "artifacts": [ARTIFACT]},
+        {"total_count": True, "artifacts": [ARTIFACT]},
+    ],
+    ids=[
+        "negative-size", "boolean-size", "string-expired", "integer-expired",
+        "duplicate-names", "boolean-run-id", "malformed-workflow-head",
+        "count-smaller-than-page", "boolean-total-count",
+    ],
+)
+async def test_archived_untrusted_wire_metadata_rejected(monkeypatch, payload):
+    """Verify the private HTTP ingestion boundary, not only the MCP adapter.
+
+    An untrusted Gitea JSON response must be validated before it can become
+    a scoped inventory, without exposing provider URL or bearer credentials.
+    """
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json=payload)
+
+    client = GiteaClient("PRIVATE")
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url="https://git.example/api/v1",
+        headers={"Authorization": "token PRIVATE"},
+        transport=httpx.MockTransport(handler),
+        follow_redirects=False,
+    )
+    try:
+        with pytest.raises(ValueError) as caught:
+            await client.list_action_run_artifacts("gpakoh", "xloud", 200)
+    finally:
+        await client.aclose()
+    assert len(requests) == 1
+    assert requests[0].url.host == "git.example"
+    assert requests[0].headers["Authorization"] == "token PRIVATE"
+    assert "PRIVATE" not in str(caught.value)
+    assert "evil.example" not in str(caught.value)
