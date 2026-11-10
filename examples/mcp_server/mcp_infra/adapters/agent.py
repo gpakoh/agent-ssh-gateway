@@ -394,6 +394,21 @@ def _normalize_single_agent_submission(tool: str, result: dict[str, Any]) -> dic
                     # Rebuild a safe failure envelope from the *raw* receipt.
                     # In particular, discard the stale success_text metadata.
                     return checked
+                exit_code = nested.get("exit_code")
+                if (
+                    isinstance(exit_code, int)
+                    and not isinstance(exit_code, bool)
+                    and exit_code != 0
+                ):
+                    # The raw tool path rejects an evidenced nonzero exit.
+                    # An already-wrapped success must not bypass that rule.
+                    return tool_error(
+                        tool=tool,
+                        code="TOOL_EXECUTION_FAILED",
+                        message=f"Command exited with code {exit_code}",
+                        result=nested,
+                        source="agent",
+                    )
         return result
     status = str(result.get("status") or "")
     job_id = result.get("job_id")

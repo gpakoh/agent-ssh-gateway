@@ -2094,7 +2094,7 @@ async def test_canonical_success_contradicting_inner_submission_is_rejected(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status,exit_code,job_id", [
     ("needs-review", None, "durable-job"),
-    ("blocked", 1, "terminal-job"),
+    ("blocked", 0, "terminal-job"),
 ])
 async def test_canonical_success_with_evidenced_job_is_left_intact(
     monkeypatch, status, exit_code, job_id
@@ -2123,3 +2123,43 @@ async def test_canonical_success_with_evidenced_job_is_left_intact(
     )
     assert result is wrapped
     assert result["meta"]["idempotency"] == "original"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["run_agent", "run_opencode"])
+async def test_canonical_success_with_nonzero_terminal_exit_is_an_error(
+    monkeypatch, tool
+):
+    """Prewrapped success cannot bypass run_tool_async's nonzero-exit rejection."""
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    monkeypatch.setenv("MCP_GATEWAY_WRITE_MODE", "handoff")
+    raw = {
+        "task_id": "single", "status": "blocked",
+        "job_id": "terminal-job", "exit_code": 1,
+        "retryable": True,
+    }
+    wrapped = {
+        "ok": True, "tool": tool, "result": raw, "error": None,
+        "meta": {"success_text": "Submitted agent task.", "source": "agent"},
+    }
+    if tool == "run_agent":
+        async def submit(**_kwargs):
+            return wrapped
+
+        monkeypatch.setattr(agent_adapter, "_submit_agent_with_fleet", submit)
+        result = await agent_adapter.gateway_run_agent("test", "single", async_submit=True)
+    else:
+        monkeypatch.delenv("MCP_OPENCODE_FLEET_ADMISSION_ENABLED", raising=False)
+        monkeypatch.setattr(
+            agent_adapter, "_project_run_opencode",
+            lambda *_args, **_kwargs: wrapped,
+        )
+        result = await agent_adapter.gateway_run_opencode(
+            "test", "single", async_submit=True
+        )
+    assert result["ok"] is False, result
+    assert result["error"]["code"] == "TOOL_EXECUTION_FAILED"
+    assert result["error"]["retryable"] is False
+    assert result["result"] == raw
+    assert "success_text" not in result["meta"]
