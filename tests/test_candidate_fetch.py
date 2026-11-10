@@ -150,6 +150,7 @@ def test_import_exact_main_preserves_existing_feature_and_origin(managed):
     result = fetch(m)
     assert result["ok"], result
     receipt = result["result"]
+    assert receipt["tracking_postcondition_reconciled"] is False
     assert receipt["job_id"] is None
     assert receipt["execution_duration_ms"] is None
     assert receipt["feature_head"] == m.head
@@ -668,3 +669,146 @@ def test_import_missing_tracking_ref_and_exact_rollback(managed, monkeypatch, po
     assert git._read_ref(m.root, "refs/remotes/origin/source") == m.base
     assert run(m.root, "rev-parse", "HEAD") == m.head
     assert run(m.root, "for-each-ref", "refs/mcp-fetch") == ""
+
+
+def test_lost_update_ref_ack_after_commit_is_reconciled_without_retry(managed, monkeypatch):
+    """The update-ref transaction can commit even if its exit status is lost."""
+    from examples.mcp_server import candidate_fetch as fetcher
+
+    m = managed
+    original = fetcher._publish
+    calls = 0
+
+    def committed_but_reported_failure(*args):
+        nonlocal calls
+        calls += 1
+        assert original(*args)  # the exact CAS really committed
+        return False  # caller loses the commit acknowledgment
+
+    monkeypatch.setattr(fetcher, "_publish", committed_but_reported_failure)
+    result = fetch(m)
+    assert result["ok"], result
+    assert calls == 1  # no blind second update-ref
+    assert result["result"]["remote_head"] == m.target
+    assert result["result"]["tracking_postcondition_reconciled"] is True
+    assert git._read_ref(m.root, "refs/remotes/origin/main") == m.target
+    assert_preserved(m)
+
+
+def test_lost_update_ref_timeout_after_commit_is_reconciled(managed, monkeypatch):
+    """An ambiguous TimeoutExpired is decided by the exact durable ref state."""
+    from examples.mcp_server import candidate_fetch as fetcher
+
+    m = managed
+    original = fetcher._publish
+    calls = 0
+
+    def committed_but_timed_out(*args):
+        nonlocal calls
+        calls += 1
+        assert original(*args)
+        raise subprocess.TimeoutExpired(cmd=["git", "update-ref"], timeout=30)
+
+    monkeypatch.setattr(fetcher, "_publish", committed_but_timed_out)
+    result = fetch(m)
+    assert result["ok"], result
+    assert calls == 1
+    assert result["result"]["tracking_postcondition_reconciled"] is True
+    assert git._read_ref(m.root, "refs/remotes/origin/main") == m.target
+    assert_preserved(m)
+
+
+def test_failed_update_ref_without_commit_is_not_mistaken_for_success(managed, monkeypatch):
+    """A definitive non-commit leaves the old ref and the caller gets an error."""
+    from examples.mcp_server import candidate_fetch as fetcher
+
+    m = managed
+    before = git._read_ref(m.root, "refs/remotes/origin/main")
+    calls = 0
+
+    def never_committed(*_args):
+        nonlocal calls
+        calls += 1
+        return False
+
+    monkeypatch.setattr(fetcher, "_publish", never_committed)
+    result = fetch(m)
+    assert not result["ok"]
+    assert result["error"]["code"] == "WORKSPACE_CONTENDED"
+    assert calls == 1
+    assert git._read_ref(m.root, "refs/remotes/origin/main") == before
+    assert_preserved(m)
+
+
+def test_ambiguous_update_ref_with_nonmatching_tracking_ref_fails_closed(
+    managed, monkeypatch
+):
+    """Do not report success or overwrite a concurrent, nonmatching ref."""
+    from examples.mcp_server import candidate_fetch as fetcher
+
+    m = managed
+    other = git._read_ref(m.root, "refs/remotes/origin/main")
+    assert other == m.base
+
+    def mismatched_commit(*_args):
+        run(m.root, "update-ref", "refs/remotes/origin/main", m.head)
+        return False
+
+    monkeypatch.setattr(fetcher, "_publish", mismatched_commit)
+    result = fetch(m)
+    assert not result["ok"]
+    assert result["error"]["code"] == "WORKSPACE_CONTENDED"
+    assert git._read_ref(m.root, "refs/remotes/origin/main") == m.head
+    assert_preserved(m)
+
+
+def test_lost_ack_with_remote_lease_drift_does_not_claim_success(managed, monkeypatch):
+    """A committed local ref is not enough when the Gitea lease has changed."""
+    from examples.mcp_server import candidate_fetch as fetcher
+
+    m = managed
+    original = fetcher._publish
+    calls = 0
+
+    def committed_with_remote_move(*args):
+        nonlocal calls
+        calls += 1
+        assert original(*args)
+        commit(m.upstream, "later.txt", "remote default branch advanced\n")
+        return False
+
+    monkeypatch.setattr(fetcher, "_publish", committed_with_remote_move)
+    result = fetch(m)
+    assert not result["ok"]
+    assert result["error"]["code"] == "HEAD_MISMATCH"
+    assert result["error"]["details"]["stage"] == "tracking_reconciliation"
+    assert result["error"]["details"]["tracking_ref_update_attempted"] is True
+    assert calls == 1
+    # Preserve the already-committed exact ref; no speculative rollback/replay.
+    assert git._read_ref(m.root, "refs/remotes/origin/main") == m.target
+    assert_preserved(m)
+
+
+def test_publish_oserror_before_commit_preserves_previous_tracking_ref(
+    managed, monkeypatch
+):
+    """A failed command cannot be retried blindly when no commit is proven."""
+    from examples.mcp_server import candidate_fetch as fetcher
+
+    m = managed
+    original_ref = git._read_ref(m.root, "refs/remotes/origin/main")
+    calls = 0
+
+    def failed_before_commit(*_args):
+        nonlocal calls
+        calls += 1
+        raise OSError("lost child process before commit")
+
+    monkeypatch.setattr(fetcher, "_publish", failed_before_commit)
+    result = fetch(m)
+    assert not result["ok"]
+    assert result["error"]["code"] == "WORKSPACE_CONTENDED"
+    assert result["error"]["details"]["stage"] == "tracking_reconciliation"
+    assert calls == 1
+    assert git._read_ref(m.root, "refs/remotes/origin/main") == original_ref
+    assert_preserved(m)
