@@ -1771,6 +1771,10 @@ jobs:
       # Each job gets its own fresh container — build-and-push's docker
       # login doesn't carry over, even on the same runner.
       - name: Log in to the Gitea container registry
+        # Root-only credential streaming uses Bash pipefail so an upstream
+        # helper failure can never be masked by a successful docker-login.
+        # Without explicit shell, act runs this job step under POSIX sh.
+        shell: bash
         run: |
           set -euo pipefail
           bash scripts/ci-registry-token-stream.sh | bash scripts/ci-docker-login-retry.sh "$REGISTRY" gpakoh

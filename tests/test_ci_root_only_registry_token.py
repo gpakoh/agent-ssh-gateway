@@ -151,3 +151,10 @@ def test_registry_secret_wiring_is_typed_yaml_and_scoped_to_master_push():
         if x.get("name") == "Log in to the Gitea container registry"
     )
     assert build_login["if"] == "github.event_name == 'push'"
+    # Previous successful deploy CI #24305 ran the login under POSIX sh.
+    # The new secret-streamer pipefail must run under Bash on master push.
+    deploy_login = next(
+        step for step in deploy["steps"]
+        if step.get("name") == "Log in to the Gitea container registry"
+    )
+    assert deploy_login["shell"] == "bash"
