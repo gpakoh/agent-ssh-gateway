@@ -9,9 +9,11 @@ connection itself had changed.
 """
 
 import asyncio
+import json
 import os
 import re
 import tempfile
+from dataclasses import asdict
 
 import pytest
 
@@ -390,3 +392,125 @@ def test_client_store_zero_byte_write_is_error_not_empty_published_file(
 
     assert not path.exists()
     assert list(tmp_path.glob(".mcp_clients_*.tmp")) == []
+
+
+def test_post_replace_ack_loss_is_reconciled_before_client_retry(tmp_path, monkeypatch):
+    """An error after successful rename is UNKNOWN until exact durable readback."""
+    from examples.mcp_server import client_store as module
+
+    path = tmp_path / "clients.json"
+    store = ClientStore(str(path))
+    provider = GatewayOAuthProvider()
+    provider.set_client_store(store)
+    info = _client_info("ack-lost")
+    real_replace = module.os.replace
+    simulated = False
+
+    def replace_then_lose_response(source, target):
+        nonlocal simulated
+        real_replace(source, target)
+        if not simulated:
+            simulated = True
+            raise TimeoutError("reply lost after commit")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module.os, "replace", replace_then_lose_response)
+        asyncio.run(provider.register_client(info))
+    assert simulated
+    assert "client_id" in vars(info)
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert list(tmp_path.glob(".mcp_clients_*.tmp")) == []
+
+    # Restart reveals exactly one durable registration, no blind re-registration.
+    fresh = GatewayOAuthProvider()
+    fresh.set_client_store(ClientStore(str(path)))
+    assert fresh.load_clients() == 1
+    assert asyncio.run(fresh.get_client(info.client_id)) is not None
+    store.add(store.load()[0])  # retry the SAME known identity; no duplicate
+    assert [c.client_id for c in store.load()] == [info.client_id]
+
+
+def test_pre_replace_timeout_requires_readback_before_explicit_retry(
+    tmp_path, monkeypatch
+):
+    from examples.mcp_server import client_store as module
+
+    path = tmp_path / "clients.json"
+    store = ClientStore(str(path))
+    old = StoredClient(client_id="existing", redirect_uris=["https://example.com/old"])
+    new = StoredClient(client_id="new", redirect_uris=["https://example.com/new"])
+    store.add(old)
+    before = path.read_bytes()
+
+    def timeout_before_commit(_source, _target):
+        raise TimeoutError("no rename occurred")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module.os, "replace", timeout_before_commit)
+        with pytest.raises(TimeoutError, match="no rename occurred"):
+            store.add(new)
+
+    # The actual durable state is authoritative; a failure message alone isn't.
+    assert path.read_bytes() == before
+    assert [c.client_id for c in store.load()] == ["existing"]
+    assert list(tmp_path.glob(".mcp_clients_*.tmp")) == []
+    store.add(new)  # deliberate retry only after checking the first outcome
+    restarted = ClientStore(str(path))
+    assert [c.client_id for c in restarted.load()] == ["existing", "new"]
+
+
+def test_ambiguous_post_replace_mismatched_data_is_not_reported_as_success(
+    tmp_path, monkeypatch
+):
+    from examples.mcp_server import client_store as module
+
+    path = tmp_path / "clients.json"
+    store = ClientStore(str(path))
+    new = StoredClient(client_id="wanted", redirect_uris=["https://example.com/wanted"])
+    different = StoredClient(client_id="other", redirect_uris=["https://example.com/other"])
+    real_replace = module.os.replace
+
+    def commit_different_then_lose_ack(source, target):
+        real_replace(source, target)
+        # Simulate an external writer outside our lock breaking exact identity.
+        path.write_text(
+            json.dumps({"version": 1, "clients": [asdict(different)]}),
+            encoding="utf-8",
+        )
+        raise TimeoutError("ambiguous completion and nonmatching data")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module.os, "replace", commit_different_then_lose_ack)
+        with pytest.raises(TimeoutError, match="ambiguous"):
+            store.add(new)
+
+    assert [client.client_id for client in store.load()] == ["other"]
+    assert list(tmp_path.glob(".mcp_clients_*.tmp")) == []
+
+
+def test_partial_result_after_write_error_keeps_previous_state(tmp_path, monkeypatch):
+    from examples.mcp_server import client_store as module
+
+    path = tmp_path / "clients.json"
+    store = ClientStore(str(path))
+    store.add(StoredClient(client_id="before", redirect_uris=["https://example.com/b"]))
+    old_bytes = path.read_bytes()
+    real_write = module.os.write
+    wrote_partial = False
+
+    def partial_then_error(fd, data):
+        nonlocal wrote_partial
+        if not wrote_partial:
+            wrote_partial = True
+            return real_write(fd, data[:12])
+        raise OSError("injected partial-result failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module.os, "write", partial_then_error)
+        with pytest.raises(OSError, match="partial-result"):
+            store.add(StoredClient(client_id="after", redirect_uris=["https://example.com/a"]))
+    assert wrote_partial
+    assert path.read_bytes() == old_bytes
+    assert [c.client_id for c in ClientStore(str(path)).load()] == ["before"]
+    assert list(tmp_path.glob(".mcp_clients_*.tmp")) == []
+

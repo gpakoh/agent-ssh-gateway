@@ -151,7 +151,15 @@ class ClientStore:
                 clients = [c for c in self.load() if c.client_id != client.client_id]
                 _trace_client_store_phase(trace_id, "loaded", started)
                 clients.append(client)
-                self._write(clients)
+                try:
+                    self._write(clients)
+                except OSError:
+                    # A timeout / lost acknowledgment from the last write
+                    # operation may arrive AFTER os.replace committed. Under
+                    # this lock, reconcile exact durable bytes before deciding
+                    # whether the registration failed. Never blindly retry.
+                    if not self._matches_committed(clients):
+                        raise
                 _trace_client_store_phase(trace_id, "persisted", started)
         except Exception:
             # No exception text or filesystem path in public CI evidence.
@@ -162,13 +170,43 @@ class ClientStore:
         """Acquire an exclusive lock over the whole read-modify-write cycle."""
         return _LockedStore(self)
 
-    def _write(self, clients: list[StoredClient]) -> None:
-        """Atomically write clients. Caller must hold the store lock."""
+    @staticmethod
+    def _encode_clients(clients: list[StoredClient]) -> bytes:
         payload: dict[str, Any] = {
             "version": 1,
             "clients": [asdict(c) for c in clients],
         }
-        raw = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+        return (json.dumps(payload, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+    def _matches_committed(self, clients: list[StoredClient]) -> bool:
+        """Read-only, exact-byte reconciliation of an ambiguous write result.
+
+        Do not follow symlinks or read special files. A proof that is absent,
+        truncated, or unreadable is NOT a successful commit.
+        """
+        expected = self._encode_clients(clients)
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        try:
+            fd = os.open(self._path, flags)
+            try:
+                st = os.fstat(fd)
+                if (
+                    not stat.S_ISREG(st.st_mode)
+                    or st.st_nlink != 1
+                    or st.st_uid != os.geteuid()
+                    or st.st_mode & 0o077
+                ):
+                    return False
+                with os.fdopen(fd, "rb", closefd=False) as f:
+                    return f.read(len(expected) + 1) == expected
+            finally:
+                os.close(fd)
+        except OSError:
+            return False
+
+    def _write(self, clients: list[StoredClient]) -> None:
+        """Atomically write clients. Caller must hold the store lock."""
+        raw = self._encode_clients(clients)
 
         fd, tmp = tempfile.mkstemp(
             dir=os.path.dirname(self._path) or ".",
@@ -179,7 +217,7 @@ class ClientStore:
             try:
                 # Set permissions before publication, not after os.replace.
                 os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
-                remaining = memoryview(raw.encode("utf-8"))
+                remaining = memoryview(raw)
                 while remaining:
                     written = os.write(fd, remaining)
                     if written <= 0:
