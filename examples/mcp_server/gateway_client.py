@@ -370,11 +370,24 @@ class GatewayClient:
             except httpx.RequestError as exc:
                 raise _transport_error(exc) from exc
             if response.status_code >= 400:
+                body: dict[str, Any] = {}
+                try:
+                    parsed = response.json()
+                    if isinstance(parsed, dict):
+                        body = parsed
+                except Exception:
+                    pass
                 cooldown: int | None = None
                 if response.status_code == 429:
-                    # A session-cap 429 often has no Retry-After; blocking all
-                    # other MCP sessions would prevent recovery when a slot frees.
-                    # Only a bounded numeric provider delay owns the governor.
+                    # Session capacity is not a rate bucket: the real REST
+                    # handler sends SESSION_LIMIT_EXCEEDED *and* Retry-After: 60.
+                    # Installing that delay globally prevents unrelated MCP
+                    # sessions from reconnecting after a slot is freed.
+                    detail = body.get("detail")
+                    gateway_code = body.get("code")
+                    if not isinstance(gateway_code, str) and isinstance(detail, dict):
+                        gateway_code = detail.get("code")
+                    is_session_capacity = gateway_code == "SESSION_LIMIT_EXCEEDED"
                     raw_wait = response.headers.get("Retry-After", "")
                     if (
                         isinstance(raw_wait, str)
@@ -384,14 +397,11 @@ class GatewayClient:
                         and int(raw_wait) <= 86400
                     ):
                         cooldown = max(int(raw_wait), 1)
-                        GatewayClient._connect_retry_not_before = time.monotonic() + cooldown
-                body: dict[str, Any] = {}
-                try:
-                    parsed = response.json()
-                    if isinstance(parsed, dict):
-                        body = parsed
-                except Exception:
-                    pass
+                        # Keep the caller-visible retry guidance, but only
+                        # globally coalesce actual request-rate throttling.
+                        # Unknown/malformed responses retain the old guard.
+                        if not is_session_capacity:
+                            GatewayClient._connect_retry_not_before = time.monotonic() + cooldown
                 err_body = body or {
                     "message": "Gateway connection rate limit exceeded"
                     if response.status_code == 429
