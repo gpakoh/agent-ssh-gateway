@@ -9,7 +9,17 @@ import httpx
 import pytest
 
 from examples.mcp_client_remote.fleet.gitea_client import GiteaClient
+from examples.mcp_server import tool_modes, tool_scopes
 from examples.mcp_server.mcp_infra.adapters import remote
+
+
+def test_artifact_inventory_is_registered_as_repo_scoped_read_only_tool():
+    """Retain the distinct tool-catalog contract from historical #792."""
+    tool = "gitea_list_action_run_artifacts"
+    assert tool_modes.should_register_tool(tool, "mcp_client")
+    assert tool_modes.should_register_tool(tool, "mcp_client_write")
+    assert tool_scopes.get_required_scopes(tool) == ["mcp:repo"]
+
 
 HEAD = "a" * 40
 PR = {
