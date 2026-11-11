@@ -1174,6 +1174,89 @@ def _require_unmodified_abandonment(candidate_root: Path, *, expected_head_sha: 
         )
 
 
+def _require_cleanup_tree_removable(candidate_root: Path, *, expected_dev: int) -> None:
+    """Fail closed before unregistering when rmtree cannot safely finish.
+
+    Git status ignores generated build output, which may contain root-owned
+    directories. A late rmtree PermissionError used to remove the registry
+    entry and some Git objects before stopping at that generated directory.
+    Inspect with lstat and never descend through symlinks. A permission scan
+    is not an atomic ownership lease; run it again at the removal boundary.
+    """
+    candidate_uid = os.geteuid()
+    pending = [candidate_root]
+    examined = 0
+    max_entries = 200_000
+    try:
+        if not os.access(
+            candidate_root.parent, os.W_OK | os.X_OK, effective_ids=True
+        ):
+            raise _fail(
+                "WORKSPACE_CONTENDED",
+                "candidate cleanup parent is not writable",
+                details={"failure_class": "parent_permission"},
+            )
+        while pending:
+            directory = pending.pop()
+            directory_stat = directory.lstat()
+            if (
+                not stat.S_ISDIR(directory_stat.st_mode)
+                or directory_stat.st_dev != expected_dev
+                or directory_stat.st_uid != candidate_uid
+            ):
+                raise _fail(
+                    "WORKSPACE_CONTENDED",
+                    "candidate cleanup tree has an unsafe directory identity",
+                    details={"failure_class": "directory_identity"},
+                )
+            if not os.access(
+                directory, os.R_OK | os.W_OK | os.X_OK, effective_ids=True
+            ):
+                raise _fail(
+                    "WORKSPACE_CONTENDED",
+                    "candidate cleanup tree has an inaccessible directory",
+                    details={"failure_class": "directory_permission"},
+                )
+            with os.scandir(directory) as children:
+                for entry in children:
+                    examined += 1
+                    if examined > max_entries:
+                        raise _fail(
+                            "WORKSPACE_CONTENDED",
+                            "candidate cleanup tree exceeds bounded preflight",
+                            details={"failure_class": "inventory_limit"},
+                        )
+                    child = Path(entry.path)
+                    child_stat = child.lstat()
+                    if (
+                        child_stat.st_uid != candidate_uid
+                        or child_stat.st_dev != expected_dev
+                    ):
+                        raise _fail(
+                            "WORKSPACE_CONTENDED",
+                            "candidate cleanup tree contains foreign-owned or mounted data",
+                            details={"failure_class": "foreign_entry"},
+                        )
+                    if stat.S_ISDIR(child_stat.st_mode):
+                        pending.append(child)
+                    elif not (
+                        stat.S_ISREG(child_stat.st_mode)
+                        or stat.S_ISLNK(child_stat.st_mode)
+                    ):
+                        raise _fail(
+                            "WORKSPACE_CONTENDED",
+                            "candidate cleanup tree contains a special filesystem entry",
+                            details={"failure_class": "special_entry"},
+                        )
+    except OSError as exc:
+        raise _fail(
+            "WORKSPACE_CONTENDED",
+            "candidate cleanup tree cannot be inspected safely",
+            retryable=True,
+            details={"failure_class": "inventory_unavailable"},
+        ) from exc
+
+
 def _is_resumable_partial_cleanup_tail(
     candidate_root: Path,
     *,
@@ -3277,6 +3360,9 @@ def _cleanup_candidate_locked(
         if abandon_unmodified:
             _require_unmodified_abandonment(candidate_root, expected_head_sha=expected_head_sha, expected_branch=expected_branch)
 
+    # An ignored root-owned build artifact can make shutil.rmtree fail AFTER
+    # unregistering and deleting Git objects. Refuse before either mutation.
+    _require_cleanup_tree_removable(candidate_root, expected_dev=root_dev)
     _enforce_reference_guard(reference_guard)
     if tombstone is None:
         tombstone = {
@@ -3350,6 +3436,8 @@ def _cleanup_candidate_locked(
             _require_no_inbound_candidate_dependencies(candidates_root, candidate_root)
             if abandon_unmodified:
                 _require_unmodified_abandonment(candidate_root, expected_head_sha=expected_head_sha, expected_branch=expected_branch)
+        # Recheck after unregister in case ownership or permissions changed.
+        _require_cleanup_tree_removable(candidate_root, expected_dev=root_dev)
         try:
             shutil.rmtree(candidate_root)
         except OSError as exc:

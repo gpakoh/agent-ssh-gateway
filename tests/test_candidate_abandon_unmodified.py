@@ -41,6 +41,107 @@ def _empty_candidate(registry_fixture, monkeypatch):
     return root, params
 
 
+@pytest.mark.parametrize("blocker", ["unwritable-directory", "foreign-owned-directory"])
+def test_abandon_preflights_generated_assets_before_unregister(
+    registry_fixture, monkeypatch, blocker
+) -> None:
+    """A root-created ignored build directory must never cause partial rmtree."""
+    import os
+
+    root, args = _empty_candidate(registry_fixture, monkeypatch)
+    registry = args["config_dir"] / "projects.yaml"
+    initial_registry = registry.read_bytes()
+    excluded = root / ".git" / "info" / "exclude"
+    excluded.write_text(
+        excluded.read_text(encoding="utf-8") + "\n.build-data/\n",
+        encoding="utf-8",
+    )
+    generated = root / ".build-data" / "audit"
+    generated.mkdir(parents=True)
+    marker = generated / "private-receipt"
+    marker.write_text("preserve this generated artifact\n", encoding="utf-8")
+    assert _git(root, "status", "--porcelain") == ""
+
+    with monkeypatch.context() as restricted:
+        if blocker == "unwritable-directory":
+            original_access = os.access
+
+            def deny_write(path, mode, **kwargs):
+                if Path(path) == generated and mode & os.W_OK:
+                    return False
+                return original_access(path, mode, **kwargs)
+
+            restricted.setattr(module.os, "access", deny_write)
+        else:
+            original_lstat = Path.lstat
+
+            def fake_foreign_owner(path):
+                result = original_lstat(path)
+                if path == generated:
+                    fields = list(result)
+                    fields[4] = result.st_uid + 1
+                    return os.stat_result(fields)
+                return result
+
+            restricted.setattr(Path, "lstat", fake_foreign_owner)
+
+        with pytest.raises(CandidateCloneError) as excinfo:
+            candidate_cleanup(**args)
+        assert excinfo.value.code == "WORKSPACE_CONTENDED"
+        assert registry.read_bytes() == initial_registry
+        assert marker.read_text(encoding="utf-8") == "preserve this generated artifact\n"
+        assert _git(root, "rev-parse", "HEAD") == args["expected_head_sha"]
+        tombstone, _ = module._cleanup_tombstone_path(
+            args["journal_root"], args["project_id"]
+        )
+        assert not tombstone.exists()
+
+    # Once the foreign ownership/permission condition is resolved, the exact
+    # unchanged candidate can still be retired through normal guarded cleanup.
+    completed = candidate_cleanup(**args)
+    assert completed.registry_removed and completed.directory_removed
+    assert not root.exists()
+
+
+def test_abandon_real_unwritable_generated_directory_keeps_registry(
+    registry_fixture, monkeypatch
+) -> None:
+    """Exercise actual Linux filesystem permissions, not only a mocked probe."""
+    import os
+
+    root, args = _empty_candidate(registry_fixture, monkeypatch)
+    registry = args["config_dir"] / "projects.yaml"
+    registry_before = registry.read_bytes()
+    excluded = root / ".git" / "info" / "exclude"
+    excluded.write_text(
+        excluded.read_text(encoding="utf-8") + "\n.build-data/\n",
+        encoding="utf-8",
+    )
+    generated = root / ".build-data" / "audit"
+    generated.mkdir(parents=True)
+    marker = generated / "owned-output.txt"
+    marker.write_text("preserve\n", encoding="utf-8")
+    assert _git(root, "status", "--porcelain") == ""
+
+    generated.chmod(0o500)
+    try:
+        if os.access(generated, os.W_OK, effective_ids=True):
+            pytest.skip("privileged test executor can write a 0500 directory")
+        with pytest.raises(CandidateCloneError) as excinfo:
+            candidate_cleanup(**args)
+        assert excinfo.value.code == "WORKSPACE_CONTENDED"
+        assert excinfo.value.details == {"failure_class": "directory_permission"}
+        assert registry.read_bytes() == registry_before
+        assert marker.read_text(encoding="utf-8") == "preserve\n"
+        assert _git(root, "rev-parse", "HEAD") == args["expected_head_sha"]
+    finally:
+        generated.chmod(0o700)
+
+    result = candidate_cleanup(**args)
+    assert result.registry_removed and result.directory_removed
+    assert not root.exists()
+
+
 def test_abandon_exact_unmodified_candidate_is_guarded_idempotent(registry_fixture, monkeypatch):
     root, args = _empty_candidate(registry_fixture, monkeypatch)
     assert _git(root, "status", "--porcelain") == ""
