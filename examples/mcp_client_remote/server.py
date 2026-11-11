@@ -421,6 +421,13 @@ async def _check_tool_scope(request: Request, path: str, body: bytes) -> JSONRes
     return None
 
 
+# The black-box /register client has a hard 20s stage deadline. A proxy
+# request waiting for upstream headers for 300s outlives that caller and
+# keeps an HTTPX pool slot in use after the client has already failed.
+# Reserve a few seconds for downstream response handling and diagnostics.
+_DCR_UPSTREAM_WALL_CLOCK_SECONDS = 17.0
+
+
 def _mcp_proxy_timeout(method: str, target_path: str) -> httpx.Timeout:
     """Per-hop timeout matrix (BLOCKING REVIEW GATE).
 
@@ -442,6 +449,13 @@ def _mcp_proxy_timeout(method: str, target_path: str) -> httpx.Timeout:
     """
     if method in ("GET", "POST") and target_path == "/mcp":
         return httpx.Timeout(connect=10.0, write=30.0, pool=10.0, read=None)
+    if method == "POST" and target_path == "/register":
+        return httpx.Timeout(
+            connect=10.0,
+            write=10.0,
+            pool=10.0,
+            read=_DCR_UPSTREAM_WALL_CLOCK_SECONDS,
+        )
     return httpx.Timeout(connect=10.0, write=30.0, pool=10.0, read=300.0)
 
 
@@ -486,7 +500,18 @@ async def _proxy_upstream(
             # A request-local hook does not modify the shared AsyncClient or
             # its finite /register timeout. A fake Request has no transport.
             req.extensions["trace"] = trace_httpcore
-        resp = await client.send(req, stream=True)
+        if request.method == "POST" and target_path == "/register":
+            # Per-socket timeouts restart on each connect/write/read operation.
+            # Bound their combined wall-clock time: stalled second DCR requests
+            # must not retain a pooled connection after the 20s caller exits.
+            async with asyncio.timeout(_DCR_UPSTREAM_WALL_CLOCK_SECONDS):
+                resp = await client.send(req, stream=True)
+        else:
+            resp = await client.send(req, stream=True)
+    except TimeoutError:
+        if dcr_trace_id is not None:
+            _log_dcr_http_phase(dcr_trace_id, "transport_error", dcr_started)
+        return None
     except asyncio.CancelledError:
         if dcr_trace_id is not None:
             _log_dcr_http_phase(dcr_trace_id, "cancelled", dcr_started)

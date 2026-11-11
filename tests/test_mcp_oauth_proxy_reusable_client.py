@@ -499,3 +499,84 @@ async def test_real_pool_capacity_gate_is_sensitive_to_twenty_connection_mutatio
     admitted = await _count_admitted_real_streams(srv, 21)
 
     assert admitted == 20
+
+
+def test_dcr_register_upstream_budget_is_shorter_than_20s_client_stage(srv):
+    """The OAuth client gives up after 20s; no proxy DCR hop may run for 300s."""
+    timeout = srv._mcp_proxy_timeout("POST", "/register")
+    assert 0 < timeout.read < 20
+    assert 0 < srv._DCR_UPSTREAM_WALL_CLOCK_SECONDS < 20
+    # SSE streams and non-DCR non-MCP operations retain their own contracts.
+    assert srv._mcp_proxy_timeout("POST", "/mcp").read is None
+    assert srv._mcp_proxy_timeout("GET", "/register").read == 300
+
+
+@pytest.mark.asyncio
+async def test_real_dcr_header_stall_releases_proxy_and_allows_next_request(srv, monkeypatch):
+    """One hung DCR header must cancel promptly without poisoning the shared pool."""
+    blocker = asyncio.Event()
+    connections = 0
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        nonlocal connections
+        connections += 1
+        current = connections
+        try:
+            await reader.readuntil(b"\r\n\r\n")
+            if current == 1:
+                await blocker.wait()
+            else:
+                writer.write(
+                    b"HTTP/1.1 201 Created\r\n"
+                    b"Content-Type: application/json\r\n"
+                    b"Content-Length: 2\r\n"
+                    b"Connection: close\r\n\r\n{}"
+                )
+                await writer.drain()
+        except (ConnectionError, asyncio.IncompleteReadError):
+            pass
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    assert server.sockets
+    port = server.sockets[0].getsockname()[1]
+    srv._UPSTREAM_CLIENT = httpx.AsyncClient(trust_env=False)
+    monkeypatch.setattr(srv, "_DCR_UPSTREAM_WALL_CLOCK_SECONDS", 0.15)
+    request = type("RequestStub", (), {"method": "POST"})()
+    started = asyncio.get_running_loop().time()
+    try:
+        failed = await asyncio.wait_for(
+            srv._proxy_upstream(
+                request, f"http://127.0.0.1:{port}/register", b"{}",
+                {"Content-Type": "application/json"},
+                target_path="/register", dcr_trace_id="abcdef012345",
+                dcr_started=started,
+            ),
+            timeout=2.0,
+        )
+        elapsed = asyncio.get_running_loop().time() - started
+        assert failed is None
+        assert elapsed < 1.0
+        recovered = await asyncio.wait_for(
+            srv._proxy_upstream(
+                request, f"http://127.0.0.1:{port}/register", b"{}",
+                {"Content-Type": "application/json"},
+                target_path="/register", dcr_trace_id="123456abcdef",
+                dcr_started=started,
+            ),
+            timeout=2.0,
+        )
+        assert recovered is not None
+        _, response = recovered
+        assert response.status_code == 201
+        await response.aclose()
+        assert connections >= 2
+    finally:
+        blocker.set()
+        await srv._UPSTREAM_CLIENT.aclose()
+        srv._UPSTREAM_CLIENT = None
+        server.close()
+        await server.wait_closed()
+
