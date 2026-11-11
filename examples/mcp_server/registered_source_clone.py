@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import subprocess
 import tempfile
 from collections.abc import Mapping
@@ -141,6 +142,85 @@ def _run(
     return result.stdout.strip()
 
 
+def _promote_verified_clone(
+    staged: Path,
+    destination: Path,
+    *,
+    original_destination: tuple[int, int] | None,
+) -> None:
+    """Publish a complete .git atomically without replacing the candidate root.
+
+    The managed candidate caller pins its pre-created directory descriptor.
+    Moving/replacing that directory would invalidate its ownership lease.
+    A no-checkout Git clone contains only .git, so we can stage and verify
+    the entire clone before installing that one directory.
+    """
+    try:
+        contents = list(staged.iterdir())
+        git_dir = staged / ".git"
+        git_stat = git_dir.lstat()
+    except OSError as exc:
+        raise RegisteredSourceCloneError(
+            "registered source staged clone cannot be inspected",
+            phase="verify_staged_layout",
+        ) from exc
+    if (
+        len(contents) != 1
+        or contents[0].name != ".git"
+        or not stat.S_ISDIR(git_stat.st_mode)
+    ):
+        raise RegisteredSourceCloneError(
+            "registered source staged clone layout is unexpected",
+            phase="verify_staged_layout",
+        )
+
+    created = False
+    created_identity: tuple[int, int] | None = None
+    try:
+        if original_destination is None:
+            # mkdir is exclusive: never replace a competing destination.
+            destination.mkdir()
+            created = True
+            target_stat = destination.lstat()
+            created_identity = target_stat.st_dev, target_stat.st_ino
+        else:
+            target_stat = destination.lstat()
+        if (
+            not stat.S_ISDIR(target_stat.st_mode)
+            or (
+                original_destination is not None
+                and (target_stat.st_dev, target_stat.st_ino) != original_destination
+            )
+            or any(destination.iterdir())
+        ):
+            raise RegisteredSourceCloneError(
+                "registered source destination changed during staging",
+                phase="validate_destination",
+            )
+        # Moving only .git preserves an existing pinned candidate root inode.
+        # No incomplete Git state is visible if clone or verification fails.
+        git_dir.rename(destination / ".git")
+    except (OSError, RegisteredSourceCloneError) as exc:
+        if created and created_identity is not None:
+            try:
+                current = destination.lstat()
+                if (
+                    stat.S_ISDIR(current.st_mode)
+                    and (current.st_dev, current.st_ino) == created_identity
+                    and not any(destination.iterdir())
+                ):
+                    destination.rmdir()
+            except OSError:
+                pass
+        if isinstance(exc, RegisteredSourceCloneError):
+            raise
+        raise RegisteredSourceCloneError(
+            "registered source staged clone could not be published",
+            phase="promote_destination",
+            retryable=True,
+        ) from exc
+
+
 def clone_registered_commit_via_bundle(
     *,
     source_root: str | Path,
@@ -181,15 +261,17 @@ def clone_registered_commit_via_bundle(
             retryable=False,
         )
 
-    destination_path = Path(destination)
+    destination_path = Path(destination).absolute()
     if destination_path.is_symlink():
         raise RegisteredSourceCloneError(
             "registered source destination must not be a symlink",
             phase="validate_destination",
             retryable=False,
         )
+    initial_destination_identity: tuple[int, int] | None = None
     if destination_path.exists():
-        if not destination_path.is_dir():
+        destination_stat = destination_path.lstat()
+        if not stat.S_ISDIR(destination_stat.st_mode):
             raise RegisteredSourceCloneError(
                 "registered source destination is not a directory",
                 phase="validate_destination",
@@ -208,6 +290,7 @@ def clone_registered_commit_via_bundle(
                 phase="validate_destination",
                 retryable=True,
             ) from exc
+        initial_destination_identity = destination_stat.st_dev, destination_stat.st_ino
 
     scratch_parent = destination_path.parent
     scratch_parent.mkdir(parents=True, exist_ok=True)
@@ -345,6 +428,10 @@ def clone_registered_commit_via_bundle(
             phase="verify_bundle",
             timeout=timeout,
         )
+        # Clone into exclusively owned scratch; Git can leave partial .git
+        # files when clone fails or times out. Never expose those in the
+        # caller's already-pinned candidate root.
+        staged_clone = scratch / "clone"
         _run(
             [
                 "git",
@@ -353,26 +440,31 @@ def clone_registered_commit_via_bundle(
                 "--no-hardlinks",
                 "--no-checkout",
                 str(bundle),
-                str(destination_path),
+                str(staged_clone),
             ],
-            cwd=scratch_parent,
+            cwd=scratch,
             env=base,
             phase="clone_bundle",
             timeout=timeout,
         )
-        destination_resolved = _run(
-            ["git", "-C", str(destination_path), "rev-parse", "--verify", f"{expected}^{{commit}}"],
-            cwd=destination_path,
+        staged_resolved = _run(
+            ["git", "-C", str(staged_clone), "rev-parse", "--verify", f"{expected}^{{commit}}"],
+            cwd=staged_clone,
             env=base,
             phase="verify_destination_commit",
             timeout=min(timeout, 30),
         ).lower()
-        if destination_resolved != expected:
+        if staged_resolved != expected:
             raise RegisteredSourceCloneError(
-                "registered source destination resolved an unexpected commit",
+                "registered source staged clone resolved an unexpected commit",
                 phase="verify_destination_commit",
                 retryable=False,
             )
+        _promote_verified_clone(
+            staged_clone,
+            destination_path,
+            original_destination=initial_destination_identity,
+        )
 
 
 __all__ = ["RegisteredSourceCloneError", "clone_registered_commit_via_bundle"]
