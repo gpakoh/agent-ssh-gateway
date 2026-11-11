@@ -189,6 +189,77 @@ class TestReconnectSession:
             second_post.assert_called_once()
         assert client.session_id == "available-sid"
 
+    def test_session_capacity_429_with_numeric_retry_does_not_block_freed_slot(self):
+        """A real Gateway session-cap 429 has Retry-After: 60.
+
+        That number is caller guidance, not a global rate-bucket cooldown:
+        another MCP session must reach /connect after capacity frees.
+        """
+        first = _client().fork_session()
+        second = _client().fork_session()
+        with patch("gateway_client.httpx.post") as post:
+            post.return_value.status_code = 429
+            post.return_value.headers = {
+                "Retry-After": "60",
+                "X-RateLimit-Bucket": "session",
+            }
+            post.return_value.json.return_value = {
+                "code": "SESSION_LIMIT_EXCEEDED",
+                "retryable": True,
+                "details": {
+                    "retry_after_seconds": 60,
+                    "bucket_class": "session",
+                    "operation_class": "connect",
+                },
+            }
+            with pytest.raises(GatewayClientError) as captured:
+                first._reconnect_session()
+
+            assert captured.value.status_code == 429
+            assert captured.value.body["code"] == "SESSION_LIMIT_EXCEEDED"
+            assert captured.value.body["details"] == {
+                "retry_after_seconds": 60,
+                "bucket_class": "session",
+                "operation_class": "connect",
+            }
+            assert GatewayClient._connect_retry_not_before == 0.0
+
+            post.return_value.status_code = 200
+            post.return_value.json.return_value = {"session_id": "newly-available"}
+            second._reconnect_session()
+            assert post.call_count == 2
+            assert second.session_id == "newly-available"
+
+    def test_session_capacity_nested_code_with_numeric_retry_does_not_block(self):
+        """Compatibility with a gateway that nests the typed error under detail."""
+        client = _client()
+        with patch("gateway_client.httpx.post") as post:
+            post.return_value.status_code = 429
+            post.return_value.headers = {"Retry-After": "60"}
+            post.return_value.json.return_value = {
+                "detail": {"code": "SESSION_LIMIT_EXCEEDED"},
+            }
+            with pytest.raises(GatewayClientError):
+                client._reconnect_session()
+        assert GatewayClient._connect_retry_not_before == 0.0
+
+    def test_bucket_header_alone_cannot_disable_generic_rate_limit_cooldown(self):
+        """Only typed capacity errors may bypass the shared request governor."""
+        client = _client()
+        with patch("gateway_client.httpx.post") as post:
+            post.return_value.status_code = 429
+            post.return_value.headers = {
+                "Retry-After": "7",
+                "X-RateLimit-Bucket": "session",
+            }
+            post.return_value.json.return_value = {
+                "code": "RATE_LIMIT_EXCEEDED",
+                "retryable": True,
+            }
+            with pytest.raises(GatewayClientError):
+                client._reconnect_session()
+        assert GatewayClient._connect_retry_not_before > 0
+
     def test_cooldown_returns_rate_limit_without_second_http(self, monkeypatch):
         from examples.mcp_server.mcp_infra.gateway_errors import (
             _classify_gateway_error,
