@@ -1945,10 +1945,39 @@ def _prepare_candidate_locked(
             )
 
         candidate_root.parent.mkdir(parents=True, exist_ok=True)
-        tmp = candidate_root.with_name(f".{candidate_root.name}.tmp")
-        if tmp.exists():
-            shutil.rmtree(tmp)
+        # The previous predictable .<project>.tmp path may be somebody else's
+        # unfinished worktree. Never delete it to make room for a new clone.
         try:
+            tmp = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{candidate_root.name}.tmp-",
+                    dir=str(candidate_root.parent),
+                )
+            )
+        except OSError as exc:
+            raise _fail(
+                "TOOL_EXECUTION_FAILED",
+                "candidate staging directory could not be created",
+                retryable=True,
+            ) from exc
+        # Pin the newly created directory open until cleanup is finished.
+        # An inode can be immediately reused after unlink, so a bare lstat
+        # before deletion is not sufficient proof of directory ownership.
+        try:
+            owned_tmp_fd = os.open(
+                tmp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+            )
+        except OSError as exc:
+            raise _fail(
+                "TOOL_EXECUTION_FAILED",
+                "candidate staging directory could not be inspected",
+                retryable=True,
+            ) from exc
+        owned_tmp_stat = os.fstat(owned_tmp_fd)
+        try:
+            # Preserve Git-clone 0755 traversal semantics for read-only verifiers
+            # while applying permissions to the pinned object, not its pathname.
+            os.fchmod(owned_tmp_fd, 0o755)
             if local_has_base:
                 try:
                     clone_registered_commit_via_bundle(
@@ -2093,9 +2122,22 @@ def _prepare_candidate_locked(
             )
             tmp.replace(candidate_root)
         except Exception:
-            if tmp.exists():
-                shutil.rmtree(tmp, ignore_errors=True)
+            # Only remove the exact directory created by this invocation.
+            # An unrelated replacement or symlink must never be traversed.
+            try:
+                current_tmp_stat = tmp.lstat()
+            except OSError:
+                pass
+            else:
+                if (
+                    stat.S_ISDIR(current_tmp_stat.st_mode)
+                    and current_tmp_stat.st_dev == owned_tmp_stat.st_dev
+                    and current_tmp_stat.st_ino == owned_tmp_stat.st_ino
+                ):
+                    shutil.rmtree(tmp, ignore_errors=True)
             raise
+        finally:
+            os.close(owned_tmp_fd)
 
     registered, registry_hash = _register_candidate(
         config_dir=config_dir,

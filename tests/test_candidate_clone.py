@@ -477,6 +477,109 @@ def test_prepare_candidate_clone_local_bundle_failure_denies_untrusted_remote(
     assert not any(path.name.startswith("candidate-") for path in clones.iterdir())
 
 
+@pytest.mark.parametrize("legacy_kind", ["directory", "symlink"])
+def test_prepare_candidate_clone_preserves_preexisting_legacy_staging(
+    registry_fixture, tmp_path: Path, legacy_kind: str
+) -> None:
+    """A predictable old scratch name can contain somebody else's useful data."""
+    from examples.mcp_server import candidate_clone as candidate_clone_module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = f"candidate/preserve-legacy-staging-{legacy_kind}"
+    project_id = candidate_clone_module._project_id("source-project", branch, base)
+    clones = workspace / ".mcp-candidate-clones"
+    clones.mkdir(parents=True, exist_ok=True)
+    stale_tmp = clones / f".{project_id}.tmp"
+    if legacy_kind == "symlink":
+        retained = tmp_path / "independent-owned-worktree"
+        retained.mkdir()
+        stale_tmp.symlink_to(retained, target_is_directory=True)
+    else:
+        retained = stale_tmp
+        retained.mkdir()
+    marker = retained / "do-not-delete.txt"
+    marker.write_text("retained uncommitted work\n", encoding="utf-8")
+
+    receipt = prepare_candidate_clone(
+        "source-project", branch, base, config_dir=config_dir, journal_root=journal_root
+    )
+
+    assert receipt.project_id == project_id
+    assert receipt.head == base
+    assert marker.read_text(encoding="utf-8") == "retained uncommitted work\n"
+    if legacy_kind == "symlink":
+        assert stale_tmp.is_symlink()
+    assert (clones / project_id / ".git").is_dir()
+
+
+def test_prepare_candidate_clone_removes_only_owned_failed_staging(
+    registry_fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from examples.mcp_server import candidate_clone as candidate_clone_module
+    from examples.mcp_server.registered_source_clone import RegisteredSourceCloneError
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/owned-failed-staging"
+    project_id = candidate_clone_module._project_id("source-project", branch, base)
+    clones = workspace / ".mcp-candidate-clones"
+
+    def interrupted_local_clone(*, destination: Path, **_kwargs: object) -> None:
+        (Path(destination) / ".git").mkdir()
+        (Path(destination) / "partial.txt").write_text("partial", encoding="utf-8")
+        raise RegisteredSourceCloneError(
+            "safe fixture: clone interrupted", phase="clone_bundle", retryable=True
+        )
+
+    monkeypatch.setattr(
+        candidate_clone_module, "clone_registered_commit_via_bundle", interrupted_local_clone
+    )
+    with pytest.raises(CandidateCloneError) as excinfo:
+        prepare_candidate_clone(
+            "source-project", branch, base, config_dir=config_dir, journal_root=journal_root
+        )
+
+    assert excinfo.value.code == "TOOL_EXECUTION_FAILED"
+    assert not (clones / project_id).exists()
+    assert not list(clones.glob(f".{project_id}.tmp-*"))
+    assert not list(clones.glob(f".{project_id}.tmp"))
+
+
+def test_prepare_candidate_clone_never_deletes_replaced_scratch_inode(
+    registry_fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A different directory mounted at the scratch path is not ours to clean."""
+    from examples.mcp_server import candidate_clone as candidate_clone_module
+    from examples.mcp_server.registered_source_clone import RegisteredSourceCloneError
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/replaced-scratch-inode"
+    retained: dict[str, Path] = {}
+
+    def replace_scratch_then_fail(*, destination: Path, **_kwargs: object) -> None:
+        temporary = Path(destination)
+        temporary.rmdir()
+        temporary.mkdir()
+        marker = temporary / "retained.txt"
+        marker.write_text("replaced-by-another-owner\n", encoding="utf-8")
+        retained["marker"] = marker
+        raise RegisteredSourceCloneError(
+            "safe fixture: staging interrupted", phase="clone_bundle", retryable=True
+        )
+
+    monkeypatch.setattr(
+        candidate_clone_module, "clone_registered_commit_via_bundle", replace_scratch_then_fail
+    )
+    with pytest.raises(CandidateCloneError) as excinfo:
+        prepare_candidate_clone(
+            "source-project", branch, base, config_dir=config_dir, journal_root=journal_root
+        )
+
+    assert excinfo.value.code == "TOOL_EXECUTION_FAILED"
+    assert retained["marker"].read_text(encoding="utf-8") == "replaced-by-another-owner\n"
+    project_id = candidate_clone_module._project_id("source-project", branch, base)
+    assert not (workspace / ".mcp-candidate-clones" / project_id).exists()
+
+
 def test_prepare_candidate_clone_refuses_dirty_existing_clone(registry_fixture) -> None:
     workspace, _source, config_dir, journal_root, base = registry_fixture
     receipt = prepare_candidate_clone(
