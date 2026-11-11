@@ -46,6 +46,11 @@ TD = ".ai-bridge/tasks/a12345678901"
 TASK_ID = "a12345678901"
 
 RUNNER_HARNESS_TIMEOUT_SECONDS = 60
+# Two independent workers / a stalled first proxy may each exercise the
+# complete bounded startup and teardown path. CI runners are shared, so
+# preserve the *application* watchdog and child-group kill while allowing
+# a measured total budget for these two integration scenarios only.
+PARALLEL_PROXY_HARNESS_TIMEOUT_SECONDS = RUNNER_HARNESS_TIMEOUT_SECONDS * 2
 PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS = RUNNER_HARNESS_TIMEOUT_SECONDS * 2
 PROXY_RETRY_HARNESS_TIMEOUT_SECONDS = RUNNER_HARNESS_TIMEOUT_SECONDS * 2
 RUNTIME_TIMEOUT_HARNESS_TIMEOUT_SECONDS = RUNNER_HARNESS_TIMEOUT_SECONDS * 2
@@ -1690,7 +1695,7 @@ def test_parallel_runners_receive_distinct_proxy_leases(tmp_path, monkeypatch):
 
         results = [
             _communicate_bounded_shell_tree(
-                proc, timeout=RUNNER_HARNESS_TIMEOUT_SECONDS
+                proc, timeout=PARALLEL_PROXY_HARNESS_TIMEOUT_SECONDS
             ) + (proc.returncode,)
             for proc in processes
         ]
@@ -1843,6 +1848,10 @@ def test_proxy_transport_marker_after_real_progress_does_not_retry(tmp_path, mon
 
 
 def test_startup_stall_retries_with_different_proxy(tmp_path, monkeypatch):
+    # Keep the 1s per-attempt startup watchdog intact. This script must
+    # generate evidence, stop/reap a stalled process and start a second
+    # worker, so a 60s CI-wide wall-clock limit can fail during host load.
+    # Give the bounded *test harness* the existing retry-case total budget.
     # This harness shares the executor-local proxy lease namespace with other
     # concurrent CI shards. Unique synthetic URLs prevent cross-test lease
     # collisions while still proving rotation to a DISTINCT second proxy.
@@ -1899,7 +1908,7 @@ def test_startup_stall_retries_with_different_proxy(tmp_path, monkeypatch):
 
         script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
         result = _run_bounded_shell_tree(
-            script, cwd=source, timeout=RUNNER_HARNESS_TIMEOUT_SECONDS
+            script, cwd=source, timeout=PROXY_RETRY_HARNESS_TIMEOUT_SECONDS
         )
 
         assert result.returncode == 0, result.stderr or result.stdout
