@@ -130,6 +130,130 @@ def test_clone_registered_commit_rejects_malformed_inherited_git_config_before_g
     assert not destination.exists()
 
 
+@pytest.mark.parametrize("precreated", [False, True])
+def test_failed_partial_bundle_clone_does_not_poison_destination_or_retry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, precreated: bool
+) -> None:
+    """Interrupted clone must not leave a partial .git in caller-owned target."""
+    source, head = _repo(tmp_path)
+    destination = tmp_path / "destination"
+    if precreated:
+        destination.mkdir()
+        original_inode = destination.stat().st_ino
+    original_run = subprocess.run
+
+    def fail_after_partial_git(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if len(argv) > 1 and argv[0] == "git" and argv[1] == "clone":
+            clone_target = Path(argv[-1])
+            clone_target.mkdir(exist_ok=True)
+            (clone_target / ".git").mkdir(exist_ok=True)
+            (clone_target / ".git" / "partial-object").write_text("incomplete", encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 128, "", "fatal: transient clone failure")
+        return original_run(argv, **kwargs)
+
+    with monkeypatch.context() as clone_failure:
+        clone_failure.setattr(registered_source_clone.subprocess, "run", fail_after_partial_git)
+        with pytest.raises(RegisteredSourceCloneError) as excinfo:
+            clone_registered_commit_via_bundle(
+                source_root=source, expected_sha=head, destination=destination,
+            )
+        assert excinfo.value.phase == "clone_bundle"
+        assert excinfo.value.failure_class == "git_failure"
+
+    if precreated:
+        assert destination.is_dir()
+        assert destination.stat().st_ino == original_inode
+        assert list(destination.iterdir()) == []
+    else:
+        assert not destination.exists()
+    assert not list(tmp_path.glob(".registered-source-*"))
+    # A new attempt using the same exact destination is safe without manual
+    # wiping of partial Git state.
+    clone_registered_commit_via_bundle(
+        source_root=source, expected_sha=head, destination=destination,
+    )
+    assert _git("rev-parse", "--verify", f"{head}^{{commit}}", cwd=destination) == head
+
+
+@pytest.mark.parametrize("precreated", [False, True])
+def test_bundle_clone_verified_sha_mismatch_never_publishes_git(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, precreated: bool
+) -> None:
+    """A successful clone still must pass exact SHA verification before publish."""
+    source, head = _repo(tmp_path)
+    destination = tmp_path / "destination"
+    if precreated:
+        destination.mkdir()
+        original_inode = destination.stat().st_ino
+    real_run = registered_source_clone._run
+
+    def reject_staged_commit(argv: list[str], **kwargs: Any) -> str:
+        result = real_run(argv, **kwargs)
+        if kwargs.get("phase") == "verify_destination_commit":
+            return "f" * 40
+        return result
+
+    with monkeypatch.context() as failed_verification:
+        failed_verification.setattr(registered_source_clone, "_run", reject_staged_commit)
+        with pytest.raises(RegisteredSourceCloneError) as excinfo:
+            clone_registered_commit_via_bundle(
+                source_root=source, expected_sha=head, destination=destination,
+            )
+        assert excinfo.value.phase == "verify_destination_commit"
+    if precreated:
+        assert destination.stat().st_ino == original_inode
+        assert list(destination.iterdir()) == []
+    else:
+        assert not destination.exists()
+    assert not list(tmp_path.glob(".registered-source-*"))
+
+
+def test_bundle_clone_preserves_pinned_precreated_directory_inode(tmp_path: Path) -> None:
+    import os
+
+    source, head = _repo(tmp_path)
+    destination = tmp_path / "destination"
+    destination.mkdir(mode=0o755)
+    parent_inode = destination.stat().st_ino
+    fd = os.open(destination, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        clone_registered_commit_via_bundle(
+            source_root=source, expected_sha=head, destination=destination,
+        )
+        assert os.fstat(fd).st_ino == parent_inode == destination.stat().st_ino
+        assert _git("rev-parse", "--verify", f"{head}^{{commit}}", cwd=destination) == head
+    finally:
+        os.close(fd)
+
+
+def test_bundle_clone_refuses_destination_modified_during_staging(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source, head = _repo(tmp_path)
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    real_run = registered_source_clone._run
+
+    def interleaved_writer(argv: list[str], **kwargs: Any) -> str:
+        result = real_run(argv, **kwargs)
+        if kwargs.get("phase") == "verify_destination_commit":
+            destination.rmdir()
+            destination.mkdir()
+            (destination / "foreign-work.txt").write_text("keep", encoding="utf-8")
+        return result
+
+    with monkeypatch.context() as concurrent:
+        concurrent.setattr(registered_source_clone, "_run", interleaved_writer)
+        with pytest.raises(RegisteredSourceCloneError) as excinfo:
+            clone_registered_commit_via_bundle(
+                source_root=source, expected_sha=head, destination=destination,
+            )
+    assert excinfo.value.phase == "validate_destination"
+    assert (destination / "foreign-work.txt").read_text(encoding="utf-8") == "keep"
+    assert not (destination / ".git").exists()
+    assert not list(tmp_path.glob(".registered-source-*"))
+
+
 @pytest.mark.parametrize(
     ("git_stderr", "expected_class", "expected_retryable"),
     [
