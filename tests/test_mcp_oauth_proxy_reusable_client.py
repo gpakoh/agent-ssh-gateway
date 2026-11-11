@@ -579,4 +579,3 @@ async def test_real_dcr_header_stall_releases_proxy_and_allows_next_request(srv,
         srv._UPSTREAM_CLIENT = None
         server.close()
         await server.wait_closed()
-
