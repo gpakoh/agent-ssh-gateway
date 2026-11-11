@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -42,17 +45,17 @@ def test_clone_registered_commit_never_directly_clones_registered_root(
     source, head = _repo(tmp_path)
     source_config_before = (source / ".git" / "config").read_bytes()
     destination = tmp_path / "destination"
-    real_run = subprocess.run
+    real_popen = subprocess.Popen
     calls: list[list[str]] = []
 
-    def recording_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def recording_popen(argv: list[str], **kwargs: Any) -> subprocess.Popen[str]:
         command = [str(item) for item in argv]
         calls.append(command)
         if "clone" in command and str(source.resolve()) in command:
             raise AssertionError("registered production root must never be a git clone source")
-        return real_run(argv, **kwargs)
+        return real_popen(argv, **kwargs)
 
-    monkeypatch.setattr(registered_source_clone.subprocess, "run", recording_run)
+    monkeypatch.setattr(registered_source_clone.subprocess, "Popen", recording_popen)
 
     clone_registered_commit_via_bundle(
         source_root=source,
@@ -60,7 +63,7 @@ def test_clone_registered_commit_never_directly_clones_registered_root(
         destination=destination,
     )
 
-    actual = real_run(
+    actual = subprocess.run(
         ["git", "-C", str(destination), "rev-parse", "--verify", f"{head}^{{commit}}"],
         text=True,
         capture_output=True,
@@ -140,19 +143,24 @@ def test_failed_partial_bundle_clone_does_not_poison_destination_or_retry(
     if precreated:
         destination.mkdir()
         original_inode = destination.stat().st_ino
-    original_run = subprocess.run
+    original_run = registered_source_clone._run
 
-    def fail_after_partial_git(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        if len(argv) > 1 and argv[0] == "git" and argv[1] == "clone":
+    def fail_after_partial_git(argv: list[str], **kwargs: Any) -> str:
+        if kwargs.get("phase") == "clone_bundle":
             clone_target = Path(argv[-1])
             clone_target.mkdir(exist_ok=True)
             (clone_target / ".git").mkdir(exist_ok=True)
             (clone_target / ".git" / "partial-object").write_text("incomplete", encoding="utf-8")
-            return subprocess.CompletedProcess(argv, 128, "", "fatal: transient clone failure")
+            raise RegisteredSourceCloneError(
+                "synthetic clone failure",
+                phase="clone_bundle",
+                exit_code=128,
+                failure_class="git_failure",
+            )
         return original_run(argv, **kwargs)
 
     with monkeypatch.context() as clone_failure:
-        clone_failure.setattr(registered_source_clone.subprocess, "run", fail_after_partial_git)
+        clone_failure.setattr(registered_source_clone, "_run", fail_after_partial_git)
         with pytest.raises(RegisteredSourceCloneError) as excinfo:
             clone_registered_commit_via_bundle(
                 source_root=source, expected_sha=head, destination=destination,
@@ -254,6 +262,55 @@ def test_bundle_clone_refuses_destination_modified_during_staging(
     assert not list(tmp_path.glob(".registered-source-*"))
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX Git process-group regression")
+def test_git_timeout_reaps_descendant_holding_capture_pipes(tmp_path: Path) -> None:
+    """A timed-out Git parent must not strand children or wait on their pipe FDs."""
+    pid_marker = tmp_path / "git-worker.pid"
+    # Use a native shell worker, not a new Python interpreter: CI runners
+    # can be heavily loaded, but /bin/sh starts fast enough for this fixture.
+    parent = 'sleep 12 & echo $! > "$1"; wait'
+    worker_pid: int | None = None
+    started = time.monotonic()
+    try:
+        with pytest.raises(RegisteredSourceCloneError) as excinfo:
+            registered_source_clone._run(
+                ["/bin/sh", "-c", parent, "git-like-worker", str(pid_marker)],
+                cwd=tmp_path,
+                env=dict(os.environ),
+                phase="clone_bundle",
+                timeout=2,
+            )
+        elapsed = time.monotonic() - started
+        assert excinfo.value.phase == "clone_bundle"
+        assert excinfo.value.failure_class == "git_timeout"
+        assert excinfo.value.retryable is True
+        # subprocess.run kills only the immediate parent; its Git-like worker
+        # survives unless the whole private process group is terminated.
+        assert elapsed < 7, f"timed-out Git descendants survived deadline for {elapsed:.1f}s"
+        assert pid_marker.exists()
+        worker_pid = int(pid_marker.read_text(encoding="utf-8"))
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            status = Path(f"/proc/{worker_pid}/stat")
+            try:
+                state = status.read_text(encoding="utf-8").split()[2]
+            except (FileNotFoundError, ProcessLookupError):
+                break  # The worker exited between the two /proc operations.
+            if state == "Z":
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("Git worker survived timed-out parent")
+    finally:
+        if pid_marker.exists():
+            worker_pid = int(pid_marker.read_text(encoding="utf-8"))
+        if worker_pid is not None:
+            try:
+                os.kill(worker_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
 @pytest.mark.parametrize(
     ("git_stderr", "expected_class", "expected_retryable"),
     [
@@ -270,10 +327,20 @@ def test_clone_bundle_failure_reports_only_sanitized_classification(
     expected_class: str,
     expected_retryable: bool,
 ) -> None:
-    def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(argv, 128, stdout="", stderr=git_stderr)
+    class FailedGit:
+        returncode = 128
 
-    monkeypatch.setattr(registered_source_clone.subprocess, "run", fake_run)
+        def __enter__(self) -> FailedGit:
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def communicate(self, *, timeout: int) -> tuple[str, str]:
+            assert timeout == 1
+            return "", git_stderr
+
+    monkeypatch.setattr(registered_source_clone.subprocess, "Popen", lambda *_a, **_kw: FailedGit())
     with pytest.raises(RegisteredSourceCloneError) as excinfo:
         registered_source_clone._run(
             ["git", "clone", "source.bundle", "destination"],
