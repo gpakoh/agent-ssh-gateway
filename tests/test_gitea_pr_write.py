@@ -124,6 +124,121 @@ async def test_raw_post_rejects_non_allowlisted_write_endpoint():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("overrides", "field"),
+    [
+        ({"title": "    "}, "title"),
+        ({"title": "x" * 201}, "title"),
+        ({"title": None}, "title"),
+        ({"head": ""}, "head"),
+        ({"head": "owner:feature"}, "head"),
+        ({"head": "../feature"}, "head"),
+        ({"base": "master..other"}, "base"),
+        ({"base": "feature/new"}, "head"),
+        ({"body": "x" * 20001}, "body"),
+        ({"body": None}, "body"),
+    ],
+)
+async def test_adapter_rejects_invalid_pr_input_before_token_or_network(
+    monkeypatch, overrides, field
+):
+    """Obvious invalid PRs never wait for get_repo or construct HTTP client."""
+    monkeypatch.delenv("GITEA_TOKEN", raising=False)
+
+    def unexpected_remote_client():
+        raise AssertionError("invalid request must not enter Gitea client")
+
+    monkeypatch.setattr(remote, "_server_gitea_client", unexpected_remote_client)
+    kwargs = {
+        "owner": "gpakoh",
+        "repo": "agent-ssh-gateway",
+        "title": "Valid title",
+        "head": "feature/new",
+        "base": "master",
+        "body": "Valid body",
+    }
+    kwargs.update(overrides)
+    result = await remote.gitea_create_pull_request(**kwargs)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INVALID_INPUT"
+    assert result["error"]["retryable"] is False
+    assert result["error"]["details"]["field"] == field
+    assert result["error"]["details"]["mutation_occurred"] is False
+    assert "x" * 60 not in str(result)
+    assert "owner:feature" not in str(result)
+
+
+@pytest.mark.asyncio
+async def test_adapter_normalizes_branch_names_before_preflight_gets(monkeypatch):
+    """Gitea POST strips branch spaces; preflight GET must use identical refs."""
+    monkeypatch.setenv("GITEA_TOKEN", "placeholder")
+    calls = []
+
+    class RecordingClient:
+        def __init__(self, token):
+            assert token == "placeholder"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get_repo(self, owner, repo):
+            calls.append("get_repo")
+            return {"default_branch": "master"}
+
+        async def get_branch(self, owner, repo, branch):
+            calls.append(("get_branch", branch))
+            assert branch in {"master", "feature/new"}
+            return {"name": branch}
+
+        async def create_pull_request(self, owner, repo, **kwargs):
+            calls.append(("create", kwargs))
+            assert kwargs == {
+                "title": "Fixed title",
+                "head": "feature/new",
+                "base": "master",
+                "body": "Fixed body",
+            }
+            return {
+                "number": 9,
+                "state": "open",
+                "title": kwargs["title"],
+                "head": {"ref": "feature/new", "sha": "a" * 40},
+                "base": {"ref": "master", "sha": "b" * 40},
+            }
+
+        async def compare_commits(self, owner, repo, *, base, head):
+            if base == "b" * 40 and head == "a" * 40:
+                return {"total_commits": 1}
+            if base == "a" * 40 and head == "b" * 40:
+                return {"total_commits": 0}
+            raise AssertionError("unexpected comparison")
+
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: RecordingClient)
+    result = await remote.gitea_create_pull_request(
+        "gpakoh", "agent-ssh-gateway", "  Fixed title  ",
+        "  feature/new  ", "  master  ", "  Fixed body  ",
+    )
+    assert result["ok"] is True
+    assert calls == [
+        "get_repo",
+        ("get_branch", "master"),
+        ("get_branch", "feature/new"),
+        (
+            "create",
+            {
+                "title": "Fixed title",
+                "head": "feature/new",
+                "base": "master",
+                "body": "Fixed body",
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_adapter_minimizes_created_pr(monkeypatch):
     monkeypatch.setenv("GITEA_TOKEN", "token")
     calls: list[dict] = []
