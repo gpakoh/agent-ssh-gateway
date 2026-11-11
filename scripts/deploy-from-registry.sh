@@ -164,6 +164,15 @@ STATE_FILE="$STATE_DIR/web-ssh-gateway-deploy.json"
 # Fail before Docker pulls/migrations when rollback identity is uncertain.
 python3 "$ROOT/scripts/deploy_state.py" preflight "$STATE_DIR"
 
+# The standard Compose stack attaches BOTH SSH executors to the existing
+# proxy-parser worker bridge. A missing/misnamed external network makes
+# Compose reject not just the new rollout but also the subsequent rollback.
+# Validate it before pulling images, changing containers, or migrations.
+# A separately supplied custom COMPOSE is operator-owned, not inferred.
+if [[ "$COMPOSE" == "$BASE_COMPOSE"* ]]; then
+  bash "$ROOT/scripts/deploy-proxy-network-preflight.sh"
+fi
+
 log() { echo "[$(date -Is)] $*"; }
 
 image_id() {

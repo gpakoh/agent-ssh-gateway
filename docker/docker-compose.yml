@@ -43,11 +43,12 @@ services:
     hostname: sshd
     networks:
       internal_net: {}
-      # proxy-parser-worker lives in quart-platform's proxy_parser_default
-      # network -- the generated agent script fetches a
+      # proxy-parser-worker lives in quart-platform's proxy-parser_default
+      # network (hyphenated project name), not proxy_parser_default. The
+      # generated agent script fetches a
       # live proxy from OPENCODE_PROXY_PROVIDER_URL on the SSH target, so
       # sshd must resolve/reach the provider by name. External network:
-      # created by the quart-platform proxy_parser project; removed if that
+      # created by the quart-platform proxy-parser project; removed if that
       # stack is ever `docker compose down`ed (sshd then loses it until
       # recreated). OpenCode is fail-closed when this provider is unavailable:
       # it must never silently burn the direct provider quota.
@@ -617,10 +618,12 @@ networks:
     name: ${GATEWAY_PUBLIC_NETWORK:-public_net}
   internal_net:
     external: true
-  # quart-platform proxy_parser project's default network; see the sshd
-  # service comment for why sshd joins it.
+  # Existing quart-platform proxy-parser worker network. Keep the logical
+  # Compose key stable for sshd/agent-sshd but bind it to the actual Docker
+  # network name; an explicit override supports older underscore deployments.
   proxy_parser_default:
     external: true
+    name: ${GATEWAY_PROXY_PARSER_NETWORK:-proxy-parser_default}
   # P1 trust boundary: project-private network for Redis only. internal:true
   # blocks all external egress/ingress; NOT external, so it is created fresh
   # by this project and never shared with anything else.
