@@ -131,6 +131,72 @@ def test_signal_to_owned_shell_group_cancels_its_separate_uv_group(tmp_path):
                 shell.wait(timeout=4)
 
 
+def test_external_shell_sigkill_keeps_fd9_until_owned_child_finishes(tmp_path):
+    """An uncatchable SSH-shell kill must never unlock a still-writing child.
+
+    Both processes belong to this test. The child waits for a private marker
+    with its own deadline, and no shared runner or unknown PID is signalled.
+    """
+    lock = tmp_path / ".sync.lock"
+    ready = tmp_path / "child-ready"
+    release = tmp_path / "release-child"
+    done = tmp_path / "child-done"
+    child_code = (
+        "from pathlib import Path; import time; "
+        f"ready=Path({str(ready)!r}); release=Path({str(release)!r}); "
+        f"done=Path({str(done)!r}); ready.touch(); "
+        "deadline=time.monotonic()+18; "
+        "\nwhile not release.exists() and time.monotonic()<deadline: "
+        "time.sleep(0.02)\n"
+        "if not release.exists(): raise SystemExit(12)\n"
+        "done.touch()"
+    )
+    script = _script(
+        lock,
+        seconds=24,
+        command=f"python3 -c {shlex.quote(child_code)}",
+    )
+    with subprocess.Popen(
+        ["sh", "-c", script],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ) as shell:
+        try:
+            deadline = time.monotonic() + 12
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert ready.exists(), "owned child never began work"
+            assert os.getpgid(shell.pid) == shell.pid
+            with lock.open("a+") as probe:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                os.kill(shell.pid, signal.SIGKILL)
+                assert shell.wait(timeout=4) == -signal.SIGKILL
+                # The inner supervisor/worker owns inherited FD9 after its
+                # outer shell disappears. Releasing early risks env corruption.
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+                release.touch()
+                deadline = time.monotonic() + 12
+                while time.monotonic() < deadline:
+                    try:
+                        fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        time.sleep(0.02)
+                else:
+                    pytest.fail("owned child did not release FD9 after finishing")
+                fcntl.flock(probe.fileno(), fcntl.LOCK_UN)
+            assert done.exists()
+        finally:
+            release.touch()
+            if shell.poll() is None and os.getpgid(shell.pid) == shell.pid:
+                os.kill(shell.pid, signal.SIGTERM)
+                shell.wait(timeout=5)
+
+
 def test_multiple_uv_calls_share_one_verifier_deadline(tmp_path):
     """All invocations use one deadline, even on a heavily contended CI runner.
 
