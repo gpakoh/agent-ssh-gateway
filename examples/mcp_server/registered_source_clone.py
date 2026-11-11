@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import stat
 import subprocess
 import tempfile
@@ -107,22 +108,20 @@ def _run(
     timeout: int,
 ) -> str:
     try:
-        result = subprocess.run(
+        # Git can spawn pack-objects, index-pack and other workers. subprocess.run
+        # kills only the immediate child on timeout; its descendants may retain
+        # CPU, object-pack handles and captured stdout/stderr pipes afterward.
+        # Give every Git command a private process group so timeout teardown
+        # cannot target the Gateway or an unrelated caller.
+        process = subprocess.Popen(
             argv,
             cwd=str(cwd),
             text=True,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             env=dict(env),
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired as exc:
-        raise RegisteredSourceCloneError(
-            "registered source materialization timed out",
-            phase=phase,
-            retryable=True,
-            failure_class="git_timeout",
-        ) from exc
     except OSError as exc:
         raise RegisteredSourceCloneError(
             "registered source materialization could not execute Git",
@@ -130,16 +129,48 @@ def _run(
             retryable=True,
             failure_class="git_spawn_error",
         ) from exc
-    if result.returncode != 0:
-        failure_class, retryable = _classify_git_failure(result.stderr)
+
+    with process:
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            # The subprocess-created session has PGID == PID. SIGKILL the
+            # entire private group, even if Git's leader has already exited.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                process.communicate(timeout=3)
+            except subprocess.TimeoutExpired:
+                # A worker that created a new session could still hold the
+                # pipe handles. Do not block waiting for its stdout/stderr.
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass  # The leader exited, but another session owns a pipe.
+                if process.stdout is not None:
+                    process.stdout.close()
+                if process.stderr is not None:
+                    process.stderr.close()
+                process.wait(timeout=3)
+            raise RegisteredSourceCloneError(
+                "registered source materialization timed out",
+                phase=phase,
+                retryable=True,
+                failure_class="git_timeout",
+            ) from exc
+
+    if process.returncode != 0:
+        failure_class, retryable = _classify_git_failure(stderr)
         raise RegisteredSourceCloneError(
             "registered source materialization Git command failed",
             phase=phase,
             retryable=retryable,
-            exit_code=result.returncode,
+            exit_code=process.returncode,
             failure_class=failure_class,
         )
-    return result.stdout.strip()
+    return stdout.strip()
 
 
 def _promote_verified_clone(
