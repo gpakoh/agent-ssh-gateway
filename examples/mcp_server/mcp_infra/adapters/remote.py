@@ -27,9 +27,12 @@ import httpx
 from tool_results import tool_error, tool_success, validate_pagination
 
 from examples.mcp_client_remote.fleet.gitea_client import (
+    MAX_PR_BODY,
+    MAX_PR_TITLE,
     GiteaActionRunResponseError,
     GiteaCommitStatusResponseError,
     GiteaMutationOutcomeUnknown,
+    _validate_branch_name,
     validate_artifact_expires_at,
 )
 from examples.mcp_client_remote.fleet.github_client import (
@@ -1589,6 +1592,39 @@ async def gitea_create_pull_request(
     before POST so a stale ``master``/``main`` assumption fails without a
     mutation and reports the actual default branch when available.
     """
+    # The lower-level GiteaClient validates these fields only when POSTing.
+    # Validate and canonicalize them BEFORE remote metadata/branch lookups:
+    # malformed requests must fail cheaply without a token or network call,
+    # and the GET preflight must check the *same* branch as the later POST.
+    def invalid(field: str, message: str) -> dict[str, Any]:
+        return tool_error(
+            tool="gitea_create_pull_request",
+            code="INVALID_INPUT",
+            message=message,
+            retryable=False,
+            details={"field": field, "mutation_occurred": False},
+            source="gitea",
+        )
+
+    if not isinstance(title, str) or not (1 <= len(title.strip()) <= MAX_PR_TITLE):
+        return invalid("title", f"title must contain 1..{MAX_PR_TITLE} characters")
+    if not isinstance(body, str) or len(body.strip()) > MAX_PR_BODY:
+        return invalid("body", f"body must contain at most {MAX_PR_BODY} characters")
+    title, body = title.strip(), body.strip()
+    for field, branch_name in (("head", head), ("base", base)):
+        if not isinstance(branch_name, str):
+            return invalid(field, f"{field} must be a valid same-repository branch name")
+        try:
+            normalized = _validate_branch_name(branch_name, field)
+        except ValueError:
+            return invalid(field, f"{field} must be a valid same-repository branch name")
+        if field == "head":
+            head = normalized
+        else:
+            base = normalized
+    if head == base:
+        return invalid("head", "head and base branches must differ")
+
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
