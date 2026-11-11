@@ -20,14 +20,14 @@ DEPLOY = ROOT / "scripts" / "deploy-from-registry.sh"
 
 def test_proxy_parser_worker_network_has_explicit_real_name_and_no_creation():
     compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
-    assert compose["networks"]["proxy_parser_default"] == {
+    assert compose["networks"]["proxy-parser_default"] == {
         "external": True,
         "name": "${GATEWAY_PROXY_PARSER_NETWORK:-proxy-parser_default}",
     }
     for service in ("sshd", "agent-sshd"):
-        assert "proxy_parser_default" in compose["services"][service]["networks"]
+        assert "proxy-parser_default" in compose["services"][service]["networks"]
     # The OAuth application is not attached to the proxy egress network.
-    assert "proxy_parser_default" not in compose["services"]["mcp-oauth"]["networks"]
+    assert "proxy-parser_default" not in compose["services"]["mcp-oauth"]["networks"]
 
 
 def _run_fake_network_preflight(
