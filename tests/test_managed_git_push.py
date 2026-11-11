@@ -1179,11 +1179,81 @@ async def test_verified_commit_reconciles_response_lost_after_success(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "push_response_lost",
+    [True, False],
+    ids=["lost-push-ack", "push-returned-success"],
+)
+@pytest.mark.parametrize(
+    "initial_sha",
+    [None, "1" * 40],
+    ids=["branch-created-late", "old-tip-updated-late"],
+)
+async def test_verified_push_delayed_visibility_cannot_prove_no_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    initial_sha: str | None,
+    push_response_lost: bool,
+) -> None:
+    """Three stale branch reads cannot authorize a retry of a started push."""
+    state: dict[str, Any] = {"reads": 0, "push_calls": 0}
+
+    class DelayedVisibilityClient(_FakeGiteaClient):
+        async def get_branch(self, owner: str, repo: str, branch: str) -> dict[str, Any]:
+            state["reads"] += 1
+            # Preflight and all three bounded reconciliation reads still show
+            # the old state. The actual pushed SHA appears on the next read.
+            if state["reads"] <= 4:
+                if initial_sha is None:
+                    raise _missing_branch_error()
+                return {
+                    "name": branch,
+                    "protected": False,
+                    "commit": {"id": initial_sha},
+                }
+            return {"name": branch, "protected": False, "commit": {"id": SHA}}
+
+    def push(**_kwargs: Any) -> None:
+        state["push_calls"] += 1
+        if push_response_lost:
+            raise managed_git.ManagedGitMutationError("push response lost")
+
+    _install_verified_push_reconciliation_mocks(
+        monkeypatch, tmp_path, DelayedVisibilityClient, push
+    )
+    result = await remote.gitea_push_verified_commit(
+        project="gpt-browser-bridge-hardening",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_base_sha="0" * 40,
+        expected_head_sha=SHA,
+        allowed_files="app/**",
+        required_checks="pytest -q",
+    )
+    assert state["push_calls"] == 1
+    assert state["reads"] == 4
+    assert result["ok"] is False
+    assert result["error"]["code"] == "MUTATION_OUTCOME_UNKNOWN"
+    assert result["error"]["retryable"] is False
+    assert result["error"]["details"]["mutation_started"] is True
+    assert result["error"]["details"]["mutation_occurred"] is None
+    assert result["error"]["details"]["reconciliation_attempts"] == 3
+    assert "Do not retry" in result["error"]["hint"]
+
+    # This is the observed #656 failure mode: a later authoritative read
+    # reveals the branch after a false "unchanged" earlier response.
+    client = DelayedVisibilityClient("managed-token")
+    visible = await client.get_branch("gpakoh", "gpt-browser-bridge", "hardening/runtime-deploy")
+    assert visible["commit"]["id"] == SHA
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "initial_sha",
     [None, "1" * 40],
     ids=["branch-absent", "old-tip"],
 )
-async def test_verified_commit_proves_no_mutation_after_push_timeout(
+async def test_verified_commit_keeps_unknown_after_push_timeout_and_stale_reads(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     initial_sha: str | None,
@@ -1217,17 +1287,18 @@ async def test_verified_commit_proves_no_mutation_after_push_timeout(
 
     assert state["push_calls"] == 1
     assert result["ok"] is False
-    assert result["error"]["code"] == "GIT_PUSH_FAILED"
-    assert result["error"]["retryable"] is True
+    assert result["error"]["code"] == "MUTATION_OUTCOME_UNKNOWN"
+    assert result["error"]["retryable"] is False
     details = result["error"]["details"]
     assert details["mutation_started"] is True
-    assert details["mutation_occurred"] is False
+    assert details["mutation_occurred"] is None
     assert details["reconciliation_attempts"] == 3
+    assert details["bounded_reads_match_pre_push_state"] is True
     assert details["previous"] == {
         "present": initial_sha is not None,
         "head_sha": initial_sha,
     }
-    assert "proven unchanged" in result["error"]["hint"]
+    assert "Do not retry" in result["error"]["hint"]
     assert state["reads"] == 4
 
 

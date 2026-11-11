@@ -6484,7 +6484,7 @@ async def _reconcile_verified_push_postcondition(
     expected_head_sha: str,
     previous_branch: dict[str, Any] | None,
 ) -> tuple[str, dict[str, Any] | None, dict[str, Any]]:
-    """Classify a post-push remote state as success, no-mutation, or unknown."""
+    """Verify published SHA or keep an already-started push outcome unknown."""
     previous_present, previous_head_sha = _gitea_branch_state(previous_branch)
     previous_state_proven = not previous_present or previous_head_sha is not None
     all_reads_match_previous = previous_state_proven
@@ -6546,8 +6546,11 @@ async def _reconcile_verified_push_postcondition(
     }
     if last_read_error_class is not None:
         details["last_read_error_class"] = last_read_error_class
-    if all_reads_match_previous:
-        return "no_mutation", None, details
+    # A bounded run of fresh reads can show only the currently visible
+    # remote tip. It cannot prove that an already-started push will not
+    # become visible *after* the last read (as observed in issue #656).
+    # Preserve the observation for diagnosis, never as retry authority.
+    details["bounded_reads_match_pre_push_state"] = all_reads_match_previous
     return "unknown", None, details
 
 
@@ -6767,32 +6770,6 @@ async def gitea_push_verified_commit(
                     previous_branch=remote_before,
                 )
             )
-            if reconciliation_outcome == "no_mutation":
-                details: dict[str, Any] = {
-                    "phase": "push_postcondition",
-                    "mutation_started": True,
-                    "mutation_occurred": False,
-                    "expected_head_sha": expected_head,
-                    "branch": destination_branch,
-                    **reconciliation,
-                }
-                if mutation_error is not None:
-                    details["mutation_error_class"] = type(mutation_error).__name__
-                return tool_error(
-                    tool="gitea_push_verified_commit",
-                    code=("GIT_PUSH_FAILED" if mutation_error is not None else "CHECK_FAILED"),
-                    message=(
-                        "Trusted push did not establish expected_head_sha; bounded fresh reads "
-                        "proved the remote branch remained at its pre-push state"
-                    ),
-                    retryable=True,
-                    hint=(
-                        "The remote branch is proven unchanged, so a retry is safe after "
-                        "resolving the transient push failure."
-                    ),
-                    details=details,
-                    source="gitea",
-                )
             if reconciliation_outcome != "success" or remote_branch is None:
                 details = {
                     "phase": "push_postcondition",
@@ -6809,7 +6786,7 @@ async def gitea_push_verified_commit(
                     code="MUTATION_OUTCOME_UNKNOWN",
                     message=(
                         "Trusted push was attempted but the exact remote postcondition could "
-                        "not be proven and the pre-push state was not proven unchanged"
+                        "not be proven; stale reads cannot prove that no mutation occurred"
                     ),
                     retryable=False,
                     hint=(
