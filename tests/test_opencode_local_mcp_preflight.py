@@ -11,6 +11,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from examples.mcp_server.agent_tools import (
     _OPENCODE_LOCAL_MCP_PREFLIGHT_PY,
     _build_opencode_script,
@@ -145,6 +147,52 @@ def test_missing_python_module_is_blocked_without_import_execution(tmp_path: Pat
     assert code != 0 and err == ""
     assert payload["status"] == "blocked"
     assert payload["reason"] == "missing_module"
+
+
+def test_python_flags_before_mcp_module_are_valid_and_do_not_import_parent(tmp_path: Path):
+    package = tmp_path / "flagged_mcp"
+    package.mkdir()
+    marker = tmp_path / "untrusted-package-executed"
+    (package / "__init__.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('executed')\n"
+    )
+    (package / "server.py").write_text("import json\n", encoding="utf-8")
+
+    code, payload, err = _check(
+        tmp_path, _local(["python", "-u", "-B", "-m", "flagged_mcp.server"])
+    )
+    assert code == 0 and err == ""
+    assert payload["status"] == "ready" and payload["checked"] == 1
+    assert not marker.exists()
+
+
+def test_python_flags_before_missing_mcp_module_still_block(tmp_path: Path):
+    code, payload, err = _check(
+        tmp_path, _local(["python", "-u", "-m", "nonexistent_flagged_mcp.server"])
+    )
+    assert code != 0 and err == ""
+    assert payload["status"] == "blocked"
+    assert payload["reason"] == "missing_module"
+
+
+@pytest.mark.parametrize("flag", ["-I", "-S", "-s", "-E"])
+def test_python_import_environment_flags_do_not_claim_mcp_ready(tmp_path: Path, flag: str):
+    (tmp_path / "browser_policy_mcp.py").write_text("import json\n", encoding="utf-8")
+    code, payload, err = _check(
+        tmp_path, _local(["python", flag, "browser_policy_mcp.py"])
+    )
+    assert code == 0 and err == ""
+    assert payload["status"] == "partial"
+    assert payload["checked"] == 1 and payload["unverified"] == 1
+
+
+def test_python_isolated_module_flag_is_unverified_without_execution(tmp_path: Path):
+    code, payload, err = _check(
+        tmp_path, _local(["python", "-I", "-m", "json.tool"])
+    )
+    assert code == 0 and err == ""
+    assert payload["status"] == "partial"
+    assert payload["checked"] == 1 and payload["unverified"] == 1
 
 
 def test_disabled_local_mcp_is_ignored(tmp_path: Path):
