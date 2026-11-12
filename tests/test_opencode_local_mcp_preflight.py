@@ -203,3 +203,38 @@ def test_runner_blocks_before_proxy_acquisition_and_model_invocation(monkeypatch
     )
     assert 'elif [ "$OPENCODE_LOCAL_MCP_BLOCKED" -eq 1 ]; then' in script
     assert '"opencode-local-mcp-unavailable"' in script
+
+
+def test_missing_local_python_executable_blocks_before_model(tmp_path: Path):
+    script = tmp_path / "browser_policy_mcp.py"
+    script.write_text("import json\n", encoding="utf-8")
+    missing_python = tmp_path / "missing-interpreter" / "python"
+    code, payload, err = _check(
+        tmp_path, _local([str(missing_python), script.name])
+    )
+    assert code != 0 and err == ""
+    assert payload["status"] == "blocked"
+    assert payload["reason"] == "missing_interpreter"
+    assert "missing-interpreter" not in json.dumps(payload)
+
+
+def test_other_python_executable_is_not_misreported_ready(tmp_path: Path):
+    marker = tmp_path / "foreign-python-executed"
+    shim = tmp_path / "python"
+    shim.write_text(
+        "#!/bin/sh\nprintf 'executed' > " + str(marker) + "\n",
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    (tmp_path / "browser_policy_mcp.py").write_text(
+        "from missing_package_only_in_foreign_interpreter import value\n",
+        encoding="utf-8",
+    )
+    code, payload, err = _check(
+        tmp_path, _local([str(shim), "browser_policy_mcp.py"])
+    )
+    assert code == 0 and err == ""
+    assert payload["status"] == "partial"
+    assert payload["checked"] == 1
+    assert payload["unverified"] == 1
+    assert not marker.exists()

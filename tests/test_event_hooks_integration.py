@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 from datetime import UTC
 
 import pytest
@@ -9,6 +10,7 @@ from httpx import ASGITransport, AsyncClient
 
 import app.main as main_module
 import app.state as state_module
+from app import event_hook_security
 from app.event_hook_delivery import DeliveryService
 from app.event_hook_store import EventHookStore
 
@@ -16,9 +18,20 @@ TEST_API_KEY = "test-event-hook-key-789"
 
 
 @pytest.fixture(autouse=True)
-def _configure_auth():
+def _configure_auth(monkeypatch):
     from app.config import settings
 
+    # API CRUD exercises real hostname/IP policy, not availability of an
+    # external DNS resolver. Resolve only these fixture hosts deterministically.
+    real_getaddrinfo = socket.getaddrinfo
+
+    def _fixture_getaddrinfo(host, port, *args, **kwargs):
+        if host in ("example.com", "private-dns.test"):
+            ip = "93.184.216.34" if host == "example.com" else "127.0.0.1"
+            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (ip, port or 0))]
+        return real_getaddrinfo(host, port, *args, **kwargs)
+
+    monkeypatch.setattr(event_hook_security.socket, "getaddrinfo", _fixture_getaddrinfo)
     settings.api_key = TEST_API_KEY
     yield
 
@@ -119,6 +132,23 @@ async def test_crud_rejects_invalid_url(_setup_globals):
         }
         r = await client.post("/api/event-hooks", json=body, headers=headers)
         assert r.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_crud_rejects_hostname_resolving_to_loopback(_setup_globals):
+    store, ds = _setup_globals
+    await store.create_tables()
+    await ds.create_tables()
+
+    transport = ASGITransport(app=main_module.app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/event-hooks",
+            json={"url": "https://private-dns.test/hook", "events": ["session.connected"]},
+            headers=_auth_headers(),
+        )
+        assert response.status_code == 422, response.text
+        assert "Blocked IP range" in response.text
 
 
 @pytest.mark.asyncio
