@@ -72,6 +72,7 @@ _OPENCODE_TERMINAL_STATUS_BY_EXIT = {
     77: "rate-limited",
     78: "startup-timeout",
     79: "run-timeout",
+    81: "blocked",
     137: "resource-exhausted",
 }
 
@@ -1985,6 +1986,270 @@ def _supervisor_postrun_script_lines(
     return lines
 
 
+_OPENCODE_LOCAL_MCP_PREFLIGHT_PY = """\
+import ast
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import stat
+from pathlib import Path
+
+# Read only the already-checked-out, source-pinned project config. No local
+# MCP command is invoked, and no source path/command/import name is printed.
+_CONFIG_BYTES_MAX = 65536
+_SCRIPT_BYTES_MAX = 262144
+_LOCAL_MCP_MAX = 32
+_ROOT = Path.cwd()
+
+
+def finish(status, reason=None, checked=0):
+    payload = {"schema_version": 1, "status": status, "checked": checked}
+    if unverified:
+        payload["unverified"] = unverified
+    if reason is not None:
+        payload["reason"] = reason
+    print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    raise SystemExit(1 if status == "blocked" else 0)
+
+
+def read_regular(path, limit, reason):
+    # Exact workspace-bound openat traversal: the final NOFOLLOW alone
+    # cannot prevent a symlinked parent directory escaping the source clone.
+    path = Path(path)
+    candidate = path if path.is_absolute() else _ROOT / path
+    try:
+        relative = candidate.relative_to(_ROOT)
+    except ValueError:
+        finish("blocked", reason)
+    if not relative.parts or ".." in relative.parts:
+        finish("blocked", reason)
+    directory_fd = None
+    try:
+        directory_fd = os.open(
+            _ROOT, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        )
+        for component in relative.parts[:-1]:
+            next_fd = os.open(
+                component,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_fd,
+            )
+            os.close(directory_fd)
+            directory_fd = next_fd
+        fd = os.open(
+            relative.parts[-1],
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+            dir_fd=directory_fd,
+        )
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+                finish("blocked", reason)
+            with os.fdopen(fd, "rb", closefd=False) as fh:
+                raw = fh.read(limit + 1)
+            if len(raw) > limit:
+                finish("blocked", reason)
+            return raw
+        finally:
+            os.close(fd)
+    except OSError:
+        finish("blocked", reason)
+    finally:
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
+def module_available(name):
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError, AttributeError):
+        return False
+
+
+def module_chain_available_without_import(module):
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*){0,15}", module):
+        return False
+    search_path = None
+    qualified = ""
+    try:
+        for component in module.split("."):
+            qualified = qualified + "." + component if qualified else component
+            # PathFinder returns specs without executing a parent package's
+            # __init__. Do not use importlib.util.find_spec on dotted names.
+            spec = importlib.machinery.PathFinder.find_spec(qualified, search_path)
+            if spec is None:
+                return False
+            search_path = spec.submodule_search_locations
+        return True
+    except (ImportError, ValueError, AttributeError, OSError):
+        return False
+
+
+def parse_jsonc(raw):
+    text = raw.decode("utf-8")
+    # Strip JSONC line/block comments only OUTSIDE quoted strings; do not
+    # misparse a schema URL such as "https://opencode.ai/config.json".
+    without_comments = []
+    quote = False
+    escaped = False
+    pos = 0
+    while pos < len(text):
+        char = text[pos]
+        if quote:
+            without_comments.append(char)
+            if escaped:
+                escaped = False
+            elif ord(char) == 92:
+                escaped = True
+            elif char == '"':
+                quote = False
+            pos += 1
+            continue
+        if char == '"':
+            quote = True
+            without_comments.append(char)
+            pos += 1
+        elif text.startswith("//", pos):
+            end = text.find("\\n", pos)
+            if end < 0:
+                break
+            without_comments.append("\\n")
+            pos = end + 1
+        elif text.startswith("/*", pos):
+            end = text.find("*/", pos + 2)
+            if end < 0:
+                raise ValueError("unclosed JSONC comment")
+            without_comments.append(" ")
+            pos = end + 2
+        else:
+            without_comments.append(char)
+            pos += 1
+    cleaned = "".join(without_comments)
+    # JSONC also permits trailing commas. Remove only outside JSON strings.
+    result = []
+    quote = False
+    escaped = False
+    for index, char in enumerate(cleaned):
+        if quote:
+            result.append(char)
+            if escaped:
+                escaped = False
+            elif ord(char) == 92:
+                escaped = True
+            elif char == '"':
+                quote = False
+            continue
+        if char == '"':
+            quote = True
+        if char == ",":
+            cursor = index + 1
+            while cursor < len(cleaned) and cleaned[cursor].isspace():
+                cursor += 1
+            if cursor < len(cleaned) and cleaned[cursor] in "}]":
+                continue
+        result.append(char)
+    return json.loads("".join(result))
+
+
+checked = 0
+unverified = 0
+for config_file in (Path("opencode.json"), Path("opencode.jsonc")):
+    if not config_file.exists() and not config_file.is_symlink():
+        continue
+    raw = read_regular(config_file, _CONFIG_BYTES_MAX, "unsafe_config")
+    try:
+        config = parse_jsonc(raw)
+    except (UnicodeError, ValueError):
+        finish("blocked", "invalid_config")
+    if not isinstance(config, dict):
+        finish("blocked", "invalid_config")
+    mcp = config.get("mcp", {})
+    if not isinstance(mcp, dict) or len(mcp) > _LOCAL_MCP_MAX:
+        finish("blocked", "invalid_config")
+    for declaration in mcp.values():
+        if not isinstance(declaration, dict):
+            finish("blocked", "invalid_config")
+        if declaration.get("enabled", True) is False:
+            continue
+        if declaration.get("type") != "local":
+            continue
+        command = declaration.get("command")
+        if (
+            not isinstance(command, list)
+            or len(command) < 2
+            or len(command) > 32
+            or any(not isinstance(arg, str) or not arg or len(arg) > 4096 for arg in command)
+        ):
+            finish("blocked", "invalid_local_command", checked)
+        interpreter = Path(command[0]).name
+        if not re.fullmatch(r"python(?:3(?:\\.\\d{1,2})?)?", interpreter):
+            # Preserve previously working node/npx/etc. transport contracts.
+            # No claim of MCP readiness is made for uninspected commands.
+            unverified += 1
+            continue
+        checked += 1
+        args = command[1:]
+        if args[0] == "-m":
+            if len(args) < 2 or not module_chain_available_without_import(args[1]):
+                finish("blocked", "missing_module", checked)
+            continue
+        while args and args[0] in ("-u", "-B", "-I", "-s", "-S", "-E"):
+            args = args[1:]
+        if not args or args[0].startswith("-"):
+            finish("blocked", "invalid_local_command", checked)
+        script = Path(args[0])
+        if not script.is_absolute():
+            script = _ROOT / script
+        if not script.is_file() or script.is_symlink():
+            finish("blocked", "missing_entrypoint", checked)
+        source = read_regular(script, _SCRIPT_BYTES_MAX, "unsafe_entrypoint")
+        try:
+            tree = ast.parse(source.decode("utf-8"))
+        except (UnicodeError, ValueError, SyntaxError):
+            finish("blocked", "invalid_entrypoint", checked)
+        # Top-level direct imports are needed for MCP server startup. Never
+        # execute the entrypoint to test importability (it can start a browser).
+        imports = set()
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                imports.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                imports.add(node.module.split(".")[0])
+        if len(imports) > 128:
+            finish("blocked", "invalid_entrypoint", checked)
+        if any(not module_available(name) for name in imports):
+            finish("blocked", "missing_module", checked)
+
+finish("partial" if unverified else "ready", checked=checked)
+"""
+
+
+def _opencode_local_mcp_preflight_script_lines() -> list[str]:
+    """Inspect only source-pinned local MCP entrypoints before proxy/model use.
+
+    Static import existence is a fast negative gate, not an assertion that a
+    browser daemon or MCP handshake will work. Never run project MCP code.
+    """
+    return [
+        "OPENCODE_LOCAL_MCP_BLOCKED=0",
+        'runner_artifact_remove "$td/opencode-local-mcp-preflight.json"',
+        "if OPENCODE_LOCAL_MCP_PREFLIGHT=$(python3 - 2>/dev/null <<'OPENCODE_LOCAL_MCP_PREFLIGHT_EOF'",
+        _OPENCODE_LOCAL_MCP_PREFLIGHT_PY.rstrip("\\n"),
+        "OPENCODE_LOCAL_MCP_PREFLIGHT_EOF",
+        "); then",
+        '  runner_artifact_write_line "$td/opencode-local-mcp-preflight.json" "$OPENCODE_LOCAL_MCP_PREFLIGHT"',
+        "else",
+        "  OPENCODE_LOCAL_MCP_BLOCKED=1",
+        "  RC=81",
+        '  FAILURE_REASON="opencode-local-mcp-unavailable"',
+        '  runner_artifact_write_line "$td/opencode-local-mcp-preflight.json" "$OPENCODE_LOCAL_MCP_PREFLIGHT"',
+        '  runner_artifact_append_line "$td/agent-status.md" "OpenCode local MCP static preflight blocked; model and proxy not started"',
+        "fi",
+    ]
+
+
 _OPENCODE_UPGRADE_GATE_PY = """\
 import fcntl
 import hashlib
@@ -2844,6 +3109,7 @@ def _build_opencode_script(
             minimum_version=upgrade_minimum_version,
         )
     )
+    parts.extend(_opencode_local_mcp_preflight_script_lines())
     parts.extend(
         _opencode_startup_watchdog_script_lines(
             opencode_model_arg,
@@ -2890,7 +3156,7 @@ def _build_opencode_script(
             [
                 f"OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS={startup_max_proxy_attempts}",
                 "OPENCODE_PROXY_ATTEMPT=1",
-                'if [ "$OPENCODE_UPGRADE_BLOCKED" -eq 0 ]; then',
+                'if [ "$OPENCODE_UPGRADE_BLOCKED" -eq 0 ] && [ "$OPENCODE_LOCAL_MCP_BLOCKED" -eq 0 ]; then',
                 '  write_proxy_status acquiring "" 0',
                 "  acquire_opencode_proxy",
                 "fi",
@@ -2935,6 +3201,8 @@ def _build_opencode_script(
     parts.extend([
         'if [ "$OPENCODE_UPGRADE_BLOCKED" -eq 1 ]; then',
         "  RC=80",
+        'elif [ "$OPENCODE_LOCAL_MCP_BLOCKED" -eq 1 ]; then',
+        "  RC=81",
         'elif [ "$PROXY_BLOCKED" -eq 1 ]; then',
         "  RC=76",
         'elif [ -f "$td/current-plan.md" ]; then',
@@ -3012,6 +3280,8 @@ def _build_opencode_script(
         proxy_final_status_lines = [
             'if [ "$FINAL_RC" -eq 0 ]; then',
             '  write_proxy_status completed "" 1',
+            'elif [ "$FINAL_RC" -eq 81 ]; then',
+            '  write_proxy_status blocked opencode_local_mcp_unavailable 1',
             'elif [ "$FINAL_RC" -eq 80 ]; then',
             '  write_proxy_status upgrade_blocked "${OPENCODE_UPGRADE_ERROR_CLASS:-opencode_upgrade_failed}" 1',
             'elif [ "$FINAL_RC" -eq 77 ]; then',
@@ -3036,6 +3306,7 @@ def _build_opencode_script(
             'if [ "$FINAL_RC" -eq 78 ] && [ "${FAILURE_REASON:-}" != "opencode-startup-timeout" ]; then FINAL_RC=1; fi',
             'if [ "$FINAL_RC" -eq 79 ] && [ "${FAILURE_REASON:-}" != "opencode-run-timeout" ] && [ "${FAILURE_REASON:-}" != "opencode-run-idle-timeout" ]; then FINAL_RC=1; fi',
             'if [ "$FINAL_RC" -eq 80 ] && [ "${FAILURE_REASON:-}" != "opencode-upgrade-failed" ] && [ "${FAILURE_REASON:-}" != "opencode-permission-mode-unsupported" ]; then FINAL_RC=1; fi',
+            'if [ "$FINAL_RC" -eq 81 ] && [ "$OPENCODE_LOCAL_MCP_BLOCKED" -ne 1 ]; then FINAL_RC=1; fi',
             *proxy_final_status_lines,
             'if [ $FINAL_RC -eq 0 ] && [ "${CHECKS_WARNING:-0}" -eq 1 ]; then',
             '  runner_artifact_write_line "$td/agent-status.md" "Status: needs-review-warning"',
@@ -3051,6 +3322,8 @@ def _build_opencode_script(
             '  runner_artifact_write_line "$td/agent-status.md" "Status: run-timeout"',
             'elif [ $FINAL_RC -eq 80 ]; then',
             '  runner_artifact_write_line "$td/agent-status.md" "Status: upgrade-blocked"',
+            'elif [ $FINAL_RC -eq 81 ]; then',
+            '  runner_artifact_write_line "$td/agent-status.md" "Status: blocked"',
             'elif [ $FINAL_RC -eq 137 ]; then',
             '  runner_artifact_write_line "$td/agent-status.md" "Status: resource-exhausted"',
             "else",
