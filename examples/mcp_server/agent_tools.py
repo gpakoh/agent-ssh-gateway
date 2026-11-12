@@ -1993,7 +1993,9 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import stat
+import sys
 from pathlib import Path
 
 # Read only the already-checked-out, source-pinned project config. No local
@@ -2190,9 +2192,29 @@ for config_file in (Path("opencode.json"), Path("opencode.jsonc")):
             unverified += 1
             continue
         checked += 1
+        # A syntactically recognized Python command is not necessarily
+        # installed. Inspect the intended executable without invoking it.
+        executable = shutil.which(command[0])
+        if executable is None:
+            finish("blocked", "missing_interpreter", checked)
+        try:
+            # Different interpreter installations and virtualenvs have
+            # different import paths. Python3 checker specs cannot validate
+            # their packages, even when the underlying binary inode matches.
+            same_python_environment = (
+                Path(executable).parent == Path(sys.executable).parent
+                and os.path.samefile(executable, sys.executable)
+            )
+        except OSError:
+            same_python_environment = False
         args = command[1:]
         if args[0] == "-m":
-            if len(args) < 2 or not module_chain_available_without_import(args[1]):
+            if len(args) < 2:
+                finish("blocked", "invalid_local_command", checked)
+            if not same_python_environment:
+                unverified += 1
+                continue
+            if not module_chain_available_without_import(args[1]):
                 finish("blocked", "missing_module", checked)
             continue
         while args and args[0] in ("-u", "-B", "-I", "-s", "-S", "-E"):
@@ -2209,6 +2231,12 @@ for config_file in (Path("opencode.json"), Path("opencode.jsonc")):
             tree = ast.parse(source.decode("utf-8"))
         except (UnicodeError, ValueError, SyntaxError):
             finish("blocked", "invalid_entrypoint", checked)
+        # Only import-check an entrypoint with the same interpreter
+        # environment as this static checker. Its path and syntax were still
+        # checked above even when package availability is unverified.
+        if not same_python_environment:
+            unverified += 1
+            continue
         # Top-level direct imports are needed for MCP server startup. Never
         # execute the entrypoint to test importability (it can start a browser).
         imports = set()
