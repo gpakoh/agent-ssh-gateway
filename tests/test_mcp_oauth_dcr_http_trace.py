@@ -109,7 +109,11 @@ async def test_dcr_httpcore_trace_reuses_proxy_id_and_never_leaks_transport_info
         "resp_headers_done",
     ]
     assert client.last_request is not None
-    assert client.last_request.extensions["timeout"]["read"] == 300.0
+    # The DCR proxy read budget must stay below the caller's 20s stage.
+    assert client.last_request.extensions["timeout"]["read"] == (
+        srv._DCR_UPSTREAM_WALL_CLOCK_SECONDS
+    )
+    assert 0 < srv._DCR_UPSTREAM_WALL_CLOCK_SECONDS < 20
 
 
 @pytest.mark.asyncio
