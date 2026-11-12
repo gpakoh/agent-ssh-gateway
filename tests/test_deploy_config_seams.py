@@ -1070,6 +1070,8 @@ class TestFleetPostgresCiGate:
             "a rerun may reconcile only its exact run+attempt container before create"
         )
         assert "--network-alias" in run
+        assert "--memory=1g" in run
+        assert "--memory-swap=1g" in run
         assert "POSTGRES_PASSWORD=fleet-ci-only" in run
         assert "POSTGRES_DB=fleet_test" in run
         assert "pg_isready -U postgres -d fleet_test" in run

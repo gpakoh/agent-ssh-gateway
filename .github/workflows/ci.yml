@@ -990,6 +990,7 @@ jobs:
           docker rm -f "$pg_name" >/dev/null 2>&1 || true
           docker run -d --name "$pg_name" \
             --network "$pg_net" --network-alias "$pg_name" \
+            --memory=1g --memory-swap=1g \
             -e POSTGRES_PASSWORD=fleet-ci-only \
             -e POSTGRES_DB=fleet_test \
             pgvector/pgvector:pg16 >/dev/null
