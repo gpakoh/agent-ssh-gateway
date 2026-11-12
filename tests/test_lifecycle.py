@@ -1,6 +1,7 @@
 """Tests for shutdown lifecycle: session close, WS drain, disconnect timeout, cleanup_stale_sessions."""
 
 import asyncio
+import threading
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -312,7 +313,13 @@ async def test_execute_stream_task_cancel_closes_remote_channel():
     channel.exit_status_ready.return_value = False
     channel.recv_ready.return_value = False
     channel.recv_stderr_ready.return_value = False
+    entered_stream = asyncio.Event()
 
+    def _stream_polling_started():
+        entered_stream.set()
+        return False
+
+    channel.exit_status_ready.side_effect = _stream_polling_started
     stdin = MagicMock()
     stdin.channel = channel
     stdout = MagicMock()
@@ -332,13 +339,69 @@ async def test_execute_stream_task_cancel_closes_remote_channel():
 
     stream = manager.execute_stream("stream-cancel", "sleep 60")
     pending_read = asyncio.create_task(anext(stream))
-    await asyncio.sleep(0.02)
+    # Synchronize on the actual SSH channel polling, not an arbitrary
+    # 20ms sleep: a loaded CI executor can start this coroutine later.
+    await asyncio.wait_for(entered_stream.wait(), timeout=10)
     pending_read.cancel()
 
     with pytest.raises(asyncio.CancelledError):
         await pending_read
 
     channel.close.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_execute_stream_cancel_during_blocking_exec_closes_late_channel():
+    """A canceled await cannot cancel a running executor thread.
+
+    When Paramiko's exec_command finally returns, the newly opened channel
+    must be closed even though the caller's async task was canceled earlier.
+    """
+    from app.ssh_manager import SessionRecord
+
+    manager = SSHSessionManager(cleanup_interval=3600)
+    started = threading.Event()
+    release = threading.Event()
+    returned = threading.Event()
+    closed = threading.Event()
+    channel = MagicMock()
+    channel.close.side_effect = closed.set
+    channel.exit_status_ready.return_value = False
+    channel.recv_ready.return_value = False
+    channel.recv_stderr_ready.return_value = False
+    stdin, stdout, stderr = MagicMock(), MagicMock(), MagicMock()
+    stdin.channel = channel
+    stdout.channel = channel
+    stderr.channel = channel
+
+    def _blocked_exec(_command):
+        started.set()
+        release.wait(timeout=6)
+        returned.set()
+        return stdin, stdout, stderr
+
+    client = MagicMock()
+    client.exec_command.side_effect = _blocked_exec
+    manager._sessions["stream-late"] = SessionRecord(
+        session_id="stream-late",
+        client=client,
+        host="127.0.0.1",
+        port=22,
+        username="test",
+    )
+
+    stream = manager.execute_stream("stream-late", "sleep 60")
+    pending_read = asyncio.create_task(anext(stream))
+    try:
+        assert await asyncio.to_thread(started.wait, 5), "SSH exec never entered"
+        pending_read.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending_read
+    finally:
+        release.set()
+    assert await asyncio.to_thread(returned.wait, 5), "SSH exec never returned"
+    assert await asyncio.to_thread(closed.wait, 10), "late SSH channel was not closed"
+    channel.close.assert_called_once()
 
 
 @pytest.mark.asyncio

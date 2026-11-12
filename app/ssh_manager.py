@@ -7,6 +7,7 @@ import io
 import ipaddress
 import logging
 import socket
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -977,10 +978,29 @@ class SSHSessionManager:
 
         record.active_operations += 1
         out_channel = None
+        # The executor thread cannot be canceled once Paramiko started
+        # exec_command(). Record the channel under a lock so cancellation
+        # before the await returns still closes a late-opened remote channel.
+        exec_lock = threading.Lock()
+        exec_cancelled = False
+        issued_channel = None
+
+        def _start_command():
+            nonlocal issued_channel
+            streams = client.exec_command(command)
+            with exec_lock:
+                issued_channel = streams[1].channel
+                close_late_channel = exec_cancelled
+            if close_late_channel:
+                try:
+                    issued_channel.close()
+                except Exception:
+                    pass
+            return streams
+
         try:
             stdin, stdout, stderr = await loop.run_in_executor(
-                None,
-                lambda: client.exec_command(command),
+                None, _start_command,
             )
             if stdin_data:
                 stdin.write(stdin_data)
@@ -1036,12 +1056,16 @@ class SSHSessionManager:
             )
 
         except asyncio.CancelledError:
-            # Force-cleanup can cancel the coroutine before cancel_event is
-            # observed by the polling loop. Close the remote channel here too
-            # so local task cancellation cannot leave the command running.
-            if out_channel is not None:
+            # A pending run_in_executor() await can be canceled while the
+            # remote command is still opening in the executor. The same lock
+            # covers both completion orders, without waiting for a stalled
+            # Paramiko call or discarding its eventually opened channel.
+            with exec_lock:
+                exec_cancelled = True
+                channel_to_close = issued_channel
+            if channel_to_close is not None:
                 try:
-                    out_channel.close()
+                    channel_to_close.close()
                 except Exception:
                     pass
             raise

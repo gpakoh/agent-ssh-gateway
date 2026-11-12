@@ -601,7 +601,7 @@ class TestBuildOpencodeScriptProxy:
         gate = 'if [ "$OPENCODE_UPGRADE_GATE_ENABLED" = "1" ]; then'
         guarded_acquire = (
             "OPENCODE_PROXY_ATTEMPT=1\n"
-            'if [ "$OPENCODE_UPGRADE_BLOCKED" -eq 0 ]; then\n'
+            'if [ "$OPENCODE_UPGRADE_BLOCKED" -eq 0 ] && [ "$OPENCODE_LOCAL_MCP_BLOCKED" -eq 0 ]; then\n'
             '  write_proxy_status acquiring "" 0\n'
             "  acquire_opencode_proxy\n"
             "fi"
@@ -962,6 +962,70 @@ def _run_managed_bundle_case(
         timeout=PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS,
     )
     return result, artifacts, workspace, marker
+
+
+def test_managed_clone_local_mcp_missing_entrypoint_blocks_before_model(tmp_path, monkeypatch):
+    """Exercise the ACTUAL isolated worker shell: no proxy/model on bad source."""
+    source = tmp_path / "source-with-missing-mcp"
+    source.mkdir()
+    _init_git_repo(source)
+    (source / "opencode.json").write_text(
+        json.dumps({"mcp": {"browser-harness": {
+            "type": "local", "enabled": True,
+            "command": ["python", "browser_policy_mcp.py"],
+        }}}),
+        encoding="utf-8",
+    )
+    _git(source, "add", "opencode.json")
+    _git(source, "commit", "-q", "-m", "declare local MCP")
+    base_ref = _git(source, "rev-parse", "HEAD")
+    bundle = _make_source_bundle(source, tmp_path / "pinned-missing-mcp.bundle")
+    result, artifacts, workspace, marker = _run_managed_bundle_case(
+        tmp_path, monkeypatch, bundle, base_ref,
+    )
+    assert result.returncode == 81, result.stderr[-800:]
+    assert workspace.exists() and not marker.exists()
+    payload = json.loads(
+        (artifacts / "opencode-local-mcp-preflight.json").read_text(encoding="utf-8")
+    )
+    assert payload["status"] == "blocked"
+    assert payload["reason"] == "missing_entrypoint"
+    report = (artifacts / "agent-report.md").read_text(encoding="utf-8")
+    assert "opencode-local-mcp-unavailable" in report
+    assert "PRIVATE_" not in report
+
+
+def test_managed_clone_valid_local_mcp_allows_model_without_running_mcp(tmp_path, monkeypatch):
+    source = tmp_path / "source-with-valid-mcp"
+    source.mkdir()
+    _init_git_repo(source)
+    (source / "opencode.json").write_text(
+        json.dumps({"mcp": {"browser-harness": {
+            "type": "local", "enabled": True,
+            "command": ["python", "browser_policy_mcp.py"],
+        }}}),
+        encoding="utf-8",
+    )
+    marker = tmp_path / "mcp-script-was-executed"
+    (source / "browser_policy_mcp.py").write_text(
+        "import json\n"
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('ran')\n",
+        encoding="utf-8",
+    )
+    _git(source, "add", "opencode.json", "browser_policy_mcp.py")
+    _git(source, "commit", "-q", "-m", "local MCP source")
+    base_ref = _git(source, "rev-parse", "HEAD")
+    bundle = _make_source_bundle(source, tmp_path / "pinned-valid-mcp.bundle")
+    result, artifacts, _, model_marker = _run_managed_bundle_case(
+        tmp_path, monkeypatch, bundle, base_ref,
+    )
+    assert result.returncode == 0, (result.stderr or result.stdout)[-800:]
+    assert model_marker.exists() and not marker.exists()
+    payload = json.loads(
+        (artifacts / "opencode-local-mcp-preflight.json").read_text(encoding="utf-8")
+    )
+    assert payload["status"] == "ready"
+    assert payload["checked"] == 1
 
 
 def test_managed_clone_accepts_single_exact_head_bundle(tmp_path, monkeypatch):
@@ -1420,10 +1484,23 @@ def test_managed_clone_requires_registry_root_at_git_toplevel(tmp_path, monkeypa
     assert _git(workspace, "remote") == ""
 
 
-def _run_proxy_preflight_script(tmp_path: Path, monkeypatch, *, provider_body: str | None):
+def _run_proxy_preflight_script(
+    tmp_path: Path, monkeypatch, *, provider_body: str | None,
+    local_mcp_config: dict | None = None, provider_url: str | None = None,
+    local_mcp_script: str | None = None,
+):
     source = tmp_path / "proxy-source"
     source.mkdir()
     _init_git_repo(source)
+    if local_mcp_config is not None:
+        (source / "opencode.json").write_text(json.dumps(local_mcp_config), encoding="utf-8")
+        _git(source, "add", "opencode.json")
+        if local_mcp_script is not None:
+            (source / "browser_policy_mcp.py").write_text(
+                local_mcp_script, encoding="utf-8"
+            )
+            _git(source, "add", "browser_policy_mcp.py")
+        _git(source, "commit", "-q", "-m", "pin local MCP contract")
     artifacts = tmp_path / "proxy-artifacts"
     artifacts.mkdir()
     (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
@@ -1449,7 +1526,9 @@ def _run_proxy_preflight_script(tmp_path: Path, monkeypatch, *, provider_body: s
         "OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS",
         str(TEST_STARTUP_MAX_PROXY_ATTEMPTS),
     )
-    if provider_body is None:
+    if provider_url is not None:
+        monkeypatch.setenv("OPENCODE_PROXY_PROVIDER_URL", provider_url)
+    elif provider_body is None:
         monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
     else:
         provider = tmp_path / "provider.txt"
@@ -1462,6 +1541,92 @@ def _run_proxy_preflight_script(tmp_path: Path, monkeypatch, *, provider_body: s
         timeout=PINNED_WORKTREE_HARNESS_TIMEOUT_SECONDS,
     )
     return result, artifacts, marker
+
+
+def test_real_runner_blocks_missing_local_mcp_before_proxy_and_model(tmp_path, monkeypatch):
+    """Run the generated real shell; no proxy GET, model or browser activity."""
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, fmt, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        result, artifacts, marker = _run_proxy_preflight_script(
+            tmp_path,
+            monkeypatch,
+            provider_body=None,
+            provider_url=f"http://127.0.0.1:{server.server_port}/proxy?format=provider",
+            local_mcp_config={
+                "mcp": {
+                    "browser-harness": {
+                        "type": "local",
+                        "enabled": True,
+                        "command": ["python", "missing_browser_policy_mcp.py"],
+                    }
+                }
+            },
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert result.returncode == 81, (result.stderr or result.stdout)[-2500:]
+    assert seen == []
+    assert not marker.exists()
+    preflight = json.loads(
+        (artifacts / "opencode-local-mcp-preflight.json").read_text(encoding="utf-8")
+    )
+    assert preflight["status"] == "blocked"
+    assert preflight["reason"] == "missing_entrypoint"
+    assert (artifacts / "agent-status.md").read_text().strip() == "Status: blocked"
+    assert (artifacts / "agent-report.md").is_file()
+    assert "Final exit code: 81" in (artifacts / "agent-report.md").read_text()
+    proxy_status = json.loads(
+        (artifacts / "proxy-status.json").read_text(encoding="utf-8")
+    )
+    assert proxy_status["final_outcome"] == "blocked"
+
+
+def test_real_runner_allows_ready_source_local_mcp_and_keeps_proxy_contract(
+    tmp_path, monkeypatch
+):
+    result, artifacts, marker = _run_proxy_preflight_script(
+        tmp_path,
+        monkeypatch,
+        provider_body="http://127.0.0.1:19999\n",
+        local_mcp_config={
+            "mcp": {
+                "browser-harness": {
+                    "type": "local",
+                    "enabled": True,
+                    "command": ["python", "browser_policy_mcp.py"],
+                }
+            }
+        },
+        local_mcp_script="import json\n",
+    )
+    assert result.returncode == 0, (result.stderr or result.stdout)[-2500:]
+    assert marker.exists()
+    preflight = json.loads(
+        (artifacts / "opencode-local-mcp-preflight.json").read_text(encoding="utf-8")
+    )
+    assert preflight == {"schema_version": 1, "status": "ready", "checked": 1}
+    proxy_status = json.loads(
+        (artifacts / "proxy-status.json").read_text(encoding="utf-8")
+    )
+    assert proxy_status["final_outcome"] == "completed"
+    assert proxy_status["attempt"] == 1
 
 
 def test_required_proxy_missing_blocks_before_opencode(tmp_path, monkeypatch):
