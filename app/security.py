@@ -443,7 +443,9 @@ class AuditLogger:
     def __init__(self, log_file: str = "logs/audit.log"):
         self.logger = logging.getLogger("audit")
         log_path = Path(log_file)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
+        # Secure newly created audit directories even with a permissive umask.
+        # Never chmod a pre-existing shared logs directory during startup.
+        log_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         # Compare normalized absolute paths WITHOUT following symlinks.
         # Reusing a pre-upgrade FileHandler would bypass the secure 0600
         # creation/reopen policy, so fail closed rather than silently keep it.

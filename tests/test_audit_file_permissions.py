@@ -37,6 +37,27 @@ def _mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 
 
+def test_new_audit_directory_is_0700_even_under_permissive_umask(
+    tmp_path, isolated_audit,
+):
+    path = tmp_path / "new" / "audit.log"
+    saved = os.umask(0o000)
+    try:
+        AuditLogger(str(path))
+    finally:
+        os.umask(saved)
+    assert _mode(path.parent) == 0o700
+    assert _mode(path) == 0o600
+
+
+def test_existing_audit_directory_permissions_not_changed(tmp_path, isolated_audit):
+    shared = tmp_path / "shared"
+    shared.mkdir(mode=0o755)
+    shared.chmod(0o755)  # Keep the pre-existing directory mode independent of CI umask.
+    AuditLogger(str(shared / "audit.log"))
+    assert _mode(shared) == 0o755
+
+
 def test_new_audit_file_is_0600_even_if_umask_is_world_writable(tmp_path, isolated_audit):
     path = tmp_path / "audit.log"
     saved = os.umask(0o000)
