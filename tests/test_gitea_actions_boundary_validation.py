@@ -88,3 +88,33 @@ async def test_get_action_run_valid_id_reaches_client(
     assert result["ok"] is True
     assert result["result"]["id"] == 42
     client.get_action_run.assert_awaited_once_with("owner", "repo", 42)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("run_id", [0, -1, True, False, "1", 1.5, None])
+async def test_list_action_run_jobs_invalid_run_id_before_token(
+    monkeypatch: pytest.MonkeyPatch, run_id: object
+) -> None:
+    monkeypatch.delenv("GITEA_TOKEN", raising=False)
+    with patch.object(remote, "_server_gitea_client", side_effect=AssertionError("client looked up")):
+        result = await remote.gitea_list_action_run_jobs("owner", "repo", run_id)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INVALID_INPUT"
+    assert result["error"]["retryable"] is False
+    assert result["error"]["details"]["field"] == "run_id"
+
+
+@pytest.mark.asyncio
+async def test_list_action_run_jobs_valid_id_reaches_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GITEA_TOKEN", "test-only-token")
+    client = AsyncMock()
+    client.list_action_run_jobs.return_value = {"jobs": [], "total_count": 0}
+    with patch.object(remote, "_server_gitea_client") as factory:
+        factory.return_value.return_value.__aenter__ = AsyncMock(return_value=client)
+        result = await remote.gitea_list_action_run_jobs("owner", "repo", 42)
+
+    assert result["ok"] is True
+    client.list_action_run_jobs.assert_awaited_once_with("owner", "repo", 42)
