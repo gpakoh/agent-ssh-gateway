@@ -195,3 +195,98 @@ def test_adapter_maps_duplicate_to_contract_error():
     assert result["ok"] is False
     assert result["error"]["code"] == "ALREADY_EXISTS"
     assert result["error"]["details"]["action"] == "duplicate_refused"
+
+
+def _invoke_upsert(project_id: str) -> dict:
+    from examples.mcp_server.mcp_infra.adapters.workspace import gateway_todo_backlog_upsert
+
+    return gateway_todo_backlog_upsert(
+        project_id=project_id,
+        title="Test finding",
+        severity="P2",
+        observed_behavior="observed",
+        reproduction_steps="reproduce",
+        expected_behavior="expected",
+        impact="impact",
+        acceptance_criteria="verified",
+    )
+
+
+@pytest.mark.parametrize(
+    ("project_id", "project_info"),
+    [
+        (
+            "agent-ssh-gateway",
+            {"project_id": "agent-ssh-gateway", "type": "fastapi", "root": "/tmp/gateway"},
+        ),
+        (
+            "opaque-candidate-id",
+            {
+                "project_id": "opaque-candidate-id",
+                "type": "candidate-clone",
+                "description": "Durable writeable candidate clone for agent-ssh-gateway",
+                "root": "/tmp/candidate",
+            },
+        ),
+    ],
+)
+def test_gateway_backlog_tool_denied_before_any_write(project_id: str, project_info: dict):
+    registry = MagicMock()
+    registry.project_info.return_value = project_info
+    with patch(
+        "examples.mcp_server.mcp_infra.adapters.workspace._server_workspace_registry",
+        return_value=registry,
+    ), patch("app.workspace.todo_backlog.upsert_todo_backlog_entry") as writer:
+        result = _invoke_upsert(project_id)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "BACKLOG_ON_GITEA_BOARD"
+    assert "coord_create" in result["error"]["hint"]
+    writer.assert_not_called()
+
+
+def test_other_projects_still_use_todo_writer(registry):
+    workspace_registry, project = registry
+    with patch(
+        "examples.mcp_server.mcp_infra.adapters.workspace._server_workspace_registry",
+        return_value=workspace_registry,
+    ):
+        result = _invoke_upsert(PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["result"]["action"] == "created"
+    assert "Test finding" in (project / "TODO.md").read_text(encoding="utf-8")
+
+
+def test_candidate_like_name_without_registry_lineage_is_not_denied():
+    registry = MagicMock()
+    registry.project_info.return_value = {
+        "project_id": "candidate-agent-ssh-gateway-fake",
+        "type": "service",
+        "description": "ordinary service",
+        "root": "/tmp/not-used",
+    }
+    with patch(
+        "examples.mcp_server.mcp_infra.adapters.workspace._server_workspace_registry",
+        return_value=registry,
+    ), patch("os.path.isdir", return_value=False), patch(
+        "app.workspace.todo_backlog.upsert_todo_backlog_entry",
+        return_value={"action": "created"},
+    ) as writer:
+        result = _invoke_upsert("candidate-agent-ssh-gateway-fake")
+
+    assert result["ok"] is True
+    writer.assert_called_once()
+
+
+def test_unknown_registry_project_fails_without_write():
+    registry = MagicMock()
+    registry.project_info.side_effect = ValueError("Unknown project")
+    with patch(
+        "examples.mcp_server.mcp_infra.adapters.workspace._server_workspace_registry",
+        return_value=registry,
+    ), patch("app.workspace.todo_backlog.upsert_todo_backlog_entry") as writer:
+        result = _invoke_upsert("unknown")
+
+    assert result["ok"] is False
+    writer.assert_not_called()
