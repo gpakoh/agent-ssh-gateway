@@ -89,10 +89,10 @@ jobs:
           git clean -fdx
           test "$(git rev-parse HEAD)" = "$expected_sha"
           test -z "$(git status --porcelain)"
-      - name: Check scope and TODO invariants without application dependencies
-        # Documentation-only PRs skip unit shards; enforce the canonical TODO
-        # count/priority contract here so a docs-only edit cannot bypass it.
-        run: python3 -m unittest tests.test_ci_change_scope tests.test_todo_count_consistency
+      - name: Check scope and single-source backlog contract without application dependencies
+        # Documentation-only PRs skip unit shards. The repo's TODO was retired;
+        # prevent its accidental return and require the canonical Gitea link.
+        run: python3 -m unittest tests.test_ci_change_scope tests.test_board_single_source
       - name: Classify exact diff and check documentation whitespace
         id: classify
         run: python3 scripts/ci_change_scope.py
