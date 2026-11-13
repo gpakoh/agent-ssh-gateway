@@ -26,6 +26,7 @@ from typing import Any
 import httpx
 from tool_results import tool_error, tool_success, validate_pagination
 
+from examples.mcp_client_remote.fleet import gitea_client
 from examples.mcp_client_remote.fleet.gitea_client import (
     MAX_PR_BODY,
     MAX_PR_TITLE,
@@ -4733,6 +4734,32 @@ async def gitea_list_action_runs(
     owner: str, repo: str, status: str | None = None, limit: int = 10
 ) -> dict[str, Any]:
     """List Gitea Actions workflow runs. Optionally filter by status (completed, running/in_progress, waiting)."""
+    # Reject malformed inputs before reading credentials or opening HTTP.
+    # Reuse the client validators to avoid diverging enum/limit rules.
+    try:
+        if status is not None and not isinstance(status, str):
+            raise ValueError("status must be a string or null")
+        status = gitea_client._normalize_action_run_status_filter(status)
+    except ValueError as exc:
+        return tool_error(
+            tool="gitea_list_action_runs", code="INVALID_INPUT",
+            message=str(exc), retryable=False,
+            details={
+                "field": "status",
+                "allowed_values": sorted(
+                    gitea_client._ALLOWED_ACTION_RUN_STATUS_FILTERS
+                    | gitea_client._ACTION_RUN_STATUS_ALIASES.keys()
+                ),
+            }, source="gitea",
+        )
+    try:
+        limit = gitea_client._validate_action_run_list_limit(limit)
+    except ValueError as exc:
+        return tool_error(
+            tool="gitea_list_action_runs", code="INVALID_INPUT",
+            message=str(exc), retryable=False,
+            details={"field": "limit"}, source="gitea",
+        )
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
@@ -4752,6 +4779,14 @@ async def gitea_list_action_runs(
 
 async def gitea_get_action_run(owner: str, repo: str, run_id: int) -> dict[str, Any]:
     """Get details of a specific Gitea Actions workflow run by ID."""
+    try:
+        run_id = gitea_client._validate_positive_int(run_id, "run_id")
+    except ValueError as exc:
+        return tool_error(
+            tool="gitea_get_action_run", code="INVALID_INPUT",
+            message=str(exc), retryable=False,
+            details={"field": "run_id"}, source="gitea",
+        )
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
