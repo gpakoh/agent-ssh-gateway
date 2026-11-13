@@ -1709,6 +1709,8 @@ _AGENT_PROXY_STATUS_STRING_FIELDS = (
 _AGENT_PROXY_STATUS_INT_FIELDS = (
     "attempt",
     "max_attempts",
+    "startup_stall_rotations",
+    "upstream_error_rotations",
     "started_epoch",
     "updated_epoch",
     "finished_epoch",
@@ -1936,7 +1938,17 @@ def _read_agent_proxy_status(
             summary[key] = _sanitize_agent_diagnostic_text(value, max_chars=120)
     for key in _AGENT_PROXY_STATUS_INT_FIELDS:
         value = data.get(key)
-        if isinstance(value, int) or value is None:
+        if key in {"startup_stall_rotations", "upstream_error_rotations"}:
+            # Additive counters must be genuine bounded integers. Never echo
+            # a forged bool, negative or huge value from the shared task dir.
+            max_attempts = data.get("max_attempts")
+            if (
+                type(value) is int
+                and type(max_attempts) is int
+                and 0 <= value <= max_attempts <= 100
+            ):
+                summary[key] = value
+        elif isinstance(value, int) or value is None:
             summary[key] = value
     updated_epoch = summary.get("updated_epoch")
     if isinstance(updated_epoch, int):
