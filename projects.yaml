@@ -618,3 +618,24 @@ projects:
     type: python-service
     description: "Branded XLOUD email composition and delivery service (scaffold)"
     tags: []
+
+  document-service:
+    root: quart-platform/document-service
+    parent: quart-platform
+    type: unknown
+    description: "Shared PDF and document processing service for Quart Platform"
+    tags: []
+
+  mail-composer-edge:
+    root: quart-platform/mail-composer-edge
+    parent: quart-platform
+    type: python-service
+    description: "Private HTTPS gateway between Mailcow/SOGo and the Mail Composer SOGo shell backend"
+    tags: []
+
+  media-processing-service:
+    root: quart-platform/media-processing-service
+    parent: quart-platform
+    type: python-service
+    description: "Independent media processing API: raster conversion, verified quality and provenance for Quart/RAG clients."
+    tags: []

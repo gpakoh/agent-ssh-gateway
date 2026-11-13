@@ -107,6 +107,24 @@ def registry(registry_root, yaml_path):
 
 
 class TestLoadRegistry:
+    def test_checked_in_registry_preserves_live_service_ids(self):
+        """Source registry must retain entries already present in the live registry."""
+        checked_in = Path(__file__).resolve().parents[1] / "projects.yaml"
+        payload = yaml.safe_load(checked_in.read_text(encoding="utf-8"))
+        projects = payload["projects"]
+        expected = {
+            "document-service": ("quart-platform/document-service", "unknown"),
+            "mail-composer-edge": ("quart-platform/mail-composer-edge", "python-service"),
+            "media-processing-service": (
+                "quart-platform/media-processing-service",
+                "python-service",
+            ),
+        }
+        for project_id, (root, project_type) in expected.items():
+            assert projects[project_id]["root"] == root
+            assert projects[project_id]["parent"] == "quart-platform"
+            assert projects[project_id]["type"] == project_type
+
     def test_load_valid_yaml(self, registry_root, yaml_path):
         projects, root = load_registry(str(yaml_path))
         assert "web-ssh-gateway" in projects
