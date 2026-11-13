@@ -68,11 +68,13 @@ _OUTPUT_TAIL_BYTES = 7000
 _DETAIL_OUTPUT_CHARS = 4000
 _MCP_VERIFY_EXIT_RE = re.compile(r"^MCP_VERIFY_EXIT=(\d+)$", re.MULTILINE)
 _MCP_VERIFY_CHECK_RE = re.compile(r"^MCP_VERIFY_CHECK=(\d+)$", re.MULTILINE)
+_MCP_VERIFY_ENV_STAGE_RE = re.compile(r"^MCP_VERIFY_ENV_STAGE=([a-z_]+)$", re.MULTILINE)
+_BOOTSTRAP_STAGES = frozenset({"python_missing", "metadata_invalid", "uv_missing", "uv_sync"})
 
 # Candidate-controlled output may try to echo credentials; scrub common
 # credential shapes in addition to the shared path/endpoint redaction.
 _CREDENTIAL_VALUE_RE = re.compile(
-    r"(?i)\b(?:authorization\s*[:=]\s*basic\s+"
+    r"(?i)\b(?:authorization\s*[:=]\s*(?:basic|bearer)\s+"
     r"|(?:[a-z0-9_]*)(?:token|secret|password|passwd|api[_-]?key)\b\s*(?::=|=|:)\s*)"
     r"[^\s'\"{}]+"
 )
@@ -691,6 +693,13 @@ def _structured_verifier_failure(
         )
     if exit_code == 82:
         details["phase"] = "verifier_env"
+        # Only verifier-owned, pre-check, fixed-enum stage markers are accepted.
+        # Never return uv/pyproject raw diagnostics (may contain credentials,
+        # proxy URLs or private filesystem paths). Duplicate/unknown markers
+        # cannot be used as authoritative evidence.
+        stages = _MCP_VERIFY_ENV_STAGE_RE.findall(str(stdout or ""))
+        if len(stages) == 1 and stages[0] in _BOOTSTRAP_STAGES:
+            details["bootstrap_stage"] = stages[0]
         return CandidateVerificationError(
             f"candidate dependency bootstrap failed before required checks "
             f"(exit code {exit_code})",
@@ -764,11 +773,12 @@ def build_candidate_verifier_script(
         'ACTUAL=$(git -C "$VERIFY_ROOT/repo" rev-parse HEAD 2>/dev/null || true)',
         '[ "$ACTUAL" = "$EXPECTED" ] || exit 81',
         f"CHECKS_PRESENT={'1' if required_checks else '0'}",
-        'command -v python3 >/dev/null 2>&1 || exit 82',
+        'command -v python3 >/dev/null 2>&1 || { echo MCP_VERIFY_ENV_STAGE=python_missing; exit 82; }',
         'if [ "$CHECKS_PRESENT" = "1" ] && [ -f "$VERIFY_ROOT/repo/uv.lock" ] && [ -f "$VERIFY_ROOT/repo/pyproject.toml" ]; then',
-        "  DEV_EXTRA=$(cd \"$VERIFY_ROOT/repo\" && env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV python3 -c 'import tomllib; data=tomllib.load(open(\"pyproject.toml\", \"rb\")); print(\"1\" if \"dev\" in data.get(\"project\", {}).get(\"optional-dependencies\", {}) else \"0\")' 2>/dev/null) || exit 82",
+        "  DEV_EXTRA=$(cd \"$VERIFY_ROOT/repo\" && env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV python3 -c 'import tomllib; data=tomllib.load(open(\"pyproject.toml\", \"rb\")); print(\"1\" if \"dev\" in data.get(\"project\", {}).get(\"optional-dependencies\", {}) else \"0\")' 2>/dev/null) || { echo MCP_VERIFY_ENV_STAGE=metadata_invalid; exit 82; }",
         '  if [ "$DEV_EXTRA" = "1" ]; then',
-        '    (cd "$VERIFY_ROOT/repo" && env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV uv sync --frozen --extra dev) >/dev/null 2>&1 || exit 82',
+        '    command -v uv >/dev/null 2>&1 || { echo MCP_VERIFY_ENV_STAGE=uv_missing; exit 82; }',
+        '    (cd "$VERIFY_ROOT/repo" && env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV uv sync --frozen --extra dev) >/dev/null 2>&1 || { echo MCP_VERIFY_ENV_STAGE=uv_sync; exit 82; }',
         "  fi",
         "fi",
     ]
