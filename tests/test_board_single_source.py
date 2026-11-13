@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ROADMAP = ROOT / "docs" / "roadmap.md"
 LEGACY_TODO = ROOT / "TODO.md"
-ISSUES_URL = "https://git.xloud.ru/gpakoh/agent-ssh-gateway/issues"
+ISSUES_URL = "/gpakoh/agent-ssh-gateway/issues"
 
 
 class TestBoardSingleSource(unittest.TestCase):
