@@ -85,6 +85,24 @@ def _workspace_candidate_required(
     )
 
 
+def _backlog_is_on_gitea_board(project_id: str, registry: Any) -> bool:
+    """Match the Gateway source or its registry-owned candidate, not ID prefixes.
+
+    Candidate clones are registered by candidate_clone._register_candidate with
+    a fixed type and source-qualified description. Only those trusted registry
+    facts can identify the source; do not infer lineage from directory names.
+    """
+    info = registry.project_info(project_id)
+    if not isinstance(info, dict) or info.get("project_id") != project_id:
+        return False
+    if project_id == "agent-ssh-gateway":
+        return True
+    return (
+        info.get("type") == "candidate-clone"
+        and info.get("description") == "Durable writeable candidate clone for agent-ssh-gateway"
+    )
+
+
 def _workspace_mutation_error(tool: str, exc: Exception) -> dict[str, Any]:
     """Classify workspace write failures without hiding the operator action."""
     from app.workspace.edit import ParentMissingError
@@ -486,6 +504,15 @@ def gateway_todo_backlog_upsert(
         from app.workspace.todo_backlog import TodoBacklogError, upsert_todo_backlog_entry
 
         registry = _server_workspace_registry()
+        if _backlog_is_on_gitea_board(project_id, registry):
+            return tool_error(
+                tool="todo_backlog_upsert",
+                code="BACKLOG_ON_GITEA_BOARD",
+                message="SSH Gateway's engineering backlog is maintained in Gitea Issues.",
+                hint="Use coord_create for new findings or coord_reply for existing Issues.",
+                retryable=False,
+                source="gateway",
+            )
         candidate_required = _workspace_candidate_required(
             "todo_backlog_upsert", project_id, registry
         )
