@@ -2208,6 +2208,16 @@ for config_file in (Path("opencode.json"), Path("opencode.jsonc")):
         except OSError:
             same_python_environment = False
         args = command[1:]
+        # Interpreter switches precede -m or the script argument. Parse
+        # them first: "python -u -m package.server" is valid Python.
+        # Flags changing Python's import search environment must not inherit
+        # the checker's positive import-spec evidence (even for same binary).
+        while args and args[0] in ("-u", "-B", "-I", "-s", "-S", "-E"):
+            if args[0] in ("-I", "-s", "-S", "-E"):
+                same_python_environment = False
+            args = args[1:]
+        if not args:
+            finish("blocked", "invalid_local_command", checked)
         if args[0] == "-m":
             if len(args) < 2:
                 finish("blocked", "invalid_local_command", checked)
@@ -2217,9 +2227,7 @@ for config_file in (Path("opencode.json"), Path("opencode.jsonc")):
             if not module_chain_available_without_import(args[1]):
                 finish("blocked", "missing_module", checked)
             continue
-        while args and args[0] in ("-u", "-B", "-I", "-s", "-S", "-E"):
-            args = args[1:]
-        if not args or args[0].startswith("-"):
+        if args[0].startswith("-"):
             finish("blocked", "invalid_local_command", checked)
         script = Path(args[0])
         if not script.is_absolute():

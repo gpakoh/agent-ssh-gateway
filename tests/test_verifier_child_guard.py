@@ -33,18 +33,23 @@ def test_guard_rejects_non_bounded_deadlines(bad):
 
 
 def test_owned_verifier_propagates_success_and_tool_failure_without_leak(tmp_path):
+    # CI runs many isolated unit shards concurrently. An innocuous Python
+    # startup can exceed three wall-clock seconds under runner contention:
+    # that tests the shared scheduler, not the propagation of child exit 7.
+    # Keep a finite child deadline and an outer guard, while dedicated
+    # timeout/FD9 tests below exercise expiry and process-group teardown.
     lock = tmp_path / ".sync.lock"
     for rc in (0, 7):
         script = _script(
             lock,
-            seconds=3,
+            seconds=12,
             command=f"python3 -c {shlex.quote(f'raise SystemExit({rc})')}",
         )
         result = subprocess.run(
             ["sh", "-c", script],
             capture_output=True,
             text=True,
-            timeout=6,
+            timeout=20,
             check=False,
         )
         assert result.returncode == rc, result.stderr
