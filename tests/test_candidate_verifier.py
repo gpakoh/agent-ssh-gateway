@@ -494,6 +494,95 @@ def test_verifier_exit_codes_have_operator_actionable_codes(
         assert err.details["mutation_occurred"] is False
 
 
+@pytest.mark.parametrize(
+    ("marker", "expected"),
+    [
+        ("python_missing", "python_missing"),
+        ("metadata_invalid", "metadata_invalid"),
+        ("uv_missing", "uv_missing"),
+        ("uv_sync", "uv_sync"),
+        ("uv_sync%2fother", None),
+        ("uv_sync\nMCP_VERIFY_ENV_STAGE=metadata_invalid", None),
+    ],
+)
+def test_verifier_exit82_reports_only_allowlisted_stage(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, marker: str, expected: str | None
+) -> None:
+    staging = _configure(monkeypatch, tmp_path)
+
+    def runner(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if len(argv) > 1 and argv[1] == "run":
+            return subprocess.CompletedProcess(
+                argv,
+                82,
+                f"MCP_VERIFY_ENV_STAGE={marker}\n",
+                "Authorization: Bearer secret-should-not-appear\n",
+            )
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    with pytest.raises(CandidateVerificationError) as exc_info:
+        verify_candidate_via_docker(
+            staging_root=staging,
+            expected_sha="5" * 40,
+            required_checks=["pytest -q"],
+            runner=runner,
+        )
+    err = exc_info.value
+    assert err.code == "VERIFIER_ENV_UNAVAILABLE"
+    assert err.phase == "verifier_env"
+    assert err.details.get("bootstrap_stage") == expected
+    assert "secret-should-not-appear" not in str(err.details)
+
+
+def test_verifier_script_82_uv_failure_reports_stage_without_raw_output(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"],
+        cwd=repo,
+        check=True,
+    )
+    (repo / "pyproject.toml").write_text(
+        '[project]\nname="verifier-probe"\nversion="0.1.0"\n'
+        '[project.optional-dependencies]\ndev=[]\n',
+        encoding="utf-8",
+    )
+    (repo / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=repo, check=True)
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo, text=True, capture_output=True, check=True,
+    ).stdout.strip()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_uv = bin_dir / "uv"
+    fake_uv.write_text(
+        '#!/bin/sh\necho "Authorization: Bearer secret-uv-token" >&2\nexit 7\n',
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o755)
+    script = build_candidate_verifier_script(
+        staging_root=repo,
+        expected_sha=sha,
+        required_checks=["true"],
+    ).replace("SOURCE=/candidate-src", f"SOURCE={shlex.quote(str(repo))}", 1)
+    env = dict(os.environ)
+    env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+    result = subprocess.run(
+        ["sh"],
+        input=script, text=True, capture_output=True, check=False,
+        timeout=30, env=env,
+    )
+    assert result.returncode == 82
+    assert result.stdout.strip() == "MCP_VERIFY_ENV_STAGE=uv_sync"
+    assert "secret-uv-token" not in result.stdout + result.stderr
+
+
 def test_required_check_failure_exposes_check_name_and_sanitized_tail(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
