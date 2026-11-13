@@ -2903,6 +2903,50 @@ class TestSupervisorPostrunEvidence:
 
 
 class TestSupervisorRequiredCheckDevExtraBootstrap:
+    def test_no_declared_checks_skip_clone_and_dev_bootstrap(self, tmp_path, monkeypatch):
+        _init_git_repo(tmp_path)
+        base_head = self._commit_uv_project(tmp_path, dev_extra=True)
+        fake_bin = tmp_path.parent / f"{tmp_path.name}-fake-bin"
+        fake_bin.mkdir()
+        marker = tmp_path / "unexpected-uv-call"
+        uv = fake_bin / "uv"
+        uv.write_text(
+            f"#!/bin/sh\nprintf called > {shlex.quote(str(marker))}\nexit 99\n",
+            encoding="utf-8",
+        )
+        uv.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+        gates = build_gate_specs(
+            required_checks=[],
+            acceptance_criteria=["Read-only source and runner are reviewed."],
+        )
+        result, td = _run_supervisor_postrun(
+            tmp_path,
+            base_head=base_head,
+            allowed_files=[],
+            required_checks=[],
+            gates=gates,
+            task_contract_sha256="c" * 64,
+        )
+
+        assert result.returncode == 0, result.stderr
+        ledger = json.loads((td / "gate-ledger.json").read_text(encoding="utf-8"))
+        assert ledger["generated_by"] == "gateway-runner"
+        assert ledger["machine_gates_met"] is True
+        assert ledger["acceptance_state"] == "needs_supervisor"
+        assert {gate["id"] for gate in ledger["gates"]} == {
+            "scope", "execution", "acceptance-1", "supervisor-review"
+        }
+        assert not marker.exists(), "empty required_checks must not install dev extras"
+        check_log = (td / "required-checks.log").read_text(encoding="utf-8")
+        assert "Cloning into" not in check_log
+        assert "bootstrapping declared dev extra" not in check_log
+        status = (td / "agent-status.md").read_text(encoding="utf-8")
+        assert "Supervisor scope check passed" in status
+        assert "Supervisor required checks passed" in status
+        assert _git(tmp_path, "status", "--porcelain=v1") == ""
+
     @staticmethod
     def _commit_uv_project(root: Path, *, dev_extra: bool) -> str:
         pyproject = '[project]\nname = "verification-fixture"\nversion = "0.0.0"\n'

@@ -1788,6 +1788,10 @@ def _supervisor_postrun_script_lines(
         'if [ "$RC" -eq 0 ] && [ "$PARENT_RC" -eq 0 ] && [ "$EVIDENCE_RC" -eq 0 ] && [ "$SCOPE_RC" -eq 0 ]; then',
         "  CHECKS_RAN=1",
         '  : > "$td/required-checks.log"',
+        # Evidence, scope and parent integrity are already checked above.
+        # With no declared check commands there is no verifier environment to
+        # prepare: avoid a redundant clone and a full dev-extra dependency sync.
+        f'  if [ "{int(bool(required_checks))}" -eq 1 ]; then',
         '  CHECK_ROOT=$(mktemp -d /tmp/mcp-required-checks.XXXXXX) || { echo "Supervisor required-check workspace create FAILED" >> "$td/agent-status.md"; CHECKS_RC=1; }',
         '  if [ "$CHECKS_RC" -eq 0 ]; then',
         '    echo "Supervisor required-check workspace: $CHECK_ROOT" >> "$td/required-checks.log"',
@@ -1850,6 +1854,7 @@ def _supervisor_postrun_script_lines(
     lines.extend(
         [
             '  if [ -n "${CHECK_ROOT:-}" ]; then rm -rf "$CHECK_ROOT"; fi',
+            "  fi",
             "fi",
             'if [ "$CHECKS_RAN" -eq 0 ]; then',
             '  echo "Supervisor required checks skipped" >> "$td/agent-status.md"',
