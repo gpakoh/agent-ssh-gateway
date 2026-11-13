@@ -98,6 +98,65 @@ def test_local_mcp_static_import_dependency_absent_is_bounded(tmp_path: Path):
     assert payload["reason"] == "missing_module"
 
 
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "from stub_browser_harness.admin import ensure_daemon",
+        "import stub_browser_harness.admin",
+        "from stub_browser_harness.admin.session import serve",
+    ],
+)
+def test_missing_nested_mcp_dependency_blocks_without_executing_parent(
+    tmp_path: Path, statement: str
+):
+    package = tmp_path / "stub_browser_harness"
+    package.mkdir()
+    marker = tmp_path / "untrusted-parent-executed"
+    (package / "__init__.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('executed')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "browser_policy_mcp.py").write_text(
+        statement + "\n", encoding="utf-8"
+    )
+    code, payload, err = _check(tmp_path, _local(["python", "browser_policy_mcp.py"]))
+    assert code != 0 and err == ""
+    assert payload["status"] == "blocked" and payload["reason"] == "missing_module"
+    assert not marker.exists()
+    assert "stub_browser_harness" not in json.dumps(payload)
+
+
+def test_present_nested_mcp_module_is_checked_without_importing_parent(tmp_path: Path):
+    package = tmp_path / "stub_browser_harness"
+    package.mkdir()
+    marker = tmp_path / "parent-executed"
+    (package / "__init__.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('executed')\n",
+        encoding="utf-8",
+    )
+    (package / "admin.py").write_text("def ensure_daemon(): pass\n", encoding="utf-8")
+    (tmp_path / "browser_policy_mcp.py").write_text(
+        "from stub_browser_harness.admin import ensure_daemon\n", encoding="utf-8"
+    )
+    code, payload, err = _check(tmp_path, _local(["python", "browser_policy_mcp.py"]))
+    assert code == 0 and err == ""
+    assert payload["status"] == "ready" and payload["checked"] == 1
+    assert not marker.exists()
+
+
+def test_nested_standard_library_imports_remain_supported(tmp_path: Path):
+    (tmp_path / "browser_policy_mcp.py").write_text(
+        "import os.path\n"
+        "import importlib.util\n"
+        "from collections.abc import Callable\n"
+        "from pathlib import Path\n",
+        encoding="utf-8",
+    )
+    code, payload, err = _check(tmp_path, _local(["python", "browser_policy_mcp.py"]))
+    assert code == 0 and err == ""
+    assert payload["status"] == "ready" and payload["checked"] == 1
+
+
 def test_local_mcp_ready_from_isolated_workspace_does_not_execute_script(tmp_path: Path):
     marker = tmp_path / "executed"
     (tmp_path / "browser_policy_mcp.py").write_text(

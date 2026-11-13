@@ -2086,6 +2086,10 @@ def module_available(name):
 def module_chain_available_without_import(module):
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*){0,15}", module):
         return False
+    # Already loaded standard-library aliases (notably os.path) need not
+    # expose an on-disk PathFinder spec. This lookup never executes code.
+    if module in sys.modules:
+        return sys.modules[module] is not None
     search_path = None
     qualified = ""
     try:
@@ -2258,17 +2262,24 @@ for config_file in (Path("opencode.json"), Path("opencode.jsonc")):
         if not same_python_environment:
             unverified += 1
             continue
-        # Top-level direct imports are needed for MCP server startup. Never
-        # execute the entrypoint to test importability (it can start a browser).
+        # Check the full dotted path; checking only the root package can
+        # falsely bless missing browser_harness.admin / mcp.server modules.
+        # PathFinder does not execute parent package __init__.py files.
         imports = set()
         for node in tree.body:
             if isinstance(node, ast.Import):
-                imports.update(alias.name.split(".")[0] for alias in node.names)
+                imports.update(alias.name for alias in node.names)
             elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                imports.add(node.module.split(".")[0])
+                imports.add(node.module)
         if len(imports) > 128:
             finish("blocked", "invalid_entrypoint", checked)
-        if any(not module_available(name) for name in imports):
+        if any(
+            not (
+                module_chain_available_without_import(name)
+                if "." in name else module_available(name)
+            )
+            for name in imports
+        ):
             finish("blocked", "missing_module", checked)
 
 finish("partial" if unverified else "ready", checked=checked)
