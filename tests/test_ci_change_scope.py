@@ -47,7 +47,7 @@ class TestChangeScope(unittest.TestCase):
         return {"before": before, "after": after}
 
     def test_docs_push_and_pr_skip_heavy_jobs(self) -> None:
-        for path in ("README.md", "TODO.md", "docs/nested/guide.rst"):
+        for path in ("README.md", "docs/nested/guide.rst"):
             self.write(path, "Updated documentation\n")
         head = self.commit()
         for name in ("push", "pull_request"):
@@ -58,6 +58,7 @@ class TestChangeScope(unittest.TestCase):
 
     def test_runtime_paths_and_mixed_changes_run_full_ci(self) -> None:
         for path in (
+            "TODO.md",  # a resurrected local backlog must not get docs-only CI bypass
             "app/service.py",
             "tests/test_example.py",
             "pyproject.toml",

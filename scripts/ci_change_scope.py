@@ -16,7 +16,6 @@ from pathlib import Path
 ROOT_DOCS = frozenset(
     {
         "README.md",
-        "TODO.md",
         "CHANGELOG.md",
         "SECURITY.md",
         "SSH_GATEWAY_GUIDE.md",
