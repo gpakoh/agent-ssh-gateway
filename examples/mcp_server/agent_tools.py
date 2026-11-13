@@ -2002,7 +2002,6 @@ def _supervisor_postrun_script_lines(
 _OPENCODE_LOCAL_MCP_PREFLIGHT_PY = """\
 import ast
 import importlib.machinery
-import importlib.util
 import json
 import os
 import re
@@ -2076,28 +2075,28 @@ def read_regular(path, limit, reason):
             os.close(directory_fd)
 
 
-def module_available(name):
-    try:
-        return importlib.util.find_spec(name) is not None
-    except (ImportError, ValueError, AttributeError):
-        return False
-
-
-def module_chain_available_without_import(module):
+def module_chain_available_without_import(module, top_level_path=None):
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*){0,15}", module):
         return False
     # Already loaded standard-library aliases (notably os.path) need not
     # expose an on-disk PathFinder spec. This lookup never executes code.
     if module in sys.modules:
         return sys.modules[module] is not None
-    search_path = None
+    search_path = top_level_path
     qualified = ""
     try:
         for component in module.split("."):
             qualified = qualified + "." + component if qualified else component
-            # PathFinder returns specs without executing a parent package's
-            # __init__. Do not use importlib.util.find_spec on dotted names.
-            spec = importlib.machinery.PathFinder.find_spec(qualified, search_path)
+            # Resolve builtin/frozen roots first, then use the script's
+            # effective sys.path[0]. PathFinder never executes __init__.py.
+            if "." not in qualified:
+                spec = (
+                    importlib.machinery.BuiltinImporter.find_spec(qualified)
+                    or importlib.machinery.FrozenImporter.find_spec(qualified)
+                    or importlib.machinery.PathFinder.find_spec(qualified, search_path)
+                )
+            else:
+                spec = importlib.machinery.PathFinder.find_spec(qualified, search_path)
             if spec is None:
                 return False
             search_path = spec.submodule_search_locations
@@ -2262,6 +2261,10 @@ for config_file in (Path("opencode.json"), Path("opencode.jsonc")):
         if not same_python_environment:
             unverified += 1
             continue
+        # `python scripts/server.py` searches next to the script, whereas
+        # this stdin checker searches the checkout root at sys.path[0].
+        # Preserve the remaining interpreter paths without importing source.
+        script_import_path = [str(script.parent), *sys.path[1:]]
         # Check the full dotted path; checking only the root package can
         # falsely bless missing browser_harness.admin / mcp.server modules.
         # PathFinder does not execute parent package __init__.py files.
@@ -2274,10 +2277,7 @@ for config_file in (Path("opencode.json"), Path("opencode.jsonc")):
         if len(imports) > 128:
             finish("blocked", "invalid_entrypoint", checked)
         if any(
-            not (
-                module_chain_available_without_import(name)
-                if "." in name else module_available(name)
-            )
+            not module_chain_available_without_import(name, script_import_path)
             for name in imports
         ):
             finish("blocked", "missing_module", checked)
