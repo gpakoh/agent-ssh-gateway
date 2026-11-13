@@ -1675,6 +1675,8 @@ def test_valid_proxy_allows_opencode_and_is_not_logged(tmp_path, monkeypatch):
     assert proxy_status["final_outcome"] == "completed"
     assert proxy_status["finished_at"]
     assert "last_error_class" not in proxy_status
+    assert proxy_status["startup_stall_rotations"] == 0
+    assert proxy_status["upstream_error_rotations"] == 0
     assert proxy not in proxy_status_raw
     assert (tmp_path / "opencode-http-proxy").read_text(encoding="utf-8") == proxy
     bypass = (tmp_path / "opencode-no-proxy").read_text(encoding="utf-8").split(",")
@@ -2178,6 +2180,8 @@ def test_startup_stall_can_reach_third_distinct_proxy(tmp_path, monkeypatch):
         assert proxy_status["max_attempts"] == TEST_STARTUP_MAX_PROXY_ATTEMPTS
         assert proxy_status["final_outcome"] == "completed"
         assert "last_error_class" not in proxy_status
+        assert proxy_status["startup_stall_rotations"] == 2
+        assert proxy_status["upstream_error_rotations"] == 0
         for proxy in _ProxyPoolHandler.proxies:
             assert proxy not in proxy_status_raw
     finally:
@@ -2255,6 +2259,8 @@ def test_startup_retry_stops_at_configured_attempt_limit(tmp_path, monkeypatch):
         assert proxy_status["attempt"] == 3
         assert proxy_status["max_attempts"] == 3
         assert proxy_status["last_error_class"] == "startup_stalled"
+        assert proxy_status["startup_stall_rotations"] == 2
+        assert proxy_status["upstream_error_rotations"] == 0
         assert proxy_status["final_outcome"] == "startup_exhausted"
         assert proxy_status["finished_at"]
         for proxy in _ProxyPoolHandler.proxies:
@@ -2338,6 +2344,8 @@ def test_pre_useful_server_error_retries_with_different_proxy(tmp_path, monkeypa
         proxy_status = json.loads((artifacts / "proxy-status.json").read_text(encoding="utf-8"))
         assert proxy_status["attempt"] == 2
         assert proxy_status["final_outcome"] == "completed"
+        assert proxy_status["startup_stall_rotations"] == 0
+        assert proxy_status["upstream_error_rotations"] == 1
     finally:
         _ProxyPoolHandler.fail_get_after_first = False
         server.shutdown()
@@ -2416,6 +2424,8 @@ def test_pre_useful_server_error_exhausts_configured_proxy_attempts(tmp_path, mo
         assert proxy_status["attempt"] == 3
         assert proxy_status["max_attempts"] == 3
         assert proxy_status["last_error_class"] == "opencode_server_error"
+        assert proxy_status["startup_stall_rotations"] == 0
+        assert proxy_status["upstream_error_rotations"] == 2
         assert proxy_status["final_outcome"] == "upstream_error_exhausted"
         assert proxy_status["finished_at"]
     finally:

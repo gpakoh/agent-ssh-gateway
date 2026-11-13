@@ -2324,6 +2324,47 @@ class TestProxyDiagnosticSensitiveFieldNames:
         assert "private.example" not in serialized
 
 
+class TestProxyRotationReasonCounters:
+    @pytest.mark.parametrize(
+        ("stall_count", "upstream_count", "expected"),
+        [
+            (2, 1, (2, 1)),
+            (True, 0, (None, 0)),
+            (-1, 0, (None, 0)),
+            (10**10, 0, (None, 0)),
+            (0, "https://secret.invalid", (0, None)),
+        ],
+    )
+    def test_status_reader_returns_only_bounded_nonsecret_counts(
+        self, monkeypatch, stall_count, upstream_count, expected
+    ):
+        from examples.mcp_server import agent_tasks
+
+        payload = {
+            "version": 1,
+            "attempt": 4,
+            "max_attempts": 6,
+            "final_outcome": "completed",
+            "startup_stall_rotations": stall_count,
+            "upstream_error_rotations": upstream_count,
+        }
+        monkeypatch.setattr(
+            agent_tasks,
+            "read_agent_task_file",
+            lambda *_args, **_kwargs: {"stdout": json.dumps(payload)},
+        )
+        result = agent_tasks._read_agent_proxy_status(
+            lambda *_args, **_kwargs: {},
+            project="my-proj",
+            task_id="a12345678901",
+            now_epoch=2_000,
+        )
+        assert result["valid"] is True
+        assert result.get("startup_stall_rotations") == expected[0]
+        assert result.get("upstream_error_rotations") == expected[1]
+        assert "secret.invalid" not in json.dumps(result)
+
+
 class TestInspectAgentTask:
     @staticmethod
     def _shell_runner(cwd):
