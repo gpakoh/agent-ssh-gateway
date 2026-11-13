@@ -6074,6 +6074,17 @@ async def gitea_cancel_action_run(
 
 async def gitea_list_action_run_jobs(owner: str, repo: str, run_id: int) -> dict[str, Any]:
     """List jobs and steps for a Gitea Actions workflow run."""
+    try:
+        run_id = gitea_client._validate_positive_int(run_id, "run_id")
+    except ValueError as exc:
+        return tool_error(
+            tool="gitea_list_action_run_jobs",
+            code="INVALID_INPUT",
+            message=str(exc),
+            retryable=False,
+            details={"field": "run_id"},
+            source="gitea",
+        )
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
