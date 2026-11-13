@@ -144,6 +144,44 @@ def test_present_nested_mcp_module_is_checked_without_importing_parent(tmp_path:
     assert not marker.exists()
 
 
+def test_script_subdirectory_sibling_import_is_ready_without_execution(tmp_path: Path):
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    package = scripts / "subdir_browser_harness"
+    package.mkdir()
+    marker = tmp_path / "untrusted-sibling-parent-executed"
+    (package / "__init__.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('executed')\n",
+        encoding="utf-8",
+    )
+    (package / "admin.py").write_text(
+        "def ensure_daemon(): pass\n", encoding="utf-8"
+    )
+    (scripts / "server.py").write_text(
+        "from subdir_browser_harness.admin import ensure_daemon\n",
+        encoding="utf-8",
+    )
+    code, payload, err = _check(tmp_path, _local(["python", "scripts/server.py"]))
+    assert code == 0 and err == ""
+    assert payload["status"] == "ready" and payload["checked"] == 1
+    assert not marker.exists()
+
+
+def test_script_subdirectory_does_not_claim_root_only_import_available(tmp_path: Path):
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (tmp_path / "root_only_mcp_dependency.py").write_text(
+        "VALUE = 1\n", encoding="utf-8"
+    )
+    (scripts / "server.py").write_text(
+        "import root_only_mcp_dependency\n", encoding="utf-8"
+    )
+    code, payload, err = _check(tmp_path, _local(["python", "scripts/server.py"]))
+    assert code != 0 and err == ""
+    assert payload["status"] == "blocked" and payload["reason"] == "missing_module"
+    assert "root_only_mcp_dependency" not in json.dumps(payload)
+
+
 def test_nested_standard_library_imports_remain_supported(tmp_path: Path):
     (tmp_path / "browser_policy_mcp.py").write_text(
         "import os.path\n"
