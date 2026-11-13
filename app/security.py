@@ -443,9 +443,34 @@ class AuditLogger:
     def __init__(self, log_file: str = "logs/audit.log"):
         self.logger = logging.getLogger("audit")
         log_path = Path(log_file)
-        # Secure newly created audit directories even with a permissive umask.
+        # Path.mkdir(parents=True) applies mode only to its leaf: newly
+        # created intermediate directories otherwise inherit mode 0777 &
+        # the process umask. Create each missing ancestor explicitly as 0700.
         # Never chmod a pre-existing shared logs directory during startup.
-        log_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # A symlink in any ancestor can redirect even a secure final-file
+        # O_NOFOLLOW open into an unrelated tree. Refuse known symlinks
+        # before creating directories; the file handler still enforces its
+        # own final parent/file nofollow checks.
+        cursor = log_path.parent
+        while True:
+            if cursor.is_symlink():
+                raise OSError("audit log directory symlink is forbidden")
+            if cursor.parent == cursor:
+                break
+            cursor = cursor.parent
+        missing_parents: list[Path] = []
+        cursor = log_path.parent
+        while not cursor.exists():
+            missing_parents.append(cursor)
+            parent = cursor.parent
+            if parent == cursor:
+                raise OSError("audit log directory has no existing ancestor")
+            cursor = parent
+        if not cursor.is_dir():
+            raise NotADirectoryError("audit log ancestor is not a directory")
+        for directory in reversed(missing_parents):
+            directory.mkdir(mode=0o700)
+        log_path.parent.mkdir(mode=0o700, exist_ok=True)
         # Compare normalized absolute paths WITHOUT following symlinks.
         # Reusing a pre-upgrade FileHandler would bypass the secure 0600
         # creation/reopen policy, so fail closed rather than silently keep it.

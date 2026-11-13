@@ -50,6 +50,50 @@ def test_new_audit_directory_is_0700_even_under_permissive_umask(
     assert _mode(path) == 0o600
 
 
+def test_all_new_audit_ancestors_are_0700_with_permissive_umask(
+    tmp_path, isolated_audit,
+):
+    path = tmp_path / "audit-root" / "tenant" / "journal" / "audit.log"
+    saved = os.umask(0o000)
+    try:
+        AuditLogger(str(path))
+    finally:
+        os.umask(saved)
+    for directory in [tmp_path / "audit-root", tmp_path / "audit-root" / "tenant", path.parent]:
+        assert _mode(directory) == 0o700
+    assert _mode(path) == 0o600
+
+
+def test_existing_shared_ancestor_is_not_chmodded_when_nesting_audit_dir(
+    tmp_path, isolated_audit,
+):
+    shared = tmp_path / "shared"
+    shared.mkdir(mode=0o755)
+    shared.chmod(0o755)
+    path = shared / "new" / "nested" / "audit.log"
+    saved = os.umask(0o000)
+    try:
+        AuditLogger(str(path))
+    finally:
+        os.umask(saved)
+    assert _mode(shared) == 0o755
+    assert _mode(shared / "new") == 0o700
+    assert _mode(path.parent) == 0o700
+    assert _mode(path) == 0o600
+
+
+def test_intermediate_audit_directory_symlink_is_denied_without_writes(
+    tmp_path, isolated_audit,
+):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = tmp_path / "alias"
+    link.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(OSError):
+        AuditLogger(str(link / "nested" / "audit.log"))
+    assert not (outside / "nested").exists()
+
+
 def test_existing_audit_directory_permissions_not_changed(tmp_path, isolated_audit):
     shared = tmp_path / "shared"
     shared.mkdir(mode=0o755)
