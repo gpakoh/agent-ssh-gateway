@@ -22,6 +22,7 @@ from app.config import settings
 from app.metrics import metrics
 from app.models import (
     CapabilitiesResponse,
+    CommandPlaneHealth,
     HealthComponentStatus,
     HealthResponse,
 )
@@ -265,6 +266,50 @@ def _gateway_worker_count() -> int:
     return workers if workers > 0 else 0
 
 
+def _command_plane_health(
+    *,
+    manager_initialized: bool,
+    ssh: tuple[bool, str | None],
+    redis: tuple[bool, str | None] | None,
+    postgres: tuple[bool, str | None] | None,
+    build_sha: str,
+    started_at: str,
+) -> CommandPlaneHealth:
+    """Derive a bounded execution-plane signal from existing probes only.
+
+    Authorization and optional observability failures do not imply an SSH
+    command-plane outage. A required probe deadline indicates overload-like
+    unresponsiveness, not an asserted physical resource cause.
+    """
+    if not manager_initialized:
+        return CommandPlaneHealth(
+            state="starting", failure_class="not_initialized", retry_after_s=3,
+            build_sha=build_sha, started_at=started_at
+        )
+
+    required = [ssh]
+    if redis is not None:
+        required.append(redis)
+    if postgres is not None:
+        required.append(postgres)
+
+    failures = [reason for ok, reason in required if not ok]
+    if not failures:
+        return CommandPlaneHealth(state="ready", build_sha=build_sha, started_at=started_at)
+    if "timeout" in failures:
+        return CommandPlaneHealth(
+            state="overloaded", failure_class="timeout", retry_after_s=5,
+            build_sha=build_sha, started_at=started_at
+        )
+    return CommandPlaneHealth(
+        state="unavailable",
+        failure_class="connect_error" if "connect_error" in failures else "unavailable",
+        retry_after_s=5,
+        build_sha=build_sha,
+        started_at=started_at,
+    )
+
+
 @router.get("/health", tags=["system"], response_model=HealthResponse)
 async def health_check():
     """Return bounded aggregate health while preserving per-component truth."""
@@ -361,6 +406,14 @@ async def health_check():
         version=APP_VERSION,
         gateway_workers=_gateway_worker_count(),
         components=components,
+        command_plane=_command_plane_health(
+            manager_initialized=_state.manager is not None,
+            ssh=(ssh_ok, ssh_failure),
+            redis=(redis_ok, redis_failure) if redis_required else None,
+            postgres=(persistent_sessions_ok, postgres_failure) if postgres_required else None,
+            build_sha=meta["build_sha"],
+            started_at=meta["started_at"],
+        ),
     )
 
 

@@ -9,6 +9,61 @@ from app.config import settings
 from app.main import app
 
 
+@pytest.mark.parametrize(
+    ("manager_ready", "ssh_result", "redis_result", "auth_key", "state", "failure", "retry"),
+    [
+        (True, (True, None), None, "key", "ready", None, None),
+        (False, (True, None), None, "key", "starting", "not_initialized", 3),
+        (True, (False, "timeout"), None, "key", "overloaded", "timeout", 5),
+        (True, (False, "connect_error"), None, "key", "unavailable", "connect_error", 5),
+        (True, (True, None), (False, "timeout"), "key", "overloaded", "timeout", 5),
+        (True, (True, None), None, "", "ready", None, None),
+    ],
+)
+def test_command_plane_health_is_independent_of_auth(
+    manager_ready, ssh_result, redis_result, auth_key, state, failure, retry
+):
+    """Bounded execution-plane status must not misdiagnose auth as a restart."""
+    import asyncio
+
+    from app.routers.system import health_check
+
+    probes = {"ssh": ssh_result}
+    if redis_result is not None:
+        probes["redis"] = redis_result
+    with (
+        patch("app.routers.system._state") as runtime,
+        patch("app.routers.system.settings") as config,
+        patch("app.routers.system._run_health_probes", new_callable=AsyncMock) as run_probes,
+        patch(
+            "app.build_info.get_build_metadata",
+            return_value={"build_sha": "a" * 40, "build_time": "build", "started_at": "boot"},
+        ),
+    ):
+        runtime.manager = object() if manager_ready else None
+        runtime.session_store = MagicMock()
+        runtime.redis_queue = MagicMock()
+        runtime.agent_event_emitter = None
+        config.redis_url = "redis://redis" if redis_result is not None else ""
+        config.persistent_sessions_enabled = False
+        config.api_auth_enabled = True
+        config.api_key = auth_key
+        run_probes.return_value = probes
+
+        health = asyncio.run(health_check())
+
+    plane = health.command_plane
+    assert plane.state == state
+    assert plane.failure_class == failure
+    assert plane.retry_after_s == retry
+    assert plane.build_sha == "a" * 40
+    assert plane.started_at == "boot"
+    if not auth_key:
+        assert health.ready is False
+        assert health.components["auth"].status == "degraded"
+        assert plane.state == "ready"
+
+
 class TestHealthReadiness:
     """ready must be True only when status is 'ok'."""
 

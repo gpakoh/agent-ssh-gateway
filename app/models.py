@@ -1,5 +1,7 @@
 """Pydantic models for API requests and responses."""
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, HttpUrl, SecretStr, field_validator, model_validator
 
 # ---------------------------------------------------------------------------
@@ -334,6 +336,21 @@ class HealthComponentStatus(BaseModel):
     reason: str | None = None  # bounded human-readable detail (optional)
 
 
+class CommandPlaneHealth(BaseModel):
+    """Execution-plane availability independent of authorization.
+
+    'overloaded' means a bounded required probe timed out; it is not proof
+    of CPU or runner saturation. Missing session IDs are scoped separately
+    to /api/session/check and are never inferred from aggregate health.
+    """
+
+    state: Literal["ready", "starting", "overloaded", "unavailable", "unknown"] = "unknown"
+    retry_after_s: int | None = Field(default=None, ge=1, le=60)
+    failure_class: Literal["not_initialized", "timeout", "connect_error", "unavailable"] | None = None
+    build_sha: str = ""
+    started_at: str = ""
+
+
 class HealthResponse(BaseModel):
     """Health check response."""
 
@@ -350,6 +367,7 @@ class HealthResponse(BaseModel):
     version: str = ""
     gateway_workers: int = 1
     components: dict[str, HealthComponentStatus] = Field(default_factory=dict)
+    command_plane: CommandPlaneHealth = Field(default_factory=CommandPlaneHealth)
 
 
 class AuthCheckResponse(BaseModel):

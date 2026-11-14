@@ -227,9 +227,30 @@ def _bounded_gateway_health_error(exc: GatewayClientError) -> dict[str, Any]:
         "PERMISSION_DENIED": "Gateway health check permission denied",
         "INVALID_INPUT": "Gateway health check is misconfigured",
     }.get(code, "Gateway health check failed")
+    # Transport unavailability says nothing about the caller's credentials.
+    # In particular, an HTTP timeout is not evidence of an expired session.
+    if code in {"REMOTE_UNAVAILABLE", "TIMEOUT"}:
+        plane_state = "unavailable"
+        plane_failure = (
+            "transport_timeout" if code == "TIMEOUT" else "transport_unavailable"
+        )
+        plane_retry = 5
+    else:
+        plane_state = "unknown"
+        plane_failure = (
+            "auth_failure" if code in {"AUTH_ERROR", "PERMISSION_DENIED"} else "gateway_error"
+        )
+        plane_retry = None
     return {
         "status": status,
         "ready": False,
+        "command_plane": {
+            "state": plane_state,
+            "retry_after_s": plane_retry,
+            "failure_class": plane_failure,
+            "build_sha": "",
+            "started_at": "",
+        },
         "error": {
             "code": code,
             "message": message,
@@ -289,6 +310,20 @@ def gateway_health() -> dict[str, Any]:
         gateway_data = _server_client().health()
     except GatewayClientError as exc:
         gateway_data = _bounded_gateway_health_error(exc)
+
+    # Mixed-version releases may expose the legacy health response. Do not
+    # synthesize readiness or infer authentication from absent state metadata.
+    if "command_plane" not in gateway_data:
+        gateway_data = {
+            **gateway_data,
+            "command_plane": {
+                "state": "unknown",
+                "retry_after_s": None,
+                "failure_class": "not_reported",
+                "build_sha": gateway_data.get("build_sha", ""),
+                "started_at": gateway_data.get("started_at", ""),
+            },
+        }
 
     return {
         "mcp": {
