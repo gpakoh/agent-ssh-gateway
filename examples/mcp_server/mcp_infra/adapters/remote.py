@@ -1287,6 +1287,14 @@ async def gitea_list_issues(
 
 async def gitea_get_issue(owner: str, repo: str, issue_number: int) -> dict[str, Any]:
     """Get details of a specific Gitea issue by number."""
+    try:
+        issue_number = gitea_client._validate_positive_int(issue_number, "issue_number")
+    except ValueError as exc:
+        return tool_error(
+            tool="gitea_get_issue", code="INVALID_INPUT",
+            message=str(exc), retryable=False,
+            details={"field": "issue_number"}, source="gitea",
+        )
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
@@ -1552,6 +1560,14 @@ async def gitea_list_pull_requests(
 
 async def gitea_get_pull_request(owner: str, repo: str, pull_number: int) -> dict[str, Any]:
     """Get details of a specific Gitea pull request by number."""
+    try:
+        pull_number = gitea_client._validate_positive_int(pull_number, "pull_number")
+    except ValueError as exc:
+        return tool_error(
+            tool="gitea_get_pull_request", code="INVALID_INPUT",
+            message=str(exc), retryable=False,
+            details={"field": "pull_number"}, source="gitea",
+        )
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
