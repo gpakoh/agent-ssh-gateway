@@ -168,3 +168,131 @@ class TestRegisteredToolIsErrorViaRealFastMCP:
                 parent = sys.modules.get(parent_name)
                 if parent is not None and getattr(parent, attr, None) is not module:
                     setattr(parent, attr, module)
+
+
+@pytest.mark.asyncio
+async def test_sync_mcp_tool_preserves_context_and_error_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import contextvars
+    import threading
+
+    from mcp.server.fastmcp import FastMCP
+
+    from examples.mcp_server.mcp_infra import tool_registry
+
+    isolated = FastMCP("context-boundary-contract")
+    monkeypatch.setattr(tool_registry.runtime, "get_mcp", lambda: isolated)
+    monkeypatch.setattr(tool_registry, "should_register_tool", lambda _name: True)
+    session_context = contextvars.ContextVar("mcp_test_session", default="missing")
+    event_loop_thread = threading.get_ident()
+
+    @tool_registry.register_tool("context_probe")
+    def sync_context_probe() -> dict:
+        return {
+            "ok": session_context.get() == "bound",
+            "result": {"worker_thread": threading.get_ident()},
+        }
+
+    token = session_context.set("bound")
+    try:
+        result = await isolated.call_tool("context_probe", {})
+    finally:
+        session_context.reset(token)
+
+    assert result.isError is False
+    assert result.structuredContent["ok"] is True
+    assert result.structuredContent["result"]["worker_thread"] != event_loop_thread
+
+
+@pytest.mark.asyncio
+async def test_sync_mcp_tool_worker_is_joined_on_anyio_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled MCP transport must not abandon an in-flight writer."""
+    import threading
+
+    import anyio
+    from mcp.server.fastmcp import FastMCP
+
+    from examples.mcp_server.mcp_infra import tool_registry
+
+    isolated = FastMCP("cancelled-worker-join-contract")
+    monkeypatch.setattr(tool_registry.runtime, "get_mcp", lambda: isolated)
+    monkeypatch.setattr(tool_registry, "should_register_tool", lambda _name: True)
+    entered = threading.Event()
+    release = threading.Event()
+    completed: list[bool] = []
+
+    @tool_registry.register_tool("writer_completion_probe")
+    def writer() -> dict:
+        entered.set()
+        return {"ok": release.wait(1.5), "result": {"receipt": "committed"}}
+
+    async def invoke() -> None:
+        try:
+            value = await isolated.call_tool("writer_completion_probe", {})
+            completed.append(bool(value.structuredContent["ok"]))
+        except BaseException:
+            completed.append(False)
+            raise
+
+    try:
+        async with anyio.create_task_group() as group:
+            group.start_soon(invoke)
+            assert await asyncio.wait_for(
+                asyncio.to_thread(entered.wait, 2.0), timeout=2.5
+            )
+            group.cancel_scope.cancel()
+            release.set()
+    finally:
+        release.set()
+
+    assert completed == [True]
+
+
+@pytest.mark.asyncio
+async def test_sync_mcp_tool_does_not_starve_oauth_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Blocked synchronous SSH tools must not prevent unrelated OAuth work.
+
+    A bounded worker gate models the live #25460 git_status stall. The
+    event loop must release it; running the function inline cannot.
+    """
+    import threading
+
+    from mcp.server.fastmcp import FastMCP
+
+    from examples.mcp_server.mcp_infra import tool_registry
+
+    isolated = FastMCP("event-loop-nonblocking-contract")
+    monkeypatch.setattr(tool_registry.runtime, "get_mcp", lambda: isolated)
+    monkeypatch.setattr(tool_registry, "should_register_tool", lambda _name: True)
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    @tool_registry.register_tool("sync_loop_probe")
+    def slow_sync_tool() -> dict:
+        entered.set()
+        return {"ok": release.wait(1.0), "result": {"done": True}}
+
+    # A direct Python call still uses the original function. The assertion
+    # exercises only the FastMCP-protocol callable, not a mock dispatcher.
+    async def invoke():
+        return await isolated.call_tool("sync_loop_probe", {})
+
+    task = asyncio.create_task(invoke())
+    try:
+        assert await asyncio.wait_for(
+            asyncio.to_thread(entered.wait, 2.0), timeout=2.5
+        ), "synchronous tool never started"
+        release.set()
+        result = await asyncio.wait_for(task, 2.0)
+        assert result.structuredContent["ok"] is True
+    finally:
+        release.set()
+        if not task.done():
+            await asyncio.wait_for(task, 2.0)
+

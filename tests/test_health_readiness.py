@@ -229,9 +229,12 @@ class TestSSHBannerProbe:
 
         with patch("app.routers.system.socket.create_connection") as connect:
             sock = connect.return_value.__enter__.return_value
-            sock.recv.side_effect = [b"HTTP/1.1 200 OK\r\n", b""]
+            # A known non-SSH protocol must be rejected on the first banner line,
+            # not after an EOF or a scheduler-dependent one-second deadline.
+            sock.recv.return_value = b"HTTP/1.1 200 OK\r\n"
             with pytest.raises(ConnectionError, match="identification banner"):
                 _tcp_ssh_check_blocking("sshd", 2222)
+            sock.recv.assert_called_once()
 
     def test_fragmented_banner_and_optional_preamble_are_accepted(self):
         from app.routers.system import _tcp_ssh_check_blocking

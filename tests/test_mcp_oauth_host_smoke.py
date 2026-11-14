@@ -55,19 +55,32 @@ _SAFE_SMOKE_STAGES = frozenset({
 })
 
 
+def _first_safe_failure_stage(output: str) -> str | None:
+    """Keep the first reported failure, not a later cleanup attempt."""
+    failures = re.findall(
+        r"(?m)^mcp_oauth_black_box_smoke: stage=([a-z_]+) "
+        r"error=[A-Za-z][A-Za-z0-9_]{0,63}$",
+        output,
+    )
+    return next((stage for stage in failures if stage in _SAFE_SMOKE_STAGES), None)
+
+
 def _last_safe_smoke_stage(output: bytes | str | None) -> str:
-    """Only reflect exact static stage names, never captured passwords or bodies."""
+    """Report the primary stage while never reflecting credentials or bodies."""
     if isinstance(output, bytes):
         output = output.decode("utf-8", errors="replace")
     if not isinstance(output, str):
         return "unknown"
+    failure = _first_safe_failure_stage(output)
+    if failure is not None:
+        return failure
     stages = re.findall(
         r"(?m)^mcp_oauth_black_box_smoke: stage=([a-z_]+)\s*$", output
     )
     return next((s for s in reversed(stages) if s in _SAFE_SMOKE_STAGES), "unknown")
 
 
-_SAFE_HTTP_PHASES = frozenset({"send", "headers", "body", "parse"})
+_SAFE_HTTP_PHASES = frozenset({"send", "headers", "body", "parse", "timeout"})
 
 
 def _last_safe_http_phase(output: bytes | str | None) -> str:
@@ -81,9 +94,11 @@ def _last_safe_http_phase(output: bytes | str | None) -> str:
         r"phase=([a-z_]+) elapsed_ms=([0-9]{1,7})$",
         output,
     )
+    failure = _first_safe_failure_stage(output)
     for stage, phase, elapsed_ms in reversed(progress):
         if stage in _SAFE_SMOKE_STAGES and phase in _SAFE_HTTP_PHASES:
-            return f"{phase}:{int(elapsed_ms)}ms"
+            if failure is None or stage == failure:
+                return f"{phase}:{int(elapsed_ms)}ms"
     return "unknown"
 
 
