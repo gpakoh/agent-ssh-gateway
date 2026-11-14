@@ -61,7 +61,7 @@ class TestHealthReadiness:
             mock_settings.api_key = "test-key"
             mock_settings.ssh_health_user = ""
             mock_settings.ssh_health_password = ""
-            mock_socket.create_connection.return_value.__enter__ = lambda s: MagicMock()
+            mock_socket.create_connection.return_value.__enter__ = lambda s: MagicMock(recv=MagicMock(return_value=b"SSH-2.0-test\r\n"))
             mock_socket.create_connection.return_value.__exit__ = MagicMock(return_value=False)
 
             with TestClient(app) as client:
@@ -88,7 +88,7 @@ class TestHealthReadiness:
             mock_settings.api_key = "test-key"
             mock_settings.ssh_health_user = ""
             mock_settings.ssh_health_password = ""
-            mock_socket.create_connection.return_value.__enter__ = lambda s: MagicMock()
+            mock_socket.create_connection.return_value.__enter__ = lambda s: MagicMock(recv=MagicMock(return_value=b"SSH-2.0-test\r\n"))
             mock_socket.create_connection.return_value.__exit__ = MagicMock(return_value=False)
 
             with TestClient(app) as client:
@@ -115,7 +115,7 @@ class TestHealthReadiness:
             mock_settings.api_auth_enabled = False
             mock_settings.ssh_health_user = ""
             mock_settings.ssh_health_password = ""
-            mock_socket.create_connection.return_value.__enter__ = lambda s: MagicMock()
+            mock_socket.create_connection.return_value.__enter__ = lambda s: MagicMock(recv=MagicMock(return_value=b"SSH-2.0-test\r\n"))
             mock_socket.create_connection.return_value.__exit__ = MagicMock(return_value=False)
 
             with TestClient(app) as client:
@@ -144,7 +144,7 @@ class TestHealthReadiness:
             mock_settings.api_key = ""
             mock_settings.ssh_health_user = ""
             mock_settings.ssh_health_password = ""
-            mock_socket.create_connection.return_value.__enter__ = lambda s: MagicMock()
+            mock_socket.create_connection.return_value.__enter__ = lambda s: MagicMock(recv=MagicMock(return_value=b"SSH-2.0-test\r\n"))
             mock_socket.create_connection.return_value.__exit__ = MagicMock(return_value=False)
 
             with TestClient(app) as client:
@@ -201,7 +201,7 @@ class TestHealthReadiness:
             mock_settings.api_key = ""
             mock_settings.ssh_health_user = ""
             mock_settings.ssh_health_password = ""
-            mock_socket.create_connection.return_value.__enter__ = lambda s: MagicMock()
+            mock_socket.create_connection.return_value.__enter__ = lambda s: MagicMock(recv=MagicMock(return_value=b"SSH-2.0-test\r\n"))
             mock_socket.create_connection.return_value.__exit__ = MagicMock(return_value=False)
 
             with TestClient(app) as client:
@@ -210,6 +210,102 @@ class TestHealthReadiness:
             assert data["status"] == "ok"
             assert data["ready"] is True
             assert data["api_key_configured"] is False
+
+
+class TestSSHBannerProbe:
+    """A TCP accept alone must not advertise a functioning SSH command plane."""
+
+    def test_accept_then_eof_is_unhealthy(self):
+        from app.routers.system import _tcp_ssh_check_blocking
+
+        with patch("app.routers.system.socket.create_connection") as connect:
+            sock = connect.return_value.__enter__.return_value
+            sock.recv.return_value = b""
+            with pytest.raises(ConnectionError, match="identification banner"):
+                _tcp_ssh_check_blocking("sshd", 2222)
+
+    def test_http_service_on_ssh_port_is_unhealthy(self):
+        from app.routers.system import _tcp_ssh_check_blocking
+
+        with patch("app.routers.system.socket.create_connection") as connect:
+            sock = connect.return_value.__enter__.return_value
+            sock.recv.side_effect = [b"HTTP/1.1 200 OK\r\n", b""]
+            with pytest.raises(ConnectionError, match="identification banner"):
+                _tcp_ssh_check_blocking("sshd", 2222)
+
+    def test_fragmented_banner_and_optional_preamble_are_accepted(self):
+        from app.routers.system import _tcp_ssh_check_blocking
+
+        with patch("app.routers.system.socket.create_connection") as connect:
+            sock = connect.return_value.__enter__.return_value
+            sock.recv.side_effect = [
+                b"notice\r\nSSH-2.",
+                b"0-OpenSSH_10.0\r\n",
+            ]
+            _tcp_ssh_check_blocking("sshd", 2222)
+            assert sock.settimeout.call_count == 2
+            assert all(call.args[0] > 0 for call in sock.settimeout.call_args_list)
+
+    @pytest.mark.parametrize("banner", [b"SSH-2.0-x\r\n", b"SSH-1.99-x\r\n"])
+    def test_minimal_software_version_is_valid(self, banner: bytes):
+        from app.routers.system import _tcp_ssh_check_blocking
+
+        with patch("app.routers.system.socket.create_connection") as connect:
+            sock = connect.return_value.__enter__.return_value
+            sock.recv.return_value = banner
+            _tcp_ssh_check_blocking("sshd", 2222)
+
+    @pytest.mark.parametrize("banner", [b"SSH-2.0-\r\n", b"SSH-1.99-\r\n"])
+    def test_empty_software_version_is_unhealthy(self, banner: bytes):
+        from app.routers.system import _tcp_ssh_check_blocking
+
+        with patch("app.routers.system.socket.create_connection") as connect:
+            sock = connect.return_value.__enter__.return_value
+            sock.recv.side_effect = [banner, b""]
+            with pytest.raises(ConnectionError, match="identification banner"):
+                _tcp_ssh_check_blocking("sshd", 2222)
+
+    def test_banner_without_line_terminator_is_bounded(self):
+        from app.routers.system import _tcp_ssh_check_blocking
+
+        with patch("app.routers.system.socket.create_connection") as connect:
+            sock = connect.return_value.__enter__.return_value
+            sock.recv.return_value = b"x" * 64
+            with pytest.raises(ConnectionError, match="identification banner"):
+                _tcp_ssh_check_blocking("sshd", 2222)
+            assert sock.recv.call_count == 32
+
+    def test_slow_banner_obeys_monotonic_deadline(self):
+        from app.routers.system import _tcp_ssh_check_blocking
+
+        with (
+            patch("app.routers.system.socket.create_connection") as connect,
+            patch(
+                "app.routers.system.time.monotonic",
+                side_effect=[10.0, 10.1, 11.1],
+            ),
+        ):
+            sock = connect.return_value.__enter__.return_value
+            sock.recv.return_value = b"SSH-2.0-"
+            with pytest.raises(TimeoutError, match="identification banner timed out"):
+                _tcp_ssh_check_blocking("sshd", 2222)
+            assert sock.recv.call_count == 1
+            sock.settimeout.assert_called_once_with(pytest.approx(0.9))
+
+    @pytest.mark.asyncio
+    async def test_tcp_accepted_then_eof_degrades_ssh_component(self):
+        from app.routers.system import _probe_ssh
+
+        with (
+            patch("app.routers.system.settings") as mock_settings,
+            patch("app.routers.system.socket.create_connection") as connect,
+        ):
+            mock_settings.ssh_health_user = ""
+            connect.return_value.__enter__.return_value.recv.return_value = b""
+            healthy, failure_class = await _probe_ssh("sshd", 2222)
+
+        assert healthy is False
+        assert failure_class == "connect_error"
 
 
 class TestCircuitBreakerMetricCardinality:

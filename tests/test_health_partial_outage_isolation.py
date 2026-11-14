@@ -62,7 +62,7 @@ def _healthy_settings(**overrides) -> MagicMock:
 def _ssh_ok_socket() -> MagicMock:
     """Mock socket that succeeds (SSH reachable)."""
     sock = MagicMock()
-    sock.create_connection.return_value.__enter__ = lambda s: MagicMock()
+    sock.create_connection.return_value.__enter__ = lambda s: MagicMock(recv=MagicMock(return_value=b"SSH-2.0-test\r\n"))
     sock.create_connection.return_value.__exit__ = MagicMock(return_value=False)
     return sock
 
