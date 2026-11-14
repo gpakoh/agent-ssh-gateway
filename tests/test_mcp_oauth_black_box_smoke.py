@@ -121,6 +121,35 @@ class TestSmokeStageDeadlines:
         assert _last_safe_smoke_stage(b"password=secret") == "unknown"
         assert _last_safe_smoke_stage(None) == "unknown"
 
+    def test_first_failure_survives_cleanup_timeout_and_never_leaks(self):
+        from tests.test_mcp_oauth_host_smoke import (
+            _last_safe_http_phase,
+            _last_safe_smoke_stage,
+        )
+
+        # Mirrors #25460 attempt 3: registration succeeds, tool result
+        # stalls, then MCP cleanup fails as well. The PRIMARY failure wins.
+        events = (
+            b"mcp_oauth_black_box_smoke: stage=register\n"
+            b"mcp_oauth_black_box_smoke: stage=register phase=parse elapsed_ms=139\n"
+            b"Authorization: Bearer never-display-this\n"
+            b"mcp_oauth_black_box_smoke: stage=git_status\n"
+            b"mcp_oauth_black_box_smoke: stage=git_status phase=body elapsed_ms=18\n"
+            b"mcp_oauth_black_box_smoke: stage=git_status phase=timeout elapsed_ms=20002\n"
+            b"mcp_oauth_black_box_smoke: stage=git_status error=TimeoutError\n"
+            b"mcp_oauth_black_box_smoke: stage=cleanup\n"
+            b"mcp_oauth_black_box_smoke: stage=cleanup phase=headers elapsed_ms=0\n"
+            b"mcp_oauth_black_box_smoke: session cleanup failed: TimeoutError\n"
+        )
+        assert _last_safe_smoke_stage(events) == "git_status"
+        assert _last_safe_http_phase(events) == "timeout:20002ms"
+        assert _last_safe_smoke_stage(
+            b"mcp_oauth_black_box_smoke: stage=cleanup\n"
+        ) == "cleanup"
+        assert _last_safe_http_phase(
+            b"mcp_oauth_black_box_smoke: stage=cleanup phase=body elapsed_ms=7\n"
+        ) == "body:7ms"
+
     def test_host_smoke_timeout_reports_only_safe_stage(self, monkeypatch):
         import subprocess
 
@@ -222,6 +251,7 @@ class TestSmokeStageDeadlines:
             assert "stage=register" in output
             assert "phase=headers" in output
             assert "phase=body" not in output
+            assert "phase=timeout" in output
             assert "never-echo-secret" not in output
         finally:
             release.set()
@@ -264,6 +294,7 @@ class TestSmokeStageDeadlines:
         assert signal.getitimer(signal.ITIMER_REAL)[0] == 0
         output = capsys.readouterr().err
         assert "phase=body" in output
+        assert "phase=timeout" in output
         assert "very-secret-token" not in output
 
     def test_main_resets_deadline_and_does_not_echo_exception_secrets(

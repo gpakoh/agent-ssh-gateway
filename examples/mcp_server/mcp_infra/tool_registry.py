@@ -13,6 +13,7 @@ import time as _time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import anyio
 from command_policy import CommandPolicyError
 from gateway_client import GatewayClientError
 from mcp.server.fastmcp import FastMCP
@@ -89,8 +90,19 @@ def register_tool(name: str):
             return func
 
         @functools.wraps(func)
-        def sync_result_wrapper(*args, **kwargs):
-            result = func(*args, **kwargs)
+        async def sync_result_wrapper(*args, **kwargs):
+            # FastMCP invokes plain synchronous handlers on its asyncio loop.
+            # A slow SSH/Gitea call then starves OAuth /register and session
+            # cleanup. AnyIO workers are separate from asyncio's default pool,
+            # leaving capacity for OAuth's durable client-store writes. Shield
+            # cancellation while the worker completes: abandoning an in-flight
+            # mutating call would lose its only authoritative outcome receipt.
+            # AnyIO propagates request contextvars to the worker, preserving
+            # the SDK's current MCP session and lifecycle owner.
+            result = await anyio.to_thread.run_sync(
+                functools.partial(func, *args, **kwargs),
+                abandon_on_cancel=False,
+            )
             if isinstance(result, dict) and "ok" in result:
                 return _envelope_to_call_tool_result(result)
             return result

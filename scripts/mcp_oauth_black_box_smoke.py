@@ -201,7 +201,7 @@ def _bounded_http_stage(seconds: float) -> Iterator[None]:
         signal.signal(signal.SIGALRM, old_handler)
 
 
-_SAFE_HTTP_PHASES = frozenset({"send", "headers", "body", "parse"})
+_SAFE_HTTP_PHASES = frozenset({"send", "headers", "body", "parse", "timeout"})
 
 
 def _log_http_phase(stage: str, phase: str, started_at: float) -> None:
@@ -265,6 +265,11 @@ def _req(method: str, path: str, body: dict[str, Any] | None = None, form: bool 
         ret_sid = resp.getheader("mcp-session-id", "")
         resp.close()
         return status, payload, location, ret_sid
+    except TimeoutError:
+        # The wall-clock timer or socket deadline can expire while reading
+        # headers or a stream body. Preserve only a fixed-shape marker.
+        _log_http_phase(stage, "timeout", stage_started)
+        raise
     finally:
         conn.close()
 
