@@ -112,7 +112,7 @@ class TestDeepSshCheck:
             mock_settings.persistent_sessions_enabled = False
             mock_settings.api_auth_enabled = False
             mock_settings.api_key = ""
-            mock_socket.create_connection.return_value.__enter__ = lambda s: MagicMock()
+            mock_socket.create_connection.return_value.__enter__ = lambda s: MagicMock(recv=MagicMock(return_value=b"SSH-2.0-test\r\n"))
             mock_socket.create_connection.return_value.__exit__ = MagicMock(return_value=False)
             from app.routers.system import health_check
             result = asyncio.run(health_check())

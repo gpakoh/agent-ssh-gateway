@@ -3,6 +3,7 @@
 import asyncio
 import os
 import socket
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -132,9 +133,36 @@ async def _deep_ssh_check(host: str, port: int) -> bool | None:
 
 
 def _tcp_ssh_check_blocking(host: str, port: int) -> None:
-    """Blocking TCP connect used by the shallow SSH health probe."""
-    with socket.create_connection((host, port), timeout=HEALTH_SSH_OPERATION_TIMEOUT_SECONDS):
-        return None
+    """Verify an SSH identification banner within a fixed time and byte budget.
+
+    A saturated sshd can accept TCP then drop the connection before the banner.
+    A TCP-only probe falsely reports that failure as ready. This check sends
+    no credentials and never runs a command; a monotonic deadline prevents a
+    slow peer from retaining a health-check worker after the HTTP timeout.
+    """
+    with socket.create_connection(
+        (host, port), timeout=HEALTH_SSH_OPERATION_TIMEOUT_SECONDS
+    ) as connection:
+        deadline = time.monotonic() + HEALTH_SSH_OPERATION_TIMEOUT_SECONDS
+        received = b""
+        total_bytes = 0
+        while total_bytes < 2048:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("SSH identification banner timed out")
+            connection.settimeout(remaining)
+            block = connection.recv(min(64, 2048 - total_bytes))
+            if not block:
+                raise ConnectionError("SSH identification banner unavailable")
+            total_bytes += len(block)
+            received += block
+            while b"\n" in received:
+                line, received = received.split(b"\n", 1)
+                line = line.rstrip(b"\r")
+                for prefix in (b"SSH-2.0-", b"SSH-1.99-"):
+                    if line.startswith(prefix) and len(prefix) < len(line) <= 253:
+                        return
+        raise ConnectionError("SSH identification banner unavailable")
 
 
 async def _probe_ssh(host: str, port: int) -> tuple[bool, str | None]:
