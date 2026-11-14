@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import math
 import time
 from enum import Enum
 
@@ -89,6 +90,16 @@ class CircuitBreaker:
                 self._state = CircuitState.OPEN
                 logger.warning("Circuit breaker OPEN (%d failures)", self._failure_count)
 
+    async def open_retry_after(self) -> int | None:
+        """Read-only bounded cooldown for an OPEN breaker, without half-open transition."""
+        async with self._lock:
+            if self._state is not CircuitState.OPEN:
+                return None
+            remaining = float(self._recovery_timeout)
+            if self._last_failure_time is not None:
+                remaining -= time.time() - self._last_failure_time
+            return max(1, min(60, math.ceil(remaining)))
+
     async def get_stats(self) -> dict:
         async with self._lock:
             return {
@@ -125,6 +136,12 @@ class CircuitBreakerRegistry:
                 self._access_order.remove(host)
             self._access_order.append(host)
             return self._breakers[host]
+
+    async def open_retry_after(self, host: str) -> int | None:
+        """Check one known target without creating a breaker or moving its LRU entry."""
+        async with self._lock:
+            breaker = self._breakers.get(host)
+        return await breaker.open_retry_after() if breaker is not None else None
 
     async def get_all_stats(self) -> dict[str, dict]:
         async with self._lock:

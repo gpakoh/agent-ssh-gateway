@@ -18,10 +18,12 @@ from app.auth_middleware import (
     require_any_auth,
     require_master_key,
 )
+from app.circuit_breaker import CircuitBreakerRegistry
 from app.config import settings
 from app.metrics import metrics
 from app.models import (
     CapabilitiesResponse,
+    CommandPlaneHealth,
     HealthComponentStatus,
     HealthResponse,
 )
@@ -43,6 +45,7 @@ HEALTH_REDIS_TIMEOUT_SECONDS = 1.0
 HEALTH_POSTGRES_TIMEOUT_SECONDS = 1.0
 HEALTH_SSH_OPERATION_TIMEOUT_SECONDS = 1.0
 HEALTH_SSH_PROBE_TIMEOUT_SECONDS = 2.25
+HEALTH_CIRCUIT_STATUS_TIMEOUT_SECONDS = 0.25
 # Docker's HTTP caller times out at 4s. Keep a full second of scheduling/serialization margin.
 HEALTH_AGGREGATE_TIMEOUT_SECONDS = 3.0
 
@@ -265,6 +268,64 @@ def _gateway_worker_count() -> int:
     return workers if workers > 0 else 0
 
 
+def _command_plane_health(
+    *,
+    manager_initialized: bool,
+    ssh: tuple[bool, str | None],
+    redis: tuple[bool, str | None] | None,
+    postgres: tuple[bool, str | None] | None,
+    breaker_retry_after_s: int | None,
+    breaker_probe_failed: bool,
+    build_sha: str,
+    started_at: str,
+) -> CommandPlaneHealth:
+    """Derive a bounded execution-plane signal from existing probes only.
+
+    Authorization and optional observability failures do not imply an SSH
+    command-plane outage. A required probe deadline indicates overload-like
+    unresponsiveness, not an asserted physical resource cause.
+    """
+    if not manager_initialized:
+        return CommandPlaneHealth(
+            state="starting", failure_class="not_initialized", retry_after_s=3,
+            build_sha=build_sha, started_at=started_at
+        )
+
+    if breaker_probe_failed:
+        return CommandPlaneHealth(
+            state="overloaded", failure_class="timeout", retry_after_s=5,
+            build_sha=build_sha, started_at=started_at,
+        )
+    if breaker_retry_after_s is not None:
+        return CommandPlaneHealth(
+            state="unavailable", failure_class="circuit_open",
+            retry_after_s=breaker_retry_after_s,
+            build_sha=build_sha, started_at=started_at,
+        )
+
+    required = [ssh]
+    if redis is not None:
+        required.append(redis)
+    if postgres is not None:
+        required.append(postgres)
+
+    failures = [reason for ok, reason in required if not ok]
+    if not failures:
+        return CommandPlaneHealth(state="ready", build_sha=build_sha, started_at=started_at)
+    if "timeout" in failures:
+        return CommandPlaneHealth(
+            state="overloaded", failure_class="timeout", retry_after_s=5,
+            build_sha=build_sha, started_at=started_at
+        )
+    return CommandPlaneHealth(
+        state="unavailable",
+        failure_class="connect_error" if "connect_error" in failures else "unavailable",
+        retry_after_s=5,
+        build_sha=build_sha,
+        started_at=started_at,
+    )
+
+
 @router.get("/health", tags=["system"], response_model=HealthResponse)
 async def health_check():
     """Return bounded aggregate health while preserving per-component truth."""
@@ -298,6 +359,20 @@ async def health_check():
         postgres_failure = None if persistent_sessions_ok else "not_configured"
 
     ssh_ok, ssh_failure = probe_results["ssh"]
+
+    # Inspect only the configured SSH target. Health must not create a
+    # breaker, change its half-open state, or inspect arbitrary customer hosts.
+    breaker_retry_after_s: int | None = None
+    breaker_probe_failed = False
+    breaker_registry = _state.circuit_breakers
+    if isinstance(breaker_registry, CircuitBreakerRegistry):
+        try:
+            breaker_retry_after_s = await asyncio.wait_for(
+                breaker_registry.open_retry_after(ssh_host),
+                timeout=HEALTH_CIRCUIT_STATUS_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            breaker_probe_failed = True
 
     api_key_ok = bool(settings.api_key)
     auth_required = bool(settings.api_auth_enabled)
@@ -361,6 +436,16 @@ async def health_check():
         version=APP_VERSION,
         gateway_workers=_gateway_worker_count(),
         components=components,
+        command_plane=_command_plane_health(
+            manager_initialized=_state.manager is not None,
+            ssh=(ssh_ok, ssh_failure),
+            redis=(redis_ok, redis_failure) if redis_required else None,
+            postgres=(persistent_sessions_ok, postgres_failure) if postgres_required else None,
+            breaker_retry_after_s=breaker_retry_after_s,
+            breaker_probe_failed=breaker_probe_failed,
+            build_sha=meta["build_sha"],
+            started_at=meta["started_at"],
+        ),
     )
 
 

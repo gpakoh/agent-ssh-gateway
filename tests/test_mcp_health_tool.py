@@ -202,6 +202,55 @@ def test_gateway_http_error_is_bounded_as_degraded_without_echoing_raw_body():
     assert "do-not-leak" not in str(result)
 
 
+@pytest.mark.parametrize(
+    ("gateway_code", "plane_state", "failure_class", "retry_after"),
+    [
+        ("REMOTE_UNAVAILABLE", "unavailable", "transport_unavailable", 5),
+        ("TIMEOUT", "unavailable", "transport_timeout", 5),
+        ("UNAUTHORIZED", "unknown", "auth_failure", None),
+    ],
+)
+def test_mcp_health_distinguishes_transport_from_auth(
+    monkeypatch, gateway_code, plane_state, failure_class, retry_after
+):
+    """Transport interruption is not an authentication or session failure."""
+    import examples.mcp_server.server as srv
+
+    client = MagicMock()
+    client.health.side_effect = srv.GatewayClientError(
+        "private-host token=do-not-leak",
+        body={"code": gateway_code, "retryable": gateway_code != "UNAUTHORIZED"},
+    )
+    monkeypatch.setattr(srv, "client", client)
+
+    health = srv.gateway_health()
+    plane = health["gateway"]["command_plane"]
+    assert plane["state"] == plane_state
+    assert plane["failure_class"] == failure_class
+    assert plane["retry_after_s"] == retry_after
+    assert plane["build_sha"] == ""
+    assert plane["started_at"] == ""
+    if gateway_code == "UNAUTHORIZED":
+        assert health["gateway"]["error"]["code"] == "AUTH_ERROR"
+    else:
+        assert health["gateway"]["status"] == "unreachable"
+    assert "private-host" not in str(health)
+    assert "do-not-leak" not in str(health)
+
+
+def test_health_preserves_gateway_plane_status_without_deduction(monkeypatch):
+    import examples.mcp_server.server as srv
+
+    client = MagicMock()
+    plane = {
+        "state": "overloaded", "failure_class": "timeout", "retry_after_s": 5,
+        "build_sha": "b" * 40, "started_at": "boot",
+    }
+    client.health.return_value = {"status": "degraded", "command_plane": plane}
+    monkeypatch.setattr(srv, "client", client)
+    assert srv.gateway_health()["gateway"]["command_plane"] == plane
+
+
 def test_gateway_health_does_not_swallow_programming_errors():
     """Only expected GatewayClientError failures are bounded."""
     from examples.mcp_server.server import gateway_health
