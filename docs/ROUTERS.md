@@ -31,6 +31,11 @@ fields. The optional `command_plane` object adds a bounded, non-auth status:
   saturation; it tells callers to back off instead of re-authenticating.
 - `state=unavailable` with `connect_error|unavailable` and a bounded
   `retry_after_s=5` means a required dependency is unavailable.
+- `state=unavailable`, `failure_class=circuit_open` reports that the
+  configured default SSH target's circuit breaker rejects new commands even
+  when its TCP SSH identification banner succeeds. The retry interval is
+  bounded by its recovery cooldown. This lookup cannot create/reset a
+  breaker, transition it to half-open, or inspect unrelated customer hosts.
 - `state=unknown` means a legacy Gateway response or insufficient evidence;
   do not infer command readiness, lost credentials or expired sessions.
 

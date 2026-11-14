@@ -177,6 +177,19 @@ class TestCircuitBreakerRace:
 
 class TestCircuitBreakerRegistry:
     @pytest.mark.asyncio
+    async def test_read_only_open_retry_lease_does_not_create_breaker(self):
+        registry = CircuitBreakerRegistry(max_size=10)
+        assert await registry.open_retry_after("missing") is None
+        assert registry._breakers == {}
+        breaker = await registry.get_breaker(
+            "default-host", failure_threshold=1, recovery_timeout=60
+        )
+        await breaker.record_failure()
+        retry = await registry.open_retry_after("default-host")
+        assert retry is not None and 1 <= retry <= 60
+        assert registry._access_order == ["default-host"]
+
+    @pytest.mark.asyncio
     async def test_get_breaker_creates_new(self):
         reg = CircuitBreakerRegistry(max_size=10)
         cb = await reg.get_breaker("host1")

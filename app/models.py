@@ -346,7 +346,7 @@ class CommandPlaneHealth(BaseModel):
 
     state: Literal["ready", "starting", "overloaded", "unavailable", "unknown"] = "unknown"
     retry_after_s: int | None = Field(default=None, ge=1, le=60)
-    failure_class: Literal["not_initialized", "timeout", "connect_error", "unavailable"] | None = None
+    failure_class: Literal["not_initialized", "timeout", "connect_error", "unavailable", "circuit_open"] | None = None
     build_sha: str = ""
     started_at: str = ""
 
