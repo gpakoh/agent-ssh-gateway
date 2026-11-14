@@ -159,6 +159,8 @@ def _tcp_ssh_check_blocking(host: str, port: int) -> None:
             while b"\n" in received:
                 line, received = received.split(b"\n", 1)
                 line = line.rstrip(b"\r")
+                if line.startswith(b"HTTP/"):
+                    raise ConnectionError("SSH identification banner unavailable")
                 for prefix in (b"SSH-2.0-", b"SSH-1.99-"):
                     if line.startswith(prefix) and len(prefix) < len(line) <= 253:
                         return
