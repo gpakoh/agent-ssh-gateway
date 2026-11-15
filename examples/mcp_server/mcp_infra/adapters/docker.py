@@ -898,6 +898,90 @@ async def _docker_compose_restart_impl(
         timeout=timeout,
     )
 
+# Recognize only the path of an explicit failed write, on the same log line
+# as the read-only error. Arbitrary text elsewhere in Docker output must not
+# choose a recovery action (logs may contain user-controlled build output).
+_COMPOSE_READONLY_WRITE = re.compile(
+    r"(?:failed to|unable to|cannot)\s+"
+    r"(?:mkdir|write|create|open|rename|copy|mount|persist)\b"
+    r"[^\n]{0,240}?(?P<path>/[^\s:;\\\"']+):\s*read-only file system"
+    r"|(?:^|\n)\s*(?:mkdir|write|create|open|rename|copy|mount|persist)\b"
+    r"[^\n]{0,120}?(?P<direct_path>/[^\s:;\\\"']+):\s*read-only file system",
+    re.IGNORECASE,
+)
+
+
+def _compose_readonly_write_surface(diagnostic: str, project_dir: str | None) -> str:
+    """Conservatively classify a Docker build ROFS write without returning paths."""
+    surfaces: set[str] = set()
+    for match in _COMPOSE_READONLY_WRITE.finditer(diagnostic[:16384]):
+        path = (match.group("path") or match.group("direct_path")).lower().rstrip("/")
+        parts = path.split("/")
+        if ".." in parts:
+            continue
+        if (
+            path == "/tmp/mcp-buildx"
+            or path == "/run/mcp-docker-config/buildx"
+            or path.startswith("/run/mcp-docker-config/buildx/")
+            or path.startswith("/tmp/mcp-buildx/")
+            or path.endswith("/.docker/buildx")
+            or "/.docker/buildx/" in path
+        ):
+            surface = "client_buildx_home"
+        elif any(
+            path.endswith(fragment) or fragment + "/" in path
+            for fragment in ("/.cache/buildx", "/.cache/buildkit")
+        ):
+            surface = "builder_cache"
+        elif any(
+            path == root or path.startswith(root + "/")
+            for root in ("/var/lib/buildkit", "/var/lib/docker/buildkit")
+        ):
+            surface = "builder_state"
+        elif any(
+            path == root or path.startswith(root + "/")
+            for root in ("/var/lib/docker", "/run/docker", "/var/run/docker")
+        ):
+            surface = "daemon_namespace"
+        elif project_dir and os.path.isabs(project_dir) and (
+            path == project_dir.rstrip("/").lower()
+            or path.startswith(project_dir.rstrip("/").lower() + "/")
+        ):
+            surface = "compose_context"
+        else:
+            surface = "unclassified"
+        surfaces.add(surface)
+    return next(iter(surfaces)) if len(surfaces) == 1 else "unclassified"
+
+
+_COMPOSE_READONLY_HINTS = {
+    "client_buildx_home": (
+        "Use the approved digest-pinned Compose runner with writable tmpfs "
+        "BUILDX_CONFIG=/tmp/mcp-buildx; keep registry auth mounts read-only."
+    ),
+    "builder_cache": (
+        "Use an approved writable builder cache or isolated Buildx state; "
+        "do not change registry auth or host ownership blindly."
+    ),
+    "builder_state": (
+        "Review the builder's configured state volume and mount permissions; "
+        "provision writable state only through an approved scoped runner."
+    ),
+    "daemon_namespace": (
+        "Ask the Docker daemon operator to verify its configured writable data-root; "
+        "do not chmod or reset the daemon namespace."
+    ),
+    "compose_context": (
+        "Check the approved Compose context mount; source context should remain "
+        "read-only and build writes must use an approved writable output mount."
+    ),
+    "unclassified": (
+        "Inspect the approved Compose context, runner, and daemon mounts; "
+        "do not alter host paths blindly."
+    ),
+}
+
+
 async def _docker_compose_build_impl(
     project_dir: str | None = None,
     services: list[str] | None = None,
@@ -919,15 +1003,8 @@ async def _docker_compose_build_impl(
         diagnostic = str(exc).lower()
         if "read-only file system" not in diagnostic:
             raise
-        if "/.docker/buildx" in diagnostic:
-            surface = "client_buildx_home"
-            hint = "Provide an approved writable HOME/Buildx state for the managed Compose runner."
-        elif "/.cache/buildx" in diagnostic or "/.cache/buildkit" in diagnostic:
-            surface = "builder_cache"
-            hint = "Provide an approved writable builder cache for the managed Compose runner."
-        else:
-            surface = "unclassified"
-            hint = "Inspect the approved Compose context and builder mounts; do not alter host paths blindly."
+        surface = _compose_readonly_write_surface(diagnostic, resolved_project_dir)
+        hint = _COMPOSE_READONLY_HINTS[surface]
         return tool_error(
             tool="docker_compose_build",
             code="DOCKER_COMMAND_FAILED",
