@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import functools
 import math
@@ -9,6 +10,8 @@ import os
 import threading
 import time
 import weakref
+from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Any
 
 import anyio
@@ -257,6 +260,8 @@ class GatewayClient:
         self._release_http_timeout = float(os.environ.get("MCP_GATEWAY_RELEASE_HTTP_TIMEOUT", "2"))
 
         self._reconnect_lock = threading.Lock()
+        self._health_inflight_lock = threading.Lock()
+        self._health_inflight: dict[tuple[str, str, str, int], Future[dict[str, Any]]] = {}
         self._retired: set[str] = set()
         self._reuse_existing = True
         self._release_managed = False
@@ -633,6 +638,59 @@ class GatewayClient:
         return wrapper
 
     def _get(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        timeout: int = 30,
+    ) -> dict[str, Any]:
+        # Only scope-local, parameterless health reads are safe to combine.
+        # Each MCP transport has a distinct GatewayClient, including when auth
+        # identities match. No completed response is cached across requests.
+        if (
+            path != "/health"
+            or params
+            or not self._ephemeral
+            or self._released
+            or timeout <= 0
+        ):
+            return self._get_direct(path, params=params, timeout=timeout)
+
+        # Bind even unexpected runtime config changes before joining a flight.
+        key = (self.base_url, self.api_key, self.session_id, timeout)
+        with self._health_inflight_lock:
+            shared = self._health_inflight.get(key)
+            leader = shared is None
+            if shared is None:
+                shared = Future()
+                self._health_inflight[key] = shared
+
+        if not leader:
+            try:
+                # Independent caller deadline: do not wait forever for a leader.
+                return copy.deepcopy(shared.result(timeout=timeout))
+            except FutureTimeoutError as exc:
+                raise GatewayClientError(
+                    "Gateway request timed out",
+                    body={
+                        "message": "Gateway request timed out",
+                        "code": "TIMEOUT",
+                        "retryable": True,
+                    },
+                ) from exc
+
+        try:
+            result = self._get_direct(path, params=params, timeout=timeout)
+            shared.set_result(result)
+            return result
+        except BaseException as exc:
+            shared.set_exception(exc)
+            raise
+        finally:
+            with self._health_inflight_lock:
+                if self._health_inflight.get(key) is shared:
+                    del self._health_inflight[key]
+
+    def _get_direct(
         self,
         path: str,
         params: dict[str, Any] | None = None,
