@@ -886,11 +886,23 @@ class SSHSessionManager:
                     loop.run_in_executor(None, stdin.write, stdin_data),
                     timeout=self._remaining_timeout(deadline),
                 )
-            stdin.channel.shutdown_write()
+            # Paramiko shutdown_write may block on channel backpressure.
+            # execute_argv is an ASGI coroutine: never block the event loop.
+            await asyncio.wait_for(
+                loop.run_in_executor(None, stdin.channel.shutdown_write),
+                timeout=self._remaining_timeout(deadline),
+            )
 
             out_data, err_data, exit_code = await self._drain_command_streams(
                 loop, stdout, stderr, deadline=deadline
             )
+        except asyncio.CancelledError:
+            if channel is not None:
+                try:
+                    channel.close()
+                except Exception:
+                    pass
+            raise
         except builtins.TimeoutError:
             if channel is not None:
                 try:

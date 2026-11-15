@@ -129,3 +129,89 @@ async def test_drain_command_streams_closes_channel_on_deadline():
         channel.close.assert_called()
     finally:
         release.set()
+
+
+@pytest.mark.asyncio
+async def test_execute_argv_shutdown_write_does_not_block_health_loop() -> None:
+    from app.ssh_manager import SSHSessionManager
+
+    manager = SSHSessionManager()
+    record, stdin, _, _ = _make_mock_record()
+    manager._sessions["test-id"] = record
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    release = threading.Event()
+    timestamps: list[float] = []
+
+    def blocked_shutdown() -> None:
+        timestamps.append(time.monotonic())
+        loop.call_soon_threadsafe(entered.set)
+        release.wait(timeout=2.5)
+
+    stdin.channel.shutdown_write.side_effect = blocked_shutdown
+    task = asyncio.create_task(manager.execute_argv("test-id", "true", b"", timeout=10))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=4)
+        assert time.monotonic() - timestamps[0] < 1.2, (
+            "execute_argv shutdown_write blocked the ASGI event loop"
+        )
+    finally:
+        release.set()
+        assert (await asyncio.wait_for(task, timeout=4))["exit_code"] == 0
+        assert record.active_operations == 0
+
+
+@pytest.mark.asyncio
+async def test_execute_argv_shutdown_write_timeout_closes_channel() -> None:
+    from app.ssh_manager import SSHSessionManager
+    from app.ssh_manager import TimeoutError as SSHTimeoutError
+
+    manager = SSHSessionManager()
+    record, stdin, stdout, _ = _make_mock_record()
+    manager._sessions["test-id"] = record
+    release = threading.Event()
+    stdout.channel.close.side_effect = release.set
+
+    def blocked_shutdown() -> None:
+        release.wait(timeout=4)
+
+    stdin.channel.shutdown_write.side_effect = blocked_shutdown
+    try:
+        with pytest.raises(SSHTimeoutError, match="Command timed out after 1s"):
+            await manager.execute_argv("test-id", "true", b"", timeout=1)
+    finally:
+        release.set()
+
+    stdout.channel.close.assert_called_once()
+    assert record.active_operations == 0
+
+
+@pytest.mark.asyncio
+async def test_execute_argv_cancelled_shutdown_closes_channel() -> None:
+    from app.ssh_manager import SSHSessionManager
+
+    manager = SSHSessionManager()
+    record, stdin, stdout, _ = _make_mock_record()
+    manager._sessions["test-id"] = record
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    release = threading.Event()
+
+    def blocked_shutdown() -> None:
+        loop.call_soon_threadsafe(entered.set)
+        release.wait(timeout=4)
+
+    stdin.channel.shutdown_write.side_effect = blocked_shutdown
+    stdout.channel.close.side_effect = release.set
+    task = asyncio.create_task(manager.execute_argv("test-id", "true", b"", timeout=10))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        assert record.active_operations == 1
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2)
+    finally:
+        release.set()
+
+    stdout.channel.close.assert_called_once()
+    assert record.active_operations == 0
