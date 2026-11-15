@@ -139,6 +139,107 @@ def test_self_test_contains_transport_failure_and_continues_diagnostics():
     assert "do-not-leak" not in str(result)
 
 
+@pytest.mark.parametrize("method", ["GET", "POST"])
+@pytest.mark.parametrize(
+    ("code", "headers", "expected"),
+    [
+        (
+            "RATE_LIMIT_EXCEEDED",
+            {"Retry-After": "7", "X-RateLimit-Bucket": "ip"},
+            {"operation_class": "execute", "retry_after_seconds": 7, "bucket_class": "ip"},
+        ),
+        (
+            "SESSION_LIMIT_EXCEEDED",
+            {"Retry-After": "60", "X-RateLimit-Bucket": "session"},
+            {"operation_class": "execute", "retry_after_seconds": 60, "bucket_class": "session"},
+        ),
+        (
+            "RATE_LIMIT_EXCEEDED",
+            {"Retry-After": "NaN", "X-RateLimit-Bucket": "secret-host token=unsafe"},
+            {"operation_class": "execute"},
+        ),
+        (
+            "RATE_LIMIT_EXCEEDED",
+            {"Retry-After": "86401"},
+            {"operation_class": "execute"},
+        ),
+        (
+            "RATE_LIMIT_EXCEEDED",
+            {"Retry-After": "0", "X-RateLimit-Bucket": "master"},
+            {"operation_class": "execute", "retry_after_seconds": 1, "bucket_class": "master"},
+        ),
+    ],
+)
+def test_http_429_propagates_only_bounded_retry_and_trusted_bucket(
+    method, code, headers, expected
+):
+    """GET/POST expose the same typed header hints without global reconnect cooldown."""
+    from mcp_infra.gateway_errors import _gateway_error_details
+
+    client = GatewayClient(base_url="https://gateway.invalid", api_key="test-key")
+    body = {"code": code, "retryable": True, "details": {"operation_class": "execute"}}
+    response = MagicMock()
+    response.status_code = 429
+    response.headers = headers
+    response.text = "opaque"
+    response.json.return_value = body
+    before = GatewayClient._connect_retry_not_before
+
+    with patch(
+        "gateway_client.httpx.get" if method == "GET" else "gateway_client.httpx.post",
+        return_value=response,
+    ):
+        with pytest.raises(GatewayClientError) as caught:
+            if method == "GET":
+                client._get("/api/status")
+            else:
+                client._post("/api/status", {"key": "value"})
+
+    error = caught.value
+    assert error.status_code == 429
+    assert error.body is not body
+    assert error.body["code"] == code
+    assert error.body["details"] == expected
+    projected = _gateway_error_details(error)
+    assert projected is not None
+    assert ("retry_after_seconds" in projected) == ("retry_after_seconds" in expected)
+    if "retry_after_seconds" in expected:
+        assert projected["retry_after_seconds"] == expected["retry_after_seconds"]
+    assert GatewayClient._connect_retry_not_before == before
+    assert "secret-host" not in str(error.body)
+    assert "token=unsafe" not in str(error.body)
+
+
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_http_429_nonjson_body_uses_bounded_retry_metadata_without_global_cooldown(method):
+    from mcp_infra.gateway_errors import _gateway_error_details
+
+    client = GatewayClient(base_url="https://gateway.invalid", api_key="test-key")
+    response = MagicMock()
+    response.status_code = 429
+    response.headers = {"Retry-After": "12", "X-RateLimit-Bucket": "ip"}
+    response.text = "upstream proxy invalid response"
+    response.json.side_effect = ValueError("not JSON")
+    before = GatewayClient._connect_retry_not_before
+    with patch(
+        "gateway_client.httpx.get" if method == "GET" else "gateway_client.httpx.post",
+        return_value=response,
+    ):
+        with pytest.raises(GatewayClientError) as caught:
+            if method == "GET":
+                client._get("/api/status")
+            else:
+                client._post("/api/status", {})
+    assert caught.value.body == {
+        "code": "RATE_LIMIT_EXCEEDED",
+        "message": "Gateway rate limit response",
+        "retryable": True,
+        "details": {"retry_after_seconds": 12, "bucket_class": "ip"},
+    }
+    assert _gateway_error_details(caught.value)["retry_after_seconds"] == 12
+    assert GatewayClient._connect_retry_not_before == before
+
+
 def test_http_status_error_contract_is_unchanged():
     client = GatewayClient(base_url="https://gateway.invalid", api_key="test-key")
     body = {
