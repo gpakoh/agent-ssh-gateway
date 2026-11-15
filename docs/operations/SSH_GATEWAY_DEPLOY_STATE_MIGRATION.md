@@ -1,7 +1,9 @@
 # SSH Gateway deploy-state trust migration
 
 **Status:** production migration qualified on 2026-10-25 by exact-master
-CI #19743. One-time bootstrap remains restricted to the attested baseline.
+CI #19743. Empty-volume bootstrap is restricted to two independently attested,
+immutable release tuples: original #19659, or the latest independently
+qualified #25510 at `891f3482b339711616af3d92c42903001cc69dee`.
 Do not delete/rewrite the original historical host receipt.
 
 ## Exact-release qualified CI bootstrap
@@ -10,10 +12,15 @@ Before deploying, CI calls scripts/ci-bootstrap-deploy-state.sh in the actual
 Docker deploy job. Only a completely empty dedicated named volume may be
 initialized. The helper verifies five running containers against three
 immutable image digests, requires healthy status and exact BUILD_SHA for
-gateway/MCP/OAuth, and uses the successful build/deploy/host-smoke #19659
-as independently verified baseline SHA
-b4c6c9c6d268f8db638f22d4c9256832dddcd875. It cannot trust a different
-running release or the historical world-writable receipt. The helper provisions
+gateway/MCP/OAuth. The original independently verified seed is CI #19659,
+SHA `b4c6c9c6d268f8db638f22d4c9256832dddcd875`. A second accepted
+seed is CI #25510 (2026-11-14), which passed build-and-push, deploy and
+host-smoke at `891f3482b339711616af3d92c42903001cc69dee`, with the
+live five-container images independently verified against immutable refs.
+No unknown release, mutable tag, or historical world-writable receipt is
+trusted. Both preconfigured tuples still require exact container digest,
+Docker healthy and three matching `BUILD_SHA` checks before **any state
+mutation**. The helper provisions
 ownership via a short-lived root helper container before the non-root deploy
 job runs the attestation bootstrap. The root helper mounts only
 ssh-gateway-deploy-state and changes ownership/mode only if it is completely
@@ -83,6 +90,37 @@ file, atomically renames it, fsyncs the directory and rereads the committed
 content. Ambiguous commit/fsync errors do not report success. This is an
 integrity safeguard, not an authorization service or complete release receipt
 system.
+
+## Scoped recovery after missing receipt — Issue #909
+
+After CI #25510 deployed and host-smoke accepted
+`891f3482b339711616af3d92c42903001cc69dee`, post-merge push #25555
+for `4ba477e499b446d296bca0bd3f90c88bd8b3dca2` built its images, but
+the deploy's bootstrap found no trusted receipt in its mounted state path.
+It rejected the historic #19659 digest tuple, as designed. The later
+exact-master push #25565 has its own lifecycle and must be checked
+independently.
+
+The additional qualified tuple is:
+
+- gateway: `sha256:8723a10a93546e746ae122d66ab6c97f56f8ba4e68ce05a5ec75b6f8f69981ac`
+- MCP and OAuth: `sha256:157b3873d91d6c3ae2eeab3bf99c0fcfa78b9a6c036e16b32ee28f682729f8e0`
+- both SSHD services: `sha256:f616f78acc163eaa6745bae249dc5beba17e97237a7c67761db417b84a3386a4`
+
+These values come from the successful #25510 deploy log and independent
+read-only five-container inspection. An **empty, private dedicated volume**
+may bootstrap to this tuple only if all five currently running containers
+still match its repository-qualified immutable refs and Docker reports each
+healthy, while Gateway/MCP/OAuth return the exact qualified build SHA.
+Existing receipts (including invalid ones), unknown files, image drift, and
+SHA drift always fail closed; the historical tuple remains unchanged.
+
+This is a narrowly pinned recovery *capability*, not proof of why the
+receipt went missing. Operators must inspect the daemon/volume identity and
+audit journal from #25510 and #25555 to establish whether the Docker context
+changed or state was lost. Never prune or reset a volume to force an empty
+bootstrap. Before declaring production acceptance require new post-merge
+build, deploy, host-smoke and live SHA/health/SSH checks.
 
 ## Delivery gate
 
