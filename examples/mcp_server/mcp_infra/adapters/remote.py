@@ -6126,6 +6126,37 @@ async def gitea_list_action_jobs(
 ) -> dict[str, Any]:
     """List repository-wide Gitea Actions jobs. Optionally filter by status
     (pending, queued, running/in_progress, failure, success, skipped)."""
+    # Validate locally before token lookup and connection setup. Preserve the
+    # transport's "running" alias and exact accepted status vocabulary.
+    for field, validate in (
+        ("status", lambda: gitea_client._normalize_action_job_status_filter(status)),
+        ("page", lambda: (
+            gitea_client._validate_positive_int(page, "page"),
+            validate_pagination(page, "page"),
+        )),
+        ("limit", lambda: (
+            gitea_client._validate_positive_int(limit, "limit"),
+            validate_pagination(limit, "limit", max_value=50),
+        )),
+    ):
+        try:
+            validate()
+        except ValueError as exc:
+            details: dict[str, Any] = {"field": field}
+            if field == "status":
+                details["allowed_values"] = [
+                    "failure", "in_progress", "pending", "queued",
+                    "running", "skipped", "success",
+                ]
+            return tool_error(
+                tool="gitea_list_action_jobs",
+                code="INVALID_INPUT",
+                message=str(exc),
+                retryable=False,
+                details=details,
+                source="gitea",
+            )
+
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
@@ -6184,6 +6215,25 @@ async def gitea_get_action_job_logs(
     tail_lines: int = GITEA_ACTION_JOB_LOG_DEFAULT_TAIL_LINES,
 ) -> dict[str, Any]:
     """Download a bounded, redacted tail of one Gitea Actions job log."""
+    # Reject malformed schema parameters before touching credentials or HTTP.
+    # The low-level Gitea client enforces the same bounds as a second guard.
+    for field, validate in (
+        ("job_id", lambda: gitea_client._validate_positive_int(job_id, "job_id")),
+        ("max_bytes", lambda: gitea_client._validate_action_job_log_max_bytes(max_bytes)),
+        ("tail_lines", lambda: _validate_action_log_tail_lines(tail_lines)),
+    ):
+        try:
+            validate()
+        except ValueError as exc:
+            return tool_error(
+                tool="gitea_get_action_job_logs",
+                code="INVALID_INPUT",
+                message=str(exc),
+                retryable=False,
+                details={"field": field},
+                source="gitea",
+            )
+
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
