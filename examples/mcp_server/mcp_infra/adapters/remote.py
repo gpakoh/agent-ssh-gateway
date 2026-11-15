@@ -1246,19 +1246,27 @@ async def gitea_get_file(
         a full blob. Default 16 KiB; pass 0 to fall back to the client's
         256 KiB safety cap.
     """
+    if type(include_content) is not bool:
+        return tool_error(
+            tool="gitea_get_file", code="INVALID_INPUT",
+            message="include_content must be a boolean", retryable=False,
+            details={"field": "include_content", "allowed_values": [False, True]},
+            source="gitea",
+        )
+    if type(max_content_bytes) is not int or max_content_bytes < 0:
+        return tool_error(
+            tool="gitea_get_file", code="INVALID_INPUT",
+            message="max_content_bytes must be a nonnegative integer",
+            retryable=False,
+            details={"field": "max_content_bytes", "min_value": 0},
+            source="gitea",
+        )
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
             tool="gitea_get_file",
             code="DEPENDENCY_MISSING",
             message="GITEA_TOKEN not configured",
-            source="gitea",
-        )
-    if max_content_bytes < 0:
-        return tool_error(
-            tool="gitea_get_file",
-            code="INVALID_INPUT",
-            message="max_content_bytes must be >= 0",
             source="gitea",
         )
     try:
