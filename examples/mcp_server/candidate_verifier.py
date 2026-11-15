@@ -69,7 +69,7 @@ _DETAIL_OUTPUT_CHARS = 4000
 _MCP_VERIFY_EXIT_RE = re.compile(r"^MCP_VERIFY_EXIT=(\d+)$", re.MULTILINE)
 _MCP_VERIFY_CHECK_RE = re.compile(r"^MCP_VERIFY_CHECK=(\d+)$", re.MULTILINE)
 _MCP_VERIFY_ENV_STAGE_RE = re.compile(r"^MCP_VERIFY_ENV_STAGE=([a-z_]+)$", re.MULTILINE)
-_BOOTSTRAP_STAGES = frozenset({"python_missing", "metadata_invalid", "uv_missing", "uv_sync"})
+_BOOTSTRAP_STAGES = frozenset({"python_missing", "metadata_invalid", "uv_missing", "uv_sync", "venv_missing"})
 
 # Candidate-controlled output may try to echo credentials; scrub common
 # credential shapes in addition to the shared path/endpoint redaction.
@@ -187,7 +187,7 @@ def probe_version(path, trusted_path):
     return text.splitlines()[0].strip()[:200]
 
 
-def resolve_primary(command, trusted_path, repo):
+def resolve_primary(command, trusted_path, repo, check_path):
     try:
         # POSIX subshell grouping is syntax, not part of an executable name.
         # shlex.split('(git status)') yields '(git', so a successful, valid
@@ -234,7 +234,7 @@ def resolve_primary(command, trusted_path, repo):
             "shell_sha256": shell_sha,
             "shell_identity": "verifier-sh",
         }
-    resolved = shutil.which(name, path=trusted_path)
+    resolved = shutil.which(name, path=check_path)
     if resolved is None and "/" in name:
         candidate = name if os.path.isabs(name) else os.path.join(repo, name)
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
@@ -250,7 +250,7 @@ def resolve_primary(command, trusted_path, repo):
         "sha256": sha256_file(resolved),
     }
     if basename in VERSION_TOOLS:
-        version = probe_version(resolved, trusted_path)
+        version = probe_version(resolved, check_path)
         if version is not None:
             info["version"] = version
     return info
@@ -274,6 +274,7 @@ def main(argv):
     before_sha, before_bytes, before_entries = status_info(before_p)
     after_sha, after_bytes, after_entries = status_info(after_p)
     trusted_path = os.environ.get("MCP_TRUSTED_PATH") or "/usr/local/bin:/usr/bin:/bin"
+    check_path = os.environ.get("MCP_CHECK_PATH") or trusted_path
     payload = {
         "v": 1,
         "run_id": run_id,
@@ -286,7 +287,7 @@ def main(argv):
         "exit_code": rc,
         "stdout_tail": tail_text(out_p),
         "stderr_tail": tail_text(err_p),
-        "primary_tool": resolve_primary(command, trusted_path, repo),
+        "primary_tool": resolve_primary(command, trusted_path, repo, check_path),
         "before_status_sha256": before_sha,
         "before_status_bytes": before_bytes,
         "before_status_entries": before_entries,
@@ -757,6 +758,8 @@ def build_candidate_verifier_script(
         f"IMAGE={_q(verifier_image)}",
         'MCP_TRUSTED_PATH=${PATH:-/usr/local/bin:/usr/bin:/bin}',
         'export MCP_TRUSTED_PATH',
+        'MCP_CHECK_PATH=$MCP_TRUSTED_PATH',
+        'export MCP_CHECK_PATH',
         'VERIFY_ROOT=$(mktemp -d /tmp/mcp-candidate-verify.XXXXXX) || exit 80',
         'cleanup() { chmod -R u+w "$VERIFY_ROOT" 2>/dev/null || true; rm -rf "$VERIFY_ROOT"; }',
         "trap cleanup EXIT",
@@ -779,6 +782,8 @@ def build_candidate_verifier_script(
         '  if [ "$DEV_EXTRA" = "1" ]; then',
         '    command -v uv >/dev/null 2>&1 || { echo MCP_VERIFY_ENV_STAGE=uv_missing; exit 82; }',
         '    (cd "$VERIFY_ROOT/repo" && env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV uv sync --frozen --extra dev) >/dev/null 2>&1 || { echo MCP_VERIFY_ENV_STAGE=uv_sync; exit 82; }',
+        '    [ -d "$VERIFY_ROOT/repo/.venv/bin" ] && [ ! -L "$VERIFY_ROOT/repo/.venv" ] && [ ! -L "$VERIFY_ROOT/repo/.venv/bin" ] || { echo MCP_VERIFY_ENV_STAGE=venv_missing; exit 82; }',
+        '    MCP_CHECK_PATH="$VERIFY_ROOT/repo/.venv/bin:$MCP_TRUSTED_PATH"',
         "  fi",
         "fi",
     ]
@@ -788,7 +793,7 @@ def build_candidate_verifier_script(
                 f"CHECK={_q(check)}",
                 'git -C "$VERIFY_ROOT/repo" status --porcelain=v1 -z --untracked-files=all >"$VERIFY_ROOT/before.status" 2>/dev/null || exit 86',
                 "python3 -c 'import time; print(time.monotonic_ns() // 1000000)' >\"$VERIFY_ROOT/t0\" || exit 86",
-                '(cd "$VERIFY_ROOT/repo" && env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV sh -c "$CHECK") '
+                '(cd "$VERIFY_ROOT/repo" && env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV "PATH=$MCP_CHECK_PATH" /bin/sh -c "$CHECK") '
                 '>"$VERIFY_ROOT/check.out" 2>"$VERIFY_ROOT/check.err"; rc=$?',
                 "python3 -c 'import time; print(time.monotonic_ns() // 1000000)' >\"$VERIFY_ROOT/t1\" || exit 86",
                 'git -C "$VERIFY_ROOT/repo" status --porcelain=v1 -z --untracked-files=all >"$VERIFY_ROOT/after.status" 2>/dev/null || exit 86',
