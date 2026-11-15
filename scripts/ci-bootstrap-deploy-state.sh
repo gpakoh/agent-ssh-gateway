@@ -21,12 +21,34 @@ if [ -n "$(ls -A "$DEPLOY_STATE_DIR")" ]; then
   exit 1
 fi
 
-# Independently verified from CI #19659 build+deploy+host-smoke and running
-# image digests. This seed is valid for THIS exact release only.
-baseline_sha=b4c6c9c6d268f8db638f22d4c9256832dddcd875
-gateway_ref="$REGISTRY/gpakoh/agent-ssh-gateway@sha256:138039b5da85ce0cb30c5b593b413b654d0dadd9d1712bb3bd39aa405f5ed0de"
-mcp_ref="$REGISTRY/gpakoh/mcp-server@sha256:a9a13014490aac48fb3f6a401061d09cc039c7ae7b355f65c551aff5aebde0ad"
-sshd_ref="$REGISTRY/gpakoh/ssh-gateway-sshd@sha256:0c96682a4b8903b31bc0245d3bcbafec5750ed38be4eed52dd4966c644bc4ed8"
+# Recovery from an actually empty dedicated volume is permitted ONLY for
+# independently attested exact image sets, never arbitrary healthy containers.
+# Original #19659 qualified the historic seed; #25510 (2026-11-14) passed
+# build, deploy AND host-smoke for 891f3482 and was independently inspected
+# against the five immutable container refs below (see Issue #909).
+# This does NOT repair an invalid existing receipt or infer a baseline from
+# mutable :latest, a legacy checkout, or an unauthenticated health response.
+historic_gateway="$REGISTRY/gpakoh/agent-ssh-gateway@sha256:138039b5da85ce0cb30c5b593b413b654d0dadd9d1712bb3bd39aa405f5ed0de"
+accepted_gateway="$REGISTRY/gpakoh/agent-ssh-gateway@sha256:8723a10a93546e746ae122d66ab6c97f56f8ba4e68ce05a5ec75b6f8f69981ac"
+live_gateway="$(docker inspect --format '{{.Config.Image}}' web-ssh-gateway)"
+case "$live_gateway" in
+  "$historic_gateway")
+    baseline_sha=b4c6c9c6d268f8db638f22d4c9256832dddcd875
+    gateway_ref="$historic_gateway"
+    mcp_ref="$REGISTRY/gpakoh/mcp-server@sha256:a9a13014490aac48fb3f6a401061d09cc039c7ae7b355f65c551aff5aebde0ad"
+    sshd_ref="$REGISTRY/gpakoh/ssh-gateway-sshd@sha256:0c96682a4b8903b31bc0245d3bcbafec5750ed38be4eed52dd4966c644bc4ed8"
+    ;;
+  "$accepted_gateway")
+    baseline_sha=891f3482b339711616af3d92c42903001cc69dee
+    gateway_ref="$accepted_gateway"
+    mcp_ref="$REGISTRY/gpakoh/mcp-server@sha256:157b3873d91d6c3ae2eeab3bf99c0fcfa78b9a6c036e16b32ee28f682729f8e0"
+    sshd_ref="$REGISTRY/gpakoh/ssh-gateway-sshd@sha256:f616f78acc163eaa6745bae249dc5beba17e97237a7c67761db417b84a3386a4"
+    ;;
+  *)
+    echo "::error::No independently attested release matches the running Gateway image" >&2
+    exit 1
+    ;;
+esac
 
 verify_live() {
   local name="$1" expected="$2" image health
