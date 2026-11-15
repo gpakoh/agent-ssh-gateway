@@ -1114,8 +1114,30 @@ async def gitea_get_repo(owner: str, repo: str) -> dict[str, Any]:
     return tool_success("gitea_get_repo", result=_minimize_gitea_repo(data), source="gitea")
 
 
+def _gitea_read_pagination_error(
+    tool: str, field: str, value: Any, *, max_value: int | None = 500
+) -> dict[str, Any] | None:
+    """Reject malformed read-only pagination before credentials or transport."""
+    try:
+        gitea_client._validate_positive_int(value, field)
+        if max_value is not None:
+            validate_pagination(value, field, max_value=max_value)
+    except ValueError as exc:
+        details: dict[str, Any] = {"field": field, "min_value": 1}
+        if max_value is not None:
+            details["max_value"] = max_value
+        return tool_error(
+            tool=tool, code="INVALID_INPUT", message=str(exc),
+            retryable=False, details=details, source="gitea",
+        )
+    return None
+
+
 async def gitea_list_branches(owner: str, repo: str, limit: int = 30) -> dict[str, Any]:
     """List branches in a Gitea repository."""
+    invalid = _gitea_read_pagination_error("gitea_list_branches", "limit", limit)
+    if invalid is not None:
+        return invalid
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
@@ -1138,6 +1160,9 @@ async def gitea_list_commits(
     owner: str, repo: str, sha: str | None = None, limit: int = 30
 ) -> dict[str, Any]:
     """List commits in a Gitea repository. Optionally filter by branch SHA."""
+    invalid = _gitea_read_pagination_error("gitea_list_commits", "limit", limit)
+    if invalid is not None:
+        return invalid
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
@@ -1166,6 +1191,13 @@ async def gitea_list_commit_statuses(
             tool=tool, code="INVALID_INPUT",
             message="sha must be an exact lowercase 40-character commit SHA", source="gitea",
         )
+    for field, value, max_value in (
+        ("page", page, None),
+        ("limit", limit, gitea_client.MAX_LIMIT),
+    ):
+        invalid = _gitea_read_pagination_error(tool, field, value, max_value=max_value)
+        if invalid is not None:
+            return invalid
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(tool=tool, code="DEPENDENCY_MISSING", message="GITEA_TOKEN not configured", source="gitea")
@@ -1268,6 +1300,9 @@ async def gitea_list_issues(
             },
             source="gitea",
         )
+    invalid = _gitea_read_pagination_error("gitea_list_issues", "limit", limit)
+    if invalid is not None:
+        return invalid
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
