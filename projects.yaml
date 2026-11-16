@@ -386,13 +386,6 @@ projects:
     description: "Durable long-running work session runtime between Engineering Supervisor and OpenCode"
     tags: ["quart", "forge", "work-session", "agent-runtime"]
 
-  infra-quart-supervisor-auth-20260903:
-    root: "quart-platform/.infra-quart-wt"
-    parent: quart-platform
-    type: "infra"
-    description: "Isolated clean infra-quart worktree for Supervisor internal API auth wiring corrective"
-    tags: ["infra-quart", "supervisor", "security", "corrective"]
-
   kojo-bot-service-ci325-hard-deadline-20260904:
     root: "quart-platform/.supervisor-workspaces/kojo-ci325-hard-deadline-20260904"
     parent: quart-platform
@@ -438,18 +431,6 @@ projects:
     description: "Temporary verified source-processing replay/limit candidate"
     tags: ["supervisor", "temporary", "verification"]
 
-  infra-quart-faiss-debug-writer-pinning-20260904:
-    root: ".supervisor-workspaces/infra-quart-faiss-debug-writer-pinning-20260904"
-    type: "infra"
-    description: "Temporary writable infra-quart clone for FAISS debug writer-pinning fix"
-    tags: ["infra-quart", "rag", "temporary"]
-
-  infra-quart-docparser-relative-context-20260904:
-    root: ".supervisor-workspaces/infra-quart-docparser-relative-context-20260904"
-    type: "infra"
-    description: "Temporary writable infra-quart clone for document-parser relative build context fix"
-    tags: ["infra-quart", "rag", "temporary"]
-
   zalesskiy-sup:
     root: astra/zalesskiy-sup
     type: astro
@@ -461,12 +442,6 @@ projects:
     type: "python-service"
     description: "Temporary manual GatewayAdapter candidate"
     tags: ["supervisor", "temporary", "verification"]
-
-  infra-quart-rag-smoke-blocked-gate-20260904:
-    root: ".supervisor-workspaces/infra-quart-rag-smoke-blocked-gate-20260904c"
-    type: "infra"
-    description: "Temporary writable infra-quart clone for RAG smoke BLOCKED_INFRA gate fix"
-    tags: ["infra-quart", "rag", "ci", "temporary"]
 
   engineering-supervisor-delivery-bundles-20260904-continue:
     root: ".supervisor-workspaces/engineering-supervisor-delivery-bundles-20260904-continue"
@@ -504,12 +479,6 @@ projects:
     type: "python"
     description: "Clean detached master worktree for direct-master policy and delivery-contract fixes"
     tags: ["agent-ssh-gateway", "master-direct", "temporary"]
-
-  infra-quart-host-binds-20260904:
-    root: ".supervisor-workspaces/infra-quart-host-binds-20260904"
-    type: "infra"
-    description: "Temporary writable infra-quart clone for internal host port bind hardening"
-    tags: ["infra-quart", "networking", "security", "temporary"]
 
   engineering-supervisor-service-deploy-3efd3ff-20260904:
     root: "engineering-supervisor-service-deploy-3efd3ff-20260904T1646"
