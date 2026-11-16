@@ -2332,6 +2332,42 @@ def git_write_capabilities(
     return probe_git_write_capabilities(client, project)
 
 
+def _git_write_plane_block_code(project: str) -> str:
+    """Distinguish a registered canonical outage from a candidate write denial.
+
+    Classification is based on the authoritative project registry, not a
+    candidate-looking project name. If registry inspection is unavailable,
+    keep the existing generic Git blocker rather than claiming canonical
+    identity without evidence. This is diagnostic only; never a fallback.
+    """
+    try:
+        from app.workspace.registry import get_registry
+
+        project_type = get_registry().project_info(project).get("type")
+    except Exception:
+        return "GIT_WRITE_CAPABILITY_BLOCKED"
+    if not isinstance(project_type, str) or project_type in {
+        "candidate-clone", "coordination-only",
+    }:
+        return "GIT_WRITE_CAPABILITY_BLOCKED"
+    return "CANONICAL_WRITE_PLANE_UNAVAILABLE"
+
+
+def _git_write_plane_recovery_hint(project: str) -> str:
+    if _git_write_plane_block_code(project) == "CANONICAL_WRITE_PLANE_UNAVAILABLE":
+        return (
+            "Canonical workspace is not writeable on the Git execution plane. "
+            "Preserve local-only commits and obtain scoped owner-controlled "
+            "worktree/metadata permission provisioning before reconciliation; "
+            "do not force/reset, bypass command policy, or silently substitute "
+            "a candidate clone for canonical writes."
+        )
+    return (
+        "Use a managed writeable candidate clone for candidate-scoped changes; "
+        "do not change global Git ownership or safe.directory to bypass this guard."
+    )
+
+
 def _git_write_preflight_from_probe(
     project: str,
     *,
@@ -2370,13 +2406,10 @@ def _git_write_preflight_from_probe(
     if blocked:
         return tool_error(
             tool=tool_name,
-            code="GIT_WRITE_CAPABILITY_BLOCKED",
+            code=_git_write_plane_block_code(project),
             message="Registered workspace lacks required Git metadata write capability",
             retryable=False,
-            hint=(
-                "Use prepare_candidate_clone or another managed writeable candidate; do not change "
-                "global Git safe.directory/ownership settings to bypass this guard."
-            ),
+            hint=_git_write_plane_recovery_hint(project),
             details={
                 "project": project,
                 "action": action,
@@ -3124,10 +3157,10 @@ def git_refresh_branch_to_head(
     if worktree_preflight["blocked_count"]:
         return tool_error(
             tool="git_refresh_branch_to_head",
-            code="GIT_WRITE_CAPABILITY_BLOCKED",
+            code=_git_write_plane_block_code(project),
             message="Exact-head refresh would write tracked files under non-writeable or unsafe parent directories.",
             retryable=False,
-            hint="Review the blocked relative paths and obtain narrowly scoped owner-approved remediation; no checkout was attempted.",
+            hint=_git_write_plane_recovery_hint(project),
             details={
                 "project": project,
                 "branch": branch,
@@ -3369,10 +3402,10 @@ def git_switch_existing_branch(
     if not worktree["available"] or worktree["blocked_count"]:
         return tool_error(
             tool="git_switch_existing_branch",
-            code=("GIT_WRITE_CAPABILITY_BLOCKED" if worktree["blocked_count"]
+            code=(_git_write_plane_block_code(project) if worktree["blocked_count"]
                   else "GIT_WRITE_PREFLIGHT_UNAVAILABLE"),
             message="Destination worktree path safety could not be proven; no switch attempted",
-            retryable=False, hint="Review bounded path diagnostics; never force a checkout",
+            retryable=False, hint=_git_write_plane_recovery_hint(project),
             details={
                 "project": project, "checked_count": worktree.get("checked_count"),
                 "blocked_count": worktree.get("blocked_count"),
@@ -3732,12 +3765,12 @@ def git_update_branch_by_merge(
             return tool_error(
                 tool="git_update_branch_by_merge",
                 code=(
-                    "GIT_WRITE_CAPABILITY_BLOCKED" if worktree.get("blocked_count")
+                    _git_write_plane_block_code(project) if worktree.get("blocked_count")
                     else "GIT_WRITE_PREFLIGHT_UNAVAILABLE"
                 ),
                 message="Merge worktree path safety cannot be proven; no Git mutation attempted",
                 retryable=not bool(worktree.get("blocked_count")),
-                hint="Inspect bounded relative paths; use a writable managed candidate, never force checkout",
+                hint=_git_write_plane_recovery_hint(project),
                 details={
                     "project": project,
                     "phase": phase,
