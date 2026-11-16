@@ -201,6 +201,40 @@ class TestComposeConfirmFlow:
         assert client.compose_up.call_args.kwargs["project_dir"] != root_b
 
     @pytest.mark.asyncio
+    async def test_compose_build_rofs_uses_validated_alias_root_without_leaking_path(
+        self, clean_confirm_store
+    ):
+        import examples.mcp_server.server as srv
+
+        root = "/srv/projects/infra-quart"
+        client = _AliasDockerClient()
+        client.compose_build = AsyncMock(
+            side_effect=RuntimeError(
+                f"failed to write {root}/generated/output: read-only file system; "
+                "TOKEN=SECRET_456"
+            )
+        )
+        with patch.object(srv, "DockerClient", lambda: client), patch.object(
+            srv, "_get_workspace_registry", return_value=_AliasRegistry(root)
+        ):
+            action = await srv.docker_compose_build(project_dir="infra-quart")
+            assert action["ok"] is True
+            result = await srv.confirm_operation(
+                token=action["result"]["confirm_token"]
+            )
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "DOCKER_COMMAND_FAILED"
+        assert result["error"]["details"] == {
+            "failure_class": "read_only_fs",
+            "write_surface": "compose_context",
+        }
+        assert root not in json.dumps(result)
+        assert "SECRET_456" not in json.dumps(result)
+        client.compose_build.assert_awaited_once()
+        assert client.compose_build.call_args.kwargs["project_dir"] == root
+
+    @pytest.mark.asyncio
     async def test_registered_alias_rejected_before_confirmation_when_root_is_disallowed(
         self, clean_confirm_store
     ):
@@ -350,6 +384,22 @@ class TestComposeConfirmFlow:
             (
                 "failed to write /hidden/operator/.cache/buildkit/state: read-only file system; TOKEN=SECRET_456",
                 "builder_cache",
+            ),
+            (
+                "failed to create /var/lib/buildkit/state.db: read-only file system; TOKEN=SECRET_456",
+                "builder_state",
+            ),
+            (
+                "failed to write /var/lib/docker/overlay2/metadata: read-only file system; TOKEN=SECRET_456",
+                "daemon_namespace",
+            ),
+            (
+                "failed to mkdir /tmp/mcp-buildx: read-only file system; TOKEN=SECRET_456",
+                "client_buildx_home",
+            ),
+            (
+                "mkdir /run/mcp-docker-config/buildx:\nread-only file system; TOKEN=SECRET_456",
+                "client_buildx_home",
             ),
             (
                 "failed to write /hidden/operator/context: read-only file system; TOKEN=SECRET_456",
@@ -522,3 +572,115 @@ class TestAdminDoubleBarrier:
                 token=action_result["confirm_token"]
             )
         assert result["ok"] is True
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "trusted_context", "expected"),
+    [
+        (
+            "failed to write /srv/approved/project/output: read-only file system",
+            "/srv/approved/project",
+            "compose_context",
+        ),
+        (
+            "failed to write /srv/approved/project/output: read-only file system",
+            None,
+            "unclassified",
+        ),
+        (
+            "failed to write /srv/approved/project-leak/output: read-only file system",
+            "/srv/approved/project",
+            "unclassified",
+        ),
+        (
+            "failed to write /srv/approved/project/../secret: read-only file system",
+            "/srv/approved/project",
+            "unclassified",
+        ),
+        (
+            "failed to write /var/lib/buildkit: read-only file system",
+            None,
+            "builder_state",
+        ),
+        (
+            "failed to write /var/lib/docker: read-only file system",
+            None,
+            "daemon_namespace",
+        ),
+        (
+            "failed to write /var/lib/docker/buildkit/cache.db: read-only file system",
+            None,
+            "builder_state",
+        ),
+        (
+            "failed to write /var/lib/docker-trap/overlay2: read-only file system",
+            None,
+            "unclassified",
+        ),
+        (
+            "failed to write /hidden/.cache/buildkit-backup/output: read-only file system",
+            None,
+            "unclassified",
+        ),
+        (
+            "failed to write /hidden/.docker/buildx-not-valid: read-only file system",
+            None,
+            "unclassified",
+        ),
+        (
+            "successful log: /.docker/buildx\n"
+            "failed to write /var/lib/docker/overlay2/file: read-only file system",
+            None,
+            "daemon_namespace",
+        ),
+        (
+            "failed to write /var/lib/docker/overlay2/file: read-only file system\n"
+            "failed to create /var/lib/buildkit/state: read-only file system",
+            None,
+            "unclassified",
+        ),
+        (
+            "cannot read /var/lib/docker: read-only file system",
+            None,
+            "unclassified",
+        ),
+        (
+            "failed to write /var/lib/docker/cache: permission denied",
+            None,
+            "unclassified",
+        ),
+        (
+            "failed to mkdir /tmp/mcp-buildx: read-only file system",
+            None,
+            "client_buildx_home",
+        ),
+        (
+            "mkdir /run/mcp-docker-config/buildx:\nread-only file system",
+            None,
+            "client_buildx_home",
+        ),
+        (
+            "mkdir /run/mcp-docker-config/buildx/instances: read-only file system",
+            None,
+            "client_buildx_home",
+        ),
+        (
+            "mkdir /run/mcp-docker-config/buildx-logs: read-only file system",
+            None,
+            "unclassified",
+        ),
+        (
+            "successful mkdir /run/mcp-docker-config/buildx: read-only file system",
+            None,
+            "unclassified",
+        ),
+    ],
+)
+def test_compose_readonly_write_surface_requires_explicit_write_and_trusted_root(
+    diagnostic: str, trusted_context: str | None, expected: str
+) -> None:
+    from examples.mcp_server.mcp_infra.adapters.docker import (
+        _compose_readonly_write_surface,
+    )
+
+    assert _compose_readonly_write_surface(diagnostic, trusted_context) == expected
