@@ -1004,6 +1004,8 @@ async def test_merge_ci_incomplete_observes_concurrent_merge_without_mutating(mo
     assert result["error"]["retryable"] is False
     assert result["error"]["details"] == {
         "expected_head_sha": SHA,
+        "expected_base_ref": "master",
+        "observed_base_sha": BASE_SHA,
         "observed_merge_commit_sha": "b" * 40,
         "concurrent_merge_observed": True,
         "mutation_started": False,
@@ -1594,6 +1596,80 @@ async def test_adapter_rejects_base_advancing_after_green_ci(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_ci_incomplete_does_not_attest_merge_into_changed_base_ref(monkeypatch):
+    """A merged PR retargeted during CI evidence is not the reviewed target."""
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient("token", workflow_payload=None)
+    original_workflows = client.list_workflows
+
+    async def concurrent_retarget_and_merge(*args):
+        client.merged = True
+        client.base_ref = "release/other"
+        return await original_workflows(*args)
+
+    client.list_workflows = concurrent_retarget_and_merge
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request("owner", "repo", 25, SHA)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CI_EVIDENCE_INCOMPLETE"
+    assert client.merge_calls == []
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_merge_retargeted_after_post_is_unproven(monkeypatch):
+    """Matching head/merge SHA never attests a different target branch."""
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+
+    class RetargetOnMerge(FakeMergeClient):
+        async def merge_pull_request(self, owner, repo, pull_number, **kwargs):
+            await super().merge_pull_request(owner, repo, pull_number, **kwargs)
+            self.base_ref = "release/other"
+
+    client = RetargetOnMerge(
+        "token",
+        merge_exception=None,
+        apply_merge=True,
+    )
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request(
+        "owner", "repo", 25, SHA, expected_base_sha=BASE_SHA
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "MUTATION_OUTCOME_UNKNOWN"
+    details = result["error"]["details"]
+    assert details["mutation_started"] is True
+    assert details["observed"]["base_ref_matches_expected"] is False
+    assert details["observed"]["base_sha"] == BASE_SHA
+    assert len(client.merge_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_post_merge_base_sha_advancement_is_not_target_retarget(monkeypatch):
+    """Gitea may legitimately move base.sha to the merge commit."""
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+
+    class AdvanceBaseOnMerge(FakeMergeClient):
+        async def merge_pull_request(self, owner, repo, pull_number, **kwargs):
+            await super().merge_pull_request(owner, repo, pull_number, **kwargs)
+            self.base_sha = NEW_BASE_SHA
+
+    client = AdvanceBaseOnMerge("token")
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request(
+        "owner", "repo", 25, SHA, expected_base_sha=BASE_SHA
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["merge_commit_sha"] == "b" * 40
+    assert len(client.merge_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_adapter_reconciles_transport_lost_after_server_applied_merge(monkeypatch):
     monkeypatch.setenv("GITEA_TOKEN", "token")
     timeout = httpx.ReadTimeout(
@@ -1752,6 +1828,7 @@ async def test_reconciliation_requires_merge_commit_sha_even_when_merged_true():
         "repo",
         25,
         expected_head_sha=SHA,
+        expected_base_ref="master",
     )
 
     assert merged_pr is None
@@ -1779,6 +1856,7 @@ async def test_reconciliation_rejects_merged_state_for_different_head():
         "repo",
         25,
         expected_head_sha=SHA,
+        expected_base_ref="master",
     )
 
     assert merged_pr is None

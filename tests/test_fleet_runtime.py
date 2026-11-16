@@ -859,7 +859,9 @@ async def test_watcher_releases_on_authoritative_job_not_found():
         },
         expected_job_id="job-42",
     )
-    assert "job-42" not in runtime._watchers_by_job
+    # complete_task can resolve before the watcher's done callback runs.
+    # Observe eventual watcher deregistration rather than one event-loop tick.
+    assert await _wait_until(lambda: "job-42" not in runtime._watchers_by_job)
     await runtime.close()
 
 
