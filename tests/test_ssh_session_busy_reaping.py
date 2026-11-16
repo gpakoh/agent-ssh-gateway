@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -229,7 +230,10 @@ async def test_execute_stream_cancellation_releases_busy_counter(
     manager._sessions[record.session_id] = record
     stdin, stdout, stderr = _command_streams(record)
     channel_ready = asyncio.Event()
-    stdin.channel.shutdown_write.side_effect = channel_ready.set
+    loop = asyncio.get_running_loop()
+    stdin.channel.shutdown_write.side_effect = lambda: loop.call_soon_threadsafe(
+        channel_ready.set
+    )
     stdout.channel.exit_status_ready.return_value = False
     stdout.channel.recv_ready.return_value = False
     stderr.channel.recv_stderr_ready.return_value = False
@@ -285,3 +289,151 @@ async def test_execute_stream_cancel_before_executor_starts_has_no_channel_to_cl
     assert record.active_operations == 0
     assert queued.cancelled()
     stdout.channel.close.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocked_step", ["stdin_write", "shutdown_write", "exit_status"])
+async def test_execute_stream_blocking_paramiko_step_keeps_event_loop_responsive(
+    monkeypatch: pytest.MonkeyPatch,
+    blocked_step: str,
+) -> None:
+    """A blocking Paramiko operation must not stall /health on the ASGI worker."""
+    manager = _manager()
+    record = _record()
+    manager._sessions[record.session_id] = record
+    stdin, stdout, stderr = _command_streams(record)
+    stdout.channel.exit_status_ready.return_value = True
+    stdout.channel.recv_ready.return_value = False
+    stderr.channel.recv_stderr_ready.return_value = False
+    stdout.channel.recv_exit_status.return_value = 0
+    monkeypatch.setattr("app.ssh_manager._emit", lambda *_args, **_kwargs: None)
+
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    release = threading.Event()
+    timestamps: list[float] = []
+
+    def stalled_paramiko_step(*_args: Any) -> int:
+        timestamps.append(time.monotonic())
+        loop.call_soon_threadsafe(entered.set)
+        release.wait(timeout=2.5)  # safe even when the pre-fix event loop blocks
+        return 0
+
+    if blocked_step == "stdin_write":
+        stdin.write.side_effect = stalled_paramiko_step
+    elif blocked_step == "shutdown_write":
+        stdin.channel.shutdown_write.side_effect = stalled_paramiko_step
+    else:
+        stdout.channel.recv_exit_status.side_effect = stalled_paramiko_step
+
+    async def consume() -> list[tuple[str, str]]:
+        return [
+            event
+            async for event in manager.execute_stream(
+                record.session_id,
+                "true",
+                timeout=10,
+                stdin_data=b"x" if blocked_step == "stdin_write" else b"",
+            )
+        ]
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=4.0)
+        assert time.monotonic() - timestamps[0] < 1.2, (
+            f"{blocked_step} blocked the event loop while Paramiko waited"
+        )
+    finally:
+        release.set()
+        assert await asyncio.wait_for(task, timeout=4.0) == [("exit", "0")]
+        assert record.active_operations == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocked_step", ["stdin_write", "shutdown_write", "exit_status"])
+async def test_execute_stream_paramiko_step_timeout_closes_channel(
+    monkeypatch: pytest.MonkeyPatch,
+    blocked_step: str,
+) -> None:
+    manager = _manager()
+    record = _record()
+    manager._sessions[record.session_id] = record
+    stdin, stdout, stderr = _command_streams(record)
+    stdout.channel.exit_status_ready.return_value = True
+    stdout.channel.recv_ready.return_value = False
+    stderr.channel.recv_stderr_ready.return_value = False
+    monkeypatch.setattr("app.ssh_manager._emit", lambda *_args, **_kwargs: None)
+
+    release = threading.Event()
+    stdout.channel.close.side_effect = release.set
+
+    def wait_for_close(*_args: Any) -> int:
+        release.wait(timeout=4)
+        return 0
+
+    if blocked_step == "stdin_write":
+        stdin.write.side_effect = wait_for_close
+    elif blocked_step == "shutdown_write":
+        stdin.channel.shutdown_write.side_effect = wait_for_close
+    else:
+        stdout.channel.recv_exit_status.side_effect = wait_for_close
+
+    try:
+        events = [
+            event
+            async for event in manager.execute_stream(
+                record.session_id,
+                "true",
+                timeout=1,
+                stdin_data=b"x" if blocked_step == "stdin_write" else b"",
+            )
+        ]
+    finally:
+        release.set()
+
+    assert len(events) == 1
+    assert events[0][0] == "error"
+    assert "timed out after 1s" in events[0][1]
+    stdout.channel.close.assert_called_once()
+    assert record.active_operations == 0
+
+
+@pytest.mark.asyncio
+async def test_execute_stream_cancel_while_stdin_write_waits_closes_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _manager()
+    record = _record()
+    manager._sessions[record.session_id] = record
+    stdin, stdout, _stderr = _command_streams(record)
+    monkeypatch.setattr("app.ssh_manager._emit", lambda *_args, **_kwargs: None)
+
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    release = threading.Event()
+
+    def wait_for_cancel(_data: bytes) -> int:
+        loop.call_soon_threadsafe(entered.set)
+        release.wait(timeout=4)
+        return 0
+
+    stdin.write.side_effect = wait_for_cancel
+    stdout.channel.close.side_effect = release.set
+
+    async def consume() -> None:
+        async for _event in manager.execute_stream(
+            record.session_id, "true", timeout=10, stdin_data=b"x"
+        ):
+            pass
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        assert record.active_operations == 1
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2)
+    finally:
+        release.set()
+    assert record.active_operations == 0
+    stdout.channel.close.assert_called_once()

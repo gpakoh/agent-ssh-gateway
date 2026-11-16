@@ -886,11 +886,23 @@ class SSHSessionManager:
                     loop.run_in_executor(None, stdin.write, stdin_data),
                     timeout=self._remaining_timeout(deadline),
                 )
-            stdin.channel.shutdown_write()
+            # Paramiko shutdown_write may block on channel backpressure.
+            # execute_argv is an ASGI coroutine: never block the event loop.
+            await asyncio.wait_for(
+                loop.run_in_executor(None, stdin.channel.shutdown_write),
+                timeout=self._remaining_timeout(deadline),
+            )
 
             out_data, err_data, exit_code = await self._drain_command_streams(
                 loop, stdout, stderr, deadline=deadline
             )
+        except asyncio.CancelledError:
+            if channel is not None:
+                try:
+                    channel.close()
+                except Exception:
+                    pass
+            raise
         except builtins.TimeoutError:
             if channel is not None:
                 try:
@@ -1002,13 +1014,26 @@ class SSHSessionManager:
             stdin, stdout, stderr = await loop.run_in_executor(
                 None, _start_command,
             )
-            if stdin_data:
-                stdin.write(stdin_data)
-            stdin.channel.shutdown_write()
-
             out_channel = stdout.channel
             err_channel = stderr.channel
             deadline = time.monotonic() + timeout
+
+            # Paramiko write/shutdown can wait on SSH channel backpressure.
+            # Never perform them on the sole ASGI event-loop thread: even
+            # /health would be unable to answer until the remote peer drains.
+            def _send_stdin():
+                if stdin_data:
+                    stdin.write(stdin_data)
+                stdin.channel.shutdown_write()
+
+            try:
+                await asyncio.wait_for(
+                    loop.run_in_executor(None, _send_stdin),
+                    timeout=max(0.001, deadline - time.monotonic()),
+                )
+            except builtins.TimeoutError:
+                out_channel.close()
+                raise TimeoutError(f"Command execution timed out after {timeout}s") from None
 
             # Stream Output In Chunks
             while not out_channel.exit_status_ready():
@@ -1042,7 +1067,20 @@ class SSHSessionManager:
                 data = err_channel.recv_stderr(4096).decode("utf-8", errors="replace")
                 yield ("stderr", data)
 
-            exit_code = out_channel.recv_exit_status()
+            # A channel may report exit-status-ready while Paramiko still
+            # waits on its synchronization primitives; do not block /health.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                out_channel.close()
+                raise TimeoutError(f"Command execution timed out after {timeout}s")
+            try:
+                exit_code = await asyncio.wait_for(
+                    loop.run_in_executor(None, out_channel.recv_exit_status),
+                    timeout=remaining,
+                )
+            except builtins.TimeoutError:
+                out_channel.close()
+                raise TimeoutError(f"Command execution timed out after {timeout}s") from None
             yield ("exit", str(exit_code))
 
             _emit(
