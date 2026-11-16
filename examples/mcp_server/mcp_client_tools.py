@@ -3624,6 +3624,38 @@ def git_update_branch_by_merge(
     if preflight_error is not None:
         return preflight_error
 
+    # Branch switch and source merge both write tracked paths. A Git switch
+    # may exit 0 despite Permission denied errors and leave a mixed worktree.
+    # Probe both exact diff surfaces before beginning either mutation.
+    for phase, before, after in (
+        ("switch", original_head, target_head),
+        ("merge", target_head, source_head),
+    ):
+        worktree = probe_git_refresh_worktree_paths(
+            client, project, current_head=before, target_head=after
+        )
+        if not worktree.get("available") or worktree.get("blocked_count"):
+            return tool_error(
+                tool="git_update_branch_by_merge",
+                code=(
+                    "GIT_WRITE_CAPABILITY_BLOCKED" if worktree.get("blocked_count")
+                    else "GIT_WRITE_PREFLIGHT_UNAVAILABLE"
+                ),
+                message="Merge worktree path safety cannot be proven; no Git mutation attempted",
+                retryable=not bool(worktree.get("blocked_count")),
+                hint="Inspect bounded relative paths; use a writable managed candidate, never force checkout",
+                details={
+                    "project": project,
+                    "phase": phase,
+                    "checked_count": worktree.get("checked_count"),
+                    "blocked_count": worktree.get("blocked_count"),
+                    "blocked_paths": worktree.get("blocked_paths", []),
+                    "reason": worktree.get("reason"),
+                    "mutation_occurred": False,
+                },
+                source="gateway",
+            )
+
     commands = [
         f"git switch {shlex.quote(branch)}",
         f"git merge --no-ff --no-edit {shlex.quote(source_branch)}",
@@ -3632,7 +3664,7 @@ def git_update_branch_by_merge(
     stdout_parts: list[str] = []
     stderr_parts: list[str] = []
     last: dict[str, Any] | None = None
-    for command in commands:
+    for step, command in enumerate(commands):
         last = run_project_command(client, project, command)
         stdout_parts.append(str(last.get("stdout", "")))
         stderr_parts.append(str(last.get("stderr", "")))
@@ -3672,7 +3704,56 @@ def git_update_branch_by_merge(
                 result=last,
             )
 
+        if step == 0:
+            # Git may report exit=0 while logging failed unlinks/creates.
+            # Never merge into a partially switched or dirty worktree.
+            switched = _project_git_state(resolved)
+            if (
+                not switched.get("available")
+                or switched.get("detached")
+                or switched.get("dirty")
+                or switched.get("branch") != branch
+                or str(switched.get("head") or "").lower() != target_head
+            ):
+                return tool_error(
+                    tool="git_update_branch_by_merge",
+                    code="WORKSPACE_VERIFICATION_FAILED",
+                    message="Git switch returned success but exact clean target state was not verified; merge not started",
+                    retryable=False,
+                    hint="Inspect exact Git status and preserve worktree before guarded recovery; never retry blindly",
+                    details={
+                        "project": project,
+                        "phase": "post_switch",
+                        "mutation_occurred": "unknown",
+                    },
+                    source="gateway",
+                )
+
     new_head = str(last.get("stdout", "")).strip() if last else ""
+    final = _project_git_state(resolved)
+    if (
+        not final.get("available")
+        or final.get("detached")
+        or final.get("dirty")
+        or final.get("branch") != branch
+        or str(final.get("head") or "").lower() != new_head
+        or _local_git_output(resolved, ["merge-base", "--is-ancestor", target_head, new_head]) is None
+        or _local_git_output(resolved, ["merge-base", "--is-ancestor", source_head, new_head]) is None
+    ):
+        return tool_error(
+            tool="git_update_branch_by_merge",
+            code="WORKSPACE_VERIFICATION_FAILED",
+            message="Merge returned success but clean merged-ancestry Git postconditions were not verified",
+            retryable=False,
+            hint="Inspect branch, worktree and merge ancestry; no automatic retry or forced recovery",
+            details={
+                "project": project,
+                "phase": "post_merge",
+                "mutation_occurred": "unknown",
+            },
+            source="gateway",
+        )
+
     return {
         "outcome": "passed",
         "exit_code": 0,
