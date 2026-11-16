@@ -334,6 +334,43 @@ def test_git_refresh_branch_to_head_rejects_non_fast_forward(tmp_path):
 
     assert result["ok"] is False
     assert result["error"]["code"] == "GIT_NON_FAST_FORWARD"
+    details = result["error"]["details"]
+    assert details["common_ancestor_sha"] == _git(repo, "merge-base", feature_head, master_head)
+    assert details["local_only_commits"] == 1
+    assert details["target_only_commits"] == 1
+    assert details["mutation_occurred"] is False
+    assert client.commands == []
+    assert _git(repo, "rev-parse", "HEAD") == feature_head
+
+
+def test_git_refresh_divergence_fails_closed_when_diagnostics_unavailable(tmp_path):
+    repo, feature_head = _init_merge_repo(tmp_path)
+    _git(repo, "switch", "feature/update")
+    master_head = _git(repo, "rev-parse", "master")
+    client = _LocalGitClient(repo)
+    from unittest.mock import patch
+
+    from mcp_client_tools import _local_git_output
+
+    def missing_diagnostics(root, args):
+        if args[0] == "rev-list" or (args[0] == "merge-base" and "--is-ancestor" not in args):
+            return None
+        return _local_git_output(root, args)
+
+    with (
+        patch("mcp_client_tools._resolve_project", return_value=repo),
+        patch("mcp_client_tools._local_git_output", side_effect=missing_diagnostics),
+    ):
+        result = git_refresh_branch_to_head(
+            client, "proj", "feature/update", feature_head, master_head
+        )
+
+    assert result["error"]["code"] == "GIT_NON_FAST_FORWARD"
+    details = result["error"]["details"]
+    assert details["common_ancestor_sha"] is None
+    assert details["local_only_commits"] is None
+    assert details["target_only_commits"] is None
+    assert details["mutation_occurred"] is False
     assert client.commands == []
     assert _git(repo, "rev-parse", "HEAD") == feature_head
 
