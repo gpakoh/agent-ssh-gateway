@@ -906,6 +906,52 @@ class TestMcpOauthWorkspaceMount:
         assert mount == f"{var_expr}:{var_expr}:rw", mount
 
 
+class TestMcpOauthAstroSitesNamedRoot:
+    """Real Astra site sources have a dedicated, non-auto-creating bind."""
+
+    def test_registry_names_the_existing_astra_site_source(self):
+        registry = yaml.safe_load((ROOT / "projects.yaml").read_text(encoding="utf-8"))
+        assert registry["registry_root"] == "/media/1TB/Python"
+        assert registry["registry_roots"]["astro-sites"] == (
+            "/media/1TB/Python/astra/sites"
+        )
+
+    def test_oauth_bind_uses_exact_named_root_without_creating_host_path(self):
+        oauth = _load_compose()["services"]["mcp-oauth"]
+        expected = "${MCP_OAUTH_ASTRO_SITES_ROOT:-/media/1TB/Python/astra/sites}"
+        mounts = [
+            mount for mount in oauth["volumes"]
+            if isinstance(mount, dict) and mount.get("target") == expected
+        ]
+        assert len(mounts) == 1
+        mount = mounts[0]
+        assert mount["type"] == "bind"
+        assert mount["source"] == expected
+        assert mount["read_only"] is False
+        assert mount["bind"]["create_host_path"] is False
+
+        env = _env_dict(oauth["environment"])
+        assert env["MCP_OAUTH_ASTRO_SITES_ROOT"] == expected
+
+    def test_site_sources_are_not_mounted_on_safe_or_gateway_service(self):
+        compose = _load_compose()
+        for name in ("mcp-server", "web-ssh-gateway"):
+            service = compose["services"][name]
+            assert "MCP_OAUTH_ASTRO_SITES_ROOT" not in json.dumps(
+                {"volumes": service.get("volumes", []), "environment": service.get("environment", [])}
+            )
+
+    def test_documented_root_must_preexist_and_preserve_site_ownership(self):
+        runbook = (
+            ROOT / "docs" / "runbooks" / "astro-sites-named-root.md"
+        ).read_text(encoding="utf-8")
+        assert "/media/1TB/Python/astra/sites" in runbook
+        assert "create_host_path: false" in runbook
+        assert "lana.xloud" in runbook
+        assert "root:root" in runbook
+        assert "MCP_OAUTH_ASTRO_SITES_ROOT" in runbook
+
+
 class TestDocsOnlyPushDoesNotDeployRuntime:
     """Docs PRs and pushes keep evidence without rebuilding the live stack."""
 

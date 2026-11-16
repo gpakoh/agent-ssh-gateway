@@ -301,6 +301,9 @@ services:
       - MCP_AGENT_EXECUTOR_SSH_KEY_PATH=/app/ssh_key
       - MCP_GATEWAY_PROJECT_ROOT=${MCP_OAUTH_PROJECT_ROOT:-}
       - MCP_PROJECT_MAP_JSON=${MCP_OAUTH_PROJECT_MAP_JSON:-}
+      # Non-secret canonical Astra site root. A different host root must be
+      # explicitly reconciled with projects.yaml before deploying.
+      - MCP_OAUTH_ASTRO_SITES_ROOT=${MCP_OAUTH_ASTRO_SITES_ROOT:-/media/1TB/Python/astra/sites}
       - MCP_GATEWAY_TOOL_MODE=mcp_client_write
       # Docker project operations remain path-allowlisted.  The admin OAuth
       # plane already has the exact MCP_OAUTH_PROJECT_ROOT mounted rw for its
@@ -440,6 +443,16 @@ services:
       # project volumes mounted :ro") -- read access for search_text/
       # read_file/run_tests/etc., no write path opened by this mount.
       - ${MCP_OAUTH_PROJECT_ROOT:?set MCP_OAUTH_PROJECT_ROOT}:${MCP_OAUTH_PROJECT_ROOT:?set MCP_OAUTH_PROJECT_ROOT}:rw
+      # Explicit Astra source-tree bind: must already exist on host. Compose's
+      # short syntax could silently create a fresh empty directory, hiding a
+      # wrong site root and exposing a false-success project registry.
+      # UID 1000 still follows Unix ownership: root-owned Lana is not writable.
+      - type: bind
+        source: ${MCP_OAUTH_ASTRO_SITES_ROOT:-/media/1TB/Python/astra/sites}
+        target: ${MCP_OAUTH_ASTRO_SITES_ROOT:-/media/1TB/Python/astra/sites}
+        read_only: false
+        bind:
+          create_host_path: false
       # Host docker daemon socket: makes docker_* tools (docker_client.py
       # spawns /usr/bin/docker) actually work against the host daemon.
       # User decision (Aug 11 2026): ChatGPT-connected OAuth client gets
