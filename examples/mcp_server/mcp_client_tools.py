@@ -3103,7 +3103,7 @@ def git_refresh_branch_to_head(
 
     # Metadata writeability does not prove that checkout can create new files
     # in root-owned paths such as scripts/. Probe all changed path parents on
-    # the SSH execution plane before reset --keep mutates any worktree content.
+    # the SSH execution plane before the guarded fast-forward mutates the worktree.
     worktree_preflight = probe_git_refresh_worktree_paths(
         client, project, current_head=current_head, target_head=target_head
     )
@@ -3141,12 +3141,86 @@ def git_refresh_branch_to_head(
             source="gateway",
         )
 
-    result = run_project_command(
-        client,
-        project,
-        f"git reset --keep {shlex.quote(target_head)}",
+    # The earlier read-only HEAD check is not a write lease. Another agent
+    # can commit after that check: reset --keep would discard its new branch
+    # tip even if the worktree is clean. Recheck branch/HEAD/index/cleanliness
+    # under the same project-directory flock used by guarded branch switching.
+    # Most importantly, ff-only can never rewrite a newly advanced history.
+    index_sha = state.get("index_sha256")
+    if not isinstance(index_sha, str) or re.fullmatch(r"[0-9a-f]{64}", index_sha) is None:
+        return tool_error(
+            tool="git_refresh_branch_to_head",
+            code="GIT_WRITE_PREFLIGHT_UNAVAILABLE",
+            message="Exact index lease is unavailable; no refresh attempted.",
+            retryable=True,
+            details={"project": project, "mutation_occurred": False},
+            source="gateway",
+        )
+    quote = shlex.quote
+    script = "\n".join([
+        "set -eu",
+        "# MCP_GIT_REFRESH_FAST_FORWARD_V1",
+        f"EXPECTED_BRANCH={quote(branch)}",
+        f"EXPECTED_HEAD={quote(current_head)}",
+        f"TARGET_HEAD={quote(target_head)}",
+        f"EXPECTED_INDEX={quote(index_sha)}",
+        'GIT_DIR="$(git rev-parse --absolute-git-dir)" || exit 98',
+        'exec 9< "$GIT_DIR" || exit 98',
+        'flock -n 9 || exit 96',
+        'test "$(git symbolic-ref --quiet --short HEAD)" = "$EXPECTED_BRANCH" || exit 97',
+        'test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD" || exit 97',
+        'STATUS="$(GIT_OPTIONAL_LOCKS=0 git status --porcelain=v1)" || exit 98',
+        'test -z "$STATUS" || exit 97',
+        'INDEX_FILE="$(mktemp "${TMPDIR:-/tmp}/mcp-refresh-index.XXXXXX")" || exit 98',
+        "trap 'rm -f \"$INDEX_FILE\"' EXIT",
+        'git ls-files --stage -z > "$INDEX_FILE" || exit 98',
+        'INDEX_SHA="$(sha256sum "$INDEX_FILE" | awk \'{print $1}\')" || exit 98',
+        'test "$INDEX_SHA" = "$EXPECTED_INDEX" || exit 97',
+        'if git merge --ff-only --no-edit "$TARGET_HEAD"; then :; else',
+        '  test "$(git symbolic-ref --quiet --short HEAD)" = "$EXPECTED_BRANCH" || exit 97',
+        '  test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD" || exit 97',
+        '  exit 99',
+        'fi',
+        'test "$(git symbolic-ref --quiet --short HEAD)" = "$EXPECTED_BRANCH" || exit 99',
+        'test "$(git rev-parse HEAD)" = "$TARGET_HEAD" || exit 99',
+        'STATUS="$(GIT_OPTIONAL_LOCKS=0 git status --porcelain=v1)" || exit 99',
+        'test -z "$STATUS" || exit 99',
+    ])
+    raw = client.execute_project_script(project, script, timeout_s=90)
+    code = int(raw.get("exit_code", -1))
+    result = build_command_result(
+        outcome="passed" if code == 0 else "failed",
+        exit_code=code,
+        stdout=_redact_project_root(raw.get("stdout") or raw.get("output") or "", str(resolved)),
+        stderr=_redact_project_root(raw.get("stderr") or "", str(resolved)),
+        execution_duration_ms=_execution_duration_ms(raw),
+        job_id=raw.get("job_id"),
+        cwd=".",
     )
-    if result.get("exit_code") != 0:
+    if code in (96, 97, 98, 99):
+        error_code = {
+            96: "WORKSPACE_CONTENDED",
+            97: "WORKSPACE_CONTENDED",
+            98: "GIT_WRITE_PREFLIGHT_UNAVAILABLE",
+            99: "GIT_OPERATION_FAILED",
+        }[code]
+        return tool_error(
+            tool="git_refresh_branch_to_head",
+            code=error_code,
+            message="Guarded fast-forward failed; no automatic reset, rollback, or retry.",
+            retryable=False,
+            hint="Recheck the exact branch, HEAD, index and worktree before taking another action.",
+            details={
+                "project": project,
+                "branch": branch,
+                "previous_head": current_head,
+                "target_head": target_head,
+                "mutation_occurred": "unknown" if code == 99 else False,
+            },
+            result=result,
+            source="gateway",
+        )
+    if code != 0:
         return _git_mutation_result(
             tool_name="git_refresh_branch_to_head",
             project=project,

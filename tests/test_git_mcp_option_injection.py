@@ -17,11 +17,14 @@ class _LocalGitClient:
     def __init__(self, root):
         self.root = root
         self.commands: list[str] = []
+        self.scripts: list[str] = []
 
     def execute_project_script(self, project: str, script: str, timeout_s: int = 30) -> dict:
-        if script.startswith("python3 - <<'PY'"):
+        if script.startswith("python3 - <<'PY'") or "# MCP_GIT_REFRESH_FAST_FORWARD_V1" in script:
             import subprocess
 
+            if "# MCP_GIT_REFRESH_FAST_FORWARD_V1" in script:
+                self.scripts.append(script)
             completed = subprocess.run(
                 ["sh"], cwd=self.root, input=script, text=True,
                 capture_output=True, timeout=timeout_s, check=False,
@@ -167,7 +170,9 @@ def test_git_refresh_branch_to_head_fast_forwards_clean_current_branch(tmp_path)
     assert result["new_head"] == target_head
     assert result["clean"] is True
     assert _git(repo, "rev-parse", "HEAD") == target_head
-    assert client.commands == [f"git reset --keep {target_head}"]
+    assert client.commands == []
+    assert len(client.scripts) == 1
+    assert "git merge --ff-only --no-edit" in client.scripts[0]
 
 
 def test_git_refresh_branch_refuses_unwriteable_new_tracked_path_before_checkout(tmp_path):
@@ -284,6 +289,145 @@ def test_git_refresh_branch_fails_closed_if_path_probe_unavailable(tmp_path):
     assert _git(repo, "rev-parse", "HEAD") == old_head
 
 
+def test_git_refresh_refuses_concurrent_checkout_without_touching_other_branch(tmp_path):
+    """A different current branch must never receive the reviewed fast-forward."""
+    repo, previous_head = _init_merge_repo(tmp_path)
+    _git(repo, "switch", "feature/update")
+    (repo / "target.txt").write_text("target\n", encoding="utf-8")
+    _git(repo, "add", "target.txt")
+    _git(repo, "commit", "-m", "target")
+    target_head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "reset", "--hard", previous_head)
+    _git(repo, "branch", "other-local")
+
+    class _ConcurrentSwitchClient(_LocalGitClient):
+        def execute_project_script(self, project: str, script: str, timeout_s: int = 30) -> dict:
+            if "# MCP_GIT_REFRESH_FAST_FORWARD_V1" in script:
+                _git(self.root, "switch", "other-local")
+            return super().execute_project_script(project, script, timeout_s)
+
+    client = _ConcurrentSwitchClient(repo)
+    from unittest.mock import patch
+
+    with patch("mcp_client_tools._resolve_project", return_value=repo):
+        result = git_refresh_branch_to_head(
+            client, "proj", "feature/update", previous_head, target_head
+        )
+
+    assert result["error"]["code"] == "WORKSPACE_CONTENDED"
+    assert result["error"]["details"]["mutation_occurred"] is False
+    assert _git(repo, "branch", "--show-current") == "other-local"
+    assert _git(repo, "rev-parse", "HEAD") == previous_head
+    assert _git(repo, "rev-parse", "feature/update") == previous_head
+    assert not (repo / "target.txt").exists()
+    assert _git(repo, "status", "--porcelain=v1") == ""
+
+
+def test_git_refresh_ff_only_cas_preserves_commit_arriving_after_preflight(tmp_path):
+    """Git's ref compare-and-swap must reject a commit racing the final merge."""
+    import os
+    import shutil
+    import subprocess
+    from unittest.mock import patch
+
+    repo, previous_head = _init_merge_repo(tmp_path)
+    _git(repo, "switch", "feature/update")
+    (repo / "target.txt").write_text("published target\n", encoding="utf-8")
+    _git(repo, "add", "target.txt")
+    _git(repo, "commit", "-m", "target")
+    target_head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "reset", "--hard", previous_head)
+
+    real_git = shutil.which("git")
+    assert real_git is not None
+    wrapper_dir = tmp_path / "git-wrapper"
+    wrapper_dir.mkdir()
+    wrapper = wrapper_dir / "git"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "merge" ]; then\n'
+        "  printf 'concurrent local data\\n' > after-preflight.txt\n"
+        f'  "{real_git}" add after-preflight.txt\n'
+        f'  "{real_git}" commit -m "commit after refresh preflight"\n'
+        "fi\n"
+        f'exec "{real_git}" "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+
+    class _CommitDuringMergeClient(_LocalGitClient):
+        def execute_project_script(self, project: str, script: str, timeout_s: int = 30) -> dict:
+            if "# MCP_GIT_REFRESH_FAST_FORWARD_V1" not in script:
+                return super().execute_project_script(project, script, timeout_s)
+            self.scripts.append(script)
+            env = os.environ.copy()
+            env["PATH"] = f"{wrapper_dir}:{env['PATH']}"
+            completed = subprocess.run(
+                ["sh"], cwd=self.root, input=script, text=True,
+                capture_output=True, timeout=timeout_s, check=False, env=env,
+            )
+            return {
+                "exit_code": completed.returncode,
+                "stdout": completed.stdout,
+                "stderr": completed.stderr,
+            }
+
+    client = _CommitDuringMergeClient(repo)
+    with patch("mcp_client_tools._resolve_project", return_value=repo):
+        result = git_refresh_branch_to_head(
+            client, "proj", "feature/update", previous_head, target_head
+        )
+
+    assert result["error"]["code"] == "WORKSPACE_CONTENDED"
+    assert result["error"]["details"]["mutation_occurred"] is False
+    concurrent_head = _git(repo, "rev-parse", "HEAD")
+    assert concurrent_head != previous_head
+    assert _git(repo, "rev-parse", "feature/update") == concurrent_head
+    assert (repo / "after-preflight.txt").read_text(encoding="utf-8") == "concurrent local data\n"
+    assert not (repo / "target.txt").exists()
+    assert _git(repo, "status", "--porcelain=v1") == ""
+    assert len(client.scripts) == 1
+
+
+def test_git_refresh_never_discards_concurrent_local_commit(tmp_path):
+    """A commit written after preflight must remain reachable from this branch."""
+    repo, previous_head = _init_merge_repo(tmp_path)
+    _git(repo, "switch", "feature/update")
+    (repo / "target.txt").write_text("published target\n", encoding="utf-8")
+    _git(repo, "add", "target.txt")
+    _git(repo, "commit", "-m", "target")
+    target_head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "reset", "--hard", previous_head)
+
+    class _ConcurrentCommitClient(_LocalGitClient):
+        concurrent_head: str | None = None
+
+        def execute_project_script(self, project: str, script: str, timeout_s: int = 30) -> dict:
+            if "# MCP_GIT_REFRESH_FAST_FORWARD_V1" in script:
+                (self.root / "local-only.txt").write_text("critical local data\n", encoding="utf-8")
+                _git(self.root, "add", "local-only.txt")
+                _git(self.root, "commit", "-m", "concurrent local work")
+                self.concurrent_head = _git(self.root, "rev-parse", "HEAD")
+            return super().execute_project_script(project, script, timeout_s)
+
+    client = _ConcurrentCommitClient(repo)
+    from unittest.mock import patch
+
+    with patch("mcp_client_tools._resolve_project", return_value=repo):
+        result = git_refresh_branch_to_head(
+            client, "proj", "feature/update", previous_head, target_head
+        )
+
+    assert result["error"]["code"] == "WORKSPACE_CONTENDED"
+    assert result["error"]["details"]["mutation_occurred"] is False
+    assert len(client.scripts) == 1
+    assert client.concurrent_head is not None
+    assert _git(repo, "rev-parse", "HEAD") == client.concurrent_head
+    assert (repo / "local-only.txt").read_text(encoding="utf-8") == "critical local data\n"
+    assert not (repo / "target.txt").exists()
+    assert _git(repo, "status", "--porcelain=v1") == ""
+
+
 def test_git_refresh_branch_to_head_preserves_concurrent_tracked_edit(tmp_path):
     repo, feature_head = _init_merge_repo(tmp_path)
     _git(repo, "switch", "feature/update")
@@ -294,9 +438,10 @@ def test_git_refresh_branch_to_head_preserves_concurrent_tracked_edit(tmp_path):
     _git(repo, "reset", "--hard", feature_head)
 
     class _ConcurrentEditClient(_LocalGitClient):
-        def execute_project_command(self, project: str, command: str) -> dict:
-            (self.root / "feature.txt").write_text("concurrent\n", encoding="utf-8")
-            return super().execute_project_command(project, command)
+        def execute_project_script(self, project: str, script: str, timeout_s: int = 30) -> dict:
+            if "# MCP_GIT_REFRESH_FAST_FORWARD_V1" in script:
+                (self.root / "feature.txt").write_text("concurrent\n", encoding="utf-8")
+            return super().execute_project_script(project, script, timeout_s)
 
     client = _ConcurrentEditClient(repo)
     from unittest.mock import patch
@@ -310,10 +455,12 @@ def test_git_refresh_branch_to_head_preserves_concurrent_tracked_edit(tmp_path):
             target_head=target_head,
         )
 
-    assert result["exit_code"] != 0
+    assert result["error"]["code"] == "WORKSPACE_CONTENDED"
+    assert result["error"]["details"]["mutation_occurred"] is False
     assert _git(repo, "rev-parse", "HEAD") == feature_head
     assert (repo / "feature.txt").read_text(encoding="utf-8") == "concurrent\n"
-    assert client.commands == [f"git reset --keep {target_head}"]
+    assert client.commands == []
+    assert len(client.scripts) == 1
 
 
 def test_git_refresh_branch_to_head_rejects_non_fast_forward(tmp_path):
