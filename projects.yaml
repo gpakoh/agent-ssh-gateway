@@ -1,6 +1,11 @@
 version: 1
 registry_root: /media/1TB/Python
 
+# Astra's existing site-source tree. Never substitute an empty astro-sites root.
+# root_selector: astro-sites is available for explicitly registered site projects.
+registry_roots:
+  astro-sites: /media/1TB/Python/astra/sites
+
 projects:
   agent-ssh-gateway:
     root: web_ssh/web-ssh-gateway
