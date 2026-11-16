@@ -336,3 +336,82 @@ def test_merge_update_blocks_before_first_git_mutation_when_refs_unwriteable(
     assert "target_ref=refs/heads/feature/update" in client.scripts[0]
     assert _git(repo, "branch", "--show-current") == "main"
     assert _git(repo, "rev-parse", "feature/update") == feature_head
+
+@pytest.mark.parametrize(
+    ("registered_type", "expected"),
+    [
+        ("fastapi", "CANONICAL_WRITE_PLANE_UNAVAILABLE"),
+        ("candidate-clone", "GIT_WRITE_CAPABILITY_BLOCKED"),
+        ("coordination-only", "GIT_WRITE_CAPABILITY_BLOCKED"),
+        (None, "GIT_WRITE_CAPABILITY_BLOCKED"),
+    ],
+)
+def test_canonical_write_plane_registry_classification(
+    monkeypatch: pytest.MonkeyPatch, registered_type: str | None, expected: str
+) -> None:
+    from types import SimpleNamespace
+
+    import mcp_client_tools as tools
+
+    monkeypatch.setattr(
+        "app.workspace.registry.get_registry",
+        lambda: SimpleNamespace(project_info=lambda _name: {"type": registered_type}),
+    )
+    assert tools._git_write_plane_block_code("demo") == expected
+
+
+def test_canonical_metadata_block_is_typed_without_executing_git(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "app.workspace.registry.get_registry",
+        lambda: SimpleNamespace(project_info=lambda _name: {"type": "fastapi"}),
+    )
+    client = _CapabilityClient(_probe_stdout(refs=False))
+    result = git_create_branch(client, "demo", "feature/blocked")
+    assert result["error"]["code"] == "CANONICAL_WRITE_PLANE_UNAVAILABLE"
+    assert "owner-controlled" in result["error"]["hint"]
+    assert result["error"]["details"]["mutation_occurred"] is False
+    assert client.commands == []
+
+
+def test_canonical_refresh_blocked_worktree_is_typed_and_non_mutating(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from types import SimpleNamespace
+
+    import mcp_client_tools as tools
+
+    repo = _init_repo(tmp_path)
+    old_head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "switch", "-c", "future")
+    (repo / "future.txt").write_text("future\\n", encoding="utf-8")
+    _git(repo, "add", "future.txt")
+    _git(repo, "commit", "-m", "future")
+    target_head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "switch", "main")
+    before = _repo_metadata_snapshot(repo)
+    monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _name: repo)
+    monkeypatch.setattr(
+        "app.workspace.registry.get_registry",
+        lambda: SimpleNamespace(project_info=lambda _name: {"type": "fastapi"}),
+    )
+    monkeypatch.setattr(
+        tools,
+        "probe_git_refresh_worktree_paths",
+        lambda *_a, **_kw: {
+            "available": True,
+            "checked_count": 1,
+            "blocked_count": 1,
+            "blocked_paths": [{"path": "future.txt", "reason": "parent_not_writeable"}],
+        },
+    )
+    result = tools.git_refresh_branch_to_head(
+        _LocalScriptClient(repo), "demo", "main", old_head, target_head
+    )
+    assert result["error"]["code"] == "CANONICAL_WRITE_PLANE_UNAVAILABLE"
+    assert result["error"]["details"]["blocked_paths"][0]["path"] == "future.txt"
+    assert result["error"]["details"]["mutation_occurred"] is False
+    assert _repo_metadata_snapshot(repo) == before

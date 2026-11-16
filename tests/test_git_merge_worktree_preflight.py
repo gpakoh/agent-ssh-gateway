@@ -188,3 +188,34 @@ def test_merge_exit_zero_without_actual_merge_does_not_claim_delivery(
     assert _git(root, "rev-parse", "HEAD") == feature
     assert _git(root, "status", "--porcelain=v1") == ""
     assert len(commands) == 3
+
+def test_canonical_merge_blocked_reports_typed_write_plane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    root, master, _feature, _ = _repo(tmp_path)
+    commands = _install_runner(monkeypatch, root)
+    monkeypatch.setattr(
+        "app.workspace.registry.get_registry",
+        lambda: SimpleNamespace(project_info=lambda _name: {"type": "fastapi"}),
+    )
+    monkeypatch.setattr(
+        tools,
+        "probe_git_refresh_worktree_paths",
+        lambda *_a, **_kw: {
+            "available": True,
+            "checked_count": 1,
+            "blocked_count": 1,
+            "blocked_paths": [
+                {"path": "nested/feature.txt", "reason": "parent_not_writeable"}
+            ],
+        },
+    )
+    result = _update(root)
+    assert result["error"]["code"] == "CANONICAL_WRITE_PLANE_UNAVAILABLE"
+    assert "owner-controlled" in result["error"]["hint"]
+    assert result["error"]["details"]["mutation_occurred"] is False
+    assert commands == []
+    assert _git(root, "rev-parse", "HEAD") == master
+    assert _git(root, "status", "--porcelain=v1") == ""
