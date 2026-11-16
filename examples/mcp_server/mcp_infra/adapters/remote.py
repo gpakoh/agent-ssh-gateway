@@ -949,12 +949,13 @@ async def _concurrent_merge_after_incomplete_ci(
     repo: str,
     pull_number: int,
     expected_head_sha: str,
+    expected_base_ref: str,
 ) -> dict[str, Any] | None:
-    """Read-only, exact-head observation; never turn missing CI into merge permission.
+    """Read-only, exact-head/target observation; never authorize a CI-bypassed merge.
 
     An independent actor may merge while our CI evidence is being read.
-    Report that observed state without claiming this invocation performed a
-    merge, and without repeating a mutation or accepting unproved receipts.
+    Report that observed state only when the reviewed target branch is still
+    the same. The target's SHA may legitimately advance during a merge.
     """
     try:
         observed = await client.get_pull_request(owner, repo, pull_number)
@@ -963,13 +964,18 @@ async def _concurrent_merge_after_incomplete_ci(
     if not isinstance(observed, dict):
         return None
     head = observed.get("head")
+    base = observed.get("base")
     merge_sha = _valid_commit_sha(observed.get("merge_commit_sha"))
+    base_sha = _valid_commit_sha(base.get("sha")) if isinstance(base, dict) else None
     if (
         type(observed.get("number")) is not int
         or observed["number"] != pull_number
         or observed.get("state") != "closed"
         or observed.get("merged") is not True
         or not isinstance(head, dict)
+        or not isinstance(base, dict)
+        or base.get("ref") != expected_base_ref
+        or base_sha is None
         or _valid_commit_sha(head.get("sha")) != expected_head_sha
         or merge_sha is None
     ):
@@ -982,6 +988,8 @@ async def _concurrent_merge_after_incomplete_ci(
         hint="Verify the observed merge commit and current master independently; do not repeat the merge.",
         details={
             "expected_head_sha": expected_head_sha,
+            "expected_base_ref": expected_base_ref,
+            "observed_base_sha": base_sha,
             "observed_merge_commit_sha": merge_sha,
             "concurrent_merge_observed": True,
             "mutation_started": False,
@@ -1010,8 +1018,9 @@ async def _reconcile_merge_postcondition(
     pull_number: int,
     *,
     expected_head_sha: str,
+    expected_base_ref: str,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    """Boundedly prove a merge after crossing the irreversible mutation boundary."""
+    """Boundedly prove the exact head AND reviewed target after a merge POST."""
     last_observed: dict[str, Any] = {}
     last_read_error_class: str | None = None
     attempts = 0
@@ -1029,6 +1038,8 @@ async def _reconcile_merge_postcondition(
             else:
                 raw_head = pr.get("head")
                 head = raw_head if isinstance(raw_head, dict) else {}
+                raw_base = pr.get("base")
+                base = raw_base if isinstance(raw_base, dict) else {}
                 raw_number = pr.get("number")
                 observed_number = (
                     raw_number if type(raw_number) is int and raw_number > 0 else None
@@ -1038,23 +1049,37 @@ async def _reconcile_merge_postcondition(
                 raw_merged = pr.get("merged")
                 observed_merged = raw_merged if type(raw_merged) is bool else None
                 observed_head_sha = _valid_commit_sha(head.get("sha"))
+                observed_base_sha = _valid_commit_sha(base.get("sha"))
+                base_ref_matches_expected = (
+                    isinstance(raw_base, dict) and base.get("ref") == expected_base_ref
+                )
                 merge_commit_sha = _valid_commit_sha(pr.get("merge_commit_sha"))
                 # Only bounded, typed fields may enter the reconciliation
-                # receipt: provider-controlled strings must never be echoed.
+                # receipt: never echo an arbitrary provider-controlled base ref.
+                # The base SHA can advance after a real merge; compare its
+                # reviewed REF, but retain the validated SHA as read-only proof.
                 last_observed = {
                     "number": observed_number,
                     "state": observed_state,
                     "merged": observed_merged,
                     "head_sha": observed_head_sha,
+                    "base_ref_matches_expected": base_ref_matches_expected,
+                    "base_sha": observed_base_sha,
                     "merge_commit_sha": merge_commit_sha,
                 }
-                if not isinstance(raw_head, dict) or observed_number is None:
+                if (
+                    not isinstance(raw_head, dict)
+                    or not isinstance(raw_base, dict)
+                    or observed_number is None
+                ):
                     last_read_error_class = "MalformedPRResponse"
                 if (
                     observed_number == pull_number
                     and observed_state == "closed"
                     and observed_merged is True
                     and observed_head_sha == expected_head_sha
+                    and base_ref_matches_expected
+                    and observed_base_sha is not None
                     and merge_commit_sha is not None
                 ):
                     return pr, {
@@ -1938,7 +1963,7 @@ async def gitea_merge_pull_request(
             if ci_status != "CI_GREEN":
                 if ci_status == "CI_EVIDENCE_INCOMPLETE":
                     concurrent = await _concurrent_merge_after_incomplete_ci(
-                        client, owner, repo, pull_number, expected_head_sha
+                        client, owner, repo, pull_number, expected_head_sha, base_ref
                     )
                     if concurrent is not None:
                         return concurrent
@@ -2047,7 +2072,7 @@ async def gitea_merge_pull_request(
             if ci_status != "CI_GREEN":
                 if ci_status == "CI_EVIDENCE_INCOMPLETE":
                     concurrent = await _concurrent_merge_after_incomplete_ci(
-                        client, owner, repo, pull_number, expected_head_sha
+                        client, owner, repo, pull_number, expected_head_sha, base_ref
                     )
                     if concurrent is not None:
                         return concurrent
@@ -2083,6 +2108,7 @@ async def gitea_merge_pull_request(
                 repo,
                 pull_number,
                 expected_head_sha=expected_head_sha,
+                expected_base_ref=base_ref,
             )
             if merged_pr is None:
                 details: dict[str, Any] = {
