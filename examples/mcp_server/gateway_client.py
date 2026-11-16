@@ -260,8 +260,11 @@ class GatewayClient:
         self._release_http_timeout = float(os.environ.get("MCP_GATEWAY_RELEASE_HTTP_TIMEOUT", "2"))
 
         self._reconnect_lock = threading.Lock()
-        self._health_inflight_lock = threading.Lock()
-        self._health_inflight: dict[tuple[str, str, str, int], Future[dict[str, Any]]] = {}
+        self._get_inflight_lock = threading.Lock()
+        self._get_inflight: dict[
+            tuple[str, str, str, str, tuple[tuple[str, str], ...], int],
+            Future[dict[str, Any]],
+        ] = {}
         self._retired: set[str] = set()
         self._reuse_existing = True
         self._release_managed = False
@@ -303,10 +306,11 @@ class GatewayClient:
                 except OSError:
                     pass
 
-    def _headers(self) -> dict[str, str]:
-        if not self.api_key:
+    def _headers(self, api_key: str | None = None) -> dict[str, str]:
+        effective_api_key = self.api_key if api_key is None else api_key
+        if not effective_api_key:
             raise GatewayClientError("GATEWAY_API_KEY is required")
-        return {"X-API-Key": self.api_key}
+        return {"X-API-Key": effective_api_key}
 
     def fork_session(self) -> GatewayClient:
         """Clone connection/auth configuration with independent mutable session state.
@@ -637,32 +641,93 @@ class GatewayClient:
 
         return wrapper
 
+    @staticmethod
+    def _coalescible_get_params(
+        path: str, params: dict[str, Any] | None
+    ) -> tuple[tuple[str, str], ...] | None:
+        """Return a canonical query key only for bounded, idempotent reads.
+
+        Long-poll waits and every unreviewed GET remain independent. This is
+        in-flight singleflight only; completed responses are never cached.
+        """
+        query = params if params is not None else {}
+        if not isinstance(query, dict):
+            return None
+
+        def safe_segment(value: str) -> bool:
+            return (
+                1 <= len(value) <= 128
+                and value.isascii()
+                and all(char.isalnum() or char in "._-" for char in value)
+            )
+
+        if path in {"/health", "/api/ssh/sessions"}:
+            return () if not query else None
+
+        parts = path.strip("/").split("/")
+        if (
+            len(parts) == 5
+            and parts[:3] == ["api", "ssh", "session"]
+            and parts[4] == "health"
+            and safe_segment(parts[3])
+            and not query
+        ):
+            return ()
+
+        if path == "/api/jobs/submissions/resolve":
+            submission_key = query.get("submission_key")
+            if (
+                not isinstance(submission_key, str)
+                or not submission_key
+                or len(submission_key) > 512
+            ):
+                return None
+            if set(query) == {"submission_key"}:
+                return (("submission_key", submission_key),)
+            if (
+                set(query) == {"submission_key", "family"}
+                and query.get("family") == "true"
+            ):
+                return (("family", "true"), ("submission_key", submission_key))
+            return None
+
+        if len(parts) == 4 and parts[:2] == ["api", "jobs"] and safe_segment(parts[2]):
+            if parts[3] == "status" and not query:
+                return ()
+            if parts[3] == "result" and set(query) == {"redact_output"}:
+                redact_output = query.get("redact_output")
+                if isinstance(redact_output, str) and redact_output in {"true", "false"}:
+                    return (("redact_output", redact_output),)
+        return None
+
     def _get(
         self,
         path: str,
         params: dict[str, Any] | None = None,
         timeout: int = 30,
     ) -> dict[str, Any]:
-        # Only scope-local, parameterless health reads are safe to combine.
-        # Each MCP transport has a distinct GatewayClient, including when auth
-        # identities match. No completed response is cached across requests.
+        coalesced_params = self._coalescible_get_params(path, params)
         if (
-            path != "/health"
-            or params
+            coalesced_params is None
             or not self._ephemeral
             or self._released
             or timeout <= 0
         ):
             return self._get_direct(path, params=params, timeout=timeout)
 
-        # Bind even unexpected runtime config changes before joining a flight.
-        key = (self.base_url, self.api_key, self.session_id, timeout)
-        with self._health_inflight_lock:
-            shared = self._health_inflight.get(key)
+        # Snapshot the request identity and use the same values on the wire.
+        # A concurrent auth/base URL mutation must never join another identity.
+        base_url = self.base_url
+        api_key = self.api_key
+        session_id = self.session_id
+        params_snapshot = dict(coalesced_params) if coalesced_params else None
+        key = (base_url, api_key, session_id, path, coalesced_params, timeout)
+        with self._get_inflight_lock:
+            shared = self._get_inflight.get(key)
             leader = shared is None
             if shared is None:
                 shared = Future()
-                self._health_inflight[key] = shared
+                self._get_inflight[key] = shared
 
         if not leader:
             try:
@@ -679,28 +744,37 @@ class GatewayClient:
                 ) from exc
 
         try:
-            result = self._get_direct(path, params=params, timeout=timeout)
+            result = self._get_direct(
+                path,
+                params=params_snapshot,
+                timeout=timeout,
+                base_url=base_url,
+                api_key=api_key,
+            )
             shared.set_result(result)
             return result
         except BaseException as exc:
             shared.set_exception(exc)
             raise
         finally:
-            with self._health_inflight_lock:
-                if self._health_inflight.get(key) is shared:
-                    del self._health_inflight[key]
+            with self._get_inflight_lock:
+                if self._get_inflight.get(key) is shared:
+                    del self._get_inflight[key]
 
     def _get_direct(
         self,
         path: str,
         params: dict[str, Any] | None = None,
         timeout: int = 30,
+        *,
+        base_url: str | None = None,
+        api_key: str | None = None,
     ) -> dict[str, Any]:
         try:
             response = httpx.get(
-                f"{self.base_url}{path}",
+                f"{self.base_url if base_url is None else base_url}{path}",
                 params=params,
-                headers=self._headers(),
+                headers=self._headers(api_key),
                 timeout=timeout,
                 trust_env=False,
             )
