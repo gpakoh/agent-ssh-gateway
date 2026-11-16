@@ -3056,16 +3056,36 @@ def git_refresh_branch_to_head(
         )
 
     if _local_git_output(resolved, ["merge-base", "--is-ancestor", current_head, target_head]) is None:
+        # Diagnostics only: do not move HEAD, create refs, or infer that the
+        # target has already incorporated the local-only commits.
+        raw_base = _local_git_output(resolved, ["merge-base", current_head, target_head])
+        ancestor = str(raw_base or "").strip().lower()
+        common_ancestor_sha = ancestor if re.fullmatch(r"[0-9a-f]{40}", ancestor) else None
+        raw_counts = _local_git_output(
+            resolved, ["rev-list", "--left-right", "--count", f"{current_head}...{target_head}"]
+        )
+        counts = str(raw_counts or "").split()
+        local_only_commits: int | None = None
+        target_only_commits: int | None = None
+        if len(counts) == 2 and all(
+            value.isascii() and value.isdecimal() and len(value) <= 12 for value in counts
+        ):
+            local_only_commits, target_only_commits = map(int, counts)
         return tool_error(
             tool="git_refresh_branch_to_head",
             code="GIT_NON_FAST_FORWARD",
             message="Target commit is not a descendant of the current HEAD; refusing history rewrite.",
             retryable=False,
+            hint="Review and preserve local-only commits before any branch reconciliation. Do not reset or force-push to bypass this guard.",
             details={
                 "project": project,
                 "branch": branch,
                 "current_head": current_head,
                 "target_head": target_head,
+                "common_ancestor_sha": common_ancestor_sha,
+                "local_only_commits": local_only_commits,
+                "target_only_commits": target_only_commits,
+                "mutation_occurred": False,
             },
             source="gateway",
         )
