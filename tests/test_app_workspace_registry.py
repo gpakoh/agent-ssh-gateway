@@ -189,6 +189,80 @@ class TestLoadRegistry:
         assert "ghost" not in projects
         assert root == registry_root
 
+    def test_oauth_env_recovers_named_root_from_stale_operator_registry(
+        self, tmp_path, monkeypatch
+    ):
+        primary = tmp_path / "workspace"
+        site_root = primary / "astra" / "sites"
+        (site_root / "example").mkdir(parents=True)
+        registry_path = tmp_path / "operator-projects.yaml"
+        registry_path.write_text(
+            yaml.safe_dump({
+                "registry_root": str(primary),
+                "projects": {
+                    "example": {"root": "example", "root_selector": "astro-sites"}
+                },
+            }),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("MCP_OAUTH_ASTRO_SITES_ROOT", str(site_root))
+
+        assert load_registry_roots(registry_path)["astro-sites"] == site_root
+        registry = WorkspaceRegistry.load(registry_path)
+        assert registry.project_info("example")["root"] == str(site_root / "example")
+        projects, _ = load_registry(registry_path)
+        assert projects["example"].root == site_root / "example"
+
+    def test_oauth_env_rejects_stale_registry_conflicting_named_root(
+        self, tmp_path, monkeypatch
+    ):
+        primary = tmp_path / "workspace"
+        site_root = primary / "astra" / "sites"
+        different_root = primary / "wrong"
+        site_root.mkdir(parents=True)
+        different_root.mkdir()
+        registry_path = tmp_path / "operator-projects.yaml"
+        registry_path.write_text(
+            yaml.safe_dump({
+                "registry_root": str(primary),
+                "registry_roots": {"astro-sites": str(different_root)},
+                "projects": {},
+            }),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("MCP_OAUTH_ASTRO_SITES_ROOT", str(site_root))
+        with pytest.raises(WorkspacePolicyError, match="astro-sites.*mismatch"):
+            load_registry_roots(registry_path)
+
+    @pytest.mark.parametrize("root_kind", ["missing", "relative", "outside", "symlink"])
+    def test_oauth_env_refuses_unprovisioned_or_unsafe_named_root(
+        self, tmp_path, monkeypatch, root_kind
+    ):
+        primary = tmp_path / "workspace"
+        primary.mkdir()
+        registry_path = tmp_path / "operator-projects.yaml"
+        registry_path.write_text(
+            yaml.safe_dump({"registry_root": str(primary), "projects": {}}),
+            encoding="utf-8",
+        )
+        if root_kind == "missing":
+            value = str(primary / "absent")
+        elif root_kind == "relative":
+            value = "astra/sites"
+        elif root_kind == "outside":
+            outside = tmp_path / "outside"
+            outside.mkdir()
+            value = str(outside)
+        else:
+            real_dir = primary / "existing"
+            real_dir.mkdir()
+            link = primary / "linked-sites"
+            link.symlink_to(real_dir, target_is_directory=True)
+            value = str(link)
+        monkeypatch.setenv("MCP_OAUTH_ASTRO_SITES_ROOT", value)
+        with pytest.raises(WorkspacePolicyError, match="astro-sites"):
+            load_registry_roots(registry_path)
+
     def test_loads_project_from_named_registry_root(self, tmp_path):
         primary = tmp_path / "workspace"
         astro_sites = tmp_path / "astro-sites"

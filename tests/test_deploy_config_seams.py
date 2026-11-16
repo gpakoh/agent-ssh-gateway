@@ -918,7 +918,7 @@ class TestMcpOauthAstroSitesNamedRoot:
 
     def test_oauth_bind_uses_exact_named_root_without_creating_host_path(self):
         oauth = _load_compose()["services"]["mcp-oauth"]
-        expected = "${MCP_OAUTH_ASTRO_SITES_ROOT:-/media/1TB/Python/astra/sites}"
+        expected = "${MCP_OAUTH_ASTRO_SITES_ROOT:-${MCP_OAUTH_PROJECT_ROOT:?set MCP_OAUTH_PROJECT_ROOT}/astra/sites}"
         mounts = [
             mount for mount in oauth["volumes"]
             if isinstance(mount, dict) and mount.get("target") == expected
@@ -945,7 +945,7 @@ class TestMcpOauthAstroSitesNamedRoot:
         runbook = (
             ROOT / "docs" / "runbooks" / "astro-sites-named-root.md"
         ).read_text(encoding="utf-8")
-        assert "/media/1TB/Python/astra/sites" in runbook
+        assert "<workspace-root>/astra/sites" in runbook
         assert "create_host_path: false" in runbook
         assert "lana.xloud" in runbook
         assert "root:root" in runbook

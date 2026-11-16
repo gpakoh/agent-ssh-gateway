@@ -163,6 +163,29 @@ def _configured_registry_roots(data: dict[str, Any], path: Path) -> dict[str, Pa
         if not candidate.is_absolute():
             raise WorkspacePolicyError("registry_roots values must be absolute paths")
         roots[selector] = candidate.resolve()
+
+    # The production registry is an operator-owned bind mount, which may lag
+    # behind the reviewed source projects.yaml. Only the OAuth/admin plane
+    # receives this non-secret env setting. Reconcile its one explicitly named
+    # Astra root without rewriting the operator's registry or affecting other
+    # named roots; an absent, escaped or conflicting source must fail closed.
+    astro_sites_raw = os.environ.get("MCP_OAUTH_ASTRO_SITES_ROOT")
+    if astro_sites_raw is not None:
+        astro_sites = Path(astro_sites_raw)
+        if not astro_sites_raw or not astro_sites.is_absolute():
+            raise WorkspacePolicyError("astro-sites root must be absolute")
+        if astro_sites.is_symlink() or not astro_sites.is_dir():
+            raise WorkspacePolicyError("astro-sites root must be a provisioned directory")
+        resolved_astro_sites = astro_sites.resolve()
+        try:
+            resolved_astro_sites.relative_to(primary)
+        except ValueError as exc:
+            raise WorkspacePolicyError("astro-sites root escapes the primary registry root") from exc
+        configured_astro_sites = roots.get("astro-sites")
+        if configured_astro_sites is not None and configured_astro_sites != resolved_astro_sites:
+            raise WorkspacePolicyError("astro-sites root mismatch with operator registry")
+        roots["astro-sites"] = resolved_astro_sites
+
     return roots
 
 
