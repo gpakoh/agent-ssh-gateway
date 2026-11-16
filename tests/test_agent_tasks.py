@@ -2745,6 +2745,109 @@ class TestInspectAgentTask:
             "do_not_copy_source_task_json": True,
         }
 
+    def test_missing_job_with_fresh_runner_heartbeat_is_orphaned_not_replaceable(
+        self, tmp_path, monkeypatch
+    ):
+        """After a Gateway restart a live heartbeat is not worker-termination proof."""
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: running\n", encoding="utf-8")
+        (td / "opencode-output.log").write_text("Previous useful work.\n", encoding="utf-8")
+        (td / "attempt-state.json").write_text(
+            json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+            encoding="utf-8",
+        )
+        (td / "agent-heartbeat.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "state": "running",
+                    "phase": "runtime",
+                    "updated_at": "2026-11-16T00:00:00Z",
+                    "updated_epoch": now - 5,
+                    "runner_pid": 123,
+                    "exit_code": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        for child in td.iterdir():
+            os.utime(child, (now - 900, now - 900))
+        os.utime(td / "agent-heartbeat.json", (now - 5, now - 5))
+
+        def missing_gateway_job(job_id):
+            assert job_id == "job-1"
+            raise RuntimeError("JOB_NOT_FOUND for job-1")
+
+        for inspect in (agent_task_status, inspect_agent_task):
+            result = inspect(
+                self._shell_runner(tmp_path),
+                project="my-proj",
+                task_id=task_id,
+                stale_after_seconds=600,
+                now_epoch=now,
+                job_status=missing_gateway_job,
+            )
+            assert result["verdict"] == "orphaned_attempt"
+            assert result["terminal"] is False
+            assert result["runner_heartbeat_fresh"] is True
+            assert result["job"]["gateway_job_absent"] is True
+            assert result["job"]["worker_termination_proven"] is False
+            assert result["reconciliation"]["state"] == "orphaned_attempt"
+            assert result["reconciliation"]["worker_termination_proven"] is False
+            if inspect is agent_task_status:
+                assert result["next"]["inspect_agent_task"]["task_id"] == task_id
+            else:
+                assert result["recovery"]["action"] == "inspect_artifacts_preserve_execution_identity"
+                assert result["recovery"]["replacement_allowed_now"] is False
+                assert result["recovery"]["do_not_create_new_task_id"] is True
+                assert "cancel_agent_task" not in result["recovery"]
+                assert "retry_agent_task" not in result["recovery"]
+                assert "run_agent" not in result["recovery"]
+
+    def test_missing_job_without_status_or_artifacts_is_incomplete_not_terminal(
+        self, tmp_path, monkeypatch
+    ):
+        """A persisted attempt does not become a completed job when files are missing."""
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "attempt-state.json").write_text(
+            json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+            encoding="utf-8",
+        )
+        os.utime(td / "attempt-state.json", (now - 900, now - 900))
+
+        def missing_gateway_job(job_id):
+            assert job_id == "job-1"
+            raise RuntimeError("JOB_NOT_FOUND for job-1")
+
+        for inspect in (agent_task_status, inspect_agent_task):
+            result = inspect(
+                self._shell_runner(tmp_path),
+                project="my-proj",
+                task_id=task_id,
+                stale_after_seconds=600,
+                now_epoch=now,
+                job_status=missing_gateway_job,
+            )
+            assert result["verdict"] == "artifact_incomplete"
+            assert result["terminal"] is False
+            assert result["job"]["gateway_job_absent"] is True
+            assert result["reconciliation"]["state"] == "artifact_incomplete"
+            assert result["reconciliation"]["artifact_incomplete"] is True
+            assert result["reconciliation"]["worker_termination_proven"] is False
+            if inspect is inspect_agent_task:
+                assert result["recovery"]["replacement_allowed_now"] is False
+                assert result["recovery"]["do_not_create_new_task_id"] is True
+                assert "cancel_agent_task" not in result["recovery"]
+                assert "retry_agent_task" not in result["recovery"]
+
     def test_terminal_server_error_sidecar_is_returned_by_deep_inspection(self, tmp_path, monkeypatch):
         monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
         task_id = "a12345678901"
