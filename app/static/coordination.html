@@ -25,8 +25,13 @@
       <span id="status" role="status" aria-live="polite"></span>
     </form>
     <div id="error" class="notice error" role="alert" hidden></div>
-    <div id="partial" class="notice" hidden>Показана часть обращений: история Gitea превышает лимит просмотра. Проверяйте конкретный Issue перед принятием решений.</div>
+    <div id="partial" class="notice" hidden>Показана частичная выборка Gitea. Используйте страницы для просмотра остальных обращений; неполные истории не подтверждают статус обращения.</div>
     <div id="columns" class="board" aria-label="Колонки Kanban"></div>
+    <nav class="pagination" aria-label="Страницы обращений">
+      <button type="button" class="secondary" id="previous" disabled>← Назад</button>
+      <span id="page-info" role="status" aria-live="polite"></span>
+      <button type="button" class="secondary" id="next" disabled>Далее →</button>
+    </nav>
     <section id="discussion" class="discussion" hidden>
       <div class="discussion-heading"><div><span class="eyebrow">ИСТОРИЯ ОБРАЩЕНИЯ</span><h2 id="thread-title"></h2></div><button type="button" class="secondary" id="close-thread">Закрыть</button></div>
       <div id="thread-history" class="history"></div>
