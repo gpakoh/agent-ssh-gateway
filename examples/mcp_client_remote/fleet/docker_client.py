@@ -37,6 +37,11 @@ ALLOWED_ADMIN_PRUNE_TYPES: set[str] = {"volume", "system"}
 ALLOWED_PRUNE_TYPES_ALL: set[str] = ALLOWED_PRUNE_TYPES | ALLOWED_ADMIN_PRUNE_TYPES
 
 IMAGE_TAG_RE = re.compile(r"^[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+$")
+# docker_run accepts a digest only as an exact, operator-allowlisted reference.
+IMAGE_RUN_DIGEST_RE = re.compile(
+    r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[1-9][0-9]{0,4})?"
+    r"(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*@sha256:[0-9a-f]{64}$"
+)
 IMAGE_REF_RE = re.compile(r"^[a-zA-Z0-9._/-]+(:[a-zA-Z0-9._-]+)?$")
 VOLUME_NAME_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
 NETWORK_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
@@ -337,6 +342,11 @@ class DockerClient:
         if not IMAGE_TAG_RE.match(name):
             raise ValueError(f"Invalid image reference (tag required): {shlex.quote(name)}")
         return name
+
+    def _validate_run_image(self, name: str) -> str:
+        if isinstance(name, str) and len(name) <= 384 and IMAGE_RUN_DIGEST_RE.fullmatch(name):
+            return name
+        return self._validate_image_tag(name)
 
     def _validate_image_ref(self, name: str) -> str:
         if not IMAGE_REF_RE.match(name):
@@ -2138,10 +2148,15 @@ exec(compile(raw, path, "exec"), {"__name__": "__main__", "__file__": path, "__p
         command: list[str],
         container_name: str | None = None,
         timeout: int = 60,
+        isolate_network: bool = False,
     ) -> RunResult:
-        self._validate_image_tag(image)
+        self._validate_run_image(image)
+        if not isinstance(isolate_network, bool):
+            raise ValueError("isolate_network must be a boolean")
         timeout = max(1, min(timeout, 600))
         argv = [DOCKER_BIN, "run", "--rm"]
+        if isolate_network:
+            argv.extend(["--network", "none"])
         if container_name:
             self._validate_container_name(container_name)
             argv.extend(["--name", container_name])
