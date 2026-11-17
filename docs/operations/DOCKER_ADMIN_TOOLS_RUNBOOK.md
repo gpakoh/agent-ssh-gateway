@@ -113,7 +113,7 @@ docker_exec(container="mcp-admin-smoke-exec", command=["env"])
 
 ### Fail-closed behavior
 
-`docker_run` is **disabled by default**. The `MCP_DOCKER_RUN_ALLOWED_IMAGES` environment variable must be set:
+`docker_run` is **disabled by default**. An operator must configure an exact image allowlist. For ordinary networking, set:
 
 ```bash
 export MCP_DOCKER_RUN_ALLOWED_IMAGES="alpine:3.20,ubuntu:22.04"
@@ -121,15 +121,15 @@ export MCP_DOCKER_RUN_ALLOWED_IMAGES="alpine:3.20,ubuntu:22.04"
 
 For the Compose-based OAuth service, set the same variable in the operator-owned `docker/.env`; Compose passes it to `mcp-oauth`. Apply configuration through the reviewed Gateway rollout. A blank value remains fail-closed, and a digest entry must match the requested image exactly.
 
-For disposable tests that must not access production networks, the operator may additionally set `MCP_DOCKER_RUN_ISOLATE_NETWORK=1` in `docker/.env`. Every allowed run then uses Docker's `--network none` (the container still has loopback). The setting defaults to `0` for compatibility; any other value blocks `docker_run`. The isolation decision is bound to the confirmation action and cannot be downgraded by a later configuration change.
+For disposable tests that must not access production networks, the operator can instead list exact image references in `MCP_DOCKER_RUN_ISOLATED_IMAGES` in `docker/.env`. Entries in this separate list use Docker's `--network none` (the container still has loopback). Both lists default to empty. If the same image appears in both, isolation wins. The isolation decision is bound to the confirmation action and cannot be downgraded by a later configuration change.
 
-If the variable is unset or empty:
+If both image lists are unset or empty:
 
 ```text
 docker_run(image="alpine:3.20", command=["echo", "ok"])
 → ok=false
 → error.code = "DOCKER_RUN_ALLOWLIST_NOT_CONFIGURED"
-→ Hint: Set MCP_DOCKER_RUN_ALLOWED_IMAGES with comma-separated image:tag entries
+→ Hint: Configure exact references in an operator-controlled image list
 ```
 
 ### Positive smoke
@@ -312,10 +312,9 @@ After an admin smoke session:
 | Code | Tool(s) | Meaning |
 |------|---------|---------|
 | `DOCKER_ADMIN_SCOPE_REQUIRED` | prune, compose_down | Admin scope needed for type/flag |
-| `DOCKER_RUN_ALLOWLIST_NOT_CONFIGURED` | docker_run | MCP_DOCKER_RUN_ALLOWED_IMAGES not set |
+| `DOCKER_RUN_ALLOWLIST_NOT_CONFIGURED` | docker_run | Both image lists are empty |
 | `DOCKER_RUN_IMAGE_NOT_ALLOWED` | docker_run | Image not in allowlist |
 | `DOCKER_RUN_IMAGE_INVALID` | docker_run | Image reference format invalid |
-| `DOCKER_RUN_NETWORK_POLICY_INVALID` | docker_run | Isolation setting must be 0 or 1 |
 | `DOCKER_EXEC_COMMAND_BLOCKED` | docker_exec, docker_run | argv matched denylist |
 | `DOCKER_EXEC_CONTAINER_NOT_FOUND` | docker_exec | Container does not exist |
 | `DOCKER_RMI_INVALID_REFERENCE` | docker_rmi | Image ref format invalid or 1-5 constraint |

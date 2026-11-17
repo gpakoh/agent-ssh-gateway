@@ -858,15 +858,30 @@ async def _docker_prune_impl(type: str = "container") -> RunResult:
 async def _docker_exec_impl(container: str, command: list[str], timeout: int = 30) -> RunResult:
     return await _docker_client().exec(container, command, timeout=timeout)
 
+def _docker_run_image_policy() -> tuple[set[str], set[str]]:
+    def read_refs(name: str) -> set[str]:
+        return {ref.strip() for ref in os.environ.get(name, "").split(",") if ref.strip()}
+
+    return read_refs("MCP_DOCKER_RUN_ALLOWED_IMAGES"), read_refs("MCP_DOCKER_RUN_ISOLATED_IMAGES")
+
+
 async def _docker_run_impl(
     image: str,
     command: list[str],
     container_name: str | None = None,
     timeout: int = 60,
     isolate_network: bool = False,
-) -> RunResult:
+) -> RunResult | dict[str, Any]:
+    allowed, isolated = _docker_run_image_policy()
+    if image not in allowed and image not in isolated:
+        return tool_error(
+            tool="docker_run",
+            code="DOCKER_RUN_IMAGE_NOT_ALLOWED",
+            message="Image is no longer in an operator-configured allowlist.",
+            source="docker",
+        )
     client = _docker_client()
-    if isolate_network:
+    if isolate_network or image in isolated:
         return await client.run(
             image, command, container_name=container_name, timeout=timeout, isolate_network=True
         )
@@ -6741,25 +6756,17 @@ async def docker_run(
 ) -> dict[str, Any]:
     """Create and start a container from an image. ADMIN: requires mcp:docker:admin scope + confirmation.
 
-    Image must be in the MCP_DOCKER_RUN_ALLOWED_IMAGES allowlist.
+    Image must be in an operator-configured exact allowlist. Entries in
+    MCP_DOCKER_RUN_ISOLATED_IMAGES always run with Docker networking disabled.
     Container runs with --rm and is removed after completion.
     """
-    allowed_raw = os.environ.get("MCP_DOCKER_RUN_ALLOWED_IMAGES", "").strip()
-    if not allowed_raw:
+    allowed_images, isolated_images = _docker_run_image_policy()
+    if not allowed_images and not isolated_images:
         return tool_error(
             tool="docker_run",
             code="DOCKER_RUN_ALLOWLIST_NOT_CONFIGURED",
-            message="docker_run requires MCP_DOCKER_RUN_ALLOWED_IMAGES environment variable.",
-            hint="Set MCP_DOCKER_RUN_ALLOWED_IMAGES with exact comma-separated tags or sha256 digests.",
-            source="docker",
-        )
-    allowed_images = {ref.strip() for ref in allowed_raw.split(",") if ref.strip()}
-    isolation_policy = os.environ.get("MCP_DOCKER_RUN_ISOLATE_NETWORK", "0").strip()
-    if isolation_policy not in {"0", "1"}:
-        return tool_error(
-            tool="docker_run",
-            code="DOCKER_RUN_NETWORK_POLICY_INVALID",
-            message="MCP_DOCKER_RUN_ISOLATE_NETWORK must be 0 or 1.",
+            message="docker_run requires an operator-configured image allowlist.",
+            hint="Set MCP_DOCKER_RUN_ALLOWED_IMAGES or MCP_DOCKER_RUN_ISOLATED_IMAGES to exact references.",
             source="docker",
         )
 
@@ -6773,7 +6780,7 @@ async def docker_run(
             message=str(e),
             source="docker",
         )
-    if image not in allowed_images:
+    if image not in allowed_images and image not in isolated_images:
         # Emit structured audit event
         try:
             audit_logger = _get_audit_logger()
@@ -6792,7 +6799,7 @@ async def docker_run(
             tool="docker_run",
             code="DOCKER_RUN_IMAGE_NOT_ALLOWED",
             message=f"Image '{image}' is not in the configured allowlist.",
-            hint="Only images listed in MCP_DOCKER_RUN_ALLOWED_IMAGES are permitted.",
+            hint="Only exact images in an operator-configured allowlist are permitted.",
             source="docker",
         )
     if container_name:
@@ -6839,9 +6846,9 @@ async def docker_run(
         "container_name": container_name,
         "timeout": timeout,
     }
-    if isolation_policy == "1":
-        # Bind the stricter policy to the confirmation action; changing the
-        # environment later must never downgrade an already prepared run.
+    if image in isolated_images:
+        # Isolated wins if an image occurs in both lists. Bind this restriction
+        # to confirmation so a later configuration change cannot downgrade it.
         action_params["isolate_network"] = True
         summary += " (network=none)"
     action = _confirm_store().create_action(
