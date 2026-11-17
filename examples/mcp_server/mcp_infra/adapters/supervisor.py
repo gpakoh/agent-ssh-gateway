@@ -13,6 +13,7 @@ import errno
 import hashlib
 import logging
 import os
+import re
 import uuid
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,10 @@ from examples.mcp_server.candidate_orphan_finalize import (
 )
 from examples.mcp_server.candidate_registry_reconcile import reconcile_runtime_candidate_registry
 from examples.mcp_server.control_plane_git import _parse_gitea_remote
+from examples.mcp_server.fleet_runtime import get_fleet_runtime
+from examples.mcp_server.legacy_candidate_handoff import (
+    archive_terminal_legacy_handoff as _archive_terminal_legacy_handoff,
+)
 from examples.mcp_server.mcp_audit import AuditWriteError, McpAuditEvent
 from examples.mcp_server.mcp_infra._server_ref import server_attr
 from examples.mcp_server.mcp_infra.tool_registry import (
@@ -1020,6 +1025,205 @@ async def candidate_cleanup_abort_legacy_prepared(
     )
 
 
+async def candidate_archive_terminal_legacy_handoff(
+    project_id: str,
+    expected_head_sha: str,
+    expected_branch: str,
+    expected_source_project: str,
+    preserved_ref: str,
+    expected_plan_sha256: str,
+    reason: str,
+    acknowledge: bool = False,
+) -> dict[str, Any]:
+    """Archive a proven terminal legacy handoff; does NOT delete a candidate.
+
+    An exact historical plan fingerprint is required. Terminal proof combines
+    a merged same-repository PR, no matching open PR, and zero fleet leases,
+    with mandatory audit. Normal candidate_cleanup still owns deletion.
+    """
+
+    async def _run() -> dict[str, Any]:
+        tool = "candidate_archive_terminal_legacy_handoff"
+        if acknowledge is not True:
+            return tool_error(
+                tool=tool,
+                code="POLICY_DENIED",
+                message="Explicit acknowledge=true is required for historical task reconciliation.",
+            )
+        try:
+            source_project, source_root = _resolve_project(expected_source_project)
+            config_dir = _resolve_registry_config_dir()
+            journal_root = _journal_root_for_project("workspace-registry", config_dir)
+        except _ProjectResolutionError:
+            return tool_error(
+                tool=tool, code="PROJECT_NOT_FOUND", message="Source project unavailable."
+            )
+        except ValueError:
+            return tool_error(
+                tool=tool, code="INVALID_INPUT", message="Registry journal is misconfigured."
+            )
+
+        correlation_id = uuid.uuid4().hex
+        audit_written = False
+        evidence: dict[str, Any] = {
+            "project_id": project_id,
+            "head": expected_head_sha,
+            "branch": expected_branch,
+            "source_project": source_project,
+            "preserved_ref": preserved_ref,
+            "plan_sha256": expected_plan_sha256,
+            "reason": reason,
+            "correlation_id": correlation_id,
+        }
+
+        async def _prove_terminal() -> None:
+            try:
+                _user, url, token = _resolve_trusted_remote(source_root)
+                _host, owner, repo = _parse_gitea_remote(url)
+            except (ManagedSourceBundleError, RuntimeError, ValueError) as exc:
+                raise CandidateCloneError(
+                    "CHECK_FAILED",
+                    "trusted source Git identity is unavailable",
+                    retryable=True,
+                ) from exc
+            delivery = await _require_merged_candidate_pr_delivery(
+                token=token,
+                owner=owner,
+                repo=repo,
+                expected_branch=expected_branch,
+                expected_head_sha=expected_head_sha,
+            )
+            if (
+                type(delivery.get("pull_number")) is not int
+                or not isinstance(delivery.get("merge_commit_sha"), str)
+                or not re.fullmatch(r"[0-9a-fA-F]{40}", delivery["merge_commit_sha"])
+            ):
+                raise CandidateCloneError(
+                    "CHECK_FAILED", "merged delivery receipt has no exact merge identity"
+                )
+            await _assert_no_open_candidate_pr_reference(
+                token=token,
+                owner=owner,
+                repo=repo,
+                expected_branch=expected_branch,
+                expected_head_sha=expected_head_sha,
+            )
+            fleet = await get_fleet_runtime()
+            if fleet is None:
+                raise CandidateCloneError(
+                    "CHECK_FAILED",
+                    "fleet state unavailable; terminal proof denied",
+                    retryable=True,
+                )
+            snapshot = await fleet.fleet_status(
+                job_status_fn=lambda job: server_attr("get_gateway_client")().job_status(job)
+            )
+            counts = snapshot.get("counts")
+            leases = snapshot.get("leases")
+            if (
+                not isinstance(counts, dict)
+                or not counts
+                or any(type(v) is not int or v != 0 for v in counts.values())
+                or not isinstance(leases, list)
+                or leases
+            ):
+                raise CandidateCloneError(
+                    "WORKSPACE_CONTENDED",
+                    "active or unverified fleet task/lease prevents legacy archival",
+                    details={"reference_check": "fleet_terminal_state"},
+                )
+            evidence["delivery_pull_number"] = delivery["pull_number"]
+            evidence["delivery_merge_commit_sha"] = delivery["merge_commit_sha"]
+
+        # The process FleetRuntime is owned by the MCP event loop. Archival
+        # itself runs in a worker thread to keep the loop responsive, but
+        # terminal proofs MUST execute on the owning loop, not asyncio.run()
+        # in a fresh thread-local loop.
+        owner_loop = asyncio.get_running_loop()
+
+        def _terminal_guard() -> None:
+            nonlocal audit_written
+            proof = asyncio.run_coroutine_threadsafe(_prove_terminal(), owner_loop)
+            try:
+                proof.result(timeout=60)
+            except CandidateCloneError:
+                proof.cancel()
+                raise
+            except Exception as exc:
+                proof.cancel()
+                raise CandidateCloneError(
+                    "CHECK_FAILED",
+                    "terminal task/delivery evidence cannot be verified",
+                    retryable=True,
+                    details={"error_class": type(exc).__name__},
+                ) from exc
+            if not audit_written:
+                try:
+                    server_attr("get_audit_logger")().append_required(
+                        McpAuditEvent(
+                            event_type="mcp.candidate_legacy_handoff_archive_intent",
+                            tool=tool,
+                            action="archive_terminal_legacy_handoff",
+                            decision="allow",
+                            reason="exact delivered legacy candidate terminal reconciliation",
+                            metadata=evidence,
+                        )
+                    )
+                except AuditWriteError as exc:
+                    raise CandidateCloneError(
+                        "AUDIT_UNAVAILABLE",
+                        "mandatory handoff archive audit unavailable",
+                        retryable=True,
+                    ) from exc
+                audit_written = True
+
+        try:
+            with cleanup_remote_resolution_scope():
+                archive = await asyncio.to_thread(
+                    _archive_terminal_legacy_handoff,
+                    project_id,
+                    expected_head_sha,
+                    expected_branch,
+                    source_project,
+                    preserved_ref,
+                    expected_plan_sha256,
+                    reason,
+                    config_dir=config_dir,
+                    journal_root=journal_root,
+                    terminal_guard=_terminal_guard,
+                )
+        except CandidateCloneError as exc:
+            return tool_error(
+                tool=tool,
+                code=exc.code,
+                message=exc.message,
+                retryable=exc.retryable,
+                details=exc.details,
+            )
+
+        try:
+            server_attr("get_audit_logger")().append(
+                McpAuditEvent(
+                    event_type="mcp.candidate_legacy_handoff_archive_success",
+                    tool=tool,
+                    action="archive_terminal_legacy_handoff",
+                    decision="allow",
+                    reason="archived legacy plan and status before candidate cleanup",
+                    metadata={**evidence, "archive_name": archive["archive_name"]},
+                )
+            )
+        except Exception:
+            pass
+        return tool_success(tool=tool, result=archive)
+
+    return await run_tool_async(
+        tool="candidate_archive_terminal_legacy_handoff",
+        title="Archive terminal legacy candidate handoff",
+        fn=_run,
+        success_text="Legacy handoff durably archived.",
+    )
+
+
 async def candidate_cleanup(
     project_id: str,
     expected_head_sha: str,
@@ -1771,6 +1975,11 @@ def register_all() -> None:
     register_tool("candidate_adopt")(
         instrumented("candidate_adopt")(candidate_adopt)
     )
+    register_tool("candidate_archive_terminal_legacy_handoff")(
+        instrumented("candidate_archive_terminal_legacy_handoff")(
+            candidate_archive_terminal_legacy_handoff
+        )
+    )
     register_tool("candidate_cleanup")(
         instrumented("candidate_cleanup")(candidate_cleanup)
     )
@@ -1797,6 +2006,7 @@ __all__ = [
     "supervisor_unregister_project",
     "prepare_candidate_clone",
     "candidate_adopt",
+    "candidate_archive_terminal_legacy_handoff",
     "candidate_cleanup",
     "candidate_discard_untracked_file",
     "candidate_cleanup_abort_legacy_prepared",
