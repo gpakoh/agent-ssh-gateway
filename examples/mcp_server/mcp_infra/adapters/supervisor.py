@@ -1135,13 +1135,22 @@ async def candidate_archive_terminal_legacy_handoff(
             evidence["delivery_pull_number"] = delivery["pull_number"]
             evidence["delivery_merge_commit_sha"] = delivery["merge_commit_sha"]
 
+        # The process FleetRuntime is owned by the MCP event loop. Archival
+        # itself runs in a worker thread to keep the loop responsive, but
+        # terminal proofs MUST execute on the owning loop, not asyncio.run()
+        # in a fresh thread-local loop.
+        owner_loop = asyncio.get_running_loop()
+
         def _terminal_guard() -> None:
             nonlocal audit_written
+            proof = asyncio.run_coroutine_threadsafe(_prove_terminal(), owner_loop)
             try:
-                asyncio.run(_prove_terminal())
+                proof.result(timeout=60)
             except CandidateCloneError:
+                proof.cancel()
                 raise
             except Exception as exc:
+                proof.cancel()
                 raise CandidateCloneError(
                     "CHECK_FAILED",
                     "terminal task/delivery evidence cannot be verified",

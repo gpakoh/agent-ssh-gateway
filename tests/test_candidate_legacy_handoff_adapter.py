@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from examples.mcp_server.mcp_infra.adapters import supervisor
@@ -19,12 +21,14 @@ def direct_async(monkeypatch):
 
 
 class _Fleet:
-    def __init__(self, *, live=0, leases=None):
+    def __init__(self, *, owner_loop, live=0, leases=None):
+        self.owner_loop = owner_loop
         self.live = live
         self.leases = [] if leases is None else leases
         self.reads = 0
 
     async def fleet_status(self, *, job_status_fn):
+        assert asyncio.get_running_loop() is self.owner_loop
         assert callable(job_status_fn)
         self.reads += 1
         return {
@@ -45,7 +49,7 @@ def _configure(tmp_path, monkeypatch, *, merged=True, live=0, fleet_available=Tr
     helpers._configure_cleanup_adapter(
         tmp_path, monkeypatch, client=client, audit=audit, guard_calls=calls
     )
-    fleet = _Fleet(live=live)
+    fleet = _Fleet(owner_loop=asyncio.get_running_loop(), live=live)
 
     async def runtime():
         return fleet if fleet_available else None
