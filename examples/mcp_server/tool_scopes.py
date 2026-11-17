@@ -143,6 +143,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "prepare_candidate_clone": ["mcp:repo", "mcp:admin"],
     "candidate_adopt": ["mcp:repo", "mcp:admin"],
     "candidate_cleanup": ["mcp:repo", "mcp:admin"],
+    "candidate_archive_terminal_legacy_handoff": ["mcp:admin"],
     "candidate_discard_untracked_file": ["mcp:repo", "mcp:admin"],
     "candidate_cleanup_abort_legacy_prepared": ["mcp:admin"],
     "candidate_orphan_finalize": ["mcp:repo", "mcp:admin"],
