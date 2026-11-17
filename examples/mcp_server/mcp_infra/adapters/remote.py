@@ -438,6 +438,11 @@ async def _gitea_pr_branch_tracking(
 
 _MERGE_RECONCILE_ATTEMPTS = 3
 _MERGE_RECONCILE_DELAY_SECONDS = 0.05
+# Only when the exact reviewed PR stays open but its base SHA has moved
+# after POST. This is an additional READ-ONLY settlement window, not a
+# mutation retry; 3 normal + 6 advanced-base reads, with bounded sleeps.
+_MERGE_RECONCILE_ADVANCED_BASE_EXTRA_ATTEMPTS = 6
+_MERGE_RECONCILE_ADVANCED_BASE_DELAY_SECONDS = 0.35
 _ACTION_RERUN_RECONCILE_ATTEMPTS = 3
 _ACTION_RERUN_RECONCILE_DELAY_SECONDS = 0.05
 _ACTION_CANCEL_RECONCILE_ATTEMPTS = 3
@@ -1019,13 +1024,17 @@ async def _reconcile_merge_postcondition(
     *,
     expected_head_sha: str,
     expected_base_ref: str,
+    pre_mutation_base_sha: str | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Boundedly prove the exact head AND reviewed target after a merge POST."""
+    pre_mutation_base_sha = _valid_commit_sha(pre_mutation_base_sha)
     last_observed: dict[str, Any] = {}
     last_read_error_class: str | None = None
     attempts = 0
-    for attempt in range(_MERGE_RECONCILE_ATTEMPTS):
-        attempts = attempt + 1
+    max_attempts = _MERGE_RECONCILE_ATTEMPTS
+    advanced_base_grace = False
+    while attempts < max_attempts:
+        attempts += 1
         try:
             pr = await client.get_pull_request(owner, repo, pull_number)
         except Exception as exc:
@@ -1067,6 +1076,33 @@ async def _reconcile_merge_postcondition(
                     "base_sha": observed_base_sha,
                     "merge_commit_sha": merge_commit_sha,
                 }
+                # Identity drift while settling invalidates the extra grace:
+                # stop read-only polling and fail closed without another POST.
+                if advanced_base_grace and (
+                    observed_number != pull_number
+                    or observed_head_sha != expected_head_sha
+                    or not base_ref_matches_expected
+                ):
+                    max_attempts = attempts
+                # Gitea can move master to our merge commit before its PR GET
+                # reflects closed+merged. Extend only a matching, still-open
+                # PR whose base has moved since the exact pre-POST snapshot.
+                # This does NOT infer success from the advanced base alone.
+                if (
+                    pre_mutation_base_sha is not None
+                    and observed_number == pull_number
+                    and observed_state == "open"
+                    and observed_merged is False
+                    and observed_head_sha == expected_head_sha
+                    and base_ref_matches_expected
+                    and observed_base_sha is not None
+                    and observed_base_sha != pre_mutation_base_sha
+                ):
+                    advanced_base_grace = True
+                    max_attempts = (
+                        _MERGE_RECONCILE_ATTEMPTS
+                        + _MERGE_RECONCILE_ADVANCED_BASE_EXTRA_ATTEMPTS
+                    )
                 if (
                     not isinstance(raw_head, dict)
                     or not isinstance(raw_base, dict)
@@ -1086,8 +1122,11 @@ async def _reconcile_merge_postcondition(
                         "reconciliation_attempts": attempts,
                         "observed": last_observed,
                     }
-        if attempt + 1 < _MERGE_RECONCILE_ATTEMPTS:
-            await asyncio.sleep(_MERGE_RECONCILE_DELAY_SECONDS)
+        if attempts < max_attempts:
+            await asyncio.sleep(
+                _MERGE_RECONCILE_ADVANCED_BASE_DELAY_SECONDS
+                if advanced_base_grace else _MERGE_RECONCILE_DELAY_SECONDS
+            )
 
     details: dict[str, Any] = {
         "reconciliation_attempts": attempts,
@@ -2109,6 +2148,7 @@ async def gitea_merge_pull_request(
                 pull_number,
                 expected_head_sha=expected_head_sha,
                 expected_base_ref=base_ref,
+                pre_mutation_base_sha=actual_base_sha,
             )
             if merged_pr is None:
                 details: dict[str, Any] = {

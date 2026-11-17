@@ -1727,6 +1727,134 @@ async def test_adapter_reconciles_malformed_2xx_body_after_server_applied_merge(
     assert len(client.merge_calls) == 1
 
 
+class _LaggingMergeClient(FakeMergeClient):
+    """Gitea advances master before its pull-request merged flag becomes visible."""
+
+    def __init__(self, settle_after: int | None):
+        super().__init__("token", apply_merge=False)
+        self.settle_after = settle_after
+        self.post_reads = 0
+
+    async def merge_pull_request(self, owner, repo, pull_number, **kwargs):
+        self.merge_calls.append(
+            {"owner": owner, "repo": repo, "pull_number": pull_number, **kwargs}
+        )
+        self.latest_base_sha = NEW_BASE_SHA
+        raise httpx.ReadTimeout(
+            "merge response lost",
+            request=httpx.Request("POST", "https://git.example/api/merge"),
+        )
+
+    async def get_pull_request(self, owner, repo, pull_number):
+        if self.merge_calls:
+            self.post_reads += 1
+            if self.settle_after is not None and self.post_reads >= self.settle_after:
+                self.merged = True
+        return await super().get_pull_request(owner, repo, pull_number)
+
+
+@pytest.mark.asyncio
+async def test_real_merge_race_base_advances_before_pr_closed_reconciles_read_only(monkeypatch):
+    """Reproduces #933: first three GETs still say open, fifth proves merged."""
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    monkeypatch.setattr(remote, "_MERGE_RECONCILE_DELAY_SECONDS", 0)
+    monkeypatch.setattr(remote, "_MERGE_RECONCILE_ADVANCED_BASE_DELAY_SECONDS", 0, raising=False)
+    client = _LaggingMergeClient(settle_after=5)
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request(
+        "owner", "repo", 25, SHA, expected_base_sha=BASE_SHA
+    )
+
+    assert result["ok"] is True, result
+    assert result["result"]["outcome"] == "completed_after_ambiguous_response"
+    assert result["result"]["merge_commit_sha"] == "b" * 40
+    assert result["result"]["reconciliation_attempts"] == 5
+    assert client.post_reads == 5
+    assert len(client.merge_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_advanced_base_without_authoritative_merge_stays_unknown(monkeypatch):
+    """Advancing base alone cannot prove the result or authorize POST replay."""
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    monkeypatch.setattr(remote, "_MERGE_RECONCILE_DELAY_SECONDS", 0)
+    monkeypatch.setattr(remote, "_MERGE_RECONCILE_ADVANCED_BASE_DELAY_SECONDS", 0, raising=False)
+    client = _LaggingMergeClient(settle_after=None)
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request(
+        "owner", "repo", 25, SHA, expected_base_sha=BASE_SHA
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "MUTATION_OUTCOME_UNKNOWN"
+    assert result["error"]["retryable"] is False
+    details = result["error"]["details"]
+    assert details["mutation_started"] is True
+    assert details["observed"]["base_sha"] == NEW_BASE_SHA
+    assert details["observed"]["merged"] is False
+    assert details["reconciliation_attempts"] == 9
+    assert len(client.merge_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_base_retarget_mid_grace_stops_without_mutation_replay(monkeypatch):
+    """A different target during settle terminates only the read-only wait."""
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    monkeypatch.setattr(remote, "_MERGE_RECONCILE_DELAY_SECONDS", 0)
+    monkeypatch.setattr(remote, "_MERGE_RECONCILE_ADVANCED_BASE_DELAY_SECONDS", 0)
+    client = _LaggingMergeClient(settle_after=None)
+    original = client.get_pull_request
+
+    async def retarget_during_grace(owner, repo, pull_number):
+        result = await original(owner, repo, pull_number)
+        if client.post_reads >= 2:
+            result["base"]["ref"] = "release/other"
+        return result
+
+    client.get_pull_request = retarget_during_grace
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request(
+        "owner", "repo", 25, SHA, expected_base_sha=BASE_SHA
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "MUTATION_OUTCOME_UNKNOWN"
+    details = result["error"]["details"]
+    assert details["reconciliation_attempts"] == 2
+    assert details["observed"]["base_ref_matches_expected"] is False
+    assert len(client.merge_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_advanced_base_with_changed_head_does_not_extend_reconciliation(monkeypatch):
+    """An unrelated concurrent push is not reason to extend the merge grace."""
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    monkeypatch.setattr(remote, "_MERGE_RECONCILE_DELAY_SECONDS", 0)
+    client = _LaggingMergeClient(settle_after=None)
+    original = client.get_pull_request
+
+    async def changed_head(owner, repo, pull_number):
+        if client.merge_calls:
+            client.latest_head_sha = "c" * 40
+        return await original(owner, repo, pull_number)
+
+    client.get_pull_request = changed_head
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request(
+        "owner", "repo", 25, SHA, expected_base_sha=BASE_SHA
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "MUTATION_OUTCOME_UNKNOWN"
+    assert result["error"]["details"]["reconciliation_attempts"] == 3
+    assert result["error"]["details"]["observed"]["head_sha"] == "c" * 40
+    assert len(client.merge_calls) == 1
+
+
 @pytest.mark.asyncio
 async def test_adapter_unresolved_lost_merge_response_forbids_blind_retry(monkeypatch):
     monkeypatch.setenv("GITEA_TOKEN", "token")
