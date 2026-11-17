@@ -85,7 +85,7 @@ def gateway_catalog(
             # missing transport identity must return a full schema.
             owner = server_attr("_current_mcp_session")()
             identity = server_attr("_current_auth_reuse_key")()
-            gateway_state = server_attr("get_gateway_client")().health()
+            gateway_state = server_attr("get_gateway_client")().health(timeout=2)
             plane = (
                 gateway_state.get("command_plane", {}).get("state")
                 if gateway_state.get("ready") is True

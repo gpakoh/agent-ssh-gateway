@@ -10,7 +10,7 @@ client.
 1. Call `gateway_catalog(tool_name="health", include_schema=true)`.
    When the request is bound to an authenticated MCP lifecycle, the MCP build
    has a known exact release SHA, Gateway's overall `ready=true` and its live
-   command plane is `ready`,
+   command plane is `ready` (health request bounded to 2 seconds),
    the response contains `result.tools[0].input_schema` and
    `result.schema_cache = {state: "fresh", etag: "sha256:...", reuse_permitted:
    true, scope: "authenticated_mcp_session"}`.

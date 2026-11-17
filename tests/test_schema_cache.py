@@ -6,6 +6,7 @@ import pytest
 from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
 
+from examples.mcp_server.gateway_client import GatewayClient
 from examples.mcp_server.mcp_infra.adapters import catalog
 from examples.mcp_server.mcp_infra.tool_registry import compute_toolset_hash
 from examples.mcp_server.schema_cache import schema_etag, validate_conditional_etag
@@ -20,7 +21,8 @@ class Gateway:
         self.state = "ready"
         self.raise_health = False
 
-    def health(self) -> dict:
+    def health(self, *, timeout: int = 30) -> dict:
+        assert timeout == 2  # Discovery must not inherit the 30s client default.
         if self.raise_health:
             raise OSError("no live Gateway")
         return {
@@ -61,6 +63,18 @@ def live_catalog(monkeypatch):
 
 def _schema(**kwargs):
     return catalog.gateway_catalog(tool_name="health", include_schema=True, **kwargs)
+
+
+def test_gateway_client_health_deadline_is_opt_in(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        GatewayClient, "_get",
+        lambda self, path, timeout=30: calls.append((path, timeout)) or {"ready": True},
+    )
+    client = GatewayClient.__new__(GatewayClient)
+    assert client.health() == {"ready": True}
+    assert client.health(timeout=2) == {"ready": True}
+    assert calls == [("/health", 30), ("/health", 2)]
 
 
 def test_schema_etag_is_bound_to_session_auth_release_and_catalog():
