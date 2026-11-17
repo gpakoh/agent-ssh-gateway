@@ -3,9 +3,13 @@
   const $ = (id) => document.getElementById(id);
   const names = {open:"Входящие",accepted:"В работе",waiting_review:"Ожидает проверки",resolved:"Решено"};
   const status = $("status"), error = $("error"), partial = $("partial"), columns = $("columns");
+  const previous = $("previous"), next = $("next"), pageInfo = $("page-info");
   const params = new URLSearchParams(location.search);
   const chosen = params.get("project");
   if (chosen && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/.test(chosen)) $("project").value = chosen;
+  const savedOffset = Number(params.get("offset") || "0");
+  let offset = Number.isInteger(savedOffset) && savedOffset >= 0 && savedOffset <= 499 ? savedOffset : 0;
+  let previousOffset = null, nextOffset = null;
   let origin = null, project = $("project").value;
 
   function safeIssueUrl(raw) {
@@ -33,7 +37,12 @@
     return response.json();
   }
   function fail(message) {error.hidden=false;error.textContent=message;}
-  function loading(value) {$("refresh").disabled=value;$("project-form").querySelector('button[type="submit"]').disabled=value;}
+  function loading(value) {
+    $("refresh").disabled=value;
+    $("project-form").querySelector('button[type="submit"]').disabled=value;
+    previous.disabled=value || previousOffset === null;
+    next.disabled=value || nextOffset === null;
+  }
   async function openThread(number, href) {
     $("discussion").hidden=true; status.textContent="Загрузка обсуждения…";
     try {
@@ -56,6 +65,12 @@
   }
   function draw(data) {
     columns.replaceChildren();origin=data.source_origin;
+    offset=data.offset;
+    previousOffset=data.previous_offset;
+    nextOffset=data.next_offset;
+    pageInfo.textContent=data.page_scan_count
+      ? "Позиции выборки Gitea: "+(offset+1)+"–"+(offset+data.page_scan_count)
+      : "На этой странице обращений нет";
     for (const col of data.columns || []) {
       const section=text("section","","column");
       const header=text("div","","column-header");
@@ -66,6 +81,10 @@
         const btn=text("button","","card");btn.type="button";
         btn.append(text("span",card.title || "Issue #"+card.number,"card-title"));
         btn.append(text("span","#"+card.number+" · "+(card.source_project || "неизвестный проект"),"meta"));
+        if (card.gitea_issue_state === "closed") {
+          btn.classList.add("closed");
+          btn.append(text("span","Закрыт в Gitea","issue-closed"));
+        }
         btn.addEventListener("click",()=>openThread(card.number,card.url));list.append(btn);
       }
       if (!list.children.length) list.append(text("div","Нет обращений","empty"));
@@ -74,18 +93,26 @@
     partial.hidden=!data.truncated;
     status.textContent=String(data.count || 0)+" обращений"+(data.truncated?" · частичная выборка":"");
   }
-  async function load() {
+  async function load(targetOffset=offset) {
     error.hidden=true;$("discussion").hidden=true;loading(true);status.textContent="Чтение Gitea…";
     project=$("project").value.trim();
     try {
-      const data=await json("/api/coordination/board?"+new URLSearchParams({project,limit:"25"}));
-      history.replaceState(null,"","/coordination?"+new URLSearchParams({project}));
+      const data=await json("/api/coordination/board?"+new URLSearchParams({
+        project,limit:"25",offset:String(targetOffset)
+      }));
+      const urlParams={project};
+      if (targetOffset) urlParams.offset=String(targetOffset);
+      history.replaceState(null,"","/coordination?"+new URLSearchParams(urlParams));
       draw(data);
-    } catch(e) {columns.replaceChildren();partial.hidden=true;status.textContent="Ошибка";fail(e.message);}
-    finally {loading(false);}
+    } catch(e) {
+      columns.replaceChildren();partial.hidden=true;status.textContent="Ошибка";
+      pageInfo.textContent="";previousOffset=null;nextOffset=null;fail(e.message);
+    } finally {loading(false);}
   }
-  $("project-form").addEventListener("submit",(event)=>{event.preventDefault();load();});
-  $("refresh").addEventListener("click",load);
+  $("project-form").addEventListener("submit",(event)=>{event.preventDefault();load(0);});
+  $("refresh").addEventListener("click",()=>load(offset));
+  previous.addEventListener("click",()=>{if(previousOffset !== null)load(previousOffset);});
+  next.addEventListener("click",()=>{if(nextOffset !== null)load(nextOffset);});
   $("close-thread").addEventListener("click",()=>$("discussion").hidden=true);
-  load();
+  load(offset);
 })();

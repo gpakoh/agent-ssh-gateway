@@ -154,6 +154,7 @@ async def browser_coordination(_identity: AuthIdentity = Depends(_admin_only)) -
 async def browser_coordination_board(
     project: str = Query(...),
     limit: int = Query(20, ge=1, le=25),
+    offset: int = Query(0, ge=0, le=499),
     _identity: AuthIdentity = Depends(_admin_only),
 ) -> Response:
     repo = _source_project(project)
@@ -162,9 +163,10 @@ async def browser_coordination_board(
         async with asyncio.timeout(30):
             async with _ReadOnlyGitea(token, base) as client:
                 issues, scanned_truncated = await list_threads_preview(client, owner, repo)
+                window = issues[offset:offset + limit]
                 cards = []
                 incomplete_thread_numbers: list[int] = []
-                for issue in issues[:limit]:
+                for issue in window:
                     state, incomplete = await preview_thread_state(
                         client, owner, repo, issue["number"]
                     )
@@ -175,13 +177,24 @@ async def browser_coordination_board(
                 columns = board_from_threads(cards)
     except (TimeoutError, httpx.HTTPError, ValueError, TypeError, KeyError) as exc:
         raise _upstream_error(exc) from exc
-    truncated = scanned_truncated or len(issues) > limit or bool(incomplete_thread_numbers)
+    next_offset = offset + limit if offset + limit < len(issues) else None
+    previous_offset = max(0, offset - limit) if offset else None
+    # Counts describe this verified page, never the unseen issues or histories.
+    truncated = (
+        scanned_truncated or offset > 0 or next_offset is not None
+        or bool(incomplete_thread_numbers)
+    )
     for column in columns:
         column["count_exact"] = not truncated
     data = {
         "project": repo,
         "columns": columns,
         "count": len(cards),
+        "offset": offset,
+        "limit": limit,
+        "page_scan_count": len(window),
+        "next_offset": next_offset,
+        "previous_offset": previous_offset,
         "truncated": truncated,
         "count_exact": not truncated,
         "source_scan_truncated": scanned_truncated,
