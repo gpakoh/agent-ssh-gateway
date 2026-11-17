@@ -198,6 +198,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "gitea_list_action_jobs": ["mcp:repo"],
     "gitea_get_action_job_logs": ["mcp:repo"],
     "gitea_list_workflows": ["mcp:repo"],
+    "project_release_guide": ["mcp:repo", "mcp:docker"],
     "github_get_repo": ["mcp:repo"],
     "github_list_branches": ["mcp:repo"],
     "github_list_commits": ["mcp:repo"],

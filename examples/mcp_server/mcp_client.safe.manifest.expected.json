@@ -1,9 +1,9 @@
 {
   "mode": "mcp_client",
   "safe_mode": true,
-  "expected_safe_count": 96,
+  "expected_safe_count": 97,
   "expected_blocked_count": 39,
-  "expected_mcp_client_full_count": 133,
+  "expected_mcp_client_full_count": 134,
   "must_include": [
     "docker_network_ls",
     "docker_network_inspect",
@@ -24,7 +24,8 @@
     "docker_recovery_catalog",
     "gateway_catalog",
     "gateway_skill",
-    "list_ssh_targets"
+    "list_ssh_targets",
+    "project_release_guide"
   ],
   "must_exclude": [
     "docker_compose_up",
