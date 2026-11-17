@@ -396,7 +396,7 @@ def _bounded_tail(value: str) -> str:
     return sanitize_verifier_output_tail(text)
 
 
-def _validated_provenance(primary_tool: Any, *, check_index: int) -> None:
+def _validated_provenance(primary_tool: Any, *, check_index: int, exit_code: int | None = None) -> None:
     if not isinstance(primary_tool, dict):
         raise _receipt_failure("verifier receipt provenance is malformed")
     kind = primary_tool.get("kind")
@@ -420,6 +420,15 @@ def _validated_provenance(primary_tool: Any, *, check_index: int) -> None:
         version = primary_tool.get("version")
         if version is not None and not isinstance(version, str):
             raise _receipt_failure("verifier receipt external provenance is malformed")
+        return
+    # A missing executable is valid NEGATIVE evidence only for shell exit 127.
+    # It must never make an unresolved check look successfully verified, and
+    # unexpected untrusted fields must not enter an error or success receipt.
+    if (
+        kind == "unresolved"
+        and exit_code == 127
+        and primary_tool == {"kind": "unresolved", "reason": "not_found_on_trusted_path"}
+    ):
         return
     # Receipt fields are untrusted check evidence. Expose only a fixed
     # classifier reason and the position, never candidate command text,
@@ -510,7 +519,9 @@ def _validated_receipt_check(
         != (payload["before_status_sha256"] != payload["after_status_sha256"])
     ):
         raise _receipt_failure("verifier receipt frame has inconsistent mutation evidence")
-    _validated_provenance(payload.get("primary_tool"), check_index=check_index)
+    _validated_provenance(
+        payload.get("primary_tool"), check_index=check_index, exit_code=exit_code
+    )
     return {
         "check_index": check_index,
         "command": payload["command"],
@@ -674,6 +685,23 @@ def _structured_verifier_failure(
         )
 
     if exit_code == 83:
+        failed_receipt = details.get("failed_receipt")
+        if (
+            isinstance(failed_receipt, dict)
+            and failed_receipt.get("exit_code") == 127
+            and failed_receipt.get("primary_tool")
+            == {"kind": "unresolved", "reason": "not_found_on_trusted_path"}
+        ):
+            details["phase"] = "verifier_env"
+            details["execution_plane"] = "isolated_candidate_verifier"
+            details["provenance_reason"] = "not_found_on_trusted_path"
+            return CandidateVerificationError(
+                "required check executable is missing from isolated verifier image",
+                code="VERIFIER_TOOL_UNAVAILABLE",
+                phase="verifier_env",
+                retryable=False,
+                details=details,
+            )
         details["phase"] = "candidate_check"
         return CandidateVerificationError(
             f"a required verification check failed with exit code {exit_code}",
