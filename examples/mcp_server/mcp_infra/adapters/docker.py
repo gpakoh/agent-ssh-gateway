@@ -863,10 +863,14 @@ async def _docker_run_impl(
     command: list[str],
     container_name: str | None = None,
     timeout: int = 60,
+    isolate_network: bool = False,
 ) -> RunResult:
-    return await _docker_client().run(
-        image, command, container_name=container_name, timeout=timeout
-    )
+    client = _docker_client()
+    if isolate_network:
+        return await client.run(
+            image, command, container_name=container_name, timeout=timeout, isolate_network=True
+        )
+    return await client.run(image, command, container_name=container_name, timeout=timeout)
 
 async def _docker_compose_up_impl(
     project_dir: str | None = None,
@@ -6750,6 +6754,14 @@ async def docker_run(
             source="docker",
         )
     allowed_images = {ref.strip() for ref in allowed_raw.split(",") if ref.strip()}
+    isolation_policy = os.environ.get("MCP_DOCKER_RUN_ISOLATE_NETWORK", "0").strip()
+    if isolation_policy not in {"0", "1"}:
+        return tool_error(
+            tool="docker_run",
+            code="DOCKER_RUN_NETWORK_POLICY_INVALID",
+            message="MCP_DOCKER_RUN_ISOLATE_NETWORK must be 0 or 1.",
+            source="docker",
+        )
 
     dc = _docker_client()
     try:
@@ -6821,14 +6833,20 @@ async def docker_run(
     summary = f"Run {image}: {' '.join(command)}"
     if container_name:
         summary += f" (name={container_name})"
+    action_params: dict[str, Any] = {
+        "image": image,
+        "command": command,
+        "container_name": container_name,
+        "timeout": timeout,
+    }
+    if isolation_policy == "1":
+        # Bind the stricter policy to the confirmation action; changing the
+        # environment later must never downgrade an already prepared run.
+        action_params["isolate_network"] = True
+        summary += " (network=none)"
     action = _confirm_store().create_action(
         "docker_run",
-        {
-            "image": image,
-            "command": command,
-            "container_name": container_name,
-            "timeout": timeout,
-        },
+        action_params,
         summary,
         required_scope="mcp:docker:admin",
     )
