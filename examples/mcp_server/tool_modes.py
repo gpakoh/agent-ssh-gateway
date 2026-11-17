@@ -24,6 +24,8 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
     },
     "standard": {
         "health",
+        "service_http_probe",
+        "service_tcp_probe",
         "tools_manifest",
         "gateway_catalog",
         "gateway_skill",
@@ -53,6 +55,8 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
     },
     "full": {
         "health",
+        "service_http_probe",
+        "service_tcp_probe",
         "tools_manifest",
         "gateway_catalog",
         "gateway_skill",
@@ -83,6 +87,8 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "todo_backlog_upsert",
     },
     "mcp_client": {
+        "service_http_probe",
+        "service_tcp_probe",
         "project_list",
         "scan_command",
         "health",
