@@ -613,6 +613,7 @@ from examples.mcp_server.mcp_infra.adapters import (  # noqa: E402
     docker,
     gateway,
     postgres,
+    release_guide,
     remote,
     site_assets,
     site_media,
@@ -668,6 +669,7 @@ gitea_get_action_job_logs = remote.gitea_get_action_job_logs
 gitea_list_workflows = remote.gitea_list_workflows
 gitea_dispatch_workflow = workflow_dispatch.gitea_dispatch_workflow
 gitea_workflow_dispatch_status = workflow_dispatch.gitea_workflow_dispatch_status
+project_release_guide = release_guide.project_release_guide
 github_get_repo = remote.github_get_repo
 github_list_branches = remote.github_list_branches
 github_list_commits = remote.github_list_commits
@@ -704,6 +706,7 @@ docker.register_all()
 gateway.register_all()
 remote.register_all()
 workflow_dispatch.register_all()
+release_guide.register_all()
 postgres.register_all()
 supervisor.register_all()
 
