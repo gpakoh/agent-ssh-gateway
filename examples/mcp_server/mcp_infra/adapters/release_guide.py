@@ -186,6 +186,8 @@ async def _observe_blob(owner: str, repository: str, path: str, ref: str, audite
         or not isinstance(commit, str) or not _SHA.fullmatch(commit)
     ):
         return {"status": "unknown", "reason": "Ревизия исходного файла не подтверждена."}
+    if _SHA.fullmatch(ref) and commit != ref:
+        return {"status": "unknown", "reason": "Закреплённая ревизия исходного файла не подтверждена."}
     return {
         "status": "unchanged" if blob == audited_sha else "changed",
         "current_commit_sha": commit,

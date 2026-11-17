@@ -105,6 +105,7 @@ async def test_core_guide_has_order_provenance_live_health_and_unknown_release_c
     assert plan["steps"] == ["API then worker"]
     assert [service["observation"]["health"] for service in plan["services"]] == ["healthy", "healthy"]
     assert plan["conditions"][0]["status"] == "unknown"
+    assert plan["source_freshness"] == "unknown"
     assert plan["ready_for_release"] == "unknown"
     assert guide.docker.docker_inspect.await_count == 2
 
@@ -367,6 +368,16 @@ async def test_all_reviewed_source_blobs_must_be_available_and_unchanged(monkeyp
     result = await guide.project_release_guide("quart-core")
     assert result["result"]["source_freshness"] == "unknown"
     assert "sensitive detail" not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_pinned_source_requires_the_exact_resolved_commit(monkeypatch):
+    monkeypatch.setattr(
+        guide.remote, "gitea_get_file",
+        AsyncMock(return_value={"ok": True, "result": {"sha": "d" * 40, "resolved_commit_sha": "e" * 40}}),
+    )
+    observed = await guide._observe_blob("gpakoh", "infra-quart", "scripts/deploy.sh", "f" * 40, "d" * 40)
+    assert observed["status"] == "unknown"
 
 
 @pytest.mark.asyncio
