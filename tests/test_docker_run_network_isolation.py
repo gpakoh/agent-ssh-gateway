@@ -18,6 +18,7 @@ IMAGE = "192.168.1.103:3005/gpakoh/quart-core@sha256:" + "a" * 64
 def clean_actions(monkeypatch):
     monkeypatch.delenv("MCP_DOCKER_RUN_ALLOWED_IMAGES", raising=False)
     monkeypatch.delenv("MCP_DOCKER_RUN_ISOLATED_IMAGES", raising=False)
+    monkeypatch.delenv("MCP_DOCKER_RUN_ISOLATE_NETWORK", raising=False)
     srv._confirm_store._actions.clear()
     srv._confirm_store._token_map.clear()
     yield
@@ -83,6 +84,45 @@ async def test_isolated_list_still_enforces_exact_image_and_admin_scope(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_global_isolation_applies_to_ordinary_allowlist(monkeypatch):
+    monkeypatch.setenv("MCP_DOCKER_RUN_ALLOWED_IMAGES", IMAGE)
+    monkeypatch.setenv("MCP_DOCKER_RUN_ISOLATE_NETWORK", "1")
+    with patch(OWNER, return_value="owner-a"):
+        pending = await srv.docker_run(image=IMAGE, command=["python", "--version"])
+    assert pending["ok"] is True
+    assert "network=none" in pending["result"]["summary"]
+    with patch(OWNER, return_value="owner-a"), patch(SCOPES, return_value=["mcp:docker:admin"]):
+        with patch("examples.mcp_server.server.DockerClient") as docker_cls:
+            docker = AsyncMock()
+            docker.run.return_value = RunResult(stdout="ok", stderr="", exit_code=0)
+            docker_cls.return_value = docker
+            result = await srv.confirm_operation(action_id=pending["result"]["action_id"])
+    assert result["ok"] is True
+    assert docker.run.await_args.kwargs["isolate_network"] is True
+
+
+@pytest.mark.asyncio
+async def test_invalid_global_isolation_fails_closed_before_and_after_confirmation(monkeypatch):
+    monkeypatch.setenv("MCP_DOCKER_RUN_ALLOWED_IMAGES", IMAGE)
+    monkeypatch.setenv("MCP_DOCKER_RUN_ISOLATE_NETWORK", "invalid")
+    refused = await srv.docker_run(image=IMAGE, command=["python", "--version"])
+    assert refused["ok"] is False
+    assert refused["error"]["code"] == "DOCKER_RUN_NETWORK_POLICY_INVALID"
+    assert not srv._confirm_store._actions
+
+    monkeypatch.setenv("MCP_DOCKER_RUN_ISOLATE_NETWORK", "0")
+    with patch(OWNER, return_value="owner-a"):
+        pending = await srv.docker_run(image=IMAGE, command=["python", "--version"])
+    monkeypatch.setenv("MCP_DOCKER_RUN_ISOLATE_NETWORK", "invalid")
+    with patch(OWNER, return_value="owner-a"), patch(SCOPES, return_value=["mcp:docker:admin"]):
+        with patch("examples.mcp_server.server.DockerClient") as docker_cls:
+            result = await srv.confirm_operation(action_id=pending["result"]["action_id"])
+    assert result["ok"] is False
+    assert result["error"]["code"] == "DOCKER_RUN_NETWORK_POLICY_INVALID"
+    docker_cls.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_empty_lists_deny_before_confirmation():
     result = await srv.docker_run(image=IMAGE, command=["python", "--version"])
     assert result["ok"] is False
@@ -137,3 +177,4 @@ def test_oauth_compose_passes_isolated_allowlist_as_empty_by_default():
     )
     env = compose["services"]["mcp-oauth"]["environment"]
     assert "MCP_DOCKER_RUN_ISOLATED_IMAGES=${MCP_DOCKER_RUN_ISOLATED_IMAGES:-}" in env
+    assert "MCP_DOCKER_RUN_ISOLATE_NETWORK=${MCP_DOCKER_RUN_ISOLATE_NETWORK:-0}" in env

@@ -858,11 +858,27 @@ async def _docker_prune_impl(type: str = "container") -> RunResult:
 async def _docker_exec_impl(container: str, command: list[str], timeout: int = 30) -> RunResult:
     return await _docker_client().exec(container, command, timeout=timeout)
 
-def _docker_run_image_policy() -> tuple[set[str], set[str]]:
+def _docker_run_image_policy() -> tuple[set[str], set[str], bool]:
     def read_refs(name: str) -> set[str]:
         return {ref.strip() for ref in os.environ.get(name, "").split(",") if ref.strip()}
 
-    return read_refs("MCP_DOCKER_RUN_ALLOWED_IMAGES"), read_refs("MCP_DOCKER_RUN_ISOLATED_IMAGES")
+    mode = os.environ.get("MCP_DOCKER_RUN_ISOLATE_NETWORK", "0").strip()
+    if mode not in {"0", "1"}:
+        raise ValueError("MCP_DOCKER_RUN_ISOLATE_NETWORK must be 0 or 1.")
+    return (
+        read_refs("MCP_DOCKER_RUN_ALLOWED_IMAGES"),
+        read_refs("MCP_DOCKER_RUN_ISOLATED_IMAGES"),
+        mode == "1",
+    )
+
+
+def _docker_run_network_policy_error(error: ValueError) -> dict[str, Any]:
+    return tool_error(
+        tool="docker_run",
+        code="DOCKER_RUN_NETWORK_POLICY_INVALID",
+        message=str(error),
+        source="docker",
+    )
 
 
 async def _docker_run_impl(
@@ -872,7 +888,10 @@ async def _docker_run_impl(
     timeout: int = 60,
     isolate_network: bool = False,
 ) -> RunResult | dict[str, Any]:
-    allowed, isolated = _docker_run_image_policy()
+    try:
+        allowed, isolated, force_isolation = _docker_run_image_policy()
+    except ValueError as error:
+        return _docker_run_network_policy_error(error)
     if image not in allowed and image not in isolated:
         return tool_error(
             tool="docker_run",
@@ -881,7 +900,7 @@ async def _docker_run_impl(
             source="docker",
         )
     client = _docker_client()
-    if isolate_network or image in isolated:
+    if isolate_network or force_isolation or image in isolated:
         return await client.run(
             image, command, container_name=container_name, timeout=timeout, isolate_network=True
         )
@@ -6760,7 +6779,10 @@ async def docker_run(
     MCP_DOCKER_RUN_ISOLATED_IMAGES always run with Docker networking disabled.
     Container runs with --rm and is removed after completion.
     """
-    allowed_images, isolated_images = _docker_run_image_policy()
+    try:
+        allowed_images, isolated_images, force_isolation = _docker_run_image_policy()
+    except ValueError as error:
+        return _docker_run_network_policy_error(error)
     if not allowed_images and not isolated_images:
         return tool_error(
             tool="docker_run",
@@ -6846,7 +6868,7 @@ async def docker_run(
         "container_name": container_name,
         "timeout": timeout,
     }
-    if image in isolated_images:
+    if force_isolation or image in isolated_images:
         # Isolated wins if an image occurs in both lists. Bind this restriction
         # to confirmation so a later configuration change cannot downgrade it.
         action_params["isolate_network"] = True
