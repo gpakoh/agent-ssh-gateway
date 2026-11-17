@@ -917,6 +917,127 @@ def test_failure_after_success_includes_check_evidence_and_failed_receipt(
     assert "assert 1 == 2" in err.details["output_tail"]
 
 
+@pytest.mark.parametrize("missing_check", ["pytest -q", "ruff check .", "mypy app/evaluation.py"])
+def test_missing_primary_executable_has_typed_verifier_diagnostic(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, missing_check: str
+) -> None:
+    """Real #882 consumer failure: shell exit 127 is not a source test failure."""
+    staging = _configure(monkeypatch, tmp_path)
+
+    def runner(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if len(argv) > 1 and argv[1] == "run":
+            run_id = _run_id_from_script(kwargs["input"])
+            stdout = (
+                _receipt_line(
+                    run_id, _image_ref(), 0, missing_check,
+                    exit_code=127,
+                    primary_tool={"kind": "unresolved", "reason": "not_found_on_trusted_path"},
+                    stderr_tail="/bin/sh: command not found",
+                )
+                + "\nMCP_VERIFY_EXIT=127\nMCP_VERIFY_CHECK=0\n"
+            )
+            return subprocess.CompletedProcess(argv, 83, stdout, "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    with pytest.raises(CandidateVerificationError) as caught:
+        verify_candidate_via_docker(
+            staging_root=staging,
+            expected_sha="ee" * 20,
+            required_checks=[missing_check],
+            runner=runner,
+        )
+    err = caught.value
+    assert err.code == "VERIFIER_TOOL_UNAVAILABLE"
+    assert err.phase == "verifier_env"
+    assert err.retryable is False
+    assert err.details["mutation_occurred"] is False
+    assert err.details["check_index"] == 0
+    assert err.details["check_exit_code"] == 127
+    assert err.details["execution_plane"] == "isolated_candidate_verifier"
+    assert err.details["provenance_reason"] == "not_found_on_trusted_path"
+    assert err.details["failed_receipt"]["primary_tool"] == {
+        "kind": "unresolved", "reason": "not_found_on_trusted_path",
+    }
+
+
+def test_real_verifier_script_missing_executable_reports_environment_plane(tmp_path: Path) -> None:
+    """Exercise actual POSIX shell and verifier-owned frame, not a mocked receipt."""
+    command = "mcp-verifier-nonexistent-executable-882 --version"
+    run_id = "8821" * 8
+    image = "registry.invalid/ssh-gateway-sshd:deadbeef"
+    rc, stdout, _source_head = _run_verifier_script_locally(
+        tmp_path, [command], run_id=run_id, verifier_image=image
+    )
+    assert rc == 83
+    err = candidate_verifier_module._structured_verifier_failure(
+        rc, [command], stdout, "", run_id=run_id, verifier_image=image
+    )
+    assert err.code == "VERIFIER_TOOL_UNAVAILABLE"
+    assert err.details["check_exit_code"] == 127
+    assert err.details["failed_receipt"]["primary_tool"] == {
+        "kind": "unresolved", "reason": "not_found_on_trusted_path",
+    }
+    assert err.details["mutation_occurred"] is False
+
+
+def test_existing_primary_tool_exit_127_remains_candidate_check_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Exit 127 alone cannot prove the primary executable is unavailable."""
+    staging = _configure(monkeypatch, tmp_path)
+    cmd = "pytest -q"
+
+    def runner(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if len(argv) > 1 and argv[1] == "run":
+            run_id = _run_id_from_script(kwargs["input"])
+            stdout = (
+                _receipt_line(run_id, _image_ref(), 0, cmd, exit_code=127)
+                + "\nMCP_VERIFY_EXIT=127\nMCP_VERIFY_CHECK=0\n"
+            )
+            return subprocess.CompletedProcess(argv, 83, stdout, "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    with pytest.raises(CandidateVerificationError) as caught:
+        verify_candidate_via_docker(
+            staging_root=staging, expected_sha="ed" * 20,
+            required_checks=[cmd], runner=runner,
+        )
+    assert caught.value.code == "CANDIDATE_CHECK_FAILED"
+    assert caught.value.phase == "candidate_check"
+
+
+def test_missing_tool_diagnostic_rejects_unverified_extra_provenance_fields(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Untrusted command metadata must not leak into a trusted tool-unavailable error."""
+    staging = _configure(monkeypatch, tmp_path)
+
+    def runner(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if len(argv) > 1 and argv[1] == "run":
+            run_id = _run_id_from_script(kwargs["input"])
+            stdout = (
+                _receipt_line(
+                    run_id, _image_ref(), 0, "pytest -q", exit_code=127,
+                    primary_tool={
+                        "kind": "unresolved",
+                        "reason": "not_found_on_trusted_path",
+                        "secret": "private-verifier-token",
+                    },
+                )
+                + "\nMCP_VERIFY_EXIT=127\nMCP_VERIFY_CHECK=0\n"
+            )
+            return subprocess.CompletedProcess(argv, 83, stdout, "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    with pytest.raises(CandidateVerificationError) as caught:
+        verify_candidate_via_docker(
+            staging_root=staging, expected_sha="ec" * 20,
+            required_checks=["pytest -q"], runner=runner,
+        )
+    assert caught.value.code != "VERIFIER_TOOL_UNAVAILABLE"
+    assert "private-verifier-token" not in str(caught.value.details)
+
+
 def test_malicious_fake_frame_in_stdout_cannot_spoof_receipt(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1043,6 +1164,7 @@ def test_quoted_and_newline_commands_round_trip_in_receipt(
         "VERIFIER_EVIDENCE_UNAVAILABLE",
         "VERIFIER_RECEIPT_INVALID",
         "VERIFIER_PROVENANCE_UNRESOLVED",
+        "VERIFIER_TOOL_UNAVAILABLE",
     ],
 )
 def test_all_verifier_receipt_failures_keep_typed_error_codes(code: str) -> None:
