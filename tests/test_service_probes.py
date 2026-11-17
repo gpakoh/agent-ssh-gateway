@@ -102,6 +102,8 @@ async def test_http_zero_bytes_does_not_read_response(monkeypatch) -> None:
     result = await probes.service_http_probe(max_response_bytes=0)
     assert result["ok"] is True
     assert result["result"]["response_bytes_sampled"] == 0
+    assert result["result"]["response_truncated"] is None
+    assert result["result"]["response_truncation_known"] is False
     assert result["result"]["response_body_included"] is False
 
 

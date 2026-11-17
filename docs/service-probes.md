@@ -10,7 +10,8 @@ two fixed peers in the MCP server's Docker Compose service network:
 
 The caller chooses `target=gateway|mcp`, with an explicit 200–5000 ms
 timeout. HTTP may sample 0–4096 *raw wire* response bytes to detect
-truncation, but **never returns the body or its hash**. Requests are GET-only,
+truncation; with a zero-byte budget, truncation is explicitly unknown
+(`response_truncated=null`). It **never returns the body or its hash**. Requests are GET-only,
 without credentials/cookies or ambient proxy configuration. Redirects are
 not followed and the `Location` header is never returned. TCP connect
 sends no application bytes and closes the socket after observation.
