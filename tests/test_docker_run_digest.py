@@ -122,6 +122,7 @@ def test_oauth_compose_passes_operator_allowlist_without_enabling_by_default():
 @pytest.mark.asyncio
 async def test_unconfigured_allowlist_still_denies_digest(monkeypatch):
     monkeypatch.delenv("MCP_DOCKER_RUN_ALLOWED_IMAGES", raising=False)
+    monkeypatch.delenv("MCP_DOCKER_RUN_ISOLATED_IMAGES", raising=False)
     result = await srv.docker_run(image=DIGEST, command=["echo", "ok"])
     assert result["ok"] is False
     assert result["error"]["code"] == "DOCKER_RUN_ALLOWLIST_NOT_CONFIGURED"

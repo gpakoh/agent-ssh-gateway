@@ -314,6 +314,10 @@ services:
       - MCP_ALLOWED_PROJECT_ROOTS=${MCP_ALLOWED_PROJECT_ROOTS:-${MCP_OAUTH_PROJECT_ROOT:?set MCP_OAUTH_PROJECT_ROOT}}
       # Empty keeps docker_run disabled until an operator allows exact images.
       - MCP_DOCKER_RUN_ALLOWED_IMAGES=${MCP_DOCKER_RUN_ALLOWED_IMAGES:-}
+      # Exact images in this separate list always run without external networking.
+      - MCP_DOCKER_RUN_ISOLATED_IMAGES=${MCP_DOCKER_RUN_ISOLATED_IMAGES:-}
+      # Alternatively an operator may isolate every normally allowed image.
+      - MCP_DOCKER_RUN_ISOLATE_NETWORK=${MCP_DOCKER_RUN_ISOLATE_NETWORK:-0}
       # Only the admin OAuth plane may delegate Compose configuration reads.
       # deploy-from-registry sets this to the exact MCP image digest.
       - MCP_COMPOSE_RUNNER_IMAGE=${MCP_COMPOSE_RUNNER_IMAGE:-}

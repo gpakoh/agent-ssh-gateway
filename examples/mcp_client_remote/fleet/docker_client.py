@@ -2148,10 +2148,15 @@ exec(compile(raw, path, "exec"), {"__name__": "__main__", "__file__": path, "__p
         command: list[str],
         container_name: str | None = None,
         timeout: int = 60,
+        isolate_network: bool = False,
     ) -> RunResult:
         self._validate_run_image(image)
+        if not isinstance(isolate_network, bool):
+            raise ValueError("isolate_network must be a boolean")
         timeout = max(1, min(timeout, 600))
         argv = [DOCKER_BIN, "run", "--rm"]
+        if isolate_network:
+            argv.extend(["--network", "none"])
         if container_name:
             self._validate_container_name(container_name)
             argv.extend(["--name", container_name])
