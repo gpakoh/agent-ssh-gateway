@@ -36,7 +36,7 @@ class _Workflow(_Model):
     branch: str = Field(min_length=1, max_length=120)
     path: str = Field(min_length=1, max_length=240)
     trigger: Literal[
-        "manual_exact_sha", "manual_operator", "push_after_merge", "push_guarded", "blocked"
+        "manual_exact_sha", "manual_operator", "push_after_merge", "push_guarded", "event_guarded", "blocked"
     ]
     audited_commit_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
     audited_blob_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
@@ -60,6 +60,7 @@ class _SourceEvidence(_Model):
 class _Guide(_Model):
     repository: str = Field(min_length=1, max_length=80)
     title: str = Field(min_length=1, max_length=160)
+    coverage: Literal["reviewed", "partial"] = "reviewed"
     compose_project: str | None = Field(default=None, min_length=1, max_length=80)
     services: list[_Service] = Field(default_factory=list, max_length=20)
     workflow: _Workflow | None = None
@@ -89,7 +90,7 @@ def _catalog(data: object) -> tuple[_Catalog, str, str]:
     blob = data.get("sha")
     if (
         not isinstance(encoded, str)
-        or len(encoded) > 4 * ((_CATALOG_LIMIT + 2) // 3) + 2048
+        or len(encoded) > 2 * (4 * ((_CATALOG_LIMIT + 2) // 3))
         or not isinstance(commit, str)
         or not _SHA.fullmatch(commit)
         or not isinstance(blob, str)
@@ -97,7 +98,10 @@ def _catalog(data: object) -> tuple[_Catalog, str, str]:
     ):
         raise ValueError("release guide catalog provenance is invalid")
     try:
-        raw = base64.b64decode("".join(encoded.split()), validate=True)
+        normalized = "".join(encoded.split())
+        if len(normalized) > 4 * ((_CATALOG_LIMIT + 2) // 3):
+            raise ValueError("release guide catalog is too large")
+        raw = base64.b64decode(normalized, validate=True)
         if len(raw) > _CATALOG_LIMIT:
             raise ValueError("release guide catalog is too large")
         parsed = _Catalog.model_validate_json(raw)
@@ -232,6 +236,31 @@ def _unavailable_workspace(project: str) -> str | None:
     return None
 
 
+def _canonical_project(project: str) -> str | None:
+    """Resolve common case/separator variants only when the result is unique."""
+    try:
+        registry = coordination_adapter.server_attr("_get_workspace_registry")()
+        rows = [*registry.list_projects(), *registry.list_unavailable_projects()]
+    except Exception:
+        return project
+    names = {
+        row["project_id"] for row in rows
+        if isinstance(row, dict) and isinstance(row.get("project_id"), str)
+    }
+    if project in names:
+        return project
+    case_matches = {name for name in names if name.casefold() == project.casefold()}
+    if len(case_matches) == 1:
+        return next(iter(case_matches))
+    if len(case_matches) > 1:
+        return None
+    normalized = project.casefold().replace("-", "_")
+    matches = {name for name in names if name.casefold().replace("-", "_") == normalized}
+    if len(matches) == 1:
+        return next(iter(matches))
+    return None if len(matches) > 1 else project
+
+
 def _source_freshness(guide: _Guide, observations: list[dict], infra_repo: str) -> str:
     if any(item.get("status") == "changed" for item in observations):
         return "changed"
@@ -257,6 +286,14 @@ async def project_release_guide(project: str) -> dict:
     tool = "project_release_guide"
     if not isinstance(project, str) or not _NAME.fullmatch(project) or ".." in project:
         return tool_error(tool=tool, code="INVALID_INPUT", message="Invalid project identifier.")
+    requested_project = project
+    resolved_project = _canonical_project(project)
+    if resolved_project is None:
+        return tool_error(
+            tool=tool, code="AMBIGUOUS_PROJECT",
+            message="Найдено несколько похожих проектов; укажите точное имя из реестра.",
+        )
+    project = resolved_project
     try:
         owner = coordination_adapter._owner()
         infra_repo = coordination_adapter._registered("infra-quart")
@@ -325,7 +362,8 @@ async def project_release_guide(project: str) -> dict:
                 for row in candidates[:40] if isinstance(row, dict)
             ]
         return tool_success(tool, source="gitea", result={
-            "project": project, "repository": f"{owner}/{repo}", "configured": False,
+            "project": project, "requested_project": requested_project,
+            "repository": f"{owner}/{repo}", "configured": False,
             "source": provenance, "workflow_candidates": candidates,
             "workspace": {"status": "unavailable", "reason": unavailable_reason} if unavailable_reason else None,
             "note": "Профиль не подготовлен. Список workflow и имя репозитория не подтверждают способ выпуска.",
@@ -355,7 +393,8 @@ async def project_release_guide(project: str) -> dict:
         for service, observation in zip(guide.services, observations, strict=True)
     ]
     return tool_success(tool, source="gitea", result={
-        "project": project, "configured": True, "title": guide.title,
+        "project": project, "requested_project": requested_project,
+        "configured": True, "title": guide.title, "coverage": guide.coverage,
         "repository": f"{owner}/{repo}", "source": provenance,
         "workflow": (
             {**guide.workflow.model_dump(), "observation": workflow_observation}

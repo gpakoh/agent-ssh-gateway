@@ -234,6 +234,16 @@ def test_catalog_supports_many_project_profiles_with_bounded_input():
     assert len(parsed.projects) == 101
 
 
+def test_catalog_accepts_line_wrapped_base64_at_the_decoded_size_limit():
+    raw = json.dumps(catalog()).encode()
+    raw += b" " * (guide._CATALOG_LIMIT - len(raw) - 1)
+    encoded = base64.b64encode(raw).decode()
+    wrapped = "\n".join(encoded[index : index + 76] for index in range(0, len(encoded), 76))
+    data = {"encoding": "base64", "content": wrapped, "sha": "a" * 40, "resolved_commit_sha": "b" * 40}
+    parsed, _, _ = guide._catalog(data)
+    assert "quart-core" in parsed.projects
+
+
 @pytest.mark.asyncio
 async def test_registered_project_without_workspace_returns_unverified_workflow_candidates(monkeypatch):
     configure(monkeypatch)
@@ -288,11 +298,12 @@ async def test_profile_can_describe_project_without_containers_or_workflow(monke
     configure(monkeypatch)
     data = catalog()
     profile = data["projects"]["quart-core"]
-    profile.update({"compose_project": None, "services": [], "workflow": None, "source_files": []})
+    profile.update({"compose_project": None, "services": [], "workflow": None, "source_files": [], "coverage": "partial"})
     monkeypatch.setattr(guide.remote, "gitea_get_file", AsyncMock(return_value=remote_file(data)))
     result = await guide.project_release_guide("quart-core")
     assert result["ok"] is True
     assert result["result"]["workflow"] is None
+    assert result["result"]["coverage"] == "partial"
     assert result["result"]["services"] == []
     assert result["result"]["source_freshness"] == "unknown"
     guide.docker.docker_inspect.assert_not_awaited()
@@ -421,3 +432,39 @@ def test_catalog_rejects_unsafe_source_paths_and_unbound_services():
     data["projects"]["quart-core"]["compose_project"] = None
     with pytest.raises(ValueError):
         guide._catalog(remote_file(data)["result"])
+
+
+def test_catalog_supports_guarded_merge_event_release():
+    data = catalog()
+    workflow = data["projects"]["quart-core"]["workflow"]
+    workflow["trigger"] = "event_guarded"
+    workflow["sha_input"] = None
+    parsed, _, _ = guide._catalog(remote_file(data)["result"])
+    assert parsed.projects["quart-core"].workflow.trigger == "event_guarded"
+
+
+def test_project_alias_resolution_is_unique_and_preserves_registered_identity(monkeypatch):
+    class Registry:
+        def list_projects(self):
+            return [{"project_id": name} for name in ("nod-gateway", "nod-android", "nod_android")]
+
+        def list_unavailable_projects(self):
+            return [{"project_id": "proxy-parser"}]
+
+    monkeypatch.setattr(guide.coordination_adapter, "server_attr", lambda _: lambda: Registry())
+    assert guide._canonical_project("NOD_gateway") == "nod-gateway"
+    assert guide._canonical_project("NOD_android") == "nod_android"
+    assert guide._canonical_project("NOD-ANDROID") == "nod-android"
+    assert guide._canonical_project("PROXY_PARSER") == "proxy-parser"
+
+
+def test_project_alias_collision_is_not_guessed(monkeypatch):
+    class Registry:
+        def list_projects(self):
+            return [{"project_id": "Foo_bar"}, {"project_id": "FOO_bar"}]
+
+        def list_unavailable_projects(self):
+            return []
+
+    monkeypatch.setattr(guide.coordination_adapter, "server_attr", lambda _: lambda: Registry())
+    assert guide._canonical_project("foo_bar") is None
