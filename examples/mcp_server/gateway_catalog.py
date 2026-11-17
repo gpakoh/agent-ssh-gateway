@@ -30,7 +30,7 @@ GROUPS = {
 def group_for(name: str) -> str:
     if name in {"site_asset_transfer", "site_media_pipeline"}:
         return "sites"
-    if name in {"health", "tools_manifest", "gateway_catalog", "gateway_skill", "self_test"}:
+    if name in {"health", "service_http_probe", "service_tcp_probe", "tools_manifest", "gateway_catalog", "gateway_skill", "self_test"}:
         return "discovery"
     if name.startswith("coord_"):
         return "coordination"
