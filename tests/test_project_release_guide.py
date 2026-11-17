@@ -105,6 +105,7 @@ async def test_core_guide_has_order_provenance_live_health_and_unknown_release_c
     assert plan["steps"] == ["API then worker"]
     assert [service["observation"]["health"] for service in plan["services"]] == ["healthy", "healthy"]
     assert plan["conditions"][0]["status"] == "unknown"
+    assert plan["source_freshness"] == "unknown"
     assert plan["ready_for_release"] == "unknown"
     assert guide.docker.docker_inspect.await_count == 2
 
@@ -168,7 +169,13 @@ async def test_invalid_or_unregistered_project_never_reads_catalog(monkeypatch):
     result = await guide.project_release_guide("../secrets")
     assert result["error"]["code"] == "INVALID_INPUT"
     guide.remote.gitea_get_file.assert_not_awaited()
-    monkeypatch.setattr(guide.coordination_adapter, "_registered", lambda _: (_ for _ in ()).throw(ValueError()))
+    def registered(name):
+        if name == "missing":
+            raise ValueError("not registered")
+        return name
+
+    monkeypatch.setattr(guide.coordination_adapter, "_registered", registered)
+    monkeypatch.setattr(guide, "_unavailable_workspace", lambda _: None)
     result = await guide.project_release_guide("missing")
     assert result["error"]["code"] == "PROJECT_NOT_FOUND"
     guide.remote.gitea_get_file.assert_not_awaited()
@@ -225,3 +232,239 @@ def test_catalog_supports_many_project_profiles_with_bounded_input():
     assert 65536 < size < guide._CATALOG_LIMIT
     parsed, _, _ = guide._catalog(remote_file(value)["result"])
     assert len(parsed.projects) == 101
+
+
+def test_catalog_accepts_line_wrapped_base64_at_the_decoded_size_limit():
+    raw = json.dumps(catalog()).encode()
+    raw += b" " * (guide._CATALOG_LIMIT - len(raw) - 1)
+    encoded = base64.b64encode(raw).decode()
+    wrapped = "\n".join(encoded[index : index + 76] for index in range(0, len(encoded), 76))
+    data = {"encoding": "base64", "content": wrapped, "sha": "a" * 40, "resolved_commit_sha": "b" * 40}
+    parsed, _, _ = guide._catalog(data)
+    assert "quart-core" in parsed.projects
+
+
+@pytest.mark.asyncio
+async def test_registered_project_without_workspace_returns_unverified_workflow_candidates(monkeypatch):
+    configure(monkeypatch)
+
+    def registered(name):
+        if name == "proxy-parser":
+            raise ValueError("workspace absent")
+        return name
+
+    class Registry:
+        def list_unavailable_projects(self):
+            return [{"project_id": "proxy-parser", "source": "source_registry", "reason": "root_missing"}]
+
+    monkeypatch.setattr(guide.coordination_adapter, "_registered", registered)
+    monkeypatch.setattr(guide.coordination_adapter, "server_attr", lambda _: lambda: Registry())
+    monkeypatch.setattr(
+        guide.remote, "gitea_get_repo",
+        AsyncMock(return_value={"ok": True, "result": {"full_name": "gpakoh/proxy-parser"}}),
+    )
+    monkeypatch.setattr(
+        guide.remote, "gitea_list_workflows",
+        AsyncMock(return_value={"ok": True, "result": {"workflows": [{"name": "CI", "path": "ci.yml"}]}}),
+    )
+    result = await guide.project_release_guide("proxy-parser")
+    assert result["ok"] is True
+    assert result["result"]["configured"] is False
+    assert result["result"]["workspace"] == {"status": "unavailable", "reason": "root_missing"}
+    assert result["result"]["workflow_candidates"] == [{"name": "CI", "path": "ci.yml"}]
+    assert result["result"]["ready_for_release"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_missing_workspace_cannot_assume_gitea_identity(monkeypatch):
+    configure(monkeypatch)
+    monkeypatch.setattr(
+        guide.coordination_adapter, "_registered",
+        lambda name: (_ for _ in ()).throw(ValueError()) if name == "proxy-parser" else name,
+    )
+    monkeypatch.setattr(guide, "_unavailable_workspace", lambda _: "root_missing")
+    monkeypatch.setattr(
+        guide.remote, "gitea_get_repo",
+        AsyncMock(return_value={"ok": True, "result": {"full_name": "other/proxy-parser"}}),
+    )
+    result = await guide.project_release_guide("proxy-parser")
+    assert result["ok"] is False
+    assert result["error"]["code"] == "SOURCE_UNAVAILABLE"
+    guide.docker.docker_inspect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_profile_can_describe_project_without_containers_or_workflow(monkeypatch):
+    configure(monkeypatch)
+    data = catalog()
+    profile = data["projects"]["quart-core"]
+    profile.update({"compose_project": None, "services": [], "workflow": None, "source_files": [], "coverage": "partial"})
+    monkeypatch.setattr(guide.remote, "gitea_get_file", AsyncMock(return_value=remote_file(data)))
+    result = await guide.project_release_guide("quart-core")
+    assert result["ok"] is True
+    assert result["result"]["workflow"] is None
+    assert result["result"]["coverage"] == "partial"
+    assert result["result"]["services"] == []
+    assert result["result"]["source_freshness"] == "unknown"
+    guide.docker.docker_inspect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_changed_deploy_source_is_reported_separately_from_workflow(monkeypatch):
+    configure(monkeypatch)
+    data = catalog()
+    data["projects"]["quart-core"]["source_evidence"] = [{
+        "repository": "infra-quart", "path": "scripts/deploy-quart-core.sh",
+        "ref": "main", "audited_blob_sha": "d" * 40,
+    }]
+
+    async def read_file(owner, repo, path, **kwargs):
+        if path == guide._CATALOG_PATH:
+            return remote_file(data)
+        blob = "f" * 40 if path == "scripts/deploy-quart-core.sh" else "d" * 40
+        return {"ok": True, "result": {"sha": blob, "resolved_commit_sha": "e" * 40}}
+
+    monkeypatch.setattr(guide.remote, "gitea_get_file", AsyncMock(side_effect=read_file))
+    result = await guide.project_release_guide("quart-core")
+    assert result["ok"] is True
+    assert result["result"]["workflow"]["observation"]["status"] == "unchanged"
+    assert result["result"]["source_freshness"] == "changed"
+    assert result["result"]["ready_for_release"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_unchecked_source_never_appears_fresh(monkeypatch):
+    configure(monkeypatch)
+    data = catalog()
+    data["projects"]["quart-core"]["source_evidence"] = [{
+        "repository": "infra-quart", "path": "scripts/other.sh",
+        "ref": "main", "audited_blob_sha": "d" * 40,
+    }]
+
+    async def read_file(owner, repo, path, **kwargs):
+        if path == guide._CATALOG_PATH:
+            return remote_file(data)
+        return {"ok": True, "result": {"sha": "d" * 40, "resolved_commit_sha": "e" * 40}}
+
+    monkeypatch.setattr(guide.remote, "gitea_get_file", AsyncMock(side_effect=read_file))
+    result = await guide.project_release_guide("quart-core")
+    assert result["ok"] is True
+    assert result["result"]["source_freshness"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_all_reviewed_source_blobs_must_be_available_and_unchanged(monkeypatch):
+    configure(monkeypatch)
+    data = catalog()
+    data["projects"]["quart-core"]["source_evidence"] = [{
+        "repository": "infra-quart", "path": "scripts/deploy-quart-core.sh",
+        "ref": "main", "audited_blob_sha": "d" * 40,
+    }]
+
+    async def read_file(owner, repo, path, **kwargs):
+        if path == guide._CATALOG_PATH:
+            return remote_file(data)
+        return {"ok": True, "result": {"sha": "d" * 40, "resolved_commit_sha": "e" * 40}}
+
+    monkeypatch.setattr(guide.remote, "gitea_get_file", AsyncMock(side_effect=read_file))
+    result = await guide.project_release_guide("quart-core")
+    assert result["result"]["source_freshness"] == "unchanged"
+
+    async def unreadable_source(owner, repo, path, **kwargs):
+        if path == "scripts/deploy-quart-core.sh":
+            raise RuntimeError("sensitive detail")
+        return await read_file(owner, repo, path, **kwargs)
+
+    monkeypatch.setattr(guide.remote, "gitea_get_file", AsyncMock(side_effect=unreadable_source))
+    result = await guide.project_release_guide("quart-core")
+    assert result["result"]["source_freshness"] == "unknown"
+    assert "sensitive detail" not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_pinned_source_requires_the_exact_resolved_commit(monkeypatch):
+    monkeypatch.setattr(
+        guide.remote, "gitea_get_file",
+        AsyncMock(return_value={"ok": True, "result": {"sha": "d" * 40, "resolved_commit_sha": "e" * 40}}),
+    )
+    observed = await guide._observe_blob("gpakoh", "infra-quart", "scripts/deploy.sh", "f" * 40, "d" * 40)
+    assert observed["status"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_unavailable_workspace_uses_reviewed_catalog_repo_mapping(monkeypatch):
+    configure(monkeypatch)
+    data = catalog()
+    data["projects"]["proxy-parser"] = data["projects"].pop("quart-core")
+    data["projects"]["proxy-parser"]["repository"] = "proxy-parser"
+    data["projects"]["proxy-parser"]["workflow"]["repository"] = "proxy-parser"
+    monkeypatch.setattr(
+        guide.coordination_adapter, "_registered",
+        lambda name: (_ for _ in ()).throw(ValueError()) if name == "proxy-parser" else name,
+    )
+    monkeypatch.setattr(guide, "_unavailable_workspace", lambda _: "root_missing")
+    monkeypatch.setattr(
+        guide.remote, "gitea_get_repo",
+        AsyncMock(return_value={"ok": True, "result": {"full_name": "gpakoh/proxy-parser"}}),
+    )
+
+    async def read_file(owner, repo, path, **kwargs):
+        if path == guide._CATALOG_PATH:
+            return remote_file(data)
+        return {"ok": True, "result": {"sha": "d" * 40, "resolved_commit_sha": "e" * 40}}
+
+    monkeypatch.setattr(guide.remote, "gitea_get_file", AsyncMock(side_effect=read_file))
+    result = await guide.project_release_guide("proxy-parser")
+    assert result["ok"] is True
+    assert result["result"]["configured"] is True
+    assert result["result"]["workspace"]["status"] == "unavailable"
+    assert result["result"]["repository"] == "gpakoh/proxy-parser"
+
+
+def test_catalog_rejects_unsafe_source_paths_and_unbound_services():
+    data = catalog()
+    data["projects"]["quart-core"]["source_evidence"] = [{
+        "repository": "infra-quart", "path": "../secret", "ref": "main", "audited_blob_sha": "d" * 40,
+    }]
+    with pytest.raises(ValueError):
+        guide._catalog(remote_file(data)["result"])
+    data = catalog()
+    data["projects"]["quart-core"]["compose_project"] = None
+    with pytest.raises(ValueError):
+        guide._catalog(remote_file(data)["result"])
+
+
+def test_catalog_supports_guarded_merge_event_release():
+    data = catalog()
+    workflow = data["projects"]["quart-core"]["workflow"]
+    workflow["trigger"] = "event_guarded"
+    workflow["sha_input"] = None
+    parsed, _, _ = guide._catalog(remote_file(data)["result"])
+    assert parsed.projects["quart-core"].workflow.trigger == "event_guarded"
+
+
+def test_project_alias_resolution_is_unique_and_preserves_registered_identity(monkeypatch):
+    class Registry:
+        def list_projects(self):
+            return [{"project_id": name} for name in ("nod-gateway", "nod-android", "nod_android")]
+
+        def list_unavailable_projects(self):
+            return [{"project_id": "proxy-parser"}]
+
+    monkeypatch.setattr(guide.coordination_adapter, "server_attr", lambda _: lambda: Registry())
+    assert guide._canonical_project("NOD_gateway") == "nod-gateway"
+    assert guide._canonical_project("NOD_android") == "nod_android"
+    assert guide._canonical_project("NOD-ANDROID") == "nod-android"
+    assert guide._canonical_project("PROXY_PARSER") == "proxy-parser"
+
+
+def test_project_alias_collision_is_not_guessed(monkeypatch):
+    class Registry:
+        def list_projects(self):
+            return [{"project_id": "Foo_bar"}, {"project_id": "FOO_bar"}]
+
+        def list_unavailable_projects(self):
+            return []
+
+    monkeypatch.setattr(guide.coordination_adapter, "server_attr", lambda _: lambda: Registry())
+    assert guide._canonical_project("foo_bar") is None
