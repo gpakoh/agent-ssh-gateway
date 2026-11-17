@@ -16,6 +16,8 @@ button.secondary{background:#192435;border-color:#33425a;color:#d3deef}button:di
 .count{display:grid;place-items:center;background:#263346;color:#cdd9ea;border-radius:7px;min-width:24px;height:23px;font-size:12px}
 .cards{display:flex;flex-direction:column;gap:10px;padding:12px}.card{border:1px solid #31425a;background:#1b2637;border-radius:10px;padding:14px;text-align:left;color:#e7effc;width:100%;font-weight:400}
 .card:hover,.card:focus-visible{border-color:#8faee1;background:#25334a}.card-title{display:block;font-size:13px;line-height:1.5;font-weight:650;overflow-wrap:anywhere}.meta{display:block;margin-top:11px;color:#91a7c8;font-size:11px;overflow-wrap:anywhere}.empty{color:#7f90aa;font-size:12px;padding:18px 4px;text-align:center}
+.card.closed{opacity:.75;border-style:dashed}.issue-closed{display:inline-block;color:#e1cda0;font-size:11px;margin-top:8px}
+.pagination{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:14px;padding:22px 0;color:#9eaec4;font-size:12px}
 .discussion{border:1px solid #334259;border-radius:13px;background:#131d2c;margin-top:26px;padding:22px;max-width:1000px}
 .discussion-heading{display:flex;justify-content:space-between;gap:16px;align-items:start}.history{display:grid;gap:12px;margin:20px 0}
 .entry{padding:15px;background:#1d2b3e;border:1px solid #304159;border-radius:10px;overflow-wrap:anywhere;white-space:pre-wrap;font-size:13px;line-height:1.65}

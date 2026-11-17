@@ -197,7 +197,7 @@ async def test_browser_board_and_thread_are_gitea_backed(monkeypatch) -> None:
     monkeypatch.setenv("COORDINATION_GITEA_API_BASE", "https://git.xloud.ru/api/v1")
     monkeypatch.setattr(route, "_ReadOnlyGitea", FakeGitea)
     response = await route.browser_coordination_board(
-        project="agent-ssh-gateway", limit=20, _identity=identity("web-ui", "admin")
+        project="agent-ssh-gateway", limit=20, offset=0, _identity=identity("web-ui", "admin")
     )
     data = __import__("json").loads(response.body)
     assert response.headers["Cache-Control"] == "no-store"
@@ -241,7 +241,7 @@ async def test_browser_board_keeps_zero_comment_issue_when_gitea_timeline_is_nul
     monkeypatch.setattr(route, "_ReadOnlyGitea", NullTimelineGitea)
 
     response = await route.browser_coordination_board(
-        project="agent-ssh-gateway", limit=20, _identity=identity("web-ui", "admin")
+        project="agent-ssh-gateway", limit=20, offset=0, _identity=identity("web-ui", "admin")
     )
     data = json.loads(response.body)
     assert data["count"] == 1
@@ -285,7 +285,7 @@ async def test_browser_long_thread_keeps_partial_state_explicit(monkeypatch) -> 
     monkeypatch.setattr(route, "_ReadOnlyGitea", RepeatedPageGitea)
 
     board = await route.browser_coordination_board(
-        project="agent-ssh-gateway", limit=20, _identity=identity("web-ui", "admin")
+        project="agent-ssh-gateway", limit=20, offset=0, _identity=identity("web-ui", "admin")
     )
     board_data = json.loads(board.body)
     assert board_data["truncated"] is True
@@ -315,7 +315,7 @@ async def test_board_missing_credential_does_not_call_gitea(monkeypatch) -> None
     monkeypatch.setattr(route, "_ReadOnlyGitea", fake)
     with pytest.raises(HTTPException) as error:
         await route.browser_coordination_board(
-            project="agent-ssh-gateway", limit=20, _identity=identity("master")
+            project="agent-ssh-gateway", limit=20, offset=0, _identity=identity("master")
         )
     assert error.value.status_code == 503
     fake.assert_not_called()
@@ -339,7 +339,7 @@ async def test_gitea_error_is_sanitized(monkeypatch) -> None:
     monkeypatch.setattr(route, "_ReadOnlyGitea", Denied)
     with pytest.raises(HTTPException) as error:
         await route.browser_coordination_board(
-            project="agent-ssh-gateway", limit=20, _identity=identity("master")
+            project="agent-ssh-gateway", limit=20, offset=0, _identity=identity("master")
         )
     assert error.value.status_code == 503
     assert "token leak" not in str(error.value.detail)
@@ -351,3 +351,155 @@ async def test_browser_has_no_mutation_transport(monkeypatch) -> None:
         assert not hasattr(client, "post")
         assert not hasattr(client, "create_coord_issue")
         assert not hasattr(client, "create_coord_comment")
+
+
+@pytest.mark.asyncio
+async def test_browser_board_paginates_and_preserves_gitea_issue_state(monkeypatch) -> None:
+    import json
+
+    class Registry:
+        def project_info(self, project):
+            return {"type": "source"}
+
+    class ManyIssues(FakeGitea):
+        def __init__(self, token, base):
+            super().__init__(token, base)
+            self.issues = [
+                {
+                    "number": n,
+                    "title": f"Coordination #{n}",
+                    "html_url": f"https://git.xloud.ru/gpakoh/agent-ssh-gateway/issues/{n}",
+                    "body": core._header(
+                        kind="issue", key=f"pagination-issue-{n}",
+                        source="agent-ssh-gateway", state="open",
+                    ) + "\nVerified",
+                    "state": "closed" if n == 28 else "open",
+                    "comments": 0,
+                    "updated_at": "2026-11-17T00:00:00Z",
+                }
+                for n in range(1, 56)
+            ]
+            self.comments = []
+
+    monkeypatch.setattr(route, "get_registry", lambda: Registry())
+    monkeypatch.setenv("COORDINATION_GITEA_READ_TOKEN", "fake-read-token")
+    monkeypatch.setenv("COORDINATION_GITEA_API_BASE", "https://git.xloud.ru/api/v1")
+    monkeypatch.setattr(route, "_ReadOnlyGitea", ManyIssues)
+
+    async def page(at):
+        response = await route.browser_coordination_board(
+            project="agent-ssh-gateway", limit=25, offset=at,
+            _identity=identity("web-ui", "admin"),
+        )
+        assert response.headers["Cache-Control"] == "no-store"
+        return json.loads(response.body)
+
+    first, middle, last = await page(0), await page(25), await page(50)
+    assert [first["offset"], middle["offset"], last["offset"]] == [0, 25, 50]
+    assert [first["page_scan_count"], middle["page_scan_count"], last["page_scan_count"]] == [25, 25, 5]
+    assert [first["next_offset"], middle["next_offset"], last["next_offset"]] == [25, 50, None]
+    assert [first["previous_offset"], middle["previous_offset"], last["previous_offset"]] == [None, 0, 25]
+    assert [first["count"], middle["count"], last["count"]] == [25, 25, 5]
+    assert all(not item["count_exact"] and item["truncated"] for item in (first, middle, last))
+
+    def numbers(page):
+        return [card["number"] for column in page["columns"] for card in column["cards"]]
+
+    assert numbers(first) == list(range(1, 26))
+    assert numbers(middle) == list(range(26, 51))
+    assert numbers(last) == list(range(51, 56))
+    card28 = next(card for col in middle["columns"] for card in col["cards"] if card["number"] == 28)
+    assert card28["gitea_issue_state"] == "closed"
+    assert middle["columns"][0]["state"] == "open"
+
+
+@pytest.mark.asyncio
+async def test_browser_pagination_skips_incomplete_without_repeating_or_losing_next_page(
+    monkeypatch,
+) -> None:
+    import json
+
+    class Registry:
+        def project_info(self, project):
+            return {"type": "source"}
+
+    class IncompleteFirstIssue(FakeGitea):
+        def __init__(self, token, base):
+            super().__init__(token, base)
+            self.issues = [
+                {
+                    "number": n,
+                    "title": f"Thread {n}",
+                    "html_url": f"https://git.xloud.ru/gpakoh/agent-ssh-gateway/issues/{n}",
+                    "body": core._header(
+                        kind="issue", key=f"incomplete-{n}",
+                        source="agent-ssh-gateway", state="open",
+                    ) + "\nVerified",
+                    "state": "open", "comments": 0,
+                    "updated_at": "2026-11-17T00:00:00Z",
+                }
+                for n in range(1, 4)
+            ]
+            self.comments = []
+
+    async def incomplete(client, owner, repo, number):
+        if number == 2:
+            return None, True
+        return "open", False
+
+    monkeypatch.setattr(route, "get_registry", lambda: Registry())
+    monkeypatch.setenv("COORDINATION_GITEA_READ_TOKEN", "fake-read-token")
+    monkeypatch.setenv("COORDINATION_GITEA_API_BASE", "https://git.xloud.ru/api/v1")
+    monkeypatch.setattr(route, "_ReadOnlyGitea", IncompleteFirstIssue)
+    monkeypatch.setattr(route, "preview_thread_state", incomplete)
+
+    response1 = await route.browser_coordination_board(
+        project="agent-ssh-gateway", limit=2, offset=0, _identity=identity("master")
+    )
+    first = json.loads(response1.body)
+    assert first["page_scan_count"] == 2
+    assert first["count"] == 1
+    assert first["incomplete_thread_numbers"] == [2]
+    assert first["next_offset"] == 2
+    assert first["count_exact"] is False
+
+    response2 = await route.browser_coordination_board(
+        project="agent-ssh-gateway", limit=2, offset=2, _identity=identity("master")
+    )
+    second = json.loads(response2.body)
+    assert second["count"] == 1
+    assert second["columns"][0]["cards"][0]["number"] == 3
+    assert second["next_offset"] is None
+    assert second["previous_offset"] == 0
+
+
+def test_browser_pagination_rejects_out_of_window_query_before_gitea_read(monkeypatch) -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.auth_middleware import require_any_auth
+
+    app = FastAPI()
+    app.include_router(route.router)
+    app.dependency_overrides[require_any_auth] = lambda: identity("web-ui", "admin")
+    called = AsyncMock()
+    monkeypatch.setattr(route, "_ReadOnlyGitea", called)
+    with TestClient(app) as client:
+        for query in ("offset=-1", "offset=500", "offset=oops", "limit=26"):
+            response = client.get("/api/coordination/board?project=agent-ssh-gateway&" + query)
+            assert response.status_code == 422
+    called.assert_not_called()
+
+
+def test_browser_pagination_controls_are_read_only_and_closed_state_is_visible() -> None:
+    from pathlib import Path
+
+    script = Path("app/static/coordination.js").read_text(encoding="utf-8")
+    html = Path("app/static/coordination.html").read_text(encoding="utf-8")
+    for expected in ('id="previous"', 'id="next"', 'id="page-info"'):
+        assert expected in html
+    assert 'card.gitea_issue_state === "closed"' in script
+    assert "offset:String(targetOffset)" in script
+    assert "previous.disabled" in script and "next.disabled" in script
+    assert "innerHTML" not in script
+    assert "credentials:\"same-origin\"" in script

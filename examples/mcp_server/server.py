@@ -615,6 +615,7 @@ from examples.mcp_server.mcp_infra.adapters import (  # noqa: E402
     postgres,
     release_guide,
     remote,
+    service_probes,
     site_assets,
     site_media,
     supervisor,
@@ -707,6 +708,7 @@ gateway.register_all()
 remote.register_all()
 workflow_dispatch.register_all()
 release_guide.register_all()
+service_probes.register_all()
 postgres.register_all()
 supervisor.register_all()
 

@@ -58,6 +58,8 @@ ACCESS_PROFILES: dict[str, list[str]] = {
 TOOL_SCOPES: dict[str, list[str]] = {
     # ops — mcp:read / mcp:execute
     "health": ["mcp:read"],
+    "service_http_probe": ["mcp:read"],
+    "service_tcp_probe": ["mcp:read"],
     "tools_manifest": ["mcp:read"],
     "gateway_catalog": ["mcp:read"],
     "gateway_skill": ["mcp:read"],
