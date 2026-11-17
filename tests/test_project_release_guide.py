@@ -215,3 +215,13 @@ async def test_workflow_lookup_failure_is_unknown_and_does_not_leak_error(monkey
     assert result["ok"]
     assert result["result"]["workflow"]["observation"]["status"] == "unknown"
     assert "private-error" not in repr(result)
+
+def test_catalog_supports_many_project_profiles_with_bounded_input():
+    value = catalog()
+    example = value["projects"]["quart-core"]
+    for index in range(100):
+        value["projects"][f"service-{index}"] = example
+    size = len(json.dumps(value).encode())
+    assert 65536 < size < guide._CATALOG_LIMIT
+    parsed, _, _ = guide._catalog(remote_file(value)["result"])
+    assert len(parsed.projects) == 101

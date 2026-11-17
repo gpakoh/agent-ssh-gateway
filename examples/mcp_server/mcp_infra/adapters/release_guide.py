@@ -16,7 +16,7 @@ from examples.mcp_server.mcp_infra.adapters import coordination_adapter, docker,
 from examples.mcp_server.mcp_infra.tool_registry import register_tool
 
 _CATALOG_PATH = "deploy/project-release-guides.json"
-_CATALOG_LIMIT = 65536
+_CATALOG_LIMIT = 262144
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}")
 _SHA = re.compile(r"[0-9a-f]{40}")
 
