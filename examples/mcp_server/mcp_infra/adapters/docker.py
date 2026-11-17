@@ -6746,14 +6746,14 @@ async def docker_run(
             tool="docker_run",
             code="DOCKER_RUN_ALLOWLIST_NOT_CONFIGURED",
             message="docker_run requires MCP_DOCKER_RUN_ALLOWED_IMAGES environment variable.",
-            hint="Set MCP_DOCKER_RUN_ALLOWED_IMAGES with comma-separated image:tag entries.",
+            hint="Set MCP_DOCKER_RUN_ALLOWED_IMAGES with exact comma-separated tags or sha256 digests.",
             source="docker",
         )
     allowed_images = {ref.strip() for ref in allowed_raw.split(",") if ref.strip()}
 
     dc = _docker_client()
     try:
-        dc._validate_image_tag(image)
+        dc._validate_run_image(image)
     except ValueError as e:
         return tool_error(
             tool="docker_run",

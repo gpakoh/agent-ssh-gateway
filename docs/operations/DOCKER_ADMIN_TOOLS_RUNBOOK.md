@@ -152,7 +152,7 @@ docker_run(image="alpine:3.20", command=["echo", "ok"])
 ### Safety notes
 
 - Container runs with `--rm` — removed automatically after exit
-- Image tag validated against `^[a-z0-9]+([._/-][a-z0-9]+)*(:[a-zA-Z0-9._-]+)?$`
+- An allowlist entry may be an existing supported tag or an exact `repository@sha256:<64 lowercase hex>` reference, including a registry port. Matching is literal; a different digest is not allowed.
 - Container name validated against `^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`
 - argv validated against same denylist as `docker_exec`
 - Timeout: 5-600 seconds (default 60)
