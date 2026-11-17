@@ -110,6 +110,15 @@ async def test_confirmation_still_requires_docker_admin_scope(monkeypatch):
     assert not srv._confirm_store._actions[pending["result"]["action_id"]].consumed
 
 
+def test_oauth_compose_passes_operator_allowlist_without_enabling_by_default():
+    import yaml
+
+    compose_path = Path(__file__).resolve().parents[1] / "docker" / "docker-compose.yml"
+    compose = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
+    environment = compose["services"]["mcp-oauth"]["environment"]
+    assert "MCP_DOCKER_RUN_ALLOWED_IMAGES=${MCP_DOCKER_RUN_ALLOWED_IMAGES:-}" in environment
+
+
 @pytest.mark.asyncio
 async def test_unconfigured_allowlist_still_denies_digest(monkeypatch):
     monkeypatch.delenv("MCP_DOCKER_RUN_ALLOWED_IMAGES", raising=False)

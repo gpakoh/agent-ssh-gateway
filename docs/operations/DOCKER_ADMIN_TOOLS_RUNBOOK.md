@@ -119,6 +119,8 @@ docker_exec(container="mcp-admin-smoke-exec", command=["env"])
 export MCP_DOCKER_RUN_ALLOWED_IMAGES="alpine:3.20,ubuntu:22.04"
 ```
 
+For the Compose-based OAuth service, set the same variable in the operator-owned `docker/.env`; Compose passes it to `mcp-oauth`. Apply configuration through the reviewed Gateway rollout. A blank value remains fail-closed, and a digest entry must match the requested image exactly.
+
 If the variable is unset or empty:
 
 ```text
