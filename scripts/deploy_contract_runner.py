@@ -12,13 +12,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-_MAX_OUTPUT_CHARS = 32 * 1024
+_REDACTED_OUTPUT = "[redacted: deploy-script output]"
 _STATE_FIELDS = (
     "gpt_browser_bridge_image",
     "gpt_browser_bridge_image_id",
@@ -34,7 +36,10 @@ def _emit(*, exit_code: int, output: str, state: dict[str, Any] | None = None, e
     payload: dict[str, Any] = {
         "version": 1,
         "exit_code": int(exit_code),
-        "output_tail": output[-_MAX_OUTPUT_CHARS:],
+        # Captured deploy stdout may include credentials unavailable to the
+        # Gateway's static redactor. Never forward the untrusted text into
+        # the helper JSON, Docker logs or MCP responses.
+        "output_tail": _REDACTED_OUTPUT if output else "",
         "state": state or {},
     }
     if error:
@@ -59,7 +64,31 @@ def _read_state(path: Path) -> dict[str, Any]:
         raise RuntimeError("deployment state file is unreadable") from exc
     if not isinstance(payload, dict):
         raise RuntimeError("deployment state payload is not an object")
-    return {key: payload.get(key) for key in _STATE_FIELDS if key in payload}
+
+    # State is script-supplied. Before serializing fields into helper stdout,
+    # constrain each to its expected non-secret wire format. The adapter
+    # separately compares those fields with live image/container identity.
+    patterns = {
+        "gpt_browser_bridge_image": r"[A-Za-z0-9._:/-]{1,300}@sha256:[0-9a-f]{64}",
+        "gpt_browser_bridge_image_id": r"sha256:[0-9a-f]{64}",
+        "gpt_browser_bridge_compose_config_fingerprint": r"[0-9a-f]{64}",
+        "gpt_browser_bridge_container_id": r"[0-9a-f]{64}",
+        "gpt_browser_bridge_deploy_generation": r"[0-9a-f]{64}",
+    }
+    for key, pattern in patterns.items():
+        value = payload.get(key)
+        if not isinstance(value, str) or re.fullmatch(pattern, value) is None:
+            raise RuntimeError("deployment state field is missing or invalid")
+    timestamp = payload.get("deployed_at")
+    if not isinstance(timestamp, str) or not 10 <= len(timestamp) <= 64:
+        raise RuntimeError("deployment state timestamp is invalid")
+    try:
+        parsed_timestamp = datetime.fromisoformat(timestamp)
+    except ValueError as exc:
+        raise RuntimeError("deployment state timestamp is invalid") from exc
+    if parsed_timestamp.tzinfo is None:
+        raise RuntimeError("deployment state timestamp has no timezone")
+    return {key: payload[key] for key in _STATE_FIELDS}
 
 
 def main() -> int:
