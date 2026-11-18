@@ -5627,10 +5627,10 @@ async def _safe_actions_jobs_summary(
     return _summarize_action_run_jobs(payload)
 
 
-def _rerun_job_set_evidence(
+def _terminal_action_jobs_evidence(
     payload: Any, *, run_id: int, head_sha: str, run_attempt: int
 ) -> tuple[str | None, dict[str, Any]]:
-    """Conservatively prove current-attempt jobs have reached terminal states.
+    """Conservatively prove all listed jobs are terminal for this exact run.
 
     A completed *run* is not enough if the Gitea scheduler still reports
     requested/running jobs. A partial page, stale attempt, or changed head
@@ -5665,10 +5665,20 @@ def _rerun_job_set_evidence(
         ):
             return "jobs_unproven", details
         seen_ids.add(job_id)
+        status = _action_run_status(job.get("status"))
         if attempt != run_attempt:
+            # Old attempts cannot satisfy current proof, but an old live job
+            # is still consuming a runner: a new attempt could overlap it.
+            if status in _ACTION_ACTIVE_JOB_STATUSES:
+                nonterminal += 1
+            elif (
+                status != _ACTION_RUN_TERMINAL_STATUS
+                or not isinstance(job.get("conclusion"), str)
+                or not job["conclusion"].strip()
+            ):
+                return "jobs_unproven", details
             continue
         current += 1
-        status = _action_run_status(job.get("status"))
         if status in _ACTION_ACTIVE_JOB_STATUSES:
             nonterminal += 1
         elif (
@@ -5797,7 +5807,7 @@ async def gitea_rerun_action_run(
                     details={"run_id": run_id, "run_attempt": previous_attempt, "reason": "jobs_unavailable", "mutation_started": False},
                     source="gitea",
                 )
-            jobs_failure, jobs_evidence = _rerun_job_set_evidence(
+            jobs_failure, jobs_evidence = _terminal_action_jobs_evidence(
                 jobs_payload,
                 run_id=run_id,
                 head_sha=expected_head_sha,
@@ -6140,6 +6150,57 @@ async def gitea_rerun_action_job(
                     source="gitea",
                 )
 
+            # A unique logical job does not make the *entire attempt*
+            # settled. Reusing the same bounded proof as full-run reruns
+            # prevents another expensive attempt while sibling jobs are
+            # active, historical, incomplete or from a different HEAD.
+            jobs_failure, jobs_evidence = _terminal_action_jobs_evidence(
+                current_payload,
+                run_id=run_id,
+                head_sha=expected_head_sha,
+                run_attempt=previous_attempt,
+            )
+            if jobs_failure is not None:
+                return tool_error(
+                    tool=tool,
+                    code="RUN_STATE_UNPROVEN",
+                    message="Current workflow job settlement is not proven; refusing job rerun",
+                    retryable=False,
+                    hint="Re-read the exact run and all jobs; never rerun an active or incomplete attempt.",
+                    details={**jobs_evidence, "reason": jobs_failure},
+                    source="gitea",
+                )
+
+            # Preflight reads are not an atomic lease. Revalidate the run
+            # immediately before posting the selected job mutation.
+            try:
+                before_post = await client.get_action_run(owner, repo, run_id)
+            except Exception:
+                return tool_error(
+                    tool=tool,
+                    code="RUN_STATE_UNPROVEN",
+                    message="Workflow run recheck unavailable before job rerun",
+                    retryable=False,
+                    details={"run_id": run_id, "reason": "run_recheck_unavailable", "mutation_started": False},
+                    source="gitea",
+                )
+            if (
+                not isinstance(before_post, dict)
+                or _action_run_id(before_post.get("id")) != run_id
+                or _valid_commit_sha(before_post.get("head_sha")) != expected_head_sha
+                or _action_run_attempt(before_post.get("run_attempt")) != previous_attempt
+                or before_post.get("status") != "completed"
+                or before_post.get("conclusion") != run_conclusion
+            ):
+                return tool_error(
+                    tool=tool,
+                    code="RUN_STATE_UNPROVEN",
+                    message="Workflow run identity or state changed before job rerun",
+                    retryable=False,
+                    details={"run_id": run_id, "reason": "run_changed", "mutation_started": False},
+                    source="gitea",
+                )
+
             mutation_error: BaseException | None = None
             mutation_response: dict[str, Any] | None = None
             try:
@@ -6347,6 +6408,34 @@ async def gitea_cancel_action_run(
                     source="gitea",
                 )
             if actual_status == _ACTION_RUN_TERMINAL_STATUS:
+                # Terminal run status is not proof that scheduler jobs or
+                # cleanup have settled. Do not certify a stranded run.
+                try:
+                    terminal_jobs_payload = await client.list_action_run_jobs(owner, repo, run_id)
+                except Exception:
+                    return tool_error(
+                        tool=tool,
+                        code="RUN_STATE_UNPROVEN",
+                        message="Cannot verify terminal jobs for already-completed run",
+                        retryable=False,
+                        details={"run_id": run_id, "reason": "jobs_unavailable", "mutation_started": False},
+                        source="gitea",
+                    )
+                jobs_failure, jobs_evidence = _terminal_action_jobs_evidence(
+                    terminal_jobs_payload,
+                    run_id=run_id,
+                    head_sha=expected_head_sha,
+                    run_attempt=expected_run_attempt,
+                )
+                if jobs_failure is not None:
+                    return tool_error(
+                        tool=tool,
+                        code="RUN_STATE_UNPROVEN",
+                        message="Run is terminal but its job statuses are not proven terminal",
+                        retryable=False,
+                        details={**jobs_evidence, "reason": jobs_failure},
+                        source="gitea",
+                    )
                 return tool_success(
                     tool,
                     result={
@@ -6364,9 +6453,8 @@ async def gitea_cancel_action_run(
                         "cancelled": before.get("conclusion") == "cancelled",
                         "verified": True,
                         "outcome": "already_terminal",
-                        "jobs_summary": await _safe_actions_jobs_summary(
-                            client, owner, repo, run_id
-                        ),
+                        "jobs_summary": _summarize_action_run_jobs(terminal_jobs_payload),
+                        "jobs_terminal_verified": True,
                     },
                     source="gitea",
                 )
@@ -6512,6 +6600,65 @@ async def gitea_cancel_action_run(
                     source="gitea",
                 )
 
+            # A terminal run read is not a runner-cleanup receipt. This
+            # prevents an acknowledged cancellation from being misreported as
+            # completed while Gitea still has pending/running jobs.
+            try:
+                terminal_jobs = await client.list_action_run_jobs(owner, repo, run_id)
+            except Exception:
+                jobs_failure = "jobs_unavailable"
+                jobs_summary = None
+            else:
+                jobs_failure, _jobs_evidence = _terminal_action_jobs_evidence(
+                    terminal_jobs,
+                    run_id=run_id,
+                    head_sha=expected_head_sha,
+                    run_attempt=expected_run_attempt,
+                )
+                jobs_summary = _summarize_action_run_jobs(terminal_jobs)
+            if jobs_failure is not None:
+                details = {
+                    "owner": owner,
+                    "repo": repo,
+                    "run_id": run_id,
+                    "expected_head_sha": expected_head_sha,
+                    "expected_run_attempt": expected_run_attempt,
+                    "observed_run_status": confirmed.get("status"),
+                    "jobs_reason": jobs_failure,
+                    "jobs_summary": jobs_summary,
+                    "mutation_started": True,
+                    "terminal_verified": False,
+                    "cancelled": False,
+                }
+                acknowledged = (
+                    mutation_error is None
+                    and isinstance(mutation_response, dict)
+                    and _action_run_id(mutation_response.get("id")) == run_id
+                    and _valid_commit_sha(mutation_response.get("head_sha")) == expected_head_sha
+                    and _action_run_attempt(mutation_response.get("run_attempt")) == expected_run_attempt
+                )
+                if acknowledged:
+                    return tool_error(
+                        tool=tool,
+                        code="ACTION_CANCEL_ACCEPTED_PENDING",
+                        message="Cancellation acknowledged but its job statuses are not proven terminal.",
+                        retryable=False,
+                        hint="Do not replay cancel. Re-read this exact run and jobs until all listed attempts settle.",
+                        details={**details, "dispatch_acknowledged": True},
+                        source="gitea",
+                    )
+                if mutation_error is not None:
+                    details["mutation_error_class"] = type(mutation_error).__name__
+                return tool_error(
+                    tool=tool,
+                    code="MUTATION_OUTCOME_UNKNOWN",
+                    message="Cancellation was attempted but job-state outcome remains unproven.",
+                    retryable=False,
+                    hint="Do not replay cancel. Inspect the same exact run/head/attempt and its jobs.",
+                    details=details,
+                    source="gitea",
+                )
+
             if audit_metadata is not None:
                 try:
                     _get_gitea_audit_logger().append(
@@ -6557,7 +6704,8 @@ async def gitea_cancel_action_run(
                 "verified": True,
                 "outcome": outcome,
                 "reconciliation_attempts": reconciliation["reconciliation_attempts"],
-                "jobs_summary": await _safe_actions_jobs_summary(client, owner, repo, run_id),
+                "jobs_summary": jobs_summary,
+                "jobs_terminal_verified": True,
             }
     except Exception as exc:
         return _remote_api_error(tool, "gitea", exc)

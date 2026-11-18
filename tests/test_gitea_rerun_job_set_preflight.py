@@ -162,3 +162,17 @@ async def test_job_list_fetch_failure_is_not_rerun_authority(monkeypatch):
     assert result["error"]["code"] == "RUN_STATE_UNPROVEN"
     assert "sensitive-token" not in str(result)
     assert "POST" not in client.calls
+
+
+@pytest.mark.asyncio
+async def test_old_attempt_still_active_blocks_full_run_rerun(monkeypatch):
+    old_running = _job(job_id=6, attempt=1, status="in_progress", conclusion=None)
+    current_done = _job(job_id=7, attempt=2)
+    client = _Client(jobs={"total_count": 2, "jobs": [old_running, current_done]}, before=_run(attempt=2))
+    _attach(monkeypatch, client)
+    result = await remote.gitea_rerun_action_run("owner", "repo", RUN_ID, SHA)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "RUN_STATE_UNPROVEN"
+    assert result["error"]["details"]["reason"] == "jobs_nonterminal"
+    assert result["error"]["details"]["mutation_started"] is False
+    assert "POST" not in client.calls
