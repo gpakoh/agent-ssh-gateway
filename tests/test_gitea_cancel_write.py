@@ -54,12 +54,14 @@ class FakeClient:
         after=None,
         mutation_error: BaseException | None = None,
         apply_mutation: bool = True,
+        jobs_after: dict | None = None,
     ):
         assert token == "token"
         self.before = before or _run()
         self.after = after or _run(status="completed", conclusion="cancelled")
         self.mutation_error = mutation_error
         self.apply_mutation = apply_mutation
+        self.jobs_after = jobs_after
         self.mutated = False
         self.cancel_calls: list[tuple[str, str, int]] = []
         self.reads = 0
@@ -78,12 +80,26 @@ class FakeClient:
         return dict(self.after if self.mutated else self.before)
 
     async def list_action_run_jobs(self, owner, repo, run_id):
+        if self.jobs_after is not None:
+            return dict(self.jobs_after)
+        terminal = (
+            (self.mutated and self.after.get("status") == "completed")
+            or (not self.mutated and self.before.get("status") == "completed")
+        )
         return {
             "total_count": 3,
             "jobs": [
-                {"id": 1, "name": "unit", "status": "requested"},
-                {"id": 2, "name": "fleet", "status": "in_progress"},
-                {"id": 3, "name": "build", "status": "completed"},
+                {
+                    "id": number, "run_id": RUN_ID, "head_sha": SHA,
+                    "run_attempt": ATTEMPT, "name": name,
+                    "status": "completed" if terminal else status,
+                    "conclusion": "cancelled" if terminal else (None if status != "completed" else "success"),
+                }
+                for number, name, status in (
+                    (1, "unit", "requested"),
+                    (2, "fleet", "in_progress"),
+                    (3, "build", "completed"),
+                )
             ],
         }
 
@@ -131,7 +147,7 @@ async def test_client_cancel_uses_dedicated_endpoint_and_force_cancel_is_denied(
 
 
 @pytest.mark.asyncio
-async def test_cancel_happy_path_is_audited_and_summarizes_remaining_jobs(monkeypatch):
+async def test_cancel_happy_path_is_audited_and_proves_settled_jobs(monkeypatch):
     client = FakeClient()
     audit = _setup(monkeypatch, client)
     result = await remote.gitea_cancel_action_run("owner", "repo", RUN_ID, SHA, ATTEMPT)
@@ -141,10 +157,8 @@ async def test_cancel_happy_path_is_audited_and_summarizes_remaining_jobs(monkey
     assert body["cancelled"] is True
     assert body["outcome"] == "cancelled"
     assert body["verified"] is True
-    assert {item["status"] for item in body["jobs_summary"]["active"]} == {
-        "requested",
-        "in_progress",
-    }
+    assert body["jobs_summary"]["active"] == []
+    assert body["jobs_terminal_verified"] is True
     assert client.cancel_calls == [("owner", "repo", RUN_ID)]
     assert [event.event_type for event in audit.required] == ["mcp.gitea_destructive_intent"]
     assert [event.event_type for event in audit.appended] == ["mcp.gitea_destructive_success"]
@@ -192,6 +206,7 @@ async def test_cancel_terminal_run_is_idempotent_without_audit_or_mutation(monke
 
     assert result["ok"] is True
     assert result["result"]["already_terminal"] is True
+    assert result["result"]["jobs_terminal_verified"] is True
     assert result["result"]["cancelled"] is False
     assert client.cancel_calls == []
     assert audit.required == []
@@ -221,6 +236,7 @@ async def test_cancel_ambiguous_response_reconciles_without_replay(monkeypatch):
 
     assert result["ok"] is True
     assert result["result"]["outcome"] == "cancelled_after_ambiguous_response"
+    assert result["result"]["jobs_terminal_verified"] is True
     assert client.cancel_calls == [("owner", "repo", RUN_ID)]
 
 
@@ -320,3 +336,119 @@ def test_cancel_tool_is_write_admin_only():
     assert "gitea_cancel_action_run" in TOOL_NAMES_BY_MODE["mcp_client_write"]
     assert "gitea_cancel_action_run" not in TOOL_NAMES_BY_MODE["mcp_client"]
     assert get_required_scopes("gitea_cancel_action_run") == ["mcp:repo", "mcp:admin"]
+
+
+def _jobs_with_one_active() -> dict:
+    return {"total_count": 2, "jobs": [
+        {"id": 21, "run_id": RUN_ID, "head_sha": SHA, "run_attempt": ATTEMPT,
+         "name": "unit", "status": "completed", "conclusion": "failure"},
+        {"id": 22, "run_id": RUN_ID, "head_sha": SHA, "run_attempt": ATTEMPT,
+         "name": "cleanup", "status": "in_progress", "conclusion": None},
+    ]}
+
+
+@pytest.mark.asyncio
+async def test_already_terminal_run_with_active_jobs_is_not_cleanly_verified(monkeypatch):
+    client = FakeClient(before=_run(status="completed", conclusion="cancelled"),
+                        jobs_after=_jobs_with_one_active())
+    audit = _setup(monkeypatch, client)
+    result = await remote.gitea_cancel_action_run("owner", "repo", RUN_ID, SHA, ATTEMPT)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "RUN_STATE_UNPROVEN"
+    assert result["error"]["details"]["reason"] == "jobs_nonterminal"
+    assert result["error"]["details"]["mutation_started"] is False
+    assert client.cancel_calls == []
+    assert audit.required == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_confirmed_terminal_run_but_active_jobs_remains_pending(monkeypatch):
+    client = FakeClient(jobs_after=_jobs_with_one_active())
+    audit = _setup(monkeypatch, client)
+    result = await remote.gitea_cancel_action_run("owner", "repo", RUN_ID, SHA, ATTEMPT)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "ACTION_CANCEL_ACCEPTED_PENDING"
+    assert result["error"]["retryable"] is False
+    assert result["error"]["details"]["dispatch_acknowledged"] is True
+    assert result["error"]["details"]["terminal_verified"] is False
+    assert result["error"]["details"]["jobs_reason"] == "jobs_nonterminal"
+    assert client.cancel_calls == [("owner", "repo", RUN_ID)]
+    assert [event.event_type for event in audit.appended] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload,reason", [
+    ({"total_count": 3, "jobs": _jobs_with_one_active()["jobs"]}, "jobs_unproven"),
+    ({"total_count": 1, "jobs": [_jobs_with_one_active()["jobs"][0] | {"head_sha": "b" * 40}]}, "jobs_unproven"),
+    ({"total_count": 0, "jobs": []}, "jobs_unproven"),
+])
+async def test_post_cancel_incomplete_or_foreign_job_set_never_claims_cleanup(monkeypatch, payload, reason):
+    client = FakeClient(jobs_after=payload)
+    _setup(monkeypatch, client)
+    result = await remote.gitea_cancel_action_run("owner", "repo", RUN_ID, SHA, ATTEMPT)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "ACTION_CANCEL_ACCEPTED_PENDING"
+    assert result["error"]["details"]["jobs_reason"] == reason
+    assert result["error"]["details"]["terminal_verified"] is False
+    assert len(client.cancel_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_cancel_with_active_jobs_remains_unknown_not_retryable(monkeypatch):
+    request = httpx.Request("POST", f"https://git.example/actions/runs/{RUN_ID}/cancel")
+    client = FakeClient(
+        jobs_after=_jobs_with_one_active(),
+        mutation_error=httpx.ReadTimeout("hidden", request=request),
+        apply_mutation=True,
+    )
+    audit = _setup(monkeypatch, client)
+    result = await remote.gitea_cancel_action_run("owner", "repo", RUN_ID, SHA, ATTEMPT)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "MUTATION_OUTCOME_UNKNOWN"
+    assert result["error"]["retryable"] is False
+    assert len(client.cancel_calls) == 1
+    assert audit.appended == []
+
+
+@pytest.mark.asyncio
+async def test_already_terminal_partial_jobs_is_not_idempotent_cleanup_proof(monkeypatch):
+    client = FakeClient(before=_run(status="completed", conclusion="success"),
+                        jobs_after={"total_count": 2, "jobs": _jobs_with_one_active()["jobs"][:1]})
+    _setup(monkeypatch, client)
+    result = await remote.gitea_cancel_action_run("owner", "repo", RUN_ID, SHA, ATTEMPT)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "RUN_STATE_UNPROVEN"
+    assert result["error"]["details"]["reason"] == "jobs_unproven"
+    assert client.cancel_calls == []
+
+
+@pytest.mark.asyncio
+async def test_completed_run_with_live_old_attempt_does_not_claim_cancel_cleanup(monkeypatch):
+    old_running = _jobs_with_one_active()["jobs"][1] | {"run_attempt": ATTEMPT - 1}
+    current_done = _jobs_with_one_active()["jobs"][0]
+    client = FakeClient(jobs_after={"total_count": 2, "jobs": [old_running, current_done]})
+    audit = _setup(monkeypatch, client)
+    result = await remote.gitea_cancel_action_run("owner", "repo", RUN_ID, SHA, ATTEMPT)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "ACTION_CANCEL_ACCEPTED_PENDING"
+    assert result["error"]["details"]["jobs_reason"] == "jobs_nonterminal"
+    assert result["error"]["details"]["terminal_verified"] is False
+    assert client.cancel_calls == [("owner", "repo", RUN_ID)]
+    assert audit.appended == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_jobs_read_failure_after_post_is_pending_without_token_leak(monkeypatch):
+    class FailingClient(FakeClient):
+        async def list_action_run_jobs(self, owner, repo, run_id):
+            raise TimeoutError("token-secret-must-not-appear")
+
+    client = FailingClient()
+    _setup(monkeypatch, client)
+    result = await remote.gitea_cancel_action_run("owner", "repo", RUN_ID, SHA, ATTEMPT)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "ACTION_CANCEL_ACCEPTED_PENDING"
+    assert result["error"]["details"]["jobs_reason"] == "jobs_unavailable"
+    assert result["error"]["retryable"] is False
+    assert "token-secret" not in repr(result)
+    assert len(client.cancel_calls) == 1

@@ -76,6 +76,8 @@ class FakeJobRerunClient:
         before_job: dict[str, object] | None = None,
         after_job: dict[str, object] | None = None,
         current_jobs: list[dict[str, object]] | None = None,
+        current_payload: dict[str, object] | None = None,
+        second_run: dict[str, object] | None = None,
         mutation_error: BaseException | None = None,
         apply_mutation: bool = True,
     ) -> None:
@@ -94,6 +96,8 @@ class FakeJobRerunClient:
             conclusion=None,
         )
         self.current_jobs = current_jobs
+        self.current_payload = current_payload
+        self.second_run = second_run
         self.mutation_error = mutation_error
         self.apply_mutation = apply_mutation
         self.mutated = False
@@ -110,7 +114,11 @@ class FakeJobRerunClient:
 
     async def get_action_run(self, owner: str, repo: str, run_id: int):
         self.run_reads += 1
-        return dict(self.after_run if self.mutated else self.before_run)
+        if self.mutated:
+            return dict(self.after_run)
+        if self.run_reads > 1 and self.second_run is not None:
+            return dict(self.second_run)
+        return dict(self.before_run)
 
     async def get_action_job(self, owner: str, repo: str, job_id: int):
         self.job_reads += 1
@@ -118,6 +126,8 @@ class FakeJobRerunClient:
 
     async def list_action_run_jobs(self, owner: str, repo: str, run_id: int):
         self.list_reads += 1
+        if not self.mutated and self.current_payload is not None:
+            return dict(self.current_payload)
         if self.mutated:
             jobs = [dict(self.after_job)]
         elif self.current_jobs is not None:
@@ -356,3 +366,93 @@ def test_job_rerun_tool_is_write_admin_only():
     assert "gitea_rerun_action_job" not in TOOL_NAMES_BY_MODE["mcp_client"]
     assert "gitea_rerun_action_job" in TOOL_NAMES_BY_MODE["mcp_client_write"]
     assert get_required_scopes("gitea_rerun_action_job") == ["mcp:repo", "mcp:admin"]
+
+
+@pytest.mark.asyncio
+async def test_job_rerun_refuses_other_active_job_in_same_completed_attempt(monkeypatch):
+    active = _job_payload(job_id=JOB_ID + 1, name="E2E", status="in_progress", conclusion=None)
+    client = FakeJobRerunClient("token", current_jobs=[_job_payload(), active])
+    _setup(monkeypatch, client)
+    result = await remote.gitea_rerun_action_job("owner", "repo", RUN_ID, JOB_ID, SHA)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "RUN_STATE_UNPROVEN"
+    assert result["error"]["details"]["reason"] == "jobs_nonterminal"
+    assert client.rerun_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"jobs": [_job_payload()]},  # no completeness attestation
+        {"total_count": 2, "jobs": [_job_payload()]},  # partial page
+        {"total_count": True, "jobs": [_job_payload()]},
+        {"total_count": 1, "jobs": [_job_payload(head_sha="b" * 40)]},
+        {"total_count": 1, "jobs": [_job_payload(run_attempt=True)]},
+        {"total_count": 1, "jobs": [_job_payload(run_attempt=2)]},
+        {"total_count": 1, "jobs": [_job_payload(job_id=True)]},
+        {"total_count": 1, "jobs": [_job_payload(conclusion=None)]},
+        {"total_count": 0, "jobs": []},
+    ],
+)
+async def test_job_rerun_refuses_unproven_complete_job_set(monkeypatch, payload):
+    client = FakeJobRerunClient("token", current_payload=payload)
+    _setup(monkeypatch, client)
+    result = await remote.gitea_rerun_action_job("owner", "repo", RUN_ID, JOB_ID, SHA)
+    assert result["ok"] is False
+    assert result["error"]["code"] in {"RUN_STATE_UNPROVEN", "JOB_IDENTITY_AMBIGUOUS", "JOB_NOT_CURRENT"}
+    assert client.rerun_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed", [
+    _run_payload(run_attempt=2),
+    _run_payload(status="in_progress", conclusion=None),
+    _run_payload(conclusion="success"),
+    _run_payload(head_sha="b" * 40),
+    _run_payload(run_id=RUN_ID + 1),
+])
+async def test_job_rerun_run_state_race_before_post_is_zero_mutation(monkeypatch, changed):
+    client = FakeJobRerunClient("token", second_run=changed)
+    _setup(monkeypatch, client)
+    result = await remote.gitea_rerun_action_job("owner", "repo", RUN_ID, JOB_ID, SHA)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "RUN_STATE_UNPROVEN"
+    assert result["error"]["details"]["reason"] == "run_changed"
+    assert client.rerun_calls == []
+    assert client.run_reads == 2
+
+
+@pytest.mark.asyncio
+async def test_job_rerun_accepts_completed_prior_attempt_with_current_job(monkeypatch):
+    old = _job_payload(job_id=JOB_ID - 1, run_attempt=1, name="History", conclusion="success")
+    current = _job_payload(run_attempt=2)
+    client = FakeJobRerunClient(
+        "token",
+        before_run=_run_payload(run_attempt=2),
+        before_job=current,
+        current_jobs=[old, current],
+        after_run=_run_payload(run_attempt=3, status="in_progress", conclusion=None),
+        after_job=_job_payload(job_id=RERUN_JOB_ID, run_attempt=3, status="in_progress", conclusion=None),
+    )
+    _setup(monkeypatch, client)
+    result = await remote.gitea_rerun_action_job("owner", "repo", RUN_ID, JOB_ID, SHA)
+    assert result["ok"] is True
+    assert result["result"]["run_attempt"] == 3
+    assert len(client.rerun_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_old_attempt_live_job_blocks_new_single_job_rerun(monkeypatch):
+    historical = _job_payload(job_id=JOB_ID + 1, run_attempt=1, name="old E2E", status="in_progress", conclusion=None)
+    current = _job_payload(run_attempt=2)
+    client = FakeJobRerunClient(
+        "token", before_run=_run_payload(run_attempt=2), before_job=current,
+        current_jobs=[historical, current],
+    )
+    _setup(monkeypatch, client)
+    result = await remote.gitea_rerun_action_job("owner", "repo", RUN_ID, JOB_ID, SHA)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "RUN_STATE_UNPROVEN"
+    assert result["error"]["details"]["reason"] == "jobs_nonterminal"
+    assert client.rerun_calls == []
