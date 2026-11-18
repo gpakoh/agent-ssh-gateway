@@ -169,6 +169,43 @@ def _remote_api_error(tool: str, source: str, exc: Exception) -> dict[str, Any]:
     if isinstance(exc, PermissionError):
         return tool_error(tool=tool, code="AUTH_ERROR", message=str(exc), source=source)
     if isinstance(exc, httpx.HTTPStatusError):
+        if exc.response.status_code == 429:
+            # A mutation may make a GET during reconciliation, so the HTTP
+            # method alone is not evidence that replaying the MCP tool is safe.
+            # Allow only explicitly named reads with an actual GET/HEAD.
+            read_only = (
+                source in {"gitea", "github"}
+                and tool.startswith((f"{source}_get_", f"{source}_list_"))
+                and exc.request.method.upper() in {"GET", "HEAD"}
+            )
+            details: dict[str, Any] = {
+                "bucket_class": "remote_api",
+                "operation_class": "read" if read_only else "mutation",
+            }
+            raw_wait = exc.response.headers.get("Retry-After", "")
+            if (
+                isinstance(raw_wait, str)
+                and 1 <= len(raw_wait) <= 5
+                and raw_wait.isascii()
+                and raw_wait.isdecimal()
+                and int(raw_wait) <= 86400
+            ):
+                details["retry_after_seconds"] = max(1, int(raw_wait))
+            return tool_error(
+                tool=tool,
+                code="RATE_LIMIT_EXCEEDED",
+                message="Remote API rate limit exceeded",
+                retryable=read_only,
+                hint=(
+                    "Wait the indicated retry_after_seconds when present, then "
+                    "retry only this idempotent read; batch repeated metadata reads."
+                    if read_only
+                    else "Inspect authoritative remote state through a fresh read "
+                    "before continuing; do not replay this write without exact-state verification."
+                ),
+                details=details,
+                source=source,
+            )
         return tool_error(
             tool=tool,
             code="REMOTE_API_ERROR",
