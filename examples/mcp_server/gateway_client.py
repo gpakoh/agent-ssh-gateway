@@ -857,8 +857,9 @@ class GatewayClient:
             )
         return self.session_id
 
-    def health(self) -> dict[str, Any]:
-        return self._get("/health")
+    def health(self, *, timeout: int = 30) -> dict[str, Any]:
+        """Read Gateway readiness, with an optional bounded caller deadline."""
+        return self._get("/health", timeout=timeout)
 
     def list_sessions(self) -> dict[str, Any]:
         return self._get("/api/ssh/sessions")
