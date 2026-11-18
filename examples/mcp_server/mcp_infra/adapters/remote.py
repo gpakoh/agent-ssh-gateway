@@ -5627,6 +5627,64 @@ async def _safe_actions_jobs_summary(
     return _summarize_action_run_jobs(payload)
 
 
+def _rerun_job_set_evidence(
+    payload: Any, *, run_id: int, head_sha: str, run_attempt: int
+) -> tuple[str | None, dict[str, Any]]:
+    """Conservatively prove current-attempt jobs have reached terminal states.
+
+    A completed *run* is not enough if the Gitea scheduler still reports
+    requested/running jobs. A partial page, stale attempt, or changed head
+    never authorizes an expensive or destructive rerun. Older attempts may
+    appear alongside current jobs but cannot serve as current proof.
+    """
+    jobs = _action_jobs(payload)
+    total = payload.get("total_count") if isinstance(payload, dict) else None
+    details: dict[str, Any] = {
+        "run_id": run_id,
+        "expected_head_sha": head_sha,
+        "run_attempt": run_attempt,
+        "mutation_started": False,
+    }
+    if (
+        jobs is None or type(total) is not int
+        or total < 1 or total > 1000 or len(jobs) != total
+    ):
+        return "jobs_unproven", details
+
+    seen_ids: set[int] = set()
+    current = 0
+    nonterminal = 0
+    for job in jobs:
+        job_id = _action_job_id(job.get("id"))
+        attempt = _action_job_attempt(job.get("run_attempt"))
+        if (
+            job_id is None or job_id in seen_ids
+            or _action_run_id(job.get("run_id")) != run_id
+            or _valid_commit_sha(job.get("head_sha")) != head_sha
+            or attempt is None or attempt > run_attempt
+        ):
+            return "jobs_unproven", details
+        seen_ids.add(job_id)
+        if attempt != run_attempt:
+            continue
+        current += 1
+        status = _action_run_status(job.get("status"))
+        if status in _ACTION_ACTIVE_JOB_STATUSES:
+            nonterminal += 1
+        elif (
+            status != _ACTION_RUN_TERMINAL_STATUS
+            or not isinstance(job.get("conclusion"), str)
+            or not job["conclusion"].strip()
+        ):
+            return "jobs_unproven", details
+    if current < 1:
+        return "jobs_unproven", details
+    details.update({"observed_jobs": total, "current_attempt_jobs": current, "active_jobs": nonterminal})
+    if nonterminal:
+        return "jobs_nonterminal", details
+    return None, details
+
+
 async def gitea_rerun_action_run(
     owner: str,
     repo: str,
@@ -5722,6 +5780,67 @@ async def gitea_rerun_action_run(
                     code="RUN_NOT_RERUNNABLE",
                     message="workflow run conclusion is not a proven rerunnable failure/cancellation",
                     details={"run_id": run_id, "conclusion": conclusion},
+                    source="gitea",
+                )
+
+            # Gitea may report a terminal run while its scheduler still has
+            # active jobs. A run-level status alone must not authorize a new
+            # expensive attempt; prove the complete exact job set first.
+            try:
+                jobs_payload = await client.list_action_run_jobs(owner, repo, run_id)
+            except Exception:
+                return tool_error(
+                    tool="gitea_rerun_action_run",
+                    code="RUN_STATE_UNPROVEN",
+                    message="Cannot verify completed jobs for this exact workflow attempt; refusing rerun",
+                    retryable=False,
+                    details={"run_id": run_id, "run_attempt": previous_attempt, "reason": "jobs_unavailable", "mutation_started": False},
+                    source="gitea",
+                )
+            jobs_failure, jobs_evidence = _rerun_job_set_evidence(
+                jobs_payload,
+                run_id=run_id,
+                head_sha=expected_head_sha,
+                run_attempt=previous_attempt,
+            )
+            if jobs_failure is not None:
+                return tool_error(
+                    tool="gitea_rerun_action_run",
+                    code="RUN_STATE_UNPROVEN",
+                    message="Current workflow attempt job settlement is not proven; refusing rerun",
+                    retryable=False,
+                    hint="Read the exact run and jobs again; do not rerun while any current-attempt job is active or unknown.",
+                    details={**jobs_evidence, "reason": jobs_failure},
+                    source="gitea",
+                )
+
+            # A job listing is non-atomic with run status. Fence the run once
+            # more immediately before POST rather than trusting an old snapshot.
+            try:
+                before_post = await client.get_action_run(owner, repo, run_id)
+            except Exception:
+                return tool_error(
+                    tool="gitea_rerun_action_run",
+                    code="RUN_STATE_UNPROVEN",
+                    message="Workflow run state could not be rechecked before rerun",
+                    retryable=False,
+                    details={"run_id": run_id, "reason": "run_recheck_unavailable", "mutation_started": False},
+                    source="gitea",
+                )
+            if (
+                not isinstance(before_post, dict)
+                or _action_run_id(before_post.get("id")) != run_id
+                or _valid_commit_sha(before_post.get("head_sha")) != expected_head_sha
+                or _action_run_attempt(before_post.get("run_attempt")) != previous_attempt
+                or before_post.get("status") != "completed"
+                or before_post.get("conclusion") != conclusion
+            ):
+                return tool_error(
+                    tool="gitea_rerun_action_run",
+                    code="RUN_STATE_UNPROVEN",
+                    message="Workflow run identity or state changed during job settlement; refusing rerun",
+                    retryable=False,
+                    details={"run_id": run_id, "mutation_started": False},
                     source="gitea",
                 )
 
