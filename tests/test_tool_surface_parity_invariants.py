@@ -118,6 +118,9 @@ class TestLiveServerToolSurface:
         "gitea_close_issue": [
             "owner", "repo", "issue_number", "expected_updated_at", "reason",
         ],
+        "gitea_reopen_issue": [
+            "owner", "repo", "issue_number", "expected_updated_at", "reason",
+        ],
         "gitea_set_default_branch": [
             "owner",
             "repo",
@@ -192,6 +195,8 @@ class TestLiveServerToolSurface:
 
         assert "gitea_close_issue" in TOOL_NAMES_BY_MODE["mcp_client_write"]
         assert "gitea_close_issue" not in TOOL_NAMES_BY_MODE["mcp_client"]
+        assert "gitea_reopen_issue" in TOOL_NAMES_BY_MODE["mcp_client_write"]
+        assert "gitea_reopen_issue" not in TOOL_NAMES_BY_MODE["mcp_client"]
 
     def test_guarded_tools_registered_with_exact_schema(self, live_server: Any) -> None:
         tools = {t.name: t for t in live_server.mcp._tool_manager.list_tools()}
