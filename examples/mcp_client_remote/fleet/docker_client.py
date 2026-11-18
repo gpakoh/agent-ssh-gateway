@@ -918,6 +918,53 @@ class DockerClient:
         services = [line.strip() for line in result.splitlines() if line.strip()]
         return {"services": services, "count": len(services)}
 
+    async def compose_one_shot_config(self, project_dir: str, service: str) -> dict:
+        """Read interpolated Compose config only into process memory.
+
+        The result contains secrets. It must only be passed to the guarded
+        one-shot policy verifier, NEVER to MCP outputs, logs or audit metadata.
+        """
+        self._validate_project_dir(project_dir)
+        self._validate_service_name(service)
+        argv = self._compose_base_argv(project_dir) + ["config", "--format", "json"]
+        try:
+            result = await self._run_with_result(argv, timeout=60.0)
+            if result.exit_code != 0 or not result.stdout or len(result.stdout) > 128 * 1024:
+                raise ValueError("invalid config receipt")
+            parsed = json.loads(result.stdout)
+            if not isinstance(parsed, dict):
+                raise ValueError("invalid config receipt")
+        except (ValueError, RuntimeError, json.JSONDecodeError):
+            # Compose interpolation errors can contain credential values.
+            raise RuntimeError("Compose service config could not be attested") from None
+        return parsed
+
+    async def compose_one_shot(
+        self,
+        *,
+        project_dir: str,
+        service: str,
+        argv: tuple[str, ...],
+        timeout: int,
+    ) -> RunResult:
+        """Run only a pre-authorized fixed Compose service command once.
+
+        No caller CLI flags, --publish, --service-ports, shell, env values or
+        host mounts are accepted here. Compose inherits only the service env
+        that the separate confirmation-bound policy has already attested.
+        """
+        self._validate_project_dir(project_dir)
+        self._validate_service_name(service)
+        self._validate_exec_argv(list(argv))
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or not 10 <= timeout <= 300:
+            raise ValueError("one-shot timeout must be 10-300 seconds")
+        command = self._compose_base_argv(project_dir) + [
+            "run", "--rm", "--no-deps", "-T", service, *argv,
+        ]
+        # Docker Compose does not publish service ports on 'run' by default.
+        # Never accept --service-ports or --publish from untrusted input.
+        return await self._run_with_result(command, timeout=float(timeout))
+
     # ── Write operations (Session 160) ──────────────────────────────
 
     async def start(self, container: str, timeout: int | None = None) -> str:

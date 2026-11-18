@@ -39,6 +39,12 @@ from examples.mcp_client_remote.fleet.docker_client import (
 from examples.mcp_server.docker_confirm import ConfirmAction, ConfirmStatus
 from examples.mcp_server.mcp_audit import McpAuditEvent
 from examples.mcp_server.mcp_infra._server_ref import server_attr
+from examples.mcp_server.mcp_infra.compose_one_shot_policy import (
+    OneShotContractError,
+    attest_compose_config,
+    load_contract,
+    parse_catalog_stdout,
+)
 from examples.mcp_server.mcp_infra.tool_registry import register_tool
 
 
@@ -649,6 +655,70 @@ async def docker_stats(limit: int = 50) -> dict[str, Any]:
         truncated=client.last_truncated,
         source="docker",
     )
+
+async def _prepare_compose_one_shot(
+    contract: str, mode: str, timeout: int
+) -> dict[str, Any]:
+    """Fail-closed authority check with a secret-opaque Compose config seal."""
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or not 10 <= timeout <= 300:
+        raise OneShotContractError("one-shot timeout must be 10-300 seconds")
+    plan = load_contract(contract, mode)
+    registry = server_attr("_get_workspace_registry")()
+    info = registry.project_info(plan["project_id"])
+    root = _safe_registered_root(info)
+    client = _docker_client()
+    client._validate_project_dir(str(root))
+    # This dict contains interpolated secrets. Do not log or return it.
+    config = await client.compose_one_shot_config(str(root), plan["service"])
+    fingerprint = attest_compose_config(plan, config)
+    image_id = await client.image_id(plan["image"])
+    if not isinstance(image_id, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) is None:
+        raise OneShotContractError("exact one-shot image is unavailable locally")
+    return {
+        "plan": plan,
+        "root": str(root),
+        "fingerprint": fingerprint,
+        "image_id": image_id,
+    }
+
+
+async def docker_compose_one_shot(
+    contract: str, mode: str, timeout: int = 120
+) -> dict[str, Any]:
+    """Stage an operator-reviewed, one-use Compose job; never accept shell argv.
+
+    No arbitrary project path, image, SQL, env value, volume, network or
+    command can be selected by the caller. The complete approved plan is
+    rechecked under a short-lived high-risk confirmation before execution.
+    """
+    tool = "docker_compose_one_shot"
+    try:
+        prepared = await _prepare_compose_one_shot(contract, mode, timeout)
+    except OneShotContractError as exc:
+        return tool_error(tool=tool, code="INVALID_INPUT", message=str(exc),
+                          retryable=False, source="docker")
+    except Exception:
+        return tool_error(
+            tool=tool, code="ONE_SHOT_PRECONDITION_UNPROVEN",
+            message="one-shot source, Compose identity or image could not be verified",
+            retryable=False, source="docker",
+        )
+    action = _confirm_store().create_action(
+        tool,
+        {
+            "contract": contract,
+            "mode": mode,
+            "timeout": timeout,
+            "expected_fingerprint": prepared["fingerprint"],
+            "expected_root": prepared["root"],
+            "expected_image_id": prepared["image_id"],
+        },
+        f"Run exact one-shot contract {contract} ({mode})",
+        risk="high",
+        required_scope="mcp:docker:admin",
+    )
+    return _confirmation_response(action)
+
 
 async def docker_compose_ps(
     project_dir: str | None = None, limit: int = 50
@@ -6569,6 +6639,91 @@ async def _docker_deploy_contract_impl(
     )
 
 
+async def _docker_compose_one_shot_impl(
+    contract: str,
+    mode: str,
+    timeout: int,
+    expected_fingerprint: str,
+    expected_root: str,
+    expected_image_id: str,
+) -> dict[str, Any]:
+    """Execute the exact confirmed plan once, without exposing env or stdout."""
+    tool = "docker_compose_one_shot"
+    # The operator policy, Compose config including hidden secret values,
+    # project root and local image may have changed after preflight.
+    try:
+        fresh = await _prepare_compose_one_shot(contract, mode, timeout)
+    except Exception:
+        return tool_error(
+            tool=tool, code="ONE_SHOT_PRECONDITION_CHANGED",
+            message="one-shot authority could not be reverified",
+            retryable=False, source="docker",
+        )
+    if (
+        not isinstance(expected_fingerprint, str)
+        or not hmac.compare_digest(fresh["fingerprint"], expected_fingerprint)
+        or fresh["root"] != expected_root
+        or fresh["image_id"] != expected_image_id
+    ):
+        return tool_error(
+            tool=tool, code="ONE_SHOT_PRECONDITION_CHANGED",
+            message="one-shot contract or runtime identity changed before execution",
+            retryable=False, source="docker",
+        )
+    plan = fresh["plan"]
+    try:
+        run = await _docker_client().compose_one_shot(
+            project_dir=fresh["root"],
+            service=plan["service"],
+            argv=plan["argv"],
+            timeout=timeout,
+        )
+    except Exception:
+        # The Docker CLI may have dispatched its one-shot child before a
+        # transport failure. Never replay a potentially mutating migration.
+        return tool_error(
+            tool=tool, code="ONE_SHOT_OUTCOME_UNKNOWN",
+            message="one-shot dispatch or completion could not be verified",
+            retryable=False, redacted=True, source="docker",
+            hint="Reconcile exact job effects and runtime state before a new attempt.",
+        )
+    if type(run.exit_code) is not int or run.exit_code == -1:
+        return tool_error(
+            tool=tool, code="ONE_SHOT_OUTCOME_UNKNOWN",
+            message="one-shot exit evidence is unavailable",
+            retryable=False, redacted=True, source="docker",
+        )
+    if run.exit_code != 0:
+        return tool_error(
+            tool=tool, code="ONE_SHOT_COMMAND_FAILED",
+            message="one-shot command returned a nonzero exit status",
+            retryable=False, redacted=True, source="docker",
+            result={"exit_code": run.exit_code},
+            hint="Inspect the approved service through read-only tools; do not blindly rerun.",
+        )
+    result: dict[str, Any] = {
+        "contract": contract,
+        "mode": mode,
+        "project_id": plan["project_id"],
+        "service": plan["service"],
+        "image": plan["image"],
+        "image_id": fresh["image_id"],
+        "exit_code": 0,
+        "completion": "command_exit_verified",
+        "output_redacted": True,
+    }
+    if mode.startswith("catalog_"):
+        try:
+            result["catalog"] = parse_catalog_stdout(run.stdout)
+        except OneShotContractError:
+            return tool_error(
+                tool=tool, code="ONE_SHOT_EVIDENCE_INVALID",
+                message="catalog response is not an approved bounded inventory",
+                retryable=False, redacted=True, source="docker",
+            )
+    return tool_success(tool, result=result, source="docker", dangerous=True, redacted=True)
+
+
 _CONFIRM_HANDLERS: dict[str, Callable[..., Any]] = {
     "docker_start": _docker_start_impl,
     "docker_stop": _docker_stop_impl,
@@ -6581,6 +6736,7 @@ _CONFIRM_HANDLERS: dict[str, Callable[..., Any]] = {
     "docker_prune": _docker_prune_impl,
     "docker_exec": _docker_exec_impl,
     "docker_run": _docker_run_impl,
+    "docker_compose_one_shot": _docker_compose_one_shot_impl,
     "docker_rmi": _docker_rmi_impl,
     "docker_volume_rm": _docker_volume_rm_impl,
     "docker_deploy_contract": _docker_deploy_contract_impl,
@@ -7268,6 +7424,7 @@ def register_all() -> None:
         "docker_stats",
         "docker_compose_ps",
         "docker_compose_services",
+        "docker_compose_one_shot",
         "docker_compose_logs",
         "docker_stop",
         "docker_restart",
