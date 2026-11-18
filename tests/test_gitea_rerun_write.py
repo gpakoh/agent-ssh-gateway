@@ -76,6 +76,15 @@ class FakeRerunClient:
         self.reads += 1
         return dict(self.after if self.mutated else self.before)
 
+    async def list_action_run_jobs(self, owner: str, repo: str, run_id: int):
+        # A terminal failed run is eligible only after the exact current
+        # attempt jobs are all proven complete.
+        return {"total_count": 1, "jobs": [{
+            "id": 999, "run_id": run_id, "head_sha": self.before["head_sha"],
+            "run_attempt": self.before["run_attempt"], "status": "completed",
+            "conclusion": "failure",
+        }]}
+
     async def rerun_action_run(self, owner: str, repo: str, run_id: int):
         self.rerun_calls.append((owner, repo, run_id))
         if self.apply_mutation:
@@ -266,7 +275,7 @@ async def test_adapter_unproven_ambiguous_rerun_forbids_blind_retry(monkeypatch)
     assert result["error"]["code"] == "MUTATION_OUTCOME_UNKNOWN"
     assert result["error"]["retryable"] is False
     assert client.rerun_calls == [("owner", "repo", RUN_ID)]
-    assert client.reads == 4  # preflight + three bounded reconciliation reads
+    assert client.reads == 5  # run, exact jobs, rechecked run + three reconciliation reads
 
 
 @pytest.mark.asyncio
