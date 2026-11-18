@@ -46,6 +46,7 @@ from app.security import (
     SECURITY_HEADERS,
     AuditLogger,
     limiter,
+    rate_limit_bucket_id,
     validate_target_host,
 )
 from app.server_manager import ServerManager
@@ -1282,6 +1283,7 @@ async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
     except Exception:
         pass
     bucket_class = _request_bucket_class(request)
+    bucket_id = rate_limit_bucket_id(request, bucket_class=bucket_class) if request is not None else None
     body = _err(
         429,
         f"Rate limit exceeded: {exc.detail}",
@@ -1295,14 +1297,14 @@ async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
         "operation_class": _rate_limit_operation_class(request),
         "limit": str(exc.detail),
     }
-    return JSONResponse(
-        status_code=429,
-        headers={
-            "Retry-After": str(retry_after),
-            "X-RateLimit-Bucket": bucket_class,
-        },
-        content=body,
-    )
+    headers = {
+        "Retry-After": str(retry_after),
+        "X-RateLimit-Bucket": bucket_class,
+    }
+    if bucket_id is not None:
+        body["details"]["bucket_id"] = bucket_id
+        headers["X-RateLimit-Bucket-ID"] = bucket_id
+    return JSONResponse(status_code=429, headers=headers, content=body)
 
 
 @app.exception_handler(RequestValidationError)

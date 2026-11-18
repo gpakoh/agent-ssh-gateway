@@ -7,6 +7,7 @@ into clean, human-readable messages and hints.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from gateway_client import GatewayClientError
@@ -92,18 +93,24 @@ _SAFE_GATEWAY_DETAIL_KEYS = (
     "errors",
     "total_errors",
     "retry_after_seconds",
+    "bucket_id",
     "bucket_class",
     "operation_class",
     "limit",
     "attempt",
 )
 _RATE_LIMIT_GATEWAY_CODES = {"RATE_LIMITED", "RATE_LIMIT_EXCEEDED", "SESSION_LIMIT_EXCEEDED"}
+_SAFE_BUCKET_ID_PATTERN = re.compile(r"^bkt_[0-9a-f]{24}$")
 
 
 def _copy_safe_gateway_details(target: dict[str, Any], source: dict[str, Any]) -> None:
     for key in _SAFE_GATEWAY_DETAIL_KEYS:
         value = source.get(key)
-        if value is not None:
+        if key == "bucket_id":
+            # Never forward arbitrary upstream text in a diagnostic identity.
+            if isinstance(value, str) and _SAFE_BUCKET_ID_PATTERN.fullmatch(value):
+                target[key] = value
+        elif value is not None:
             target[key] = value
 
 
