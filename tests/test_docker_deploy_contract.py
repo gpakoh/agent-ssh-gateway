@@ -90,7 +90,9 @@ def _inspect() -> list[dict]:
             "Config": {
                 "Image": TARGET,
                 "Labels": {
-                    "io.xloud.gpt-browser-bridge.deploy-generation": GENERATION
+                    "io.xloud.gpt-browser-bridge.deploy-generation": GENERATION,
+                    "com.docker.compose.project": "infra-quart",
+                    "com.docker.compose.service": "gpt-browser-bridge",
                 },
             },
             "State": {
@@ -261,7 +263,7 @@ async def test_outer_helper_timeout_is_ambiguous_not_failed_evidence(monkeypatch
 
     assert result["ok"] is False
     assert result["error"]["code"] == "DEPLOY_CONTRACT_OUTCOME_AMBIGUOUS"
-    assert result["error"]["retryable"] is True
+    assert result["error"]["retryable"] is False
     assert result["result"]["target_image"] == TARGET
 
 

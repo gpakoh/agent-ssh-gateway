@@ -25,6 +25,7 @@ import stat
 import subprocess
 import time as _time
 from collections.abc import Callable
+from datetime import datetime
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -129,6 +130,9 @@ def _redact_bound_compose_path(
 
 
 _DEPLOY_STABILITY_SECONDS = 90
+# Repo-owned script output is untrusted: its contents may include credentials
+# unknown to the configured redactor, including after failure or timeout.
+_DEPLOY_OUTPUT_WITHHELD = "[redacted: deploy-script output]"
 _DEPLOY_HELPER_CONTAINER = "mcp-oauth"
 _DEPLOY_CONTRACTS: dict[str, dict[str, str]] = {
     "gpt-browser-bridge": {
@@ -139,6 +143,7 @@ _DEPLOY_CONTRACTS: dict[str, dict[str, str]] = {
         "image_env": "GPT_BRIDGE_TARGET_IMAGE",
         "image_repo_env": "GPT_BRIDGE_IMAGE_REPO",
         "compose_project": "infra-quart",
+        "compose_service": "gpt-browser-bridge",
         "profile_volume": "infra-quart_gpt-browser-bridge-profile",
         "logical_volume": "gpt-browser-bridge-profile",
         "verify_container": "infra-quart-gpt-browser-bridge-1",
@@ -410,9 +415,13 @@ def _verify_deploy_evidence(
     labels = config.get("Labels")
     if not isinstance(labels, dict):
         raise RuntimeError("deployed container labels are unavailable")
+    if labels.get("com.docker.compose.project") != spec["compose_project"]:
+        raise RuntimeError("deployed container Compose project identity mismatch")
+    if labels.get("com.docker.compose.service") != spec["compose_service"]:
+        raise RuntimeError("deployed container Compose service identity mismatch")
     generation = labels.get(spec["generation_label"])
-    if not isinstance(generation, str) or not generation:
-        raise RuntimeError("deployed container generation label is missing")
+    if not isinstance(generation, str) or not re.fullmatch(r"[0-9a-f]{64}", generation):
+        raise RuntimeError("deployed container generation label is invalid")
     container_id = inspected.get("Id")
     if state.get("gpt_browser_bridge_image") != target_image:
         raise RuntimeError("deployment state image does not match target")
@@ -425,6 +434,15 @@ def _verify_deploy_evidence(
     fingerprint = state.get("gpt_browser_bridge_compose_config_fingerprint")
     if not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
         raise RuntimeError("deployment state Compose fingerprint is invalid")
+    deployed_at = state.get("deployed_at")
+    if not isinstance(deployed_at, str) or not 10 <= len(deployed_at) <= 64:
+        raise RuntimeError("deployment state timestamp is invalid")
+    try:
+        date_value = datetime.fromisoformat(deployed_at)
+    except ValueError as exc:
+        raise RuntimeError("deployment state timestamp is invalid") from exc
+    if date_value.tzinfo is None:
+        raise RuntimeError("deployment state timestamp must include a timezone")
     return {
         "container_id": container_id,
         "image_id": target_image_id,
@@ -434,7 +452,7 @@ def _verify_deploy_evidence(
         "started_at": runtime_state.get("StartedAt"),
         "deploy_generation": generation,
         "compose_config_fingerprint": fingerprint,
-        "deployed_at": state.get("deployed_at"),
+        "deployed_at": deployed_at,
     }
 
 
@@ -6361,18 +6379,31 @@ async def _docker_deploy_contract_impl(
 
     client = _docker_client()
     spec = plan["spec"]
-    run = await client.run_deploy_contract_helper(
-        helper_image_id=plan["helper_image_id"],
-        candidate_root=plan["candidate_root"],
-        infra_root=plan["infra_root"],
-        script_path=plan["script_path"],
-        state_file=plan["state_file"],
-        image_env=spec["image_env"],
-        image_ref=target_image,
-        profile_volume=spec["profile_volume"],
-        profile_mountpoint=plan["profile_mountpoint"],
-        timeout=timeout,
-    )
+    try:
+        run = await client.run_deploy_contract_helper(
+            helper_image_id=plan["helper_image_id"],
+            candidate_root=plan["candidate_root"],
+            infra_root=plan["infra_root"],
+            script_path=plan["script_path"],
+            state_file=plan["state_file"],
+            image_env=spec["image_env"],
+            image_ref=target_image,
+            profile_volume=spec["profile_volume"],
+            profile_mountpoint=plan["profile_mountpoint"],
+            timeout=timeout,
+        )
+    except Exception:
+        # The transport may have failed *after* Docker dispatched the helper.
+        # Never echo the exception (which may contain the script output) or
+        # classify the possible side effect as safe to replay.
+        return tool_error(
+            tool="docker_deploy_contract",
+            code="DEPLOY_CONTRACT_OUTCOME_AMBIGUOUS",
+            message="deploy helper dispatch outcome is unknown",
+            retryable=False,
+            hint="Read exact deployment state and runtime evidence before any new attempt.",
+            source="docker",
+        )
 
     if run.exit_code == -1:
         return tool_error(
@@ -6383,14 +6414,13 @@ async def _docker_deploy_contract_impl(
                 "the deploy transaction may still have reached the host daemon"
             ),
             result={
-                "output_tail": _sanitize_deploy_tail(
-                    client, (run.stdout or "") + "\n" + (run.stderr or "")
-                ),
+                "output_tail": _DEPLOY_OUTPUT_WITHHELD,
                 "target_image": target_image,
                 "verify_container": spec["verify_container"],
             },
             source="docker",
-            retryable=True,
+            retryable=False,
+            redacted=True,
             hint=(
                 "Reconcile the target container identity/health and deployment state "
                 "before retrying the exact same contract."
@@ -6403,35 +6433,67 @@ async def _docker_deploy_contract_impl(
         parsed = None
     helper_payload = parsed if isinstance(parsed, dict) else None
     if helper_payload is None:
+        # Invalid output does not prove the script never ran or rolled back.
+        # There is no safe automatic retry after a possible deploy dispatch.
         return tool_error(
             tool="docker_deploy_contract",
-            code="DEPLOY_CONTRACT_EVIDENCE_INVALID",
-            message="deploy helper returned invalid evidence",
+            code="DEPLOY_CONTRACT_OUTCOME_AMBIGUOUS",
+            message="deploy helper returned no authoritative completion receipt",
             result={
                 "exit_code": run.exit_code,
-                "output_tail": _sanitize_deploy_tail(
-                    client, (run.stdout or "") + "\n" + (run.stderr or "")
-                ),
+                "output_tail": _DEPLOY_OUTPUT_WITHHELD,
             },
             source="docker",
             retryable=False,
+            redacted=True,
+            hint="Reconcile the exact deployment state and container before retrying.",
         )
 
-    output_tail = _sanitize_deploy_tail(
-        client, str(helper_payload.get("output_tail") or "")
-    )
+    # A helper may have changed production before the host process timed out,
+    # crashed or emitted a partial result. A syntactically valid JSON object
+    # is insufficient: the protocol and process exit must be consistent.
     helper_exit = helper_payload.get("exit_code")
+    if (
+        type(helper_payload.get("version")) is not int
+        or helper_payload["version"] != 1
+        or type(helper_exit) is not int
+        or helper_exit != run.exit_code
+    ):
+        return tool_error(
+            tool="docker_deploy_contract",
+            code="DEPLOY_CONTRACT_OUTCOME_AMBIGUOUS",
+            message="deploy helper protocol or exit status is unproven",
+            result={"output_tail": _DEPLOY_OUTPUT_WITHHELD},
+            source="docker",
+            retryable=False,
+            redacted=True,
+            hint="Reconcile exact deployment state and container identity before retrying.",
+        )
+
+    output_tail = _DEPLOY_OUTPUT_WITHHELD if helper_payload.get("output_tail") else ""
+    if run.exit_code == 124 or helper_exit == 124:
+        return tool_error(
+            tool="docker_deploy_contract",
+            code="DEPLOY_CONTRACT_OUTCOME_AMBIGUOUS",
+            message="deploy script timed out after possible mutations",
+            result={"exit_code": helper_exit, "output_tail": output_tail},
+            source="docker",
+            retryable=False,
+            redacted=True,
+            hint="Reconcile exact deployment state and container identity before retrying.",
+        )
     if run.exit_code != 0 or helper_exit != 0:
         return tool_error(
             tool="docker_deploy_contract",
             code="DEPLOY_CONTRACT_FAILED",
-            message=str(helper_payload.get("error") or "deploy contract failed"),
+            message="deploy contract script reported failure",
             result={
                 "exit_code": helper_exit if isinstance(helper_exit, int) else run.exit_code,
                 "output_tail": output_tail,
             },
             source="docker",
             retryable=False,
+            redacted=True,
         )
 
     state = helper_payload.get("state")
