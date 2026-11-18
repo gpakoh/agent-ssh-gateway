@@ -35,6 +35,25 @@ def _rate_limit_key(request: Request) -> str:
 
 limiter = Limiter(key_func=_rate_limit_key)
 
+# A process-local diagnostic salt prevents the caller from reversing a bucket
+# identifier into an IP address or using it as a permanent user identifier.
+# IDs intentionally change on restart and across different workers.
+_RATE_LIMIT_BUCKET_ID_KEY = secrets.token_bytes(32)
+
+
+def rate_limit_bucket_id(request: Request, *, bucket_class: str) -> str:
+    """Opaque correlation ID for one active route/source-IP throttle bucket.
+
+    Uses the same trusted-proxy-aware source key as the real Limiter, but
+    never returns the address, token or route to the client. This is a local
+    diagnostic, not a cross-worker rate-limit lease or storage key.
+    """
+    route = request.scope.get("route")
+    scope_path = getattr(route, "path", None) or request.url.path
+    parts = (bucket_class, request.method.upper(), scope_path, _rate_limit_key(request))
+    payload = "\\0".join(parts).encode("utf-8")
+    return "bkt_" + hmac.new(_RATE_LIMIT_BUCKET_ID_KEY, payload, hashlib.sha256).hexdigest()[:24]
+
 
 def _verified_master_rate_lane(request: Request, setting_name: str) -> bool:
     """Return whether this request may use an explicitly configured master lane."""
