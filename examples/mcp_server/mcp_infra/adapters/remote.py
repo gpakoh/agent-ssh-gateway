@@ -44,6 +44,7 @@ from examples.mcp_client_remote.fleet.shared import (
     list_confirmed_gitea_issues,
     list_pagination_meta,
     minimize_issue_payload,
+    validate_repo_owner_or_name,
     validate_repo_path,
 )
 from examples.mcp_server.candidate_verifier import (
@@ -1198,8 +1199,37 @@ def _minimize_github_repo(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _gitea_read_repo_identity_error(
+    tool: str, owner: Any, repo: Any
+) -> dict[str, Any] | None:
+    """Fail closed at the read boundary without reflecting untrusted identity."""
+    for field, value in (("owner", owner), ("repo", repo)):
+        valid = (
+            isinstance(value, str)
+            and value == value.strip()
+            and not any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
+        )
+        if valid:
+            try:
+                validate_repo_owner_or_name(value, label=field)
+            except ValueError:
+                valid = False
+        if not valid:
+            return tool_error(
+                tool=tool,
+                code="INVALID_INPUT",
+                message=f"{field} must be a safe Gitea repository identifier",
+                retryable=False,
+                details={"field": field},
+                source="gitea",
+            )
+    return None
+
+
 async def gitea_get_repo(owner: str, repo: str) -> dict[str, Any]:
     """Get Gitea repository metadata (login, visibility, default branch, permissions, counters, topics)."""
+    if error := _gitea_read_repo_identity_error("gitea_get_repo", owner, repo):
+        return error
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
@@ -1412,6 +1442,8 @@ async def gitea_get_file(
                 retryable=False, details={"field": "branch", "max_length": 255},
                 source="gitea",
             )
+    if error := _gitea_read_repo_identity_error("gitea_get_file", owner, repo):
+        return error
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
@@ -6933,6 +6965,8 @@ async def gitea_get_action_job_logs(
 
 async def gitea_list_workflows(owner: str, repo: str) -> dict[str, Any]:
     """List Gitea Actions workflow files in a repository."""
+    if error := _gitea_read_repo_identity_error("gitea_list_workflows", owner, repo):
+        return error
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
