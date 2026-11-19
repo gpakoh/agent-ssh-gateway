@@ -44,6 +44,7 @@ from examples.mcp_client_remote.fleet.shared import (
     list_confirmed_gitea_issues,
     list_pagination_meta,
     minimize_issue_payload,
+    validate_repo_path,
 )
 from examples.mcp_server.candidate_verifier import (
     CandidateVerificationError,
@@ -1378,6 +1379,20 @@ async def gitea_get_file(
             retryable=False,
             details={"field": "max_content_bytes", "min_value": 0},
             source="gitea",
+        )
+    # Validate non-empty paths before auth/client creation. An empty string
+    # is the documented root-listing form, not an invalid file path.
+    valid_path = isinstance(path, str)
+    if valid_path and path:
+        try:
+            validate_repo_path(path)
+        except ValueError:
+            valid_path = False
+    if not valid_path:
+        return tool_error(
+            tool="gitea_get_file", code="INVALID_INPUT",
+            message="path must be a safe repository-relative path",
+            retryable=False, details={"field": "path"}, source="gitea",
         )
     # The file API first resolves branch/tag/SHA through list_commits. A
     # malformed ref can otherwise reach Gitea and surface as an HTTP 500.
