@@ -456,6 +456,29 @@ def _classify_env_failure(stderr: str | None, exit_code: int | None) -> str | No
     return "VERIFIER_ENV_UNAVAILABLE" if any(marker in low for marker in env_markers) else None
 
 
+def _uv_readonly_editable_build_failed(raw: dict[str, Any]) -> bool:
+    """Identify uv's pre-tool PEP 660 write failure, without re-running a check.
+
+    Exit 1 is shared with actual pytest failures. Require the distinct uv build
+    wrapper and setuptools' .egg-info timestamp error, and never infer an env
+    failure once the test runner has reported collection. Output is untrusted:
+    this classifier changes diagnostics only, never triggers another execution.
+    """
+    if raw.get("exit_code") != 1:
+        return False
+    stdout = str(raw.get("stdout") or raw.get("output") or "").lower()
+    stderr = str(raw.get("stderr") or "").lower()
+    return (
+        "verifier_check_phase: execute" in stderr
+        and "failed to build `" in stdout
+        and "setuptools.build_meta.build_editable" in stdout
+        and "cannot update time stamp of directory" in stdout
+        and ".egg-info" in stdout
+        and "test session starts" not in stdout
+        and "collected " not in stdout
+    )
+
+
 def _uv_run_args(tool: str, project_dir: str, targets: list[str]) -> list[str]:
     """Build the uv command arguments for a verifier run."""
     if tool not in _UV_TOOL_MAP and tool != "compileall":
@@ -506,6 +529,7 @@ def _build_primary_script(
     lines += _verifier_root_bootstrap(base)
     lines += _verifier_project_prologue(proj_root, project_identity=project_dir)
     lines += [
+        f"PROJECT_DIR={shlex.quote(proj)}",
         f"export UV_PROJECT_ENVIRONMENT={shlex.quote(venv)}",
         f"export PYTHONPYCACHEPREFIX={shlex.quote(_verifier_project_cache_root(project_dir) + '/pycache')}",
     ]
@@ -519,10 +543,32 @@ def _build_primary_script(
             f"python3 -c {shlex.quote(walk)} -- {target_args}"
         )
     else:
+        # uv run has no --no-install-project flag. On a read-only checkout,
+        # first synchronize ONLY dependencies into the external verifier venv,
+        # then execute from source without triggering a second editable build.
+        # Both commands share the owned-process deadline and external caches.
+        lines.extend(
+            [
+                'UV_RUN_SYNC_FLAG=""',
+                'if [ ! -w "$PROJECT_DIR" ]; then UV_RUN_SYNC_FLAG="--no-sync"; fi',
+                # This also catches a writable top-level directory with stale,
+                # owner-locked setuptools metadata from an earlier build.
+                'for metadata_dir in "$PROJECT_DIR"/*.egg-info "$PROJECT_DIR"/src/*.egg-info; do',
+                '  if [ -d "$metadata_dir" ] && [ ! -w "$metadata_dir" ]; then',
+                '    UV_RUN_SYNC_FLAG="--no-sync"',
+                '    break',
+                '  fi',
+                'done',
+                'if [ -n "$UV_RUN_SYNC_FLAG" ]; then',
+                '  echo "VERIFIER_CHECK_PHASE: sync" >&2',
+                '  verifier_uv uv sync --frozen --all-extras --no-install-project --directory "$PROJECT_DIR" 2>&1',
+                'fi',
+            ]
+        )
         cmd_s = " ".join(shlex.quote(a) for a in _UV_TOOL_MAP[tool])
         cache_s = " ".join(shlex.quote(a) for a in _tool_cache_args(tool, project_dir))
         run = (
-            f"uv run --frozen --all-extras --directory {shlex.quote(proj)} -- "
+            f"uv run --frozen --all-extras $UV_RUN_SYNC_FLAG --directory {shlex.quote(proj)} -- "
             f"{cmd_s} {cache_s} -- {target_args}"
         )
     lines.append('echo "VERIFIER_CHECK_PHASE: execute" >&2')
@@ -1023,11 +1069,11 @@ def _build_readonly_fallback_script(
     tool caches, and dependency-resolution state live under the server-owned
     verifier root.
 
-    When ``uv.lock`` exists, uv syncs the *real* project with ``--frozen`` and
-    ``UV_PROJECT_ENVIRONMENT`` pointing at the external venv.  This preserves
-    editable/project installation semantics without creating ``.venv`` or
-    lock/cache files in source.  For projects without a lockfile, dependency
-    metadata is copied to the temp root and synced with ``--no-install-project``
+    When ``uv.lock`` exists, uv resolves the *real* project's dependencies
+    with ``--frozen --no-install-project`` and ``UV_PROJECT_ENVIRONMENT``
+    pointing at the external venv. This avoids PEP 660 editable package
+    metadata writes in the read-only checkout. For projects without a lockfile,
+    dependency metadata is copied to the temp root and synced with ``--no-install-project``
     so uv is never allowed to create a new lockfile inside the read-only repo.
     Immediate requirements of the explicitly selected service are installed
     only into the external verifier environment, never into the source.
@@ -1129,11 +1175,11 @@ def _build_readonly_fallback_script(
         "if [ $NEED_SYNC -eq 1 ]; then",
         '  echo "VERIFIER_CHECK_PHASE: sync" >&2',
         "  if [ $HAS_LOCK -eq 1 ]; then",
-        # The real project can be installed into the external venv safely:
-        # --frozen forbids lock mutation and UV_PROJECT_ENVIRONMENT prevents
-        # .venv creation inside the source checkout.
+        # Sync the locked dependency graph without editable-installing the
+        # source project. --frozen forbids lock writes and the external venv
+        # prevents .venv or package metadata writes inside the checkout.
         '    cd "$PROJECT_DIR"',
-        "    verifier_uv uv sync --all-extras --frozen 2>&1",
+        "    verifier_uv uv sync --all-extras --frozen --no-install-project 2>&1",
         '    cp "$PROJECT_DIR/uv.lock" "$SOURCE_LOCK"',
         '    SYNC_PROJECT="$PROJECT_DIR"',
         "  else",
@@ -1249,6 +1295,8 @@ def _fallback_result(
         ),
         r2.get("exit_code"),
     )
+    if _uv_readonly_editable_build_failed(r2):
+        env_failure = "VERIFIER_ENV_UNAVAILABLE"
     if env_failure:
         return tool_error(
             code=env_failure,
@@ -1527,6 +1575,8 @@ def _run_uv_tool(
         ),
         raw.get("exit_code"),
     )
+    if _uv_readonly_editable_build_failed(raw):
+        env_failure = "VERIFIER_ENV_UNAVAILABLE"
     if env_failure:
         return tool_error(
             code=env_failure,

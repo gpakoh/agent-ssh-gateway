@@ -350,7 +350,9 @@ class TestReadOnlyFallbackMypyPackageBase:
 
         script = _build_readonly_fallback_script("pytest", "/project", ["tests"])
         sync_lines = [ln for ln in script.splitlines() if "uv sync" in ln]
-        assert "    verifier_uv uv sync --all-extras --frozen 2>&1" in sync_lines
+        # A locked read-only source still provides its lock and dependencies,
+        # but editable-install can write .egg-info into the source checkout.
+        assert "    verifier_uv uv sync --all-extras --frozen --no-install-project 2>&1" in sync_lines
         assert "--extra dev" not in script
         assert 'export UV_PROJECT_ENVIRONMENT="$TMP_ROOT/.venv"' in script
         assert 'cd "$PROJECT_DIR"' in script
@@ -877,6 +879,70 @@ class TestRunUvToolContract:
         assert result["result"]["exit_code"] == 0
         assert result["result"]["stdout"] == "OK"
         assert result["error"] is None
+
+    def test_primary_readonly_source_skips_editable_package_build(self):
+        from mcp_client_tools import _build_primary_script
+
+        script = _build_primary_script("pytest", "/project", ["tests"])
+
+        assert "PROJECT_DIR=/project" in script
+        assert 'if [ ! -w "$PROJECT_DIR" ]; then' in script
+        assert 'for metadata_dir in "$PROJECT_DIR"/*.egg-info "$PROJECT_DIR"/src/*.egg-info; do' in script
+        assert 'if [ -d "$metadata_dir" ] && [ ! -w "$metadata_dir" ]; then' in script
+        assert 'verifier_uv uv sync --frozen --all-extras --no-install-project' in script
+        assert 'UV_RUN_SYNC_FLAG="--no-sync"' in script
+        assert "uv run --frozen --all-extras $UV_RUN_SYNC_FLAG --directory /project" in script
+        assert "uv run --frozen --all-extras --no-install-project" not in script
+
+    @pytest.mark.parametrize(
+        ("pytest_prefix", "expected_code"),
+        [
+            ("", "VERIFIER_ENV_UNAVAILABLE"),
+            ("============================= test session starts ==============================\ncollected 1 item\n", "CHECK_FAILED"),
+        ],
+    )
+    def test_uv_editable_egginfo_build_failure_is_not_a_failed_test(
+        self, monkeypatch, pytest_prefix, expected_code
+    ):
+        from mcp_client_tools import _run_uv_tool
+
+        monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
+
+        class FakeClient:
+            def __init__(self):
+                self.commands = []
+
+            def execute_raw(self, command, **kwargs):
+                self.commands.append(command)
+                return {"job_id": f"job{len(self.commands)}"}
+
+            def wait_job(self, job_id, **kwargs):
+                if job_id == "job1":
+                    return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
+                return {
+                    "exit_code": 1,
+                    "job_id": job_id,
+                    "stderr": "VERIFIER_LOCK_ACQUIRED: scope=test waited_s=0\nVERIFIER_CHECK_PHASE: execute\n",
+                    "stdout": pytest_prefix + (
+                        "   Building nod-gateway-client @ file://.\n"
+                        "  × Failed to build `nod-gateway-client @ file://.`\n"
+                        "  ├─▶ The build backend returned an error\n"
+                        "  ╰─▶ Call to `setuptools.build_meta.build_editable` failed (exit status: 1)\n"
+                        "      error: Cannot update time stamp of directory 'nod_gateway_client.egg-info'\n"
+                    ),
+                }
+
+            def execute_project_script(self, *args, **kwargs):
+                raise AssertionError("A failed test may not be re-executed")
+
+        client = FakeClient()
+        response = _run_uv_tool(
+            client, "gateway_client", "pytest", "run_pytest", target=["tests/unit"]
+        )
+
+        assert response["ok"] is False
+        assert response["error"]["code"] == expected_code
+        assert len(client.commands) == 2
 
     def test_pytest_failure(self, monkeypatch):
         from mcp_client_tools import _run_uv_tool
