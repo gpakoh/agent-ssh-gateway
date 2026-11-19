@@ -370,6 +370,7 @@ def _unavailable_tool_reasons() -> dict[str, str]:
     COMPOSE_TOOLS = {
         "docker_compose_ps",
         "docker_compose_services",
+        "docker_compose_one_shot",
         "docker_compose_up",
         "docker_compose_restart",
         "docker_compose_build",
@@ -786,6 +787,7 @@ docker_logs = docker.docker_logs
 docker_stats = docker.docker_stats
 docker_compose_ps = docker.docker_compose_ps
 docker_compose_services = docker.docker_compose_services
+docker_compose_one_shot = docker.docker_compose_one_shot
 docker_compose_logs = docker.docker_compose_logs
 docker_stop = docker.docker_stop
 docker_restart = docker.docker_restart
@@ -816,6 +818,7 @@ _docker_prune_impl = docker._docker_prune_impl
 _docker_exec_impl = docker._docker_exec_impl
 _docker_run_impl = docker._docker_run_impl
 _docker_compose_up_impl = docker._docker_compose_up_impl
+_docker_compose_one_shot_impl = docker._docker_compose_one_shot_impl
 _docker_compose_restart_impl = docker._docker_compose_restart_impl
 _docker_compose_build_impl = docker._docker_compose_build_impl
 _docker_rmi_impl = docker._docker_rmi_impl

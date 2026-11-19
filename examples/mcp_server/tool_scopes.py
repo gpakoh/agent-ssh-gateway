@@ -227,6 +227,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "docker_stop": ["mcp:docker"],
     "docker_restart": ["mcp:docker"],
     "docker_compose_up": ["mcp:docker"],
+    "docker_compose_one_shot": ["mcp:docker:admin"],
     "docker_compose_restart": ["mcp:docker"],
     "docker_compose_build": ["mcp:docker"],
     "docker_compose_logs": ["mcp:docker"],

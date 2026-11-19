@@ -170,6 +170,7 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "docker_site_audit_crm_ingress_readiness",
         "docker_compose_ps",
         "docker_compose_services",
+        "docker_compose_one_shot",
         # "docker_start" deliberately absent: it has an impl function
         # (_docker_start_impl) and a _CONFIRM_HANDLERS entry in server.py,
         # but unlike every other docker_* action here, no @register_tool()
@@ -262,6 +263,7 @@ MCP_CLIENT_BLOCKED_TOOLS: frozenset[str] = frozenset({
     "docker_stop",
     "docker_restart",
     "docker_compose_up",
+    "docker_compose_one_shot",
     "docker_compose_restart",
     "docker_compose_build",
     "docker_rm",
