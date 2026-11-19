@@ -1267,6 +1267,8 @@ def _gitea_read_pagination_error(
 
 async def gitea_list_branches(owner: str, repo: str, limit: int = 30) -> dict[str, Any]:
     """List branches in a Gitea repository."""
+    if error := _gitea_read_repo_identity_error("gitea_list_branches", owner, repo):
+        return error
     invalid = _gitea_read_pagination_error("gitea_list_branches", "limit", limit)
     if invalid is not None:
         return invalid
@@ -1477,6 +1479,8 @@ async def gitea_list_issues(
     owner: str, repo: str, state: str = "open", limit: int = 30
 ) -> dict[str, Any]:
     """List actual Gitea Issues (not PRs). State: open, closed, all."""
+    if error := _gitea_read_repo_identity_error("gitea_list_issues", owner, repo):
+        return error
     if not isinstance(state, str) or state not in _GITEA_ISSUE_STATE_FILTERS:
         allowed = ", ".join(sorted(_GITEA_ISSUE_STATE_FILTERS))
         return tool_error(
@@ -5189,6 +5193,8 @@ async def gitea_list_action_runs(
     owner: str, repo: str, status: str | None = None, limit: int = 10
 ) -> dict[str, Any]:
     """List Gitea Actions workflow runs. Optionally filter by status (completed, running/in_progress, waiting)."""
+    if error := _gitea_read_repo_identity_error("gitea_list_action_runs", owner, repo):
+        return error
     # Reject malformed inputs before reading credentials or opening HTTP.
     # Reuse the client validators to avoid diverging enum/limit rules.
     try:
@@ -5234,6 +5240,8 @@ async def gitea_list_action_runs(
 
 async def gitea_get_action_run(owner: str, repo: str, run_id: int) -> dict[str, Any]:
     """Get details of a specific Gitea Actions workflow run by ID."""
+    if error := _gitea_read_repo_identity_error("gitea_get_action_run", owner, repo):
+        return error
     try:
         run_id = gitea_client._validate_positive_int(run_id, "run_id")
     except ValueError as exc:
@@ -6832,6 +6840,8 @@ async def gitea_list_action_jobs(
 ) -> dict[str, Any]:
     """List repository-wide Gitea Actions jobs. Optionally filter by status
     (pending, queued, running/in_progress, failure, success, skipped)."""
+    if error := _gitea_read_repo_identity_error("gitea_list_action_jobs", owner, repo):
+        return error
     # Validate locally before token lookup and connection setup. Preserve the
     # transport's "running" alias and exact accepted status vocabulary.
     for field, validate in (
