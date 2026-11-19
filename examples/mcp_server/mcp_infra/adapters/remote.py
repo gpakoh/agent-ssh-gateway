@@ -3730,6 +3730,8 @@ async def gitea_get_branch_protection(
 ) -> dict[str, Any]:
     """Read one exact branch-protection rule as an absence-aware CAS snapshot."""
     tool = "gitea_get_branch_protection"
+    if error := _gitea_read_repo_identity_error(tool, owner, repo):
+        return error
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
@@ -5292,6 +5294,8 @@ async def gitea_list_action_run_artifacts(
     Results are descriptive, not authorization to download or publish.
     """
     tool = "gitea_list_action_run_artifacts"
+    if error := _gitea_read_repo_identity_error(tool, owner, repo):
+        return error
     if (
         type(pull_number) is not int or pull_number <= 0
         or type(run_id) is not int or run_id <= 0
@@ -6814,6 +6818,8 @@ async def gitea_cancel_action_run(
 
 async def gitea_list_action_run_jobs(owner: str, repo: str, run_id: int) -> dict[str, Any]:
     """List jobs and steps for a Gitea Actions workflow run."""
+    if error := _gitea_read_repo_identity_error("gitea_list_action_run_jobs", owner, repo):
+        return error
     try:
         run_id = gitea_client._validate_positive_int(run_id, "run_id")
     except ValueError as exc:
@@ -6941,6 +6947,8 @@ async def gitea_get_action_job_logs(
     tail_lines: int = GITEA_ACTION_JOB_LOG_DEFAULT_TAIL_LINES,
 ) -> dict[str, Any]:
     """Download a bounded, redacted tail of one Gitea Actions job log."""
+    if error := _gitea_read_repo_identity_error("gitea_get_action_job_logs", owner, repo):
+        return error
     # Reject malformed schema parameters before touching credentials or HTTP.
     # The low-level Gitea client enforces the same bounds as a second guard.
     for field, validate in (
