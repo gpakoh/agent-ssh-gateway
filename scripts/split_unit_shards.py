@@ -3,14 +3,14 @@
 
 Each shard is a disjoint set of test FILES (a file is never split across
 shards), so module-level fixtures and inter-test ordering inside a file
-are preserved exactly as in a serial run. Files are assigned by a greedy
-bin-packing on the number of collected tests per file, which keeps shard
-durations roughly even without ever splitting a file.
+are preserved exactly as in a serial run. Files are assigned by greedy
+bin-packing on collected test counts with a measured runtime cost hint for
+one slow module. This balances expected runtime without splitting a file.
 
 The partition is a pure function of the repo state: identical input
 (checked-out tree + same Python) always yields identical output, so the
 parallel shard jobs need no coordination. The greedy loop sorts files by
-(descending test count, path) and assigns each to the currently least
+(descending estimated work, path) and assigns each to the currently least
 loaded shard, which makes the result independent of pytest's collection
 order -- the same sort discipline that fixed the earlier non-deterministic
 FORBIDDEN_KEYS parametrize order.
@@ -35,6 +35,15 @@ from collections import defaultdict
 from pathlib import Path
 
 UNIT_MARKER_FILTER = "not host_smoke and not e2e and not integration and not smoke"
+
+# Gitea Actions #26755: this file accounted for roughly 11 min (Python 3.11)
+# and 7 min (Python 3.12), versus a few minutes for other files in its
+# count-balanced shard. A conservative virtual-test weight allows the costly
+# file to occupy one shard without splitting module fixtures or dropping tests.
+# It affects placement only; all collected nodes are still executed once.
+UNIT_FILE_COST_MULTIPLIERS: dict[str, int] = {
+    "tests/test_agent_tools_proxy_worktree.py": 12,
+}
 
 
 def collect_unit_files() -> dict[str, int]:
@@ -82,14 +91,20 @@ def collect_unit_files() -> dict[str, int]:
 
 
 def assign_shards(counts: dict[str, int], total: int) -> list[list[str]]:
-    """Greedy bin-pack files into `total` shards by collected test count."""
-    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    """Greedy bin-pack files by estimated work, preserving complete file units."""
+
+    def estimated_work(item: tuple[str, int]) -> int:
+        path, count = item
+        return count * UNIT_FILE_COST_MULTIPLIERS.get(path, 1)
+
+    ordered = sorted(counts.items(), key=lambda item: (-estimated_work(item), item[0]))
     shards: list[list[str]] = [[] for _ in range(total)]
     loads = [0] * total
-    for path, n in ordered:
+    for item in ordered:
+        path, _ = item
         target = min(range(total), key=lambda i: (loads[i], i))
         shards[target].append(path)
-        loads[target] += n
+        loads[target] += estimated_work(item)
     return shards
 
 
