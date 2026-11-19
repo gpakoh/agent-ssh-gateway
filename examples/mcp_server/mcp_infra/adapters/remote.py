@@ -1264,6 +1264,23 @@ async def gitea_list_commits(
     invalid = _gitea_read_pagination_error("gitea_list_commits", "limit", limit)
     if invalid is not None:
         return invalid
+    # Gitea accepts this optional query value as a branch, tag or commit SHA.
+    # Reject malformed refs locally: control characters can otherwise reach
+    # Gitea as an invalid ref and surface as an upstream HTTP 500.
+    if sha is not None:
+        valid = isinstance(sha, str) and 0 < len(sha) <= 255 and sha == sha.strip()
+        if valid:
+            try:
+                valid = _validate_branch_name(sha, "commit") == sha
+            except ValueError:
+                valid = False
+        if not valid:
+            return tool_error(
+                tool="gitea_list_commits", code="INVALID_INPUT",
+                message="sha must be a bounded Git branch, tag or commit SHA",
+                retryable=False, details={"field": "sha", "max_length": 255},
+                source="gitea",
+            )
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
