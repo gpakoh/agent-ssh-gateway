@@ -2,8 +2,8 @@
   "mode": "mcp_client",
   "safe_mode": true,
   "expected_safe_count": 99,
-  "expected_blocked_count": 39,
-  "expected_mcp_client_full_count": 136,
+  "expected_blocked_count": 40,
+  "expected_mcp_client_full_count": 137,
   "must_include": [
     "docker_network_ls",
     "docker_network_inspect",
@@ -31,6 +31,7 @@
   ],
   "must_exclude": [
     "docker_compose_up",
+    "docker_compose_one_shot",
     "docker_deploy_content_harvester",
     "docker_migrate_content_harvester",
     "docker_prepare_site_audit_lkg_recovery",
