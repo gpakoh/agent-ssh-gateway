@@ -79,11 +79,16 @@ def test_primary_and_fallback_emit_safe_execution_phase_after_lock():
         assert phase_lines
         assert all("private-value" not in line for line in phase_lines)
         assert all("candidate" not in line for line in phase_lines)
-    assert "VERIFIER_CHECK_PHASE: sync" not in primary
-    assert "VERIFIER_CHECK_PHASE: sync" in fallback
-    assert fallback.index("VERIFIER_CHECK_PHASE: sync") < fallback.index(
-        "VERIFIER_CHECK_PHASE: execute"
-    )
+    # The primary path now conditionally syncs dependencies before pytest
+    # when the source or its existing .egg-info is read-only. Both paths
+    # must report that phase only after acquiring the scoped verifier lock.
+    for script in (primary, fallback):
+        assert script.index("VERIFIER_LOCK_ACQUIRED:") < script.index(
+            "VERIFIER_CHECK_PHASE: sync"
+        )
+        assert script.index("VERIFIER_CHECK_PHASE: sync") < script.index(
+            "VERIFIER_CHECK_PHASE: execute"
+        )
 
 
 @pytest.mark.parametrize("wait_seconds", [True, -1, 0, 61, 1.2])
