@@ -44,13 +44,26 @@ def test_default_unit_files_keep_count_based_deterministic_assignment() -> None:
     )
 
 
-def test_weighted_partition_preserves_each_test_file_exactly_once() -> None:
-    counts = {SLOW_PROXY_FILE: 200}
-    counts.update({f"tests/test_{n}.py": (n % 7) + 1 for n in range(1, 41)})
+def test_realistic_large_suite_isolates_slow_file_without_dropping_others() -> None:
+    # The first implementation used a 12x test-count weight; despite that,
+    # actual PR #948 CI #26781 placed 44 additional modules in shard 0.
+    # Reproduce a similarly large test-file mix, not only six large files.
+    counts = {SLOW_PROXY_FILE: 80}
+    counts.update({f"tests/test_{n:03}.py": 200 for n in range(1, 45)})
 
     shards = assign_shards(counts, total=6)
 
     assert len(shards) == 6
-    assert sorted(file for shard in shards for file in shard) == sorted(counts)
+    assert shards[0] == [SLOW_PROXY_FILE]
     assert all(shard for shard in shards)
+    assert sorted(file for shard in shards for file in shard) == sorted(counts)
     assert shards == assign_shards(dict(reversed(list(counts.items()))), total=6)
+
+
+def test_small_suites_do_not_need_isolation_or_change_simple_binpack() -> None:
+    counts = {SLOW_PROXY_FILE: 3, "tests/test_a.py": 7}
+    assert sorted(path for shard in assign_shards(counts, 1) for path in shard) == sorted(counts)
+    assert assign_shards({"tests/test_a.py": 2, "tests/test_b.py": 1}, 2) == [
+        ["tests/test_a.py"],
+        ["tests/test_b.py"],
+    ]

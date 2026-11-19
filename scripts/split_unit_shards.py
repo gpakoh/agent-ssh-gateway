@@ -3,15 +3,15 @@
 
 Each shard is a disjoint set of test FILES (a file is never split across
 shards), so module-level fixtures and inter-test ordering inside a file
-are preserved exactly as in a serial run. Files are assigned by greedy
-bin-packing on collected test counts with a measured runtime cost hint for
-one slow module. This balances expected runtime without splitting a file.
+are preserved exactly as in a serial run. One measured slow module gets a
+dedicated shard; the remaining files are greedily balanced by collected test
+count. This avoids splitting fixtures or selecting a different set of tests.
 
 The partition is a pure function of the repo state: identical input
 (checked-out tree + same Python) always yields identical output, so the
-parallel shard jobs need no coordination. The greedy loop sorts files by
-(descending estimated work, path) and assigns each to the currently least
-loaded shard, which makes the result independent of pytest's collection
+parallel shard jobs need no coordination. The greedy loop sorts remaining
+files by (descending test count, path) and assigns each to the least loaded
+non-dedicated shard, independent of pytest's collection
 order -- the same sort discipline that fixed the earlier non-deterministic
 FORBIDDEN_KEYS parametrize order.
 
@@ -36,14 +36,10 @@ from pathlib import Path
 
 UNIT_MARKER_FILTER = "not host_smoke and not e2e and not integration and not smoke"
 
-# Gitea Actions #26755: this file accounted for roughly 11 min (Python 3.11)
-# and 7 min (Python 3.12), versus a few minutes for other files in its
-# count-balanced shard. A conservative virtual-test weight allows the costly
-# file to occupy one shard without splitting module fixtures or dropping tests.
-# It affects placement only; all collected nodes are still executed once.
-UNIT_FILE_COST_MULTIPLIERS: dict[str, int] = {
-    "tests/test_agent_tools_proxy_worktree.py": 12,
-}
+# Gitea Actions #26755 found this module significantly slower than others.
+# Weighting by 12x still co-located 44 other files in #26781, making its
+# shard the slowest. Isolate it, but preserve the full unit test selection.
+ISOLATED_SLOW_UNIT_FILE = "tests/test_agent_tools_proxy_worktree.py"
 
 
 def collect_unit_files() -> dict[str, int]:
@@ -91,20 +87,22 @@ def collect_unit_files() -> dict[str, int]:
 
 
 def assign_shards(counts: dict[str, int], total: int) -> list[list[str]]:
-    """Greedy bin-pack files by estimated work, preserving complete file units."""
-
-    def estimated_work(item: tuple[str, int]) -> int:
-        path, count = item
-        return count * UNIT_FILE_COST_MULTIPLIERS.get(path, 1)
-
-    ordered = sorted(counts.items(), key=lambda item: (-estimated_work(item), item[0]))
+    """Pack every collected file exactly once; reserve a measured slow shard."""
     shards: list[list[str]] = [[] for _ in range(total)]
     loads = [0] * total
-    for item in ordered:
-        path, _ = item
-        target = min(range(total), key=lambda i: (loads[i], i))
+    first_general_shard = 0
+    if total > 1 and ISOLATED_SLOW_UNIT_FILE in counts:
+        shards[0].append(ISOLATED_SLOW_UNIT_FILE)
+        first_general_shard = 1
+
+    ordered = sorted(
+        ((path, count) for path, count in counts.items() if path not in shards[0]),
+        key=lambda item: (-item[1], item[0]),
+    )
+    for path, count in ordered:
+        target = min(range(first_general_shard, total), key=lambda i: (loads[i], i))
         shards[target].append(path)
-        loads[target] += estimated_work(item)
+        loads[target] += count
     return shards
 
 
