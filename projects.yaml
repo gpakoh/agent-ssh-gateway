@@ -290,11 +290,11 @@ projects:
     tags: []
 
   proxy-parser:
-    root: quart-platform/proxy_parser
+    root: quart-platform/proxy-parser
     parent: quart-platform
-    type: unknown
-    description: "Парсер HTTPS-прокси с best-proxies.ru"
-    tags: []
+    type: python-service
+    description: "Proxy Parser: existing renamed checkout, Gitea gpakoh/proxy-parser"
+    tags: [python-service, proxy]
 
   agent-memory-service:
     root: quart-platform/agent-memory-service
