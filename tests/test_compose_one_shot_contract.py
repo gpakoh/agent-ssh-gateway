@@ -247,3 +247,22 @@ def test_server_export_and_mcp_scope_are_admin_only():
     assert server.docker_compose_one_shot is adapter.docker_compose_one_shot
     assert TOOL_SCOPES["docker_compose_one_shot"] == ["mcp:docker:admin"]
     assert server._docker_compose_one_shot_impl is adapter._docker_compose_one_shot_impl
+
+
+def test_new_one_shot_visible_in_write_modes_but_blocked_in_safe_mode():
+    from examples.mcp_server.tool_modes import (
+        MCP_CLIENT_BLOCKED_TOOLS,
+        TOOL_NAMES_BY_MODE,
+        get_mcp_client_safe_tools,
+        should_register_tool,
+    )
+
+    tool = "docker_compose_one_shot"
+    assert tool in TOOL_NAMES_BY_MODE["mcp_client"]
+    assert tool in TOOL_NAMES_BY_MODE["mcp_client_write"]
+    assert tool not in TOOL_NAMES_BY_MODE["standard"]
+    assert tool in MCP_CLIENT_BLOCKED_TOOLS
+    assert tool not in get_mcp_client_safe_tools()
+    assert should_register_tool(tool, "mcp_client")
+    assert should_register_tool(tool, "mcp_client_write")
+    assert not should_register_tool(tool, "minimal")

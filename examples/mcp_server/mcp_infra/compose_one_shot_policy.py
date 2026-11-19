@@ -176,6 +176,11 @@ def attest_compose_config(plan: dict[str, Any], config: Any) -> str:
         raise OneShotContractError("Compose environment metadata is invalid")
     if set(actual_environment) != set(plan["env_names"]):
         raise OneShotContractError("Compose inherited environment names are not allowlisted")
+    if any(not isinstance(value, str) or not value for value in actual_environment.values()):
+        # A declared name without an interpolated value is not proven
+        # inherited. In particular, a missing DB credential must not
+        # silently downgrade a one-shot to the image's default identity.
+        raise OneShotContractError("Compose inherited environment values are unavailable")
     volumes = service.get("volumes", [])
     if not isinstance(volumes, list) or any(not isinstance(v, dict) for v in volumes):
         raise OneShotContractError("Compose volume metadata is invalid")

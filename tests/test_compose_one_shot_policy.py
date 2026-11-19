@@ -218,3 +218,12 @@ def test_compose_policy_rejects_external_volume_and_untrusted_physical_network()
             config["networks"]["internal"]["internal"] = False
         with pytest.raises(OneShotContractError):
             attest_compose_config(plan, config)
+
+
+@pytest.mark.parametrize("unproven", [None, "", 123])
+def test_compose_does_not_accept_declared_but_unavailable_secret(unproven):
+    plan = load_contract("pg-ops", "readiness", environ=_env())
+    config = _config()
+    config["services"]["postgres"]["environment"]["PGPASSWORD"] = unproven
+    with pytest.raises(OneShotContractError, match="environment values are unavailable"):
+        attest_compose_config(plan, config)

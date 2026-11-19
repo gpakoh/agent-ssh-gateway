@@ -57,8 +57,10 @@ Preflight creates an **`mcp:docker:admin`, high-risk, one-use** confirmation.
 Only a process-keyed HMAC of the interpolated config, immutable image ID and
 expected registered root are retained as the identity lease. Secret values
 are never serialized in confirmation kwargs, audit metadata, tool responses
-or command-line arguments. On confirmation, the entire preflight is repeated;
-any change fails closed **before** running a container.
+or command-line arguments. Every approved environment name must resolve
+to a nonempty value; missing credentials fail closed before confirmation.
+On confirmation, the entire preflight is repeated; any change fails closed
+**before** running a container.
 
 Execution uses `docker compose run --rm --no-deps -T` with a fixed
 operator-approved service and argv. It does not publish service ports.
