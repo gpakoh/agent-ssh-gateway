@@ -1379,6 +1379,24 @@ async def gitea_get_file(
             details={"field": "max_content_bytes", "min_value": 0},
             source="gitea",
         )
+    # The file API first resolves branch/tag/SHA through list_commits. A
+    # malformed ref can otherwise reach Gitea and surface as an HTTP 500.
+    # Preserve "" as the documented default-branch sentinel, without
+    # silently trimming or coercing any explicitly supplied ref.
+    if branch is not None and branch != "":
+        valid = isinstance(branch, str) and 0 < len(branch) <= 255 and branch == branch.strip()
+        if valid:
+            try:
+                _validate_branch_name(branch, "file ref")
+            except ValueError:
+                valid = False
+        if not valid:
+            return tool_error(
+                tool="gitea_get_file", code="INVALID_INPUT",
+                message="branch must be a bounded Git branch, tag or commit SHA",
+                retryable=False, details={"field": "branch", "max_length": 255},
+                source="gitea",
+            )
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
