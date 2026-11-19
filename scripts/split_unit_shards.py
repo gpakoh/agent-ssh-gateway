@@ -3,15 +3,15 @@
 
 Each shard is a disjoint set of test FILES (a file is never split across
 shards), so module-level fixtures and inter-test ordering inside a file
-are preserved exactly as in a serial run. Files are assigned by a greedy
-bin-packing on the number of collected tests per file, which keeps shard
-durations roughly even without ever splitting a file.
+are preserved exactly as in a serial run. One measured slow module gets a
+dedicated shard; the remaining files are greedily balanced by collected test
+count. This avoids splitting fixtures or selecting a different set of tests.
 
 The partition is a pure function of the repo state: identical input
 (checked-out tree + same Python) always yields identical output, so the
-parallel shard jobs need no coordination. The greedy loop sorts files by
-(descending test count, path) and assigns each to the currently least
-loaded shard, which makes the result independent of pytest's collection
+parallel shard jobs need no coordination. The greedy loop sorts remaining
+files by (descending test count, path) and assigns each to the least loaded
+non-dedicated shard, independent of pytest's collection
 order -- the same sort discipline that fixed the earlier non-deterministic
 FORBIDDEN_KEYS parametrize order.
 
@@ -35,6 +35,11 @@ from collections import defaultdict
 from pathlib import Path
 
 UNIT_MARKER_FILTER = "not host_smoke and not e2e and not integration and not smoke"
+
+# Gitea Actions #26755 found this module significantly slower than others.
+# Weighting by 12x still co-located 44 other files in #26781, making its
+# shard the slowest. Isolate it, but preserve the full unit test selection.
+ISOLATED_SLOW_UNIT_FILE = "tests/test_agent_tools_proxy_worktree.py"
 
 
 def collect_unit_files() -> dict[str, int]:
@@ -82,14 +87,22 @@ def collect_unit_files() -> dict[str, int]:
 
 
 def assign_shards(counts: dict[str, int], total: int) -> list[list[str]]:
-    """Greedy bin-pack files into `total` shards by collected test count."""
-    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    """Pack every collected file exactly once; reserve a measured slow shard."""
     shards: list[list[str]] = [[] for _ in range(total)]
     loads = [0] * total
-    for path, n in ordered:
-        target = min(range(total), key=lambda i: (loads[i], i))
+    first_general_shard = 0
+    if total > 1 and ISOLATED_SLOW_UNIT_FILE in counts:
+        shards[0].append(ISOLATED_SLOW_UNIT_FILE)
+        first_general_shard = 1
+
+    ordered = sorted(
+        ((path, count) for path, count in counts.items() if path not in shards[0]),
+        key=lambda item: (-item[1], item[0]),
+    )
+    for path, count in ordered:
+        target = min(range(first_general_shard, total), key=lambda i: (loads[i], i))
         shards[target].append(path)
-        loads[target] += n
+        loads[target] += count
     return shards
 
 
