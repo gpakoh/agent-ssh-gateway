@@ -1294,6 +1294,8 @@ async def gitea_list_commits(
     owner: str, repo: str, sha: str | None = None, limit: int = 30
 ) -> dict[str, Any]:
     """List commits in a Gitea repository. Optionally filter by branch SHA."""
+    if error := _gitea_read_repo_identity_error("gitea_list_commits", owner, repo):
+        return error
     invalid = _gitea_read_pagination_error("gitea_list_commits", "limit", limit)
     if invalid is not None:
         return invalid
@@ -1337,6 +1339,8 @@ async def gitea_list_commit_statuses(
 ) -> dict[str, Any]:
     """Read one page of exact-SHA status contexts; never assert merged CI readiness."""
     tool = "gitea_list_commit_statuses"
+    if error := _gitea_read_repo_identity_error(tool, owner, repo):
+        return error
     if not isinstance(sha, str) or len(sha) != 40 or any(ch not in "0123456789abcdef" for ch in sha):
         return tool_error(
             tool=tool, code="INVALID_INPUT",
@@ -1517,6 +1521,8 @@ async def gitea_list_issues(
 
 async def gitea_get_issue(owner: str, repo: str, issue_number: int) -> dict[str, Any]:
     """Get details of a specific Gitea issue by number."""
+    if error := _gitea_read_repo_identity_error("gitea_get_issue", owner, repo):
+        return error
     try:
         issue_number = gitea_client._validate_positive_int(issue_number, "issue_number")
     except ValueError as exc:
@@ -1958,6 +1964,8 @@ async def gitea_list_pull_requests(
     owner: str, repo: str, state: str = "open", limit: int = 30
 ) -> dict[str, Any]:
     """List pull requests in a Gitea repository. State: open, closed, all."""
+    if error := _gitea_read_repo_identity_error("gitea_list_pull_requests", owner, repo):
+        return error
     # Client input errors must fail before token resolution and HTTP setup.
     if not isinstance(state, str) or state not in _GITEA_ISSUE_STATE_FILTERS:
         allowed = sorted(_GITEA_ISSUE_STATE_FILTERS)
@@ -2001,6 +2009,8 @@ async def gitea_list_pull_requests(
 
 async def gitea_get_pull_request(owner: str, repo: str, pull_number: int) -> dict[str, Any]:
     """Get details of a specific Gitea pull request by number."""
+    if error := _gitea_read_repo_identity_error("gitea_get_pull_request", owner, repo):
+        return error
     try:
         pull_number = gitea_client._validate_positive_int(pull_number, "pull_number")
     except ValueError as exc:
