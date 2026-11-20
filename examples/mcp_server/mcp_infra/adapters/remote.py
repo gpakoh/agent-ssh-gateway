@@ -1458,29 +1458,46 @@ async def _concurrent_merge_after_incomplete_ci(
     Report that observed state only when the reviewed target branch is still
     the same. The target's SHA may legitimately advance during a merge.
     """
+    def verified_receipt(observed: Any) -> tuple[str, str] | None:
+        if not isinstance(observed, dict):
+            return None
+        head = observed.get("head")
+        base = observed.get("base")
+        if not isinstance(head, dict) or not isinstance(base, dict):
+            return None
+        merge_sha = _valid_commit_sha(observed.get("merge_commit_sha"))
+        base_sha = _valid_commit_sha(base.get("sha"))
+        if (
+            type(observed.get("number")) is not int
+            or observed["number"] != pull_number
+            or observed.get("state") != "closed"
+            or observed.get("merged") is not True
+            or base.get("ref") != expected_base_ref
+            or base_sha is None
+            or _valid_commit_sha(head.get("sha")) != expected_head_sha
+            or merge_sha is None
+        ):
+            return None
+        return base_sha, merge_sha
+
     try:
-        observed = await client.get_pull_request(owner, repo, pull_number)
+        first = verified_receipt(
+            await client.get_pull_request(owner, repo, pull_number)
+        )
+        if first is None:
+            return None
+        # The CI read may race a concurrent merge or provider transition.
+        # Do not describe another actor's write as authoritative based on
+        # one potentially stale PR response. Require the same immutable
+        # merge receipt from a second independent GET; never repeat POST.
+        second = verified_receipt(
+            await client.get_pull_request(owner, repo, pull_number)
+        )
     except Exception:
         return None
-    if not isinstance(observed, dict):
+    if second is None or second != first:
         return None
-    head = observed.get("head")
-    base = observed.get("base")
-    merge_sha = _valid_commit_sha(observed.get("merge_commit_sha"))
-    base_sha = _valid_commit_sha(base.get("sha")) if isinstance(base, dict) else None
-    if (
-        type(observed.get("number")) is not int
-        or observed["number"] != pull_number
-        or observed.get("state") != "closed"
-        or observed.get("merged") is not True
-        or not isinstance(head, dict)
-        or not isinstance(base, dict)
-        or base.get("ref") != expected_base_ref
-        or base_sha is None
-        or _valid_commit_sha(head.get("sha")) != expected_head_sha
-        or merge_sha is None
-    ):
-        return None
+    base_sha, merge_sha = second
     return tool_error(
         tool="gitea_merge_pull_request",
         code="PR_NOT_OPEN",

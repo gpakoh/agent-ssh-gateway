@@ -1199,7 +1199,8 @@ async def test_merge_ci_incomplete_observes_concurrent_merge_without_mutating(mo
         "mutation_started": False,
     }
     assert client.merge_calls == []
-    assert client.pr_reads == 2
+    # Initial preflight plus two matching independent merged-state reads.
+    assert client.pr_reads == 3
     assert client.action_run_pages == []
 
 
@@ -1227,6 +1228,39 @@ async def test_merge_ci_incomplete_second_read_observes_external_merge(monkeypat
     assert result["error"]["details"]["mutation_started"] is False
     assert result["error"]["details"]["observed_merge_commit_sha"] == "b" * 40
     assert client.merge_calls == []
+    # Initial + second-gate preflight, then two consistent post-state GETs.
+    assert client.pr_reads == 4
+
+
+@pytest.mark.asyncio
+async def test_ci_incomplete_rejects_transient_concurrent_merge_response(monkeypatch):
+    """One stale merged=true GET must not prove a concurrent actor's mutation."""
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient("token", workflow_payload=None)
+    original_workflows = client.list_workflows
+    original_read = client.get_pull_request
+
+    async def concurrent(*args):
+        client.merged = True
+        return await original_workflows(*args)
+
+    async def changing_receipt(*args):
+        result = await original_read(*args)
+        if client.pr_reads == 3:
+            result["state"] = "open"
+            result["merged"] = False
+            result["merge_commit_sha"] = None
+        return result
+
+    client.list_workflows = concurrent
+    client.get_pull_request = changing_receipt
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request("owner", "repo", 25, SHA)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CI_EVIDENCE_INCOMPLETE"
+    assert len(client.merge_calls) == 0
     assert client.pr_reads == 3
 
 
