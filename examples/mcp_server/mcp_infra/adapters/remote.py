@@ -1131,6 +1131,135 @@ async def _gitea_multi_workflow_ci_evidence(
     return "CI_GREEN"
 
 
+def _ci_simple_status_glob_regex(pattern: Any) -> re.Pattern[str] | None:
+    """Compile the supported case-sensitive Gitea status-check glob subset.
+
+    Only the literal-plus-star subset is deliberately supported; complex glob
+    operators are unprovable here and must fail closed, not silently weaken a
+    protected branch rule.
+    """
+    if (
+        not isinstance(pattern, str)
+        or not pattern
+        or len(pattern) > _GITEA_BRANCH_PROTECTION_MAX_CONTEXT_LEN
+        or "*" not in pattern
+        or any(c in pattern for c in "?[]{}\\")
+        or re.fullmatch(r"[A-Za-z0-9_ .:/()*-]+", pattern) is None
+    ):
+        return None
+    return re.compile(
+        r"\A" + "".join(".*" if char == "*" else re.escape(char) for char in pattern) + r"\Z"
+    )
+
+
+async def _ci_exact_head_status_snapshot(
+    client: Any, owner: str, repo: str, sha: str
+) -> tuple[tuple[int, str, str], ...] | None:
+    """Read *all* exact-commit statuses, newest first, with bounded pagination.
+
+    The commit status endpoint preserves superseded pending rows: only each
+    context's newest status is effective. Strict ID ordering is a necessary
+    completeness receipt; missing or overlapping pages must fail closed.
+    """
+    rows: list[tuple[int, str, str]] = []
+    last_id: int | None = None
+    for page in range(1, _GITEA_CI_MAX_PAGES + 1):
+        try:
+            chunk = await client.list_commit_statuses(
+                owner, repo, sha, page=page, limit=_GITEA_CI_PAGE_LIMIT
+            )
+        except Exception:
+            return None
+        if not isinstance(chunk, list) or len(chunk) > _GITEA_CI_PAGE_LIMIT:
+            return None
+        for status in chunk:
+            if not isinstance(status, dict):
+                return None
+            status_id = status.get("id")
+            context = status.get("context")
+            state = status.get("state")
+            if (
+                type(status_id) is not int
+                or status_id <= 0
+                or (last_id is not None and status_id >= last_id)
+                or not isinstance(context, str)
+                or not context
+                or not isinstance(state, str)
+                or state not in {"success", "pending", "failure", "error", "warning", "skipped"}
+            ):
+                return None
+            rows.append((status_id, context, state))
+            last_id = status_id
+        if len(chunk) < _GITEA_CI_PAGE_LIMIT:
+            return tuple(rows)
+    return None
+
+
+async def _gitea_wildcard_ci_evidence(
+    client: Any,
+    owner: str,
+    repo: str,
+    expected_head_sha: str,
+    workflow_payload: Any,
+    patterns: tuple[str, ...],
+    first_page_total: int,
+    first_page_ids: list[int],
+) -> str:
+    """Resolve branch glob patterns to exact, green, Actions-backed PR checks.
+
+    Status rows identify fully qualified *contexts* but do not authorize merge
+    by themselves: the resolved names still need the protected workflow-run
+    job/attempt/actor/SHA attestation and a post-job status snapshot recheck.
+    """
+    matchers = [_ci_simple_status_glob_regex(p) for p in patterns]
+    if not matchers or any(m is None for m in matchers):
+        return "CI_EVIDENCE_INCOMPLETE"
+    initial = await _ci_exact_head_status_snapshot(
+        client, owner, repo, expected_head_sha
+    )
+    if not initial:
+        return "CI_EVIDENCE_INCOMPLETE"
+
+    latest_contexts: dict[str, str] = {}
+    for _, context, state in initial:
+        latest_contexts.setdefault(context, state)
+
+    qualified_contexts: set[str] = set()
+    for matcher in matchers:
+        if matcher is None:
+            return "CI_EVIDENCE_INCOMPLETE"
+        matched = {
+            context: state
+            for context, state in latest_contexts.items()
+            if context.endswith(" (pull_request)") and matcher.fullmatch(context)
+        }
+        if not matched:
+            return "CI_EVIDENCE_INCOMPLETE"
+        if any(state != "success" for state in matched.values()):
+            return "CI_NOT_GREEN"
+        qualified_contexts.update(matched)
+
+    # Resolve the provider's exact statuses into workflow+job identities. The
+    # current exact Actions run is authoritative for those identities, not an
+    # older status row or a status posted by an unrelated integration.
+    groups = _ci_required_workflow_contexts(tuple(sorted(qualified_contexts)))
+    if groups is None:
+        return "CI_EVIDENCE_INCOMPLETE"
+    result = await _gitea_multi_workflow_ci_evidence(
+        client, owner, repo, expected_head_sha, workflow_payload,
+        groups, first_page_total, first_page_ids
+    )
+    if result != "CI_GREEN":
+        return result
+
+    current = await _ci_exact_head_status_snapshot(
+        client, owner, repo, expected_head_sha
+    )
+    if current != initial:
+        return "CI_EVIDENCE_INCOMPLETE"
+    return "CI_GREEN"
+
+
 async def _gitea_ci_evidence(
     client: Any,
     owner: str,
@@ -1228,6 +1357,20 @@ async def _gitea_ci_evidence(
         return "CI_EVIDENCE_INCOMPLETE"
 
     if required_contexts is not None:
+        is_glob_policy = any(
+            isinstance(context, str) and any(ch in context for ch in "*?[]{}")
+            for context in required_contexts
+        )
+        if is_glob_policy and latest_exact_head_run is not None:
+            if (
+                latest_exact_head_run.get("status") != "completed"
+                or latest_exact_head_run.get("conclusion") != "success"
+            ):
+                return "CI_NOT_GREEN"
+            return await _gitea_wildcard_ci_evidence(
+                client, owner, repo, expected_head_sha, workflow_payload,
+                required_contexts, expected_total, first_page_ids,
+            )
         context_groups = _ci_required_workflow_contexts(required_contexts)
         if context_groups is None:
             return "CI_EVIDENCE_INCOMPLETE"
