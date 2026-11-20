@@ -232,7 +232,13 @@ class FakeMergeClient:
                 "status": "completed",
                 "conclusion": self.ci_conclusion,
             }
-        run = {**run, "run_attempt": run.get("run_attempt", 1)}
+        run = {
+            "actor": {"login": "ci-author"},
+            "trigger_actor": {"login": "ci-trigger"},
+            "repository": {"name": repo, "full_name": f"{owner}/{repo}"},
+            **run,
+            "run_attempt": run.get("run_attempt", 1),
+        }
         self._last_ci_run = run
         return {"total_count": 1, "workflow_runs": [run]}
 
@@ -354,6 +360,100 @@ async def test_adapter_refuses_second_gate_job_attempt_drift_before_post(monkeyp
     assert result["ok"] is False
     assert result["error"]["code"] == "CI_EVIDENCE_INCOMPLETE"
     assert client.merge_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("repository", {"name": "repo", "full_name": "wrong/repo"}),
+        ("repository", None),
+        ("actor", {"login": " "}),
+        ("trigger_actor", None),
+    ],
+)
+async def test_adapter_rejects_run_list_origin_without_merge_post(
+    monkeypatch, field, value
+):
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient("token")
+    original = client.list_action_runs
+
+    async def changed_run_origin(*args, **kwargs):
+        page = await original(*args, **kwargs)
+        page["workflow_runs"][0][field] = value
+        return page
+
+    client.list_action_runs = changed_run_origin
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+    result = await remote.gitea_merge_pull_request("owner", "repo", 25, SHA)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CI_EVIDENCE_INCOMPLETE"
+    assert client.merge_calls == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_refuses_actor_drift_between_listing_and_exact_run(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient("token")
+    original = client.get_action_run
+
+    async def changed_actor(*args, **kwargs):
+        run = await original(*args, **kwargs)
+        run["actor"] = {"login": "other-actor"}
+        return run
+
+    client.get_action_run = changed_actor
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+    result = await remote.gitea_merge_pull_request("owner", "repo", 25, SHA)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CI_EVIDENCE_INCOMPLETE"
+    assert client.merge_calls == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_refuses_trigger_actor_drift_after_job_attestation(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient("token")
+    original = client.get_action_run
+    reads = 0
+
+    async def changed_actor_after_jobs(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        run = await original(*args, **kwargs)
+        if reads == 2:
+            run["trigger_actor"] = {"login": "new-rerun-trigger"}
+        return run
+
+    client.get_action_run = changed_actor_after_jobs
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+    result = await remote.gitea_merge_pull_request("owner", "repo", 25, SHA)
+    assert reads == 2
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CI_EVIDENCE_INCOMPLETE"
+    assert client.merge_calls == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_accepts_consistent_distinct_ci_actor_and_rerun_trigger(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient("token")
+    original = client.list_action_runs
+
+    async def consistent_distinct_actors(*args, **kwargs):
+        page = await original(*args, **kwargs)
+        page["workflow_runs"][0]["actor"] = {"login": "ci-author"}
+        page["workflow_runs"][0]["trigger_actor"] = {"login": "rerun-operator"}
+        # The provider's exact run read must return the same identity.
+        client._last_ci_run["trigger_actor"] = {"login": "rerun-operator"}
+        return page
+
+    client.list_action_runs = consistent_distinct_actors
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+    result = await remote.gitea_merge_pull_request("owner", "repo", 25, SHA)
+    assert result["ok"] is True
+    assert len(client.merge_calls) == 1
 
 
 def _ci_run(
