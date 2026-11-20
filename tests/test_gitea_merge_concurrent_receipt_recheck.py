@@ -31,8 +31,13 @@ def merged_receipt() -> dict:
 
 
 async def check(client: AsyncMock):
+    if client.compare_commits.side_effect is None:
+        client.compare_commits.side_effect = [
+            {"total_commits": 1, "commits": [{"sha": MERGE}]},
+            {"total_commits": 0, "commits": []},
+        ]
     return await remote._concurrent_merge_after_incomplete_ci(
-        client, "owner", "repo", 25, HEAD, "master"
+        client, "owner", "repo", 25, HEAD, "master", BASE
     )
 
 
@@ -71,6 +76,72 @@ async def test_changed_second_observation_does_not_report_merged(field, changed)
     client.get_pull_request.side_effect = [first, second]
     assert await check(client) is None
     assert client.get_pull_request.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_advanced_base_may_equal_exact_merge_commit_without_losing_receipt():
+    """A real concurrent merge may advance the target SHA to its merge commit."""
+    first = merged_receipt()
+    first["base"]["sha"] = MERGE
+    client = AsyncMock()
+    client.get_pull_request.side_effect = [first, deepcopy(first)]
+
+    result = await check(client)
+
+    assert result["error"]["code"] == "PR_NOT_OPEN"
+    assert result["error"]["details"]["expected_base_sha"] == BASE
+    assert result["error"]["details"]["observed_base_sha"] == MERGE
+    assert client.get_pull_request.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_concurrent_merge_with_unreviewed_base_sha_is_not_attested():
+    """Stable provider state cannot attest a merge onto an unrelated base."""
+    first = merged_receipt()
+    first["base"]["sha"] = "d" * 40
+    client = AsyncMock()
+    client.get_pull_request.side_effect = [first, deepcopy(first)]
+
+    assert await check(client) is None
+    assert client.get_pull_request.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "forward, backward",
+    [
+        ({"total_commits": 1}, {"total_commits": 1}),
+        ({"total_commits": 0}, {"total_commits": 0}),
+        ({"total_commits": "invalid"}, {"total_commits": 0}),
+        ({"total_commits": True}, {"total_commits": 0}),
+        ({"commits": [{"sha": MERGE}]}, {"commits": []}),
+        ({}, {"total_commits": 0}),
+    ],
+)
+async def test_unproven_ancestry_never_attests_external_merge(forward, backward):
+    client = AsyncMock()
+    client.get_pull_request.side_effect = [
+        merged_receipt(), deepcopy(merged_receipt()),
+    ]
+    client.compare_commits.side_effect = [forward, backward]
+    assert await check(client) is None
+    assert client.get_pull_request.await_count == 2
+    assert client.compare_commits.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_compare_transport_error_never_attests_external_merge():
+    client = AsyncMock()
+    client.get_pull_request.side_effect = [
+        merged_receipt(), deepcopy(merged_receipt()),
+    ]
+    client.compare_commits.side_effect = [
+        {"total_commits": 1},
+        httpx.ReadTimeout("private comparison provider details"),
+    ]
+    assert await check(client) is None
+    assert client.get_pull_request.await_count == 2
+    assert client.compare_commits.await_count == 2
 
 
 @pytest.mark.asyncio
