@@ -14,6 +14,12 @@ adapter never returns the raw failing Docker stderr, source path or environment
 variables in this case. Only a path associated with an explicit failed write
 in the same bounded diagnostic line can select a surface; unrelated build
 output does not. Multiple conflicting failures remain `unclassified`.
+Only a failure at the beginning of a line, or an explicit
+`ERROR: failed to solve:` / `Error response from daemon:` prefix, can select
+a surface. Recognized prefixed direct syscall errors (such as
+`ERROR: failed to solve: mkdir /var/lib/buildkit/cache: read-only file system`)
+are classified without echoing the path. Dockerfile `RUN echo` or unrelated
+progress output containing error-like text is **not** authoritative evidence.
 
 | `write_surface` | Evidence required | Permitted follow-up |
 | --- | --- | --- |
