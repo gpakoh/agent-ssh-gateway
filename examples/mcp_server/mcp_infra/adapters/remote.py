@@ -903,7 +903,7 @@ async def _gitea_ci_job_attestation(
     for context in required_contexts:
         if not isinstance(context, str) or " / " not in context:
             return "CI_EVIDENCE_INCOMPLETE"
-        job_context = context.split(" / ", 1)[1]
+        job_context = context.rsplit(" / ", 1)[1]
         suffix = " (pull_request)"
         if not job_context.endswith(suffix):
             return "CI_EVIDENCE_INCOMPLETE"
@@ -975,6 +975,158 @@ async def _gitea_ci_job_attestation(
         run_provenance is not None
         and _ci_run_provenance_receipt(current, owner, repo) != run_provenance
     ):
+        return "CI_EVIDENCE_INCOMPLETE"
+    return "CI_GREEN"
+
+
+def _ci_required_workflow_contexts(
+    contexts: tuple[str, ...],
+) -> dict[str, tuple[str, ...]] | None:
+    """Parse exact provider `workflow / job (pull_request)` check contexts."""
+    groups: dict[str, list[str]] = {}
+    for context in contexts:
+        if not isinstance(context, str):
+            return None
+        suffix = " (pull_request)"
+        if not context.endswith(suffix):
+            return None
+        stem = context[: -len(suffix)]
+        workflow_name, separator, job_name = stem.rpartition(" / ")
+        if not separator or not workflow_name or not job_name:
+            return None
+        jobs = groups.setdefault(workflow_name, [])
+        if job_name in jobs:
+            return None
+        jobs.append(job_name)
+    return {name: tuple(names) for name, names in groups.items()}
+
+
+async def _gitea_multi_workflow_ci_evidence(
+    client: Any,
+    owner: str,
+    repo: str,
+    expected_head_sha: str,
+    workflow_payload: Any,
+    context_groups: dict[str, tuple[str, ...]],
+    first_page_total: int,
+    first_page_ids: list[int],
+) -> str:
+    """Attest required jobs from separate workflow-scoped exact CI attempts.
+
+    Provider workflow-specific run endpoints establish the workflow name
+    binding missing from Gitea's general Actions run/job receipt. This path
+    never infers a run's workflow from a job name or historical status row.
+    """
+    workflows = workflow_payload.get("workflows") if isinstance(workflow_payload, dict) else None
+    total = workflow_payload.get("total_count") if isinstance(workflow_payload, dict) else None
+    if (
+        not isinstance(workflows, list)
+        or type(total) is not int
+        or total != len(workflows)
+        or not workflows
+    ):
+        return "CI_EVIDENCE_INCOMPLETE"
+
+    workflow_ids: dict[str, str] = {}
+    for workflow in workflows:
+        if not isinstance(workflow, dict):
+            return "CI_EVIDENCE_INCOMPLETE"
+        name = workflow.get("name")
+        workflow_id = workflow.get("id")
+        if (
+            not isinstance(name, str)
+            or not name
+            or name in workflow_ids
+            or not isinstance(workflow_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*\.ya?ml", workflow_id)
+            or ".." in workflow_id
+        ):
+            return "CI_EVIDENCE_INCOMPLETE"
+        workflow_ids[name] = workflow_id
+    if len(set(workflow_ids.values())) != len(workflow_ids):
+        return "CI_EVIDENCE_INCOMPLETE"
+
+    selected: list[tuple[str, int, list[int], tuple[int, int, str, str, str, str], tuple[str, str, str]]] = []
+    selected_ids: set[int] = set()
+    for name, required_jobs in context_groups.items():
+        workflow_id = workflow_ids.get(name)
+        if workflow_id is None:
+            return "CI_EVIDENCE_INCOMPLETE"
+        try:
+            snapshot = await client.list_pull_request_workflow_runs(owner, repo, workflow_id)
+        except Exception:
+            return "CI_EVIDENCE_INCOMPLETE"
+        page = _validated_action_run_page(snapshot)
+        if page is None:
+            return "CI_EVIDENCE_INCOMPLETE"
+        count, runs, ids = page
+        if (
+            not ids
+            or len(ids) > _GITEA_CI_PAGE_LIMIT
+            or len(ids) < min(count, _GITEA_CI_PAGE_LIMIT)
+            or not _run_ids_descend_from(ids, None)
+            or any(run.get("event") != "pull_request" for run in runs)
+        ):
+            return "CI_EVIDENCE_INCOMPLETE"
+        current = next(
+            (run for run in runs if run.get("head_sha") == expected_head_sha),
+            None,
+        )
+        if current is None:
+            return "CI_EVIDENCE_INCOMPLETE"
+        receipt = _ci_run_attempt_receipt(current)
+        provenance = _ci_run_provenance_receipt(current, owner, repo)
+        if receipt is None or provenance is None or receipt[0] in selected_ids:
+            return "CI_EVIDENCE_INCOMPLETE"
+        selected_ids.add(receipt[0])
+        if receipt[4:] != ("completed", "success"):
+            return "CI_NOT_GREEN"
+        try:
+            exact = await client.get_action_run(owner, repo, receipt[0])
+        except Exception:
+            return "CI_EVIDENCE_INCOMPLETE"
+        if (
+            _ci_run_attempt_receipt(exact) != receipt
+            or _ci_run_provenance_receipt(exact, owner, repo) != provenance
+        ):
+            return "CI_EVIDENCE_INCOMPLETE"
+        contexts = tuple(
+            f"{name} / {job} (pull_request)" for job in required_jobs
+        )
+        result = await _gitea_ci_job_attestation(
+            client, owner, repo, receipt, contexts, run_provenance=provenance
+        )
+        if result != "CI_GREEN":
+            return result
+        selected.append((workflow_id, count, ids, receipt, provenance))
+
+    # Check after all jobs, not only immediately after each workflow: a
+    # new run or rerun in the first workflow cannot be borrowed unnoticed.
+    for workflow_id, count, ids, receipt, provenance in selected:
+        try:
+            reread = await client.list_pull_request_workflow_runs(
+                owner, repo, workflow_id
+            )
+        except Exception:
+            return "CI_EVIDENCE_INCOMPLETE"
+        page = _validated_action_run_page(reread)
+        if page is None or page[0] != count or page[2] != ids:
+            return "CI_EVIDENCE_INCOMPLETE"
+        exact_run = next((run for run in page[1] if run.get("id") == receipt[0]), None)
+        if (
+            _ci_run_attempt_receipt(exact_run) != receipt
+            or _ci_run_provenance_receipt(exact_run, owner, repo) != provenance
+        ):
+            return "CI_EVIDENCE_INCOMPLETE"
+
+    try:
+        global_reread = await client.list_action_runs(
+            owner, repo, status=None, limit=_GITEA_CI_PAGE_LIMIT, page=1,
+        )
+    except Exception:
+        return "CI_EVIDENCE_INCOMPLETE"
+    verified = _validated_action_run_page(global_reread)
+    if verified is None or verified[0] != first_page_total or verified[2] != first_page_ids:
         return "CI_EVIDENCE_INCOMPLETE"
     return "CI_GREEN"
 
@@ -1074,6 +1226,16 @@ async def _gitea_ci_evidence(
     reread_total, _, reread_ids = reread
     if reread_total != expected_total or reread_ids != first_page_ids:
         return "CI_EVIDENCE_INCOMPLETE"
+
+    if required_contexts is not None:
+        context_groups = _ci_required_workflow_contexts(required_contexts)
+        if context_groups is None:
+            return "CI_EVIDENCE_INCOMPLETE"
+        if len(context_groups) > 1 and latest_exact_head_run is not None:
+            return await _gitea_multi_workflow_ci_evidence(
+                client, owner, repo, expected_head_sha, workflow_payload,
+                context_groups, expected_total, first_page_ids,
+            )
 
     if latest_exact_head_run is None:
         if not saw_exact_head_run:
