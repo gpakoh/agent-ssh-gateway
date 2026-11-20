@@ -1024,6 +1024,26 @@ def _assert_renewal_gaps_within_budget(timestamps: list[float], interval: float)
     )
 
 
+def _renewals_in_stream_window(
+    timestamps: list[float], *, started_at: float, ended_at: float
+) -> list[float]:
+    """Only count leases renewed while SSH execution was actually active.
+
+    The window is captured *inside* the stream. Comparing against a fresh
+    time.monotonic() after cleanup falsely includes post-execution ticks.
+    """
+    assert started_at <= ended_at
+    return [at for at in timestamps if started_at <= at <= ended_at]
+
+
+def test_renewal_window_excludes_pre_stream_and_post_stream_ticks():
+    """Late renewals cannot make an under-renewed SSH stream look healthy."""
+    ticks = [9.9, 10.1, 10.4, 10.7, 12.1, 12.3]
+    selected = _renewals_in_stream_window(ticks, started_at=10.0, ended_at=12.0)
+    assert selected == [10.1, 10.4, 10.7]
+    assert _renewals_in_stream_window([9.9, 12.1, 12.3], started_at=10, ended_at=12) == []
+
+
 @pytest.mark.asyncio
 async def test_slow_pg_does_not_drift_renewal_deadline(monkeypatch):
     """BLOCKER B: absolute-monotonic scheduling.
@@ -1070,13 +1090,18 @@ async def test_slow_pg_does_not_drift_renewal_deadline(monkeypatch):
     q.heartbeat_durable_execution = recording_renewal
     started = asyncio.Event()
     stream_done = asyncio.Event()
+    stream_started_at: float | None = None
+    stream_done_at: float | None = None
 
     async def stream(*args, **kwargs):
+        nonlocal stream_started_at, stream_done_at
+        stream_started_at = time.monotonic()
         started.set()
         # ~6 renewal cycles at a 1/3s cadence; long enough to prove the
         # invariant but short enough to stay well inside the completion watchdog.
         await asyncio.sleep(2.0)
-        stream_done.set()  # measurement window ends here, independent of cleanup
+        stream_done_at = time.monotonic()
+        stream_done.set()  # immutable measurement boundary before cleanup
         yield "exit", "0"
 
     jm = _v2_manager(q, stream)
@@ -1090,14 +1115,17 @@ async def test_slow_pg_does_not_drift_renewal_deadline(monkeypatch):
     # The heartbeat invariant is measured over the stream window, not against
     # an arbitrary wall-clock completion deadline.
     await asyncio.wait_for(stream_done.wait(), timeout=8)
-    # Give the stream's heartbeat loop a moment to surface its renewals, then
-    # assert the invariant on the samples collected inside the window.
-    await asyncio.sleep(interval)
-    renewals_in_window = [t for t in renewal_times if t <= time.monotonic()]
+    # The SSH stream records its boundary *before* completion/cleanup.
+    # Ticks arriving later are excluded even if the test runner stalls while
+    # awaiting convergence; those ticks do not prove an active lease.
+    assert stream_started_at is not None and stream_done_at is not None
+    renewals_in_window = _renewals_in_stream_window(
+        renewal_times, started_at=stream_started_at, ended_at=stream_done_at
+    )
 
     assert len(renewals_in_window) >= 3, (
         f"expected ≥3 renewals in stream window, got {len(renewals_in_window)} "
-        f"(all={renewal_times})"
+        f"(window={stream_done_at-stream_started_at:.3f}s, all={renewal_times})"
     )
     _assert_renewal_gaps_within_budget(renewals_in_window, interval)
 
