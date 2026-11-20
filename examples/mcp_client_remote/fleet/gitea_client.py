@@ -502,6 +502,44 @@ class GiteaClient:
     async def get_version(self) -> dict[str, Any]:
         return await self._get("/version")
 
+    async def list_pull_request_workflow_runs(
+        self, owner: str, repo: str, workflow_id: str
+    ) -> dict[str, Any]:
+        """Bounded workflow-specific PR runs for exact CI-merge attestation.
+
+        Unlike the public dispatch tracker this explicitly selects the
+        pull_request event. The workflow ID comes from the provider's own
+        workflow catalog and the endpoint binds each returned run to it.
+        """
+        if (
+            not isinstance(workflow_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*\.ya?ml", workflow_id)
+            or ".." in workflow_id
+        ):
+            raise ValueError("invalid Gitea workflow ID")
+        data = await self._get(
+            "/repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs",
+            params={"page": 1, "limit": 50, "event": "pull_request"},
+            owner=owner, repo=repo, workflow_id=workflow_id,
+        )
+        if not isinstance(data, dict):
+            raise GiteaActionRunResponseError("invalid workflow-specific CI evidence")
+        runs = data.get("workflow_runs")
+        total = data.get("total_count")
+        if (
+            type(total) is not int
+            or total < 0
+            or not isinstance(runs, list)
+            or len(runs) > 50
+            or total < len(runs)
+            or any(not isinstance(run, dict) for run in runs)
+        ):
+            raise GiteaActionRunResponseError("invalid workflow-specific CI evidence")
+        return {
+            "total_count": total,
+            "workflow_runs": [minimize_action_run_payload(run) for run in runs],
+        }
+
     async def list_workflow_runs(self, owner: str, repo: str, workflow_id: str) -> dict[str, Any]:
         """Read only this workflow's bounded run list; no generic endpoint input."""
         data = await self._get(
