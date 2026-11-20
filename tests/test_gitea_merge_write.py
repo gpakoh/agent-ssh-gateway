@@ -276,6 +276,12 @@ class FakeMergeClient:
 
     async def compare_commits(self, owner: str, repo: str, *, base: str, head: str):
         self.compare_calls.append((base, head))
+        # Read-only ancestry proof for the concurrent merge receipt. The
+        # reviewed base is a parent/ancestor of the external merge commit.
+        if base == self.base_sha and head == "b" * 40:
+            return {"total_commits": 1, "commits": [{"sha": head}]}
+        if base == "b" * 40 and head == self.base_sha:
+            return {"total_commits": 0, "commits": []}
         current_head_sha = self.latest_head_sha or self.head_sha
         current_base_sha = self.latest_base_sha or self.base_sha
         if base == current_base_sha and head == current_head_sha:
@@ -1193,6 +1199,7 @@ async def test_merge_ci_incomplete_observes_concurrent_merge_without_mutating(mo
     assert result["error"]["details"] == {
         "expected_head_sha": SHA,
         "expected_base_ref": "master",
+        "expected_base_sha": BASE_SHA,
         "observed_base_sha": BASE_SHA,
         "observed_merge_commit_sha": "b" * 40,
         "concurrent_merge_observed": True,
@@ -1202,6 +1209,40 @@ async def test_merge_ci_incomplete_observes_concurrent_merge_without_mutating(mo
     # Initial preflight plus two matching independent merged-state reads.
     assert client.pr_reads == 3
     assert client.action_run_pages == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("observed_base_sha", ["b" * 40, "d" * 40])
+async def test_ci_incomplete_concurrent_merge_requires_reviewed_or_merge_base(
+    monkeypatch, observed_base_sha
+):
+    """CI failure is not proof of an external merge on an unreviewed base."""
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient(
+        "token", workflow_payload=None, latest_base_sha=observed_base_sha
+    )
+    original_workflows = client.list_workflows
+
+    async def concurrent(*args):
+        client.merged = True
+        return await original_workflows(*args)
+
+    client.list_workflows = concurrent
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request(
+        "owner", "repo", 25, SHA, expected_base_sha=BASE_SHA
+    )
+
+    assert result["ok"] is False
+    if observed_base_sha == "b" * 40:
+        assert result["error"]["code"] == "PR_NOT_OPEN"
+        assert result["error"]["details"]["expected_base_sha"] == BASE_SHA
+        assert result["error"]["details"]["observed_base_sha"] == observed_base_sha
+        assert result["error"]["details"]["mutation_started"] is False
+    else:
+        assert result["error"]["code"] == "CI_EVIDENCE_INCOMPLETE"
+    assert client.merge_calls == []
 
 
 @pytest.mark.asyncio

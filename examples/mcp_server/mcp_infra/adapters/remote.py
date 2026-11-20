@@ -1451,13 +1451,19 @@ async def _concurrent_merge_after_incomplete_ci(
     pull_number: int,
     expected_head_sha: str,
     expected_base_ref: str,
+    expected_base_sha: str,
 ) -> dict[str, Any] | None:
-    """Read-only, exact-head/target observation; never authorize a CI-bypassed merge.
+    """Read-only exact-head/target/base observation; never bypass CI for a merge.
 
-    An independent actor may merge while our CI evidence is being read.
-    Report that observed state only when the reviewed target branch is still
-    the same. The target's SHA may legitimately advance during a merge.
+    After a concurrent merge, a provider may report either the original
+    reviewed base SHA or the new merge commit as base.sha. A third SHA is
+    unreviewed base drift: report CI evidence incomplete, not a proven
+    concurrent merge. Separately attest exact ancestry via immutable compare.
     """
+    reviewed_base_sha = _valid_commit_sha(expected_base_sha)
+    if reviewed_base_sha is None:
+        return None
+
     def verified_receipt(observed: Any) -> tuple[str, str] | None:
         if not isinstance(observed, dict):
             return None
@@ -1476,6 +1482,7 @@ async def _concurrent_merge_after_incomplete_ci(
             or base_sha is None
             or _valid_commit_sha(head.get("sha")) != expected_head_sha
             or merge_sha is None
+            or base_sha not in (reviewed_base_sha, merge_sha)
         ):
             return None
         return base_sha, merge_sha
@@ -1498,6 +1505,33 @@ async def _concurrent_merge_after_incomplete_ci(
     if second is None or second != first:
         return None
     base_sha, merge_sha = second
+
+    # A stable PR read alone cannot prove the merge was based on the exact
+    # pre-CI snapshot. Require independent commit ancestry in BOTH directions.
+    # Compare by immutable SHAs, not by a movable branch ref or current HEAD.
+    # If Gitea cannot supply authoritative counts, leave the CI result
+    # incomplete; this read-only branch must never retry or authorize POST.
+    try:
+        ahead = await client.compare_commits(
+            owner, repo, base=reviewed_base_sha, head=merge_sha
+        )
+        behind = await client.compare_commits(
+            owner, repo, base=merge_sha, head=reviewed_base_sha
+        )
+    except Exception:
+        return None
+    # Do not infer ancestry from a truncated 'commits' list or bool masquerading
+    # as an integer. The compare provider must explicitly attest both counts.
+    if not isinstance(ahead, dict) or not isinstance(behind, dict):
+        return None
+    ahead_by, behind_by = ahead.get("total_commits"), behind.get("total_commits")
+    if (
+        type(ahead_by) is not int
+        or type(behind_by) is not int
+        or ahead_by < 1
+        or behind_by != 0
+    ):
+        return None
     return tool_error(
         tool="gitea_merge_pull_request",
         code="PR_NOT_OPEN",
@@ -1507,6 +1541,7 @@ async def _concurrent_merge_after_incomplete_ci(
         details={
             "expected_head_sha": expected_head_sha,
             "expected_base_ref": expected_base_ref,
+            "expected_base_sha": reviewed_base_sha,
             "observed_base_sha": base_sha,
             "observed_merge_commit_sha": merge_sha,
             "concurrent_merge_observed": True,
@@ -2821,7 +2856,8 @@ async def gitea_merge_pull_request(
             if ci_status != "CI_GREEN":
                 if ci_status == "CI_EVIDENCE_INCOMPLETE":
                     concurrent = await _concurrent_merge_after_incomplete_ci(
-                        client, owner, repo, pull_number, expected_head_sha, base_ref
+                        client, owner, repo, pull_number, expected_head_sha, base_ref,
+                        actual_base_sha,
                     )
                     if concurrent is not None:
                         return concurrent
@@ -2931,7 +2967,8 @@ async def gitea_merge_pull_request(
             if ci_status != "CI_GREEN":
                 if ci_status == "CI_EVIDENCE_INCOMPLETE":
                     concurrent = await _concurrent_merge_after_incomplete_ci(
-                        client, owner, repo, pull_number, expected_head_sha, base_ref
+                        client, owner, repo, pull_number, expected_head_sha, base_ref,
+                        actual_base_sha,
                     )
                     if concurrent is not None:
                         return concurrent
