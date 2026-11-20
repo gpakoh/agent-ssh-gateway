@@ -845,12 +845,49 @@ def _ci_run_attempt_receipt(run: Any) -> tuple[int, int, str, str, str, str] | N
     return (run_id, attempt, event, head_sha, status, conclusion)
 
 
+def _ci_run_provenance_receipt(
+    run: Any, owner: str, repo: str
+) -> tuple[str, str, str] | None:
+    """Bind a CI attempt to the exact repository and provider actor identities.
+
+    These are consistency fields, not authorization or role checks. Never
+    reflect untrusted provider actor details into error responses.
+    """
+    if not isinstance(run, dict):
+        return None
+    repository = run.get("repository")
+    if not isinstance(repository, dict):
+        return None
+    full_name = repository.get("full_name")
+    if repository.get("name") != repo or full_name != f"{owner}/{repo}":
+        return None
+
+    logins: list[str] = []
+    for field in ("actor", "trigger_actor"):
+        user = run.get(field)
+        if not isinstance(user, dict):
+            return None
+        login = user.get("login")
+        if (
+            type(login) is not str
+            or not login
+            or login != login.strip()
+            or len(login) > 255
+            or any(ord(char) < 32 or ord(char) == 127 for char in login)
+        ):
+            return None
+        logins.append(login)
+    return (full_name, logins[0], logins[1])
+
+
 async def _gitea_ci_job_attestation(
     client: Any,
     owner: str,
     repo: str,
     run_receipt: tuple[int, int, str, str, str, str],
     required_contexts: tuple[str, ...],
+    *,
+    run_provenance: tuple[str, str, str] | None = None,
 ) -> str:
     """Fail closed unless the required jobs belong to this exact green run attempt.
 
@@ -933,6 +970,11 @@ async def _gitea_ci_job_attestation(
     except Exception:
         return "CI_EVIDENCE_INCOMPLETE"
     if _ci_run_attempt_receipt(current) != run_receipt:
+        return "CI_EVIDENCE_INCOMPLETE"
+    if (
+        run_provenance is not None
+        and _ci_run_provenance_receipt(current, owner, repo) != run_provenance
+    ):
         return "CI_EVIDENCE_INCOMPLETE"
     return "CI_GREEN"
 
@@ -1052,15 +1094,28 @@ async def _gitea_ci_evidence(
     original_receipt = _ci_run_attempt_receipt(latest_exact_head_run)
     if original_receipt is None:
         return "CI_EVIDENCE_INCOMPLETE"
+    original_provenance: tuple[str, str, str] | None = None
+    if required_contexts is not None:
+        original_provenance = _ci_run_provenance_receipt(
+            latest_exact_head_run, owner, repo
+        )
+        if original_provenance is None:
+            return "CI_EVIDENCE_INCOMPLETE"
     try:
         current_run = await client.get_action_run(owner, repo, original_receipt[0])
     except Exception:
         return "CI_EVIDENCE_INCOMPLETE"
     if _ci_run_attempt_receipt(current_run) != original_receipt:
         return "CI_EVIDENCE_INCOMPLETE"
+    if (
+        original_provenance is not None
+        and _ci_run_provenance_receipt(current_run, owner, repo) != original_provenance
+    ):
+        return "CI_EVIDENCE_INCOMPLETE"
     if required_contexts is not None:
         return await _gitea_ci_job_attestation(
-            client, owner, repo, original_receipt, required_contexts
+            client, owner, repo, original_receipt, required_contexts,
+            run_provenance=original_provenance,
         )
     return "CI_GREEN"
 
