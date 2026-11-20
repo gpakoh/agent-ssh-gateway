@@ -75,30 +75,29 @@ def resolve_file_path(path: str) -> str:
     """Resolve a file path for gateway file operations.
 
     Relative paths are resolved under MCP_GATEWAY_PROJECT_ROOT.
-    Absolute paths are allowed only if under the project root.
+    Absolute paths must be an exact root or its path-component descendant,
+    not merely start with the same string as a sibling directory.
     Path traversal (..) is blocked.
 
-    Returns the resolved absolute path.
+    Returns the gateway-target path without filesystem dereferencing.
     """
-    if not path:
-        raise GatewayClientError("path is required")
+    if not isinstance(path, str) or not path:
+        raise GatewayClientError("path must be a non-empty string")
 
     if ".." in path.split("/"):
-        raise GatewayClientError(f"path traversal blocked: {path!r}")
+        raise GatewayClientError("path traversal blocked")
 
-    root = os.environ.get("MCP_GATEWAY_PROJECT_ROOT", "").strip().rstrip("/")
+    raw_root = os.environ.get("MCP_GATEWAY_PROJECT_ROOT", "").strip()
+    # Keep filesystem root as "/" instead of treating it as unset.
+    root = raw_root.rstrip("/") or ("/" if raw_root.startswith("/") else "")
 
     if path.startswith("/"):
-        if not root:
-            return path
-        if not path.startswith(root):
-            allowed = root or "(not set)"
-            raise GatewayClientError(f"absolute path {path!r} is outside allowed root {allowed}")
+        if root and path != root and not path.startswith(root.rstrip("/") + "/"):
+            raise GatewayClientError("absolute path is outside allowed project root")
         return path
 
     if root:
-        resolved = root + "/" + path.lstrip("/")
-        return resolved
+        return root.rstrip("/") + "/" + path.lstrip("/")
 
     return path
 
