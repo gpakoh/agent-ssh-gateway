@@ -152,7 +152,7 @@ class FakeMergeClient:
         self.default_branch = default_branch
         self.base_ref = base_ref
         self.branch_policy_payload = (
-            {"enable_status_check": True, "status_check_contexts": ["ci"]}
+            {"enable_status_check": True, "status_check_contexts": ["CI / Change scope (pull_request)"]}
             if branch_policy_payload is _DEFAULT_BRANCH_POLICY_PAYLOAD
             else branch_policy_payload
         )
@@ -242,6 +242,32 @@ class FakeMergeClient:
         assert self._last_ci_run["id"] == run_id
         return dict(self._last_ci_run)
 
+    async def list_action_run_jobs(self, owner: str, repo: str, run_id: int):
+        assert (owner, repo) == ("owner", "repo")
+        assert self._last_ci_run is not None
+        assert run_id == self._last_ci_run["id"]
+        contexts = self.branch_policy_payload.get("status_check_contexts") or []
+        names = [
+            context.split(" / ", 1)[1][: -len(" (pull_request)")]
+            for context in contexts
+            if isinstance(context, str)
+            and " / " in context
+            and context.endswith(" (pull_request)")
+        ] or ["Change scope"]
+        jobs = [
+            {
+                "id": index + 1,
+                "run_id": run_id,
+                "run_attempt": self._last_ci_run["run_attempt"],
+                "head_sha": self._last_ci_run["head_sha"],
+                "name": name,
+                "status": "completed",
+                "conclusion": "success",
+            }
+            for index, name in enumerate(names)
+        ]
+        return {"total_count": len(jobs), "jobs": jobs}
+
     async def compare_commits(self, owner: str, repo: str, *, base: str, head: str):
         self.compare_calls.append((base, head))
         current_head_sha = self.latest_head_sha or self.head_sha
@@ -266,6 +292,68 @@ class FakeMergeClient:
         if self.merge_exception is not None:
             raise self.merge_exception
         return {}
+
+
+@pytest.mark.asyncio
+async def test_adapter_refuses_wrong_attempt_jobs_before_merge_post(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient("token")
+    original = client.list_action_run_jobs
+
+    async def stale_jobs(owner, repo, run_id):
+        payload = await original(owner, repo, run_id)
+        payload["jobs"][0]["run_attempt"] = 999
+        return payload
+
+    client.list_action_run_jobs = stale_jobs
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+    result = await remote.gitea_merge_pull_request("owner", "repo", 25, SHA)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CI_EVIDENCE_INCOMPLETE"
+    assert client.merge_calls == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_refuses_skipped_required_job_before_merge_post(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient("token")
+    original = client.list_action_run_jobs
+
+    async def skipped_jobs(owner, repo, run_id):
+        payload = await original(owner, repo, run_id)
+        payload["jobs"][0]["conclusion"] = "skipped"
+        return payload
+
+    client.list_action_run_jobs = skipped_jobs
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+    result = await remote.gitea_merge_pull_request("owner", "repo", 25, SHA)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CI_NOT_GREEN"
+    assert client.merge_calls == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_refuses_second_gate_job_attempt_drift_before_post(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient("token")
+    original = client.list_action_run_jobs
+    reads = 0
+
+    async def jobs_change_during_review(owner, repo, run_id):
+        nonlocal reads
+        reads += 1
+        payload = await original(owner, repo, run_id)
+        if reads == 2:
+            payload["jobs"][0]["run_attempt"] = 999
+        return payload
+
+    client.list_action_run_jobs = jobs_change_during_review
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+    result = await remote.gitea_merge_pull_request("owner", "repo", 25, SHA)
+    assert reads == 2
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CI_EVIDENCE_INCOMPLETE"
+    assert client.merge_calls == []
 
 
 def _ci_run(
@@ -1163,7 +1251,7 @@ async def test_adapter_blocks_branch_ci_policy_drift_after_green_evidence(monkey
         "token",
         branch_policy_payload={
             "enable_status_check": True,
-            "status_check_contexts": ["ci"],
+            "status_check_contexts": ["CI / Change scope (pull_request)"],
         },
         second_branch_policy_payload={
             "enable_status_check": False,
@@ -1178,7 +1266,7 @@ async def test_adapter_blocks_branch_ci_policy_drift_after_green_evidence(monkey
     assert result["error"]["code"] == "CI_POLICY_CHANGED"
     assert result["error"]["details"] == {
         "initial_policy": "CI_REQUIRED",
-        "initial_contexts": ["ci"],
+        "initial_contexts": ["CI / Change scope (pull_request)"],
         "observed_policy": "CI_POLICY_NO_REQUIRED_CHECKS",
         "observed_contexts": [],
         "base_ref": "master",
@@ -1196,11 +1284,17 @@ async def test_adapter_blocks_required_context_drift_after_green_evidence(monkey
         "token",
         branch_policy_payload={
             "enable_status_check": True,
-            "status_check_contexts": ["lint", "tests"],
+            "status_check_contexts": [
+                "CI / Change scope (pull_request)",
+                "CI / Checks 3.11 (pull_request)",
+            ],
         },
         second_branch_policy_payload={
             "enable_status_check": True,
-            "status_check_contexts": ["lint", "security"],
+            "status_check_contexts": [
+                "CI / Change scope (pull_request)",
+                "CI / E2E (Selenium) (pull_request)",
+            ],
         },
     )
     monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
@@ -1211,9 +1305,15 @@ async def test_adapter_blocks_required_context_drift_after_green_evidence(monkey
     assert result["error"]["code"] == "CI_POLICY_CHANGED"
     assert result["error"]["details"] == {
         "initial_policy": "CI_REQUIRED",
-        "initial_contexts": ["lint", "tests"],
+        "initial_contexts": [
+            "CI / Change scope (pull_request)",
+            "CI / Checks 3.11 (pull_request)",
+        ],
         "observed_policy": "CI_REQUIRED",
-        "observed_contexts": ["lint", "security"],
+        "observed_contexts": [
+            "CI / Change scope (pull_request)",
+            "CI / E2E (Selenium) (pull_request)",
+        ],
         "base_ref": "master",
         "mutation_occurred": False,
     }

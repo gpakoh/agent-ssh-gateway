@@ -845,12 +845,105 @@ def _ci_run_attempt_receipt(run: Any) -> tuple[int, int, str, str, str, str] | N
     return (run_id, attempt, event, head_sha, status, conclusion)
 
 
+async def _gitea_ci_job_attestation(
+    client: Any,
+    owner: str,
+    repo: str,
+    run_receipt: tuple[int, int, str, str, str, str],
+    required_contexts: tuple[str, ...],
+) -> str:
+    """Fail closed unless the required jobs belong to this exact green run attempt.
+
+    The Gitea commit-status endpoint retains historical pending rows and has
+    no reliable job/run actor identity. Use the Actions job identities instead;
+    do not infer current required job success from stale status rows alone.
+    """
+    run_id, attempt, event, head_sha, _, _ = run_receipt
+    if event != "pull_request":
+        return "CI_EVIDENCE_INCOMPLETE"
+
+    required_names: set[str] = set()
+    for context in required_contexts:
+        if not isinstance(context, str) or " / " not in context:
+            return "CI_EVIDENCE_INCOMPLETE"
+        job_context = context.split(" / ", 1)[1]
+        suffix = " (pull_request)"
+        if not job_context.endswith(suffix):
+            return "CI_EVIDENCE_INCOMPLETE"
+        name = job_context[: -len(suffix)]
+        if not name or name in required_names:
+            return "CI_EVIDENCE_INCOMPLETE"
+        required_names.add(name)
+
+    try:
+        payload = await client.list_action_run_jobs(owner, repo, run_id)
+    except Exception:
+        return "CI_EVIDENCE_INCOMPLETE"
+    if not isinstance(payload, dict):
+        return "CI_EVIDENCE_INCOMPLETE"
+    jobs = payload.get("jobs")
+    total_count = payload.get("total_count")
+    if (
+        type(total_count) is not int
+        or not isinstance(jobs, list)
+        or not jobs
+        or total_count != len(jobs)
+    ):
+        return "CI_EVIDENCE_INCOMPLETE"
+
+    seen_ids: set[int] = set()
+    seen_names: set[str] = set()
+    success_seen = False
+    for job in jobs:
+        if not isinstance(job, dict):
+            return "CI_EVIDENCE_INCOMPLETE"
+        job_id = job.get("id")
+        job_name = job.get("name")
+        if (
+            type(job_id) is not int
+            or job_id <= 0
+            or job_id in seen_ids
+            or type(job.get("run_id")) is not int
+            or job["run_id"] != run_id
+            or type(job.get("run_attempt")) is not int
+            or job["run_attempt"] != attempt
+            or job.get("head_sha") != head_sha
+            or not isinstance(job_name, str)
+            or not job_name.strip()
+            or job_name in seen_names
+        ):
+            return "CI_EVIDENCE_INCOMPLETE"
+        seen_ids.add(job_id)
+        seen_names.add(job_name)
+        if job.get("status") != "completed":
+            return "CI_NOT_GREEN"
+        conclusion = job.get("conclusion")
+        if conclusion == "success":
+            success_seen = True
+        elif conclusion != "skipped" or job_name in required_names:
+            return "CI_NOT_GREEN"
+
+    if not success_seen or not required_names.issubset(seen_names):
+        return "CI_EVIDENCE_INCOMPLETE"
+
+    # Reruns keep the run_id but advance run_attempt. Recheck after the job
+    # list, so a mid-audit rerun cannot inherit a previous attempt's success.
+    try:
+        current = await client.get_action_run(owner, repo, run_id)
+    except Exception:
+        return "CI_EVIDENCE_INCOMPLETE"
+    if _ci_run_attempt_receipt(current) != run_receipt:
+        return "CI_EVIDENCE_INCOMPLETE"
+    return "CI_GREEN"
+
+
 async def _gitea_ci_evidence(
     client: Any,
     owner: str,
     repo: str,
     expected_head_sha: str,
     branch_ci_policy: str = "CI_REQUIRED",
+    required_contexts: tuple[str, ...] | None = None,
 ) -> str:
     workflow_payload = await client.list_workflows(owner, repo)
     if _configured_workflow_count(workflow_payload) is None:
@@ -965,6 +1058,10 @@ async def _gitea_ci_evidence(
         return "CI_EVIDENCE_INCOMPLETE"
     if _ci_run_attempt_receipt(current_run) != original_receipt:
         return "CI_EVIDENCE_INCOMPLETE"
+    if required_contexts is not None:
+        return await _gitea_ci_job_attestation(
+            client, owner, repo, original_receipt, required_contexts
+        )
     return "CI_GREEN"
 
 
@@ -2342,6 +2439,7 @@ async def gitea_merge_pull_request(
                 repo,
                 expected_head_sha,
                 branch_ci_policy,
+                required_contexts=branch_ci_policy_signature[1],
             )
             if ci_status != "CI_GREEN":
                 if ci_status == "CI_EVIDENCE_INCOMPLETE":
@@ -2451,6 +2549,7 @@ async def gitea_merge_pull_request(
                 repo,
                 expected_head_sha,
                 latest_branch_ci_policy,
+                required_contexts=latest_branch_ci_policy_signature[1],
             )
             if ci_status != "CI_GREEN":
                 if ci_status == "CI_EVIDENCE_INCOMPLETE":
