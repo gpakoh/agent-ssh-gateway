@@ -129,9 +129,7 @@ class TestReconnectSession:
                 client._reconnect_session()
 
     def test_raises_structured_error_on_429_with_body_and_code(self):
-        """auto-reconnect 429 must preserve the structured gateway error:
-        status_code=429, the JSON body intact, and the machine code
-        surfaced in the message so callers can branch on it."""
+        """auto-reconnect 429 keeps typed code/retry hints, not raw JSON fields."""
         GatewayClient._connect_retry_not_before = 0.0
         client = _client()
         body = {
@@ -151,8 +149,12 @@ class TestReconnectSession:
         err = exc_info.value
         assert err.status_code == 429
         assert err.body is not None
-        assert {k: v for k, v in err.body.items() if k != "details"} == body
-        assert err.body["details"] == {"retry_after_seconds": 7}
+        assert err.body == {
+            "code": "RATE_LIMIT_EXCEEDED",
+            "message": "Gateway rate limit response",
+            "retryable": True,
+            "details": {"retry_after_seconds": 7},
+        }
         assert "429" in str(err)
         assert "RATE_LIMIT_EXCEEDED" in str(err)
 
@@ -179,7 +181,11 @@ class TestReconnectSession:
 
         err = exc_info.value
         assert err.status_code == 429
-        assert err.body == body
+        assert err.body == {
+            "code": "RATE_LIMIT_EXCEEDED",
+            "message": "Gateway rate limit response",
+            "retryable": True,
+        }
         assert GatewayClient._connect_retry_not_before == 0.0
         assert "RATE_LIMIT_EXCEEDED" in str(err)
         with patch("gateway_client.httpx.post") as second_post:
