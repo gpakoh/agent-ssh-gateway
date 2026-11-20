@@ -221,6 +221,76 @@ def _append_entries_if_unchanged(
         os.close(fd)
 
 
+def _get_gitea_branch_head(
+    api_base: str, token: str, owner: str, repo: str, branch: str
+) -> str:
+    """Read the current protected branch from Gitea, never a stale local ref."""
+    if not all(
+        re.fullmatch(r"[A-Za-z0-9_.-]+", part)
+        for part in (owner, repo, branch)
+    ):
+        raise RuntimeError("canonical repository identity is invalid")
+    req = urllib.request.Request(
+        f"{api_base.rstrip('/')}/repos/{owner}/{repo}/branches/{branch}",
+        headers={"Authorization": f"token {token}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            payload = json.loads(response.read())
+    except Exception:
+        raise RuntimeError("canonical Gitea branch head unavailable") from None
+    commit = payload.get("commit") if isinstance(payload, dict) else None
+    sha = commit.get("id") if isinstance(commit, dict) else None
+    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
+        raise RuntimeError("canonical Gitea branch head is invalid")
+    return sha.lower()
+
+
+def _require_current_canonical_base(
+    yaml_path: Path, api_base: str, token: str, owner: str
+) -> None:
+    """Refuse scheduled writes to a stale/divergent source-controlled registry.
+
+    This is a pre-write safety gate, NOT a Git push/commit or atomic upstream
+    CAS. Candidate/runtime overlays and dry runs do not use this gate.
+    """
+    if yaml_path.resolve() != (REPO_ROOT / "projects.yaml").resolve():
+        return
+
+    def git(*arguments: str) -> str:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(REPO_ROOT), *arguments],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            raise RuntimeError("canonical Git state unavailable") from None
+        return result.stdout.strip()
+
+    if Path(git("rev-parse", "--show-toplevel")).resolve() != REPO_ROOT.resolve():
+        raise RuntimeError("canonical Git root mismatch")
+
+    branch = git("symbolic-ref", "--quiet", "--short", "HEAD")
+    if branch not in {"master", "main"}:
+        raise RuntimeError("canonical registry write requires main/master branch")
+    if git("status", "--porcelain=v1", "--untracked-files=no"):
+        raise RuntimeError("canonical Git worktree is not clean")
+
+    remote_url = git("remote", "get-url", "origin")
+    repo = _repo_name_from_remote(remote_url, owner)
+    if repo is None:
+        raise RuntimeError("canonical Git origin identity is unverified")
+    local_sha = git("rev-parse", "HEAD")
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", local_sha):
+        raise RuntimeError("canonical Git HEAD is invalid")
+    remote_sha = _get_gitea_branch_head(api_base, token, owner, repo, branch)
+    if local_sha.lower() != remote_sha:
+        raise RuntimeError("canonical master/main differs from protected Gitea HEAD")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true", help="Write changes to projects.yaml (default: dry run)")
@@ -300,6 +370,7 @@ def main() -> int:
         return 0
 
     try:
+        _require_current_canonical_base(args.yaml, api_base, token, owner)
         _append_entries_if_unchanged(args.yaml, text, new_entries)
     except (OSError, RuntimeError) as exc:
         print(f"Registry sync aborted safely: {exc}", file=sys.stderr)
