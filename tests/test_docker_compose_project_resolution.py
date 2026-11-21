@@ -41,6 +41,87 @@ def _docker_client() -> MagicMock:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "kwargs", "field"),
+    [
+        ("docker_compose_ps", {"project_dir": 42}, "project_dir"),
+        ("docker_compose_ps", {"project_dir": "  "}, "project_dir"),
+        ("docker_compose_ps", {"limit": 0}, "limit"),
+        ("docker_compose_ps", {"limit": 501}, "limit"),
+        ("docker_compose_ps", {"limit": True}, "limit"),
+        ("docker_compose_ps", {"limit": "50"}, "limit"),
+        ("docker_compose_services", {"project_dir": 42}, "project_dir"),
+        ("docker_compose_services", {"project_dir": "  "}, "project_dir"),
+        ("docker_compose_logs", {"project_dir": 42}, "project_dir"),
+        ("docker_compose_logs", {"project_dir": "  "}, "project_dir"),
+        ("docker_compose_logs", {"services": "web"}, "services"),
+        ("docker_compose_logs", {"services": ["bad/name"]}, "services"),
+        ("docker_compose_logs", {"tail": 0}, "tail"),
+        ("docker_compose_logs", {"tail": 1001}, "tail"),
+        ("docker_compose_logs", {"tail": True}, "tail"),
+        ("docker_compose_logs", {"tail": "100"}, "tail"),
+        ("docker_compose_logs", {"follow": True}, "follow"),
+        ("docker_compose_logs", {"follow": 1}, "follow"),
+        ("docker_compose_logs", {"timestamps": "yes"}, "timestamps"),
+    ],
+)
+async def test_compose_read_rejects_bad_schema_before_docker_and_registry(
+    tool_name: str, kwargs: dict[str, object], field: str
+) -> None:
+    with (
+        patch.object(srv, "DockerClient", side_effect=AssertionError("premature Docker client")),
+        patch.object(
+            srv, "_get_workspace_registry", side_effect=AssertionError("premature registry lookup")
+        ),
+    ):
+        result = await getattr(srv, tool_name)(**kwargs)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INVALID_INPUT"
+    assert result["error"]["details"]["field"] == field
+    assert result["error"]["message"] == "Invalid Docker Compose read argument"
+    assert "bad/name" not in str(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "kwargs", "client_method", "expected_kwargs"),
+    [
+        ("docker_compose_ps", {"limit": 1}, "compose_ps", {"limit": 1}),
+        ("docker_compose_ps", {"limit": 500}, "compose_ps", {"limit": 500}),
+        (
+            "docker_compose_logs",
+            {"tail": 1, "follow": False, "timestamps": True},
+            "compose_logs",
+            {"tail": 1, "follow": False, "timestamps": True},
+        ),
+        (
+            "docker_compose_logs",
+            {"tail": 1000, "follow": False, "timestamps": False},
+            "compose_logs",
+            {"tail": 1000, "follow": False, "timestamps": False},
+        ),
+    ],
+)
+async def test_compose_read_accepts_valid_numeric_boundaries(
+    tool_name: str,
+    kwargs: dict[str, object],
+    client_method: str,
+    expected_kwargs: dict[str, object],
+) -> None:
+    client = _docker_client()
+    response: object = [] if client_method == "compose_ps" else {"lines": [], "count": 0}
+    method = AsyncMock(return_value=response)
+    setattr(client, client_method, method)
+    with patch.object(srv, "DockerClient", return_value=client):
+        result = await getattr(srv, tool_name)(**kwargs)
+    assert result["ok"] is True
+    expected_call = {"project_dir": None, **expected_kwargs}
+    if client_method == "compose_logs":
+        expected_call["services"] = None
+    method.assert_awaited_once_with(**expected_call)
+
+
+@pytest.mark.asyncio
 async def test_compose_services_resolves_registered_project_id() -> None:
     registry = _registered_project()
     client = _docker_client()
