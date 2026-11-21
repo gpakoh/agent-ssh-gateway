@@ -721,13 +721,58 @@ async def docker_compose_one_shot(
     return _confirmation_response(action)
 
 
+def _compose_read_schema_error(
+    tool: str,
+    project_dir: str | None,
+    *,
+    services: list[str] | None = None,
+    limit: int = 50,
+    tail: int = 100,
+    follow: bool = False,
+    timestamps: bool = False,
+) -> dict[str, Any] | None:
+    """Validate read-only Compose inputs before Docker or workspace resolution."""
+    invalid: tuple[str, str] | None = None
+    if project_dir is not None and (
+        type(project_dir) is not str or not project_dir.strip()
+    ):
+        invalid = ("project_dir", "non-empty string or null")
+    elif tool == "docker_compose_ps":
+        if type(limit) is not int or not 1 <= limit <= 500:
+            invalid = ("limit", "integer from 1 to 500")
+    elif tool == "docker_compose_logs":
+        if services is not None and (
+            type(services) is not list
+            or any(type(s) is not str or SERVICE_NAME_RE.fullmatch(s) is None for s in services)
+        ):
+            invalid = ("services", "list of Compose service names or null")
+        elif type(tail) is not int or not 1 <= tail <= 1000:
+            invalid = ("tail", "integer from 1 to 1000")
+        elif type(follow) is not bool or follow:
+            invalid = ("follow", "false (streaming is unsupported)")
+        elif type(timestamps) is not bool:
+            invalid = ("timestamps", "boolean")
+    if invalid is None:
+        return None
+    field, expected = invalid
+    return tool_error(
+        tool=tool,
+        code="INVALID_INPUT",
+        message="Invalid Docker Compose read argument",
+        details={"field": field, "expected": expected},
+        source="docker",
+    )
+
+
 async def docker_compose_ps(
     project_dir: str | None = None, limit: int = 50
 ) -> dict[str, Any]:
     """List containers in a Docker Compose project as structured rows. limit: max rows (default 50)."""
+    invalid = _compose_read_schema_error("docker_compose_ps", project_dir, limit=limit)
+    if invalid is not None:
+        return invalid
     client = _docker_client()
     try:
-        validate_pagination(limit, "limit")
         resolved_project_dir = _resolve_compose_project_dir(project_dir, client)
         rows = await client.compose_ps(project_dir=resolved_project_dir, limit=limit)
     except ValueError as exc:
@@ -748,6 +793,9 @@ async def docker_compose_services(
     project_dir: str | None = None,
 ) -> dict[str, Any]:
     """List service names defined in a Docker Compose project."""
+    invalid = _compose_read_schema_error("docker_compose_services", project_dir)
+    if invalid is not None:
+        return invalid
     client = _docker_client()
     try:
         resolved_project_dir = _resolve_compose_project_dir(project_dir, client)
@@ -770,6 +818,12 @@ async def docker_compose_logs(
     timestamps: bool = False,
 ) -> dict[str, Any]:
     """Fetch logs from services in a Docker Compose project. tail: 1-1000 lines."""
+    invalid = _compose_read_schema_error(
+        "docker_compose_logs", project_dir,
+        services=services, tail=tail, follow=follow, timestamps=timestamps,
+    )
+    if invalid is not None:
+        return invalid
     client = _docker_client()
     try:
         resolved_project_dir = _resolve_compose_project_dir(project_dir, client)
