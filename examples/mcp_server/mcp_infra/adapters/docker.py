@@ -34,6 +34,7 @@ from dotenv import dotenv_values
 from tool_results import tool_error, tool_success, validate_pagination
 
 from examples.mcp_client_remote.fleet.docker_client import (
+    SERVICE_NAME_RE,
     RunResult,  # noqa: F401  (used in impl return annotations)
 )
 from examples.mcp_server.docker_confirm import ConfirmAction, ConfirmStatus
@@ -883,7 +884,34 @@ async def docker_compose_build(
     no_cache: bool = False,
     timeout: int = 300,
 ) -> dict[str, Any]:
-    """Build (or rebuild) services in a Docker Compose project. DANGEROUS: requires confirmation via confirm_operation(token)."""
+    """Build services only after validating local schema; still requires confirmation."""
+    # Reject malformed inputs before constructing DockerClient, resolving
+    # workspace paths, or minting a dangerous-operation confirmation token.
+    # Static diagnostics must never reflect service names or host paths.
+    invalid: tuple[str, str] | None = None
+    if project_dir is not None and (
+        type(project_dir) is not str or not project_dir.strip()
+    ):
+        invalid = ("project_dir", "non-empty string or null")
+    elif services is not None and (
+        type(services) is not list
+        or any(type(s) is not str or SERVICE_NAME_RE.fullmatch(s) is None for s in services)
+    ):
+        invalid = ("services", "list of Compose service names or null")
+    elif type(no_cache) is not bool:
+        invalid = ("no_cache", "boolean")
+    elif type(timeout) is not int or not 1 <= timeout <= 1800:
+        invalid = ("timeout", "integer from 1 to 1800 seconds")
+    if invalid is not None:
+        field, expected = invalid
+        return tool_error(
+            tool="docker_compose_build",
+            code="INVALID_INPUT",
+            message="Invalid Docker Compose build argument",
+            details={"field": field, "expected": expected},
+            source="docker",
+        )
+
     client = _docker_client()
     try:
         resolved_dir, label = _resolve_compose_confirmation_target(project_dir, client)

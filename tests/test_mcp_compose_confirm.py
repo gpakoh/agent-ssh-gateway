@@ -253,6 +253,43 @@ class TestComposeConfirmFlow:
         assert not srv._confirm_store._actions
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("kwargs", "field"),
+        [
+            ({"project_dir": 7}, "project_dir"),
+            ({"project_dir": ""}, "project_dir"),
+            ({"services": "web"}, "services"),
+            ({"services": {"web": True}}, "services"),
+            ({"services": ["web", "bad/secret"]}, "services"),
+            ({"services": [23]}, "services"),
+            ({"no_cache": "false"}, "no_cache"),
+            ({"no_cache": 1}, "no_cache"),
+            ({"timeout": "300"}, "timeout"),
+            ({"timeout": True}, "timeout"),
+            ({"timeout": 0}, "timeout"),
+            ({"timeout": 1801}, "timeout"),
+        ],
+    )
+    async def test_compose_build_invalid_schema_is_rejected_before_client_or_token(
+        self, clean_confirm_store, kwargs, field
+    ):
+        """Malformed calls cannot initialize Docker, resolve a root or mint approval."""
+        import examples.mcp_server.server as srv
+
+        with patch.object(
+            srv, "DockerClient", side_effect=AssertionError("Docker context invoked")
+        ), patch.object(
+            srv._confirm_store, "create_action", side_effect=AssertionError("confirmation minted")
+        ):
+            result = await srv.docker_compose_build(**kwargs)
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "INVALID_INPUT"
+        assert result["error"]["details"]["field"] == field
+        assert "bad/secret" not in json.dumps(result)
+        assert not srv._confirm_store._actions
+
+    @pytest.mark.asyncio
     async def test_missing_allowed_roots_rejects_confirmation_before_allocating_token(
         self, clean_confirm_store, monkeypatch
     ):
