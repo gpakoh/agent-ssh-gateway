@@ -125,6 +125,24 @@ class TestChangeScope(unittest.TestCase):
             with self.subTest(event=name, payload=event):
                 self.assertTrue(classify(self.root, name, event).full_ci)
 
+    def test_non_string_or_malformed_revisions_require_full_ci(self) -> None:
+        # Untrusted Gitea event values must never authorize the docs-only gate.
+        for invalid in (None, True, 0, ["a" * 40], {"sha": "a" * 40}, "", "A" * 40):
+            with self.subTest(invalid=invalid):
+                self.assertTrue(
+                    classify(self.root, "push", {"before": invalid, "after": self.base}).full_ci
+                )
+                self.assertTrue(
+                    classify(self.root, "push", {"before": self.base, "after": invalid}).full_ci
+                )
+                self.assertTrue(
+                    classify(
+                        self.root,
+                        "pull_request",
+                        {"pull_request": {"base": {"sha": invalid}, "head": {"sha": self.base}}},
+                    ).full_ci
+                )
+
     def test_checkout_mismatch_fails(self) -> None:
         self.write("README.md", "Updated\n")
         self.commit()

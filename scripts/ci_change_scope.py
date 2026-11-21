@@ -71,7 +71,11 @@ def classify(root: Path, event_name: str, event: dict) -> Scope:
         before, after = event.get("before"), event.get("after")
     else:
         return Scope(True, "unsupported event", head)
-    if not all(isinstance(sha, str) and SHA.fullmatch(sha) for sha in (before, after)):
+    # Narrow both untrusted event values before passing them to Git. Keep
+    # non-string and non-lowercase-hex revisions fail-closed (full CI).
+    if not isinstance(before, str) or not isinstance(after, str):
+        return Scope(True, "missing exact event revisions", head)
+    if SHA.fullmatch(before) is None or SHA.fullmatch(after) is None:
         return Scope(True, "missing exact event revisions", head)
     if after != head:
         raise ValueError("checkout HEAD does not match the event head")
