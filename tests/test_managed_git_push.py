@@ -20,6 +20,20 @@ SHA = "4e846348f293539593a194236b42414336d22576"
 VERIFIER_IMAGE = "ghcr.io/example/verifier:1"
 
 
+@pytest.fixture(autouse=True)
+def _verified_push_test_audit(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Existing managed-push tests use a fake Gitea client and no production
+    # audit volume. Keep that environment isolated unless a test overrides it.
+    class TestAudit:
+        def append_required(self, _event: Any) -> None:
+            pass
+
+        def append(self, _event: Any) -> None:
+            pass
+
+    monkeypatch.setattr(remote, "_get_gitea_audit_logger", TestAudit)
+
+
 def _trusted_receipt(candidate_head: str) -> dict[str, object]:
     """Build a minimal receipt that verifier_receipt_is_trusted accepts."""
     evidence = {
@@ -903,7 +917,10 @@ async def test_verified_push_reports_candidate_drift_after_remote_publication(
     assert result["error"]["retryable"] is False
     assert "private host path" not in str(result)
     assert "Do not repeat the push" in result["error"]["hint"]
-    assert result["error"]["details"] == {
+    details = dict(result["error"]["details"])
+    audit_intent_id = details.pop("audit_intent_id")
+    assert isinstance(audit_intent_id, str) and len(audit_intent_id) == 32
+    assert details == {
         "phase": "candidate_post_push",
         "mutation_started": True,
         "mutation_occurred": True,
@@ -1145,6 +1162,239 @@ def _install_verified_push_reconciliation_mocks(
     monkeypatch.setattr(remote, "verify_workspace_via_docker", lambda **_kwargs: None)
     monkeypatch.setattr(remote, "push_exact_sha", push_impl)
     monkeypatch.setattr(remote, "_GITEA_VERIFIED_PUSH_RECONCILE_DELAY_SECONDS", 0)
+
+
+@pytest.mark.asyncio
+async def test_verified_push_refuses_dispatch_when_durable_intent_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    push_calls = 0
+
+    class OldBranchClient(_FakeGiteaClient):
+        async def get_branch(self, owner: str, repo: str, branch: str) -> dict[str, Any]:
+            return {"name": branch, "protected": False, "commit": {"id": "1" * 40}}
+
+    def push(**_kwargs: Any) -> None:
+        nonlocal push_calls
+        push_calls += 1
+
+    class UnavailableAudit:
+        def append_required(self, _event: Any) -> None:
+            raise remote.AuditWriteError("disk full; private secret")
+
+    _install_verified_push_reconciliation_mocks(
+        monkeypatch, tmp_path, OldBranchClient, push
+    )
+    monkeypatch.setattr(remote, "_get_gitea_audit_logger", UnavailableAudit)
+    result = await remote.gitea_push_verified_commit(
+        project="gpt-browser-bridge-hardening",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_base_sha="0" * 40,
+        expected_head_sha=SHA,
+        allowed_files="app/**",
+        required_checks="pytest -q",
+    )
+    assert push_calls == 0
+    assert result["ok"] is False
+    assert result["error"]["code"] == "AUDIT_UNAVAILABLE"
+    assert result["error"]["details"]["mutation_started"] is False
+    assert "private secret" not in str(result)
+
+
+@pytest.mark.asyncio
+async def test_verified_push_records_durable_intent_before_dispatch_and_outcome(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events: list[Any] = []
+    pushed = False
+
+    class AuditedClient(_FakeGiteaClient):
+        async def get_branch(self, owner: str, repo: str, branch: str) -> dict[str, Any]:
+            return {
+                "name": branch,
+                "protected": False,
+                "commit": {"id": SHA if pushed else "1" * 40},
+            }
+
+    class CapturingAudit:
+        def append_required(self, event: Any) -> None:
+            events.append(event)
+
+        def append(self, event: Any) -> None:
+            events.append(event)
+
+    def push(**_kwargs: Any) -> None:
+        nonlocal pushed
+        assert len(events) == 1  # Durable intent must exist before transport.
+        assert events[0].metadata["expected_head_sha"] == SHA
+        pushed = True
+
+    _install_verified_push_reconciliation_mocks(
+        monkeypatch, tmp_path, AuditedClient, push
+    )
+    monkeypatch.setattr(remote, "_get_gitea_audit_logger", CapturingAudit)
+    result = await remote.gitea_push_verified_commit(
+        project="gpt-browser-bridge-hardening",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_base_sha="0" * 40,
+        expected_head_sha=SHA,
+        allowed_files="app/**",
+        required_checks="pytest -q",
+    )
+    assert result["ok"] is True
+    assert pushed is True
+    assert len(events) == 2
+    intent, outcome = events
+    assert intent.event_type == "mcp.gitea_verified_push_intent"
+    assert outcome.event_type == "mcp.gitea_verified_push_outcome"
+    intent_id = intent.metadata["correlation_id"]
+    assert len(intent_id) == 32
+    assert outcome.metadata["correlation_id"] == intent_id
+    assert outcome.metadata["outcome"] == "remote_exact_head_verified"
+    assert result["result"]["audit_intent_id"] == intent_id
+    assert "managed-token" not in repr(events)
+
+
+@pytest.mark.asyncio
+async def test_verified_push_unknown_is_audited_without_retry_lease(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events: list[Any] = []
+    pushes = 0
+
+    class OldHeadClient(_FakeGiteaClient):
+        async def get_branch(self, owner: str, repo: str, branch: str) -> dict[str, Any]:
+            return {"name": branch, "protected": False, "commit": {"id": "1" * 40}}
+
+    class CapturingAudit:
+        def append_required(self, event: Any) -> None:
+            events.append(event)
+
+        def append(self, event: Any) -> None:
+            events.append(event)
+
+    def push(**_kwargs: Any) -> None:
+        nonlocal pushes
+        assert len(events) == 1
+        pushes += 1
+        raise managed_git.ManagedGitMutationError("private source path")
+
+    _install_verified_push_reconciliation_mocks(
+        monkeypatch, tmp_path, OldHeadClient, push
+    )
+    monkeypatch.setattr(remote, "_get_gitea_audit_logger", CapturingAudit)
+    result = await remote.gitea_push_verified_commit(
+        project="gpt-browser-bridge-hardening",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_base_sha="0" * 40,
+        expected_head_sha=SHA,
+        allowed_files="app/**",
+        required_checks="pytest -q",
+    )
+    assert pushes == 1
+    assert result["ok"] is False
+    assert result["error"]["code"] == "MUTATION_OUTCOME_UNKNOWN"
+    assert result["error"]["retryable"] is False
+    assert result["error"]["details"]["mutation_started"] is True
+    assert len(events) == 2
+    assert events[1].metadata["outcome"] == "remote_postcondition_unproven"
+    intent_id = events[0].metadata["correlation_id"]
+    assert events[1].metadata["correlation_id"] == intent_id
+    assert result["error"]["details"]["audit_intent_id"] == intent_id
+    assert "private source path" not in str(result)
+    assert "private source path" not in repr(events)
+
+
+@pytest.mark.asyncio
+async def test_verified_push_reconcile_only_does_not_require_mutation_audit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def must_not_push(**_kwargs: Any) -> None:
+        raise AssertionError("read-only reconcile must not run git push")
+
+    class NoMutationAudit:
+        def append_required(self, _event: Any) -> None:
+            raise AssertionError("read-only reconcile must not need an intent")
+
+    _install_verified_push_reconciliation_mocks(
+        monkeypatch, tmp_path, _FakeGiteaClient, must_not_push
+    )
+    monkeypatch.setattr(remote, "_get_gitea_audit_logger", NoMutationAudit)
+    result = await remote.gitea_push_verified_commit(
+        project="gpt-browser-bridge-hardening",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_base_sha="0" * 40,
+        expected_head_sha=SHA,
+        allowed_files="app/**",
+        required_checks="pytest -q",
+        reconcile_only=True,
+    )
+    assert result["ok"] is True
+    assert result["result"]["outcome"] == "already_published"
+    assert result["result"]["mutation_started"] is False
+    assert "audit_intent_id" not in result["result"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [RuntimeError, managed_git.ManagedGitError])
+async def test_verified_push_unexpected_postdispatch_error_remains_unknown(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, error_type: type[Exception]
+) -> None:
+    pushes = 0
+    events: list[Any] = []
+
+    class OldHeadClient(_FakeGiteaClient):
+        async def get_branch(self, owner: str, repo: str, branch: str) -> dict[str, Any]:
+            return {"name": branch, "protected": False, "commit": {"id": "1" * 40}}
+
+    class CapturingAudit:
+        def append_required(self, event: Any) -> None:
+            events.append(event)
+
+        def append(self, event: Any) -> None:
+            events.append(event)
+
+    def push(**_kwargs: Any) -> None:
+        nonlocal pushes
+        pushes += 1
+
+    async def unexpected_reconciliation(*_args: Any, **_kwargs: Any) -> None:
+        raise error_type("sensitive data that must never be exposed")
+
+    _install_verified_push_reconciliation_mocks(
+        monkeypatch, tmp_path, OldHeadClient, push
+    )
+    monkeypatch.setattr(remote, "_get_gitea_audit_logger", CapturingAudit)
+    monkeypatch.setattr(
+        remote, "_reconcile_verified_push_postcondition", unexpected_reconciliation
+    )
+    result = await remote.gitea_push_verified_commit(
+        project="gpt-browser-bridge-hardening",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_base_sha="0" * 40,
+        expected_head_sha=SHA,
+        allowed_files="app/**",
+        required_checks="pytest -q",
+    )
+    assert pushes == 1
+    assert result["ok"] is False
+    assert result["error"]["code"] == "MUTATION_OUTCOME_UNKNOWN"
+    assert result["error"]["retryable"] is False
+    assert result["error"]["details"]["mutation_started"] is True
+    assert result["error"]["details"]["mutation_occurred"] is None
+    assert events[1].metadata["outcome"] == "remote_postcondition_unproven"
+    assert result["error"]["details"]["audit_intent_id"] == events[0].metadata["correlation_id"]
+    assert "sensitive data" not in str(result)
 
 
 def _missing_branch_error() -> httpx.HTTPStatusError:
