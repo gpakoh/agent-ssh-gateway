@@ -733,10 +733,18 @@ async def test_verified_workspace_adapter_rechecks_then_pushes_exact_sha(
     def push(**kwargs: Any) -> None:
         captured["push"] = kwargs
 
+    class NewlyPublishedClient(_FakeGiteaClient):
+        async def get_branch(self, owner: str, repo: str, branch: str) -> dict[str, Any]:
+            # This test exercises the mutation path, not the separately
+            # covered already-published read-only outcome.
+            if "push" not in captured:
+                return {"name": branch, "protected": False, "commit": {"id": "1" * 40}}
+            return await super().get_branch(owner, repo, branch)
+
     monkeypatch.setenv("GITEA_TOKEN", "managed-token")
     monkeypatch.setenv("GITEA_GIT_BASE", "https://git.example.test")
     monkeypatch.setattr(remote, "_server_workspace_registry", lambda: _Registry(tmp_path))
-    monkeypatch.setattr(remote, "_server_gitea_client", lambda: _FakeGiteaClient)
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: NewlyPublishedClient)
     monkeypatch.setattr(remote, "verify_registered_delivery_workspace", verify_workspace)
     monkeypatch.setattr(remote, "verify_workspace_via_docker", verify_checks)
     monkeypatch.setattr(remote, "push_exact_sha", push)
@@ -865,10 +873,16 @@ async def test_verified_push_reports_candidate_drift_after_remote_publication(
     def push(**_kwargs: Any) -> None:
         state["pushes"] += 1
 
+    class NewlyPublishedClient(_FakeGiteaClient):
+        async def get_branch(self, owner: str, repo: str, branch: str) -> dict[str, Any]:
+            if state["pushes"] == 0:
+                return {"name": branch, "protected": False, "commit": {"id": "1" * 40}}
+            return await super().get_branch(owner, repo, branch)
+
     monkeypatch.setenv("GITEA_TOKEN", "managed-token")
     monkeypatch.setenv("GITEA_GIT_BASE", "https://git.example.test")
     monkeypatch.setattr(remote, "_server_workspace_registry", lambda: _Registry(tmp_path))
-    monkeypatch.setattr(remote, "_server_gitea_client", lambda: _FakeGiteaClient)
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: NewlyPublishedClient)
     monkeypatch.setattr(remote, "verify_registered_delivery_workspace", verify_workspace)
     monkeypatch.setattr(remote, "verify_workspace_via_docker", lambda **_kwargs: None)
     monkeypatch.setattr(remote, "push_exact_sha", push)
@@ -1071,7 +1085,7 @@ async def test_verified_commit_post_push_mismatch_marks_mutation(
             return {
                 "name": branch,
                 "protected": False,
-                "commit": {"id": "0" * 40 if pushed["done"] else SHA},
+                "commit": {"id": "0" * 40 if pushed["done"] else "1" * 40},
             }
 
     def verify_workspace(**kwargs: Any) -> dict[str, Any]:
@@ -1137,6 +1151,191 @@ def _missing_branch_error() -> httpx.HTTPStatusError:
     request = httpx.Request("GET", "https://git.example.test/branch")
     response = httpx.Response(404, request=request)
     return httpx.HTTPStatusError("not found", request=request, response=response)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reconcile_only", [False, True])
+async def test_verified_push_existing_exact_head_is_read_only_success(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, reconcile_only: bool
+) -> None:
+    reads = {"count": 0}
+
+    class ExistingHeadClient(_FakeGiteaClient):
+        async def get_branch(self, owner: str, repo: str, branch: str) -> dict[str, Any]:
+            reads["count"] += 1
+            return await super().get_branch(owner, repo, branch)
+
+    def must_not_push(**_kwargs: Any) -> None:
+        raise AssertionError("an already published exact SHA must not be pushed twice")
+
+    _install_verified_push_reconciliation_mocks(
+        monkeypatch, tmp_path, ExistingHeadClient, must_not_push
+    )
+    result = await remote.gitea_push_verified_commit(
+        project="gpt-browser-bridge-hardening",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_base_sha="0" * 40,
+        expected_head_sha=SHA,
+        allowed_files="app/**",
+        required_checks="pytest -q",
+        reconcile_only=reconcile_only,
+    )
+    assert result["ok"] is True
+    assert result["result"]["outcome"] == "already_published"
+    assert result["result"]["remote_observed_sha"] == SHA
+    assert result["result"]["checks_verified"] is True
+    assert result["result"]["mutation_started"] is False
+    assert result["result"]["candidate_verified_after_push"] is True
+    assert reads["count"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second_state", ["changed", "missing", "transport_error"])
+async def test_verified_push_existing_head_drift_never_mutates(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    second_state: str,
+) -> None:
+    reads = {"count": 0}
+
+    class ChangingHeadClient(_FakeGiteaClient):
+        async def get_branch(self, owner: str, repo: str, branch: str) -> dict[str, Any]:
+            reads["count"] += 1
+            if reads["count"] == 1:
+                return await super().get_branch(owner, repo, branch)
+            if second_state == "missing":
+                raise _missing_branch_error()
+            if second_state == "transport_error":
+                raise TimeoutError("private provider diagnostics must not be echoed")
+            return {"name": branch, "protected": False, "commit": {"id": "2" * 40}}
+
+    def must_not_push(**_kwargs: Any) -> None:
+        raise AssertionError("a changing positive branch receipt must never trigger push")
+
+    _install_verified_push_reconciliation_mocks(
+        monkeypatch, tmp_path, ChangingHeadClient, must_not_push
+    )
+    result = await remote.gitea_push_verified_commit(
+        project="gpt-browser-bridge-hardening",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_base_sha="0" * 40,
+        expected_head_sha=SHA,
+        allowed_files="app/**",
+        required_checks="pytest -q",
+    )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CHECK_FAILED"
+    assert result["error"]["retryable"] is False
+    assert result["error"]["details"]["phase"] == "existing_push_postcondition"
+    assert result["error"]["details"]["mutation_started"] is False
+    assert "private provider" not in str(result)
+    assert reads["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_verified_push_existing_head_workspace_drift_is_not_replayed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = {"count": 0}
+
+    def verify_workspace(**_kwargs: Any) -> dict[str, Any]:
+        calls["count"] += 1
+        if calls["count"] == 3:
+            return {**_delivery_proof(), "status_sha256": "f" * 64}
+        return _delivery_proof()
+
+    def must_not_push(**_kwargs: Any) -> None:
+        raise AssertionError("already published exact SHA must not be pushed")
+
+    _install_verified_push_reconciliation_mocks(
+        monkeypatch, tmp_path, _FakeGiteaClient, must_not_push
+    )
+    monkeypatch.setattr(remote, "verify_registered_delivery_workspace", verify_workspace)
+    result = await remote.gitea_push_verified_commit(
+        project="gpt-browser-bridge-hardening",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_base_sha="0" * 40,
+        expected_head_sha=SHA,
+        allowed_files="app/**",
+        required_checks="pytest -q",
+    )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "WORKSPACE_CONTENDED"
+    assert result["error"]["retryable"] is False
+    assert result["error"]["details"]["mutation_started"] is False
+    assert calls["count"] == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remote_head", ["absent", "wrong"])
+async def test_verified_push_reconcile_only_never_writes_on_nonmatching_head(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    remote_head: str,
+) -> None:
+    reads = {"count": 0}
+
+    class NonmatchingHeadClient(_FakeGiteaClient):
+        async def get_branch(self, owner: str, repo: str, branch: str) -> dict[str, Any]:
+            reads["count"] += 1
+            if remote_head == "absent":
+                raise _missing_branch_error()
+            return {"name": branch, "protected": False, "commit": {"id": "1" * 40}}
+
+    def must_not_push(**_kwargs: Any) -> None:
+        raise AssertionError("reconcile_only must never attempt a remote mutation")
+
+    _install_verified_push_reconciliation_mocks(
+        monkeypatch, tmp_path, NonmatchingHeadClient, must_not_push
+    )
+    result = await remote.gitea_push_verified_commit(
+        project="gpt-browser-bridge-hardening",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_base_sha="0" * 40,
+        expected_head_sha=SHA,
+        allowed_files="app/**",
+        required_checks="pytest -q",
+        reconcile_only=True,
+    )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CHECK_FAILED"
+    assert result["error"]["retryable"] is False
+    assert result["error"]["details"]["phase"] == "existing_push_postcondition"
+    assert result["error"]["details"]["mutation_started"] is False
+    assert reads["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_verified_push_reconcile_only_rejects_wrong_type_before_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GITEA_TOKEN", "managed-token")
+    monkeypatch.setattr(
+        remote,
+        "_server_workspace_registry",
+        lambda: (_ for _ in ()).throw(AssertionError("workspace must not be read")),
+    )
+    result = await remote.gitea_push_verified_commit(
+        project="gpt-browser-bridge-hardening",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_base_sha="0" * 40,
+        expected_head_sha=SHA,
+        allowed_files="app/**",
+        required_checks="pytest -q",
+        reconcile_only="yes",  # type: ignore[arg-type]
+    )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INVALID_INPUT"
 
 
 @pytest.mark.asyncio
