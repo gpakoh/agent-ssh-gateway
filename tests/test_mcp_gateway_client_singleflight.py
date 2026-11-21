@@ -6,7 +6,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -200,6 +200,54 @@ def test_cross_transport_flights_do_not_cross_security_or_session_bounds(
     )
     assert results == [{"status": "ok"}, {"status": "ok"}]
     assert calls == 2
+
+
+def test_cross_transport_flight_table_saturation_falls_back_without_allocating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A flood of distinct authenticated readers must not grow the
+    # process-global in-flight table without bound.
+    first_key = (
+        "https://gateway.invalid", "other-auth", "",
+        "/health", (), 30,
+    )
+    in_flight: dict[tuple[object, ...], object] = {first_key: object()}
+    monkeypatch.setattr(GatewayClient, "_shared_get_inflight", in_flight)
+    monkeypatch.setattr(GatewayClient, "_SHARED_GET_MAX_INFLIGHT", 1)
+    client = GatewayClient(
+        base_url="https://gateway.invalid", api_key="new-auth"
+    ).fork_session()
+
+    def fake_get(url: str, **kwargs: object) -> httpx.Response:
+        assert url == "https://gateway.invalid/health"
+        assert kwargs["headers"] == {"X-API-Key": "new-auth"}
+        assert set(in_flight) == {first_key}
+        assert len(in_flight) == 1
+        return _response(200, {"ready": True}, url=url)
+
+    with patch("gateway_client.httpx.get", side_effect=fake_get) as get:
+        assert client.health() == {"ready": True}
+        assert client.health() == {"ready": True}
+    assert get.call_count == 2
+    assert set(in_flight) == {first_key}
+
+
+def test_cross_transport_existing_flight_can_join_at_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    key = ("https://gateway.invalid", "same-auth", "", "/health", (), 30)
+    published: Future[dict[str, object]] = Future()
+    published.set_result({"ready": True})
+    flights = {key: published}
+    monkeypatch.setattr(GatewayClient, "_shared_get_inflight", flights)
+    monkeypatch.setattr(GatewayClient, "_SHARED_GET_MAX_INFLIGHT", 1)
+    client = GatewayClient(
+        base_url="https://gateway.invalid", api_key="same-auth"
+    ).fork_session()
+    with patch("gateway_client.httpx.get") as get:
+        assert client.health() == {"ready": True}
+    get.assert_not_called()
+    assert flights == {key: published}
 
 
 def test_scoped_health_reads_share_only_inflight_work() -> None:

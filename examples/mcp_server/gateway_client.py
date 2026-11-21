@@ -287,6 +287,7 @@ class GatewayClient:
     # The key contains the exact URL and API authority; a completed future
     # is always removed, so this is not a cross-session response cache.
     _SHARED_GET_INFLIGHT_LOCK = threading.Lock()
+    _SHARED_GET_MAX_INFLIGHT = 128
     _shared_get_inflight: dict[
         tuple[str, str, str, str, tuple[tuple[str, str], ...], int],
         Future[dict[str, Any]],
@@ -794,9 +795,27 @@ class GatewayClient:
         with inflight_lock:
             shared = inflight.get(key)
             leader = shared is None
-            if shared is None:
+            # Preserve in-flight matches even at capacity, but never allocate
+            # another process-shared Future for a new identity once full.
+            overflow = (
+                transport_independent
+                and leader
+                and len(inflight) >= GatewayClient._SHARED_GET_MAX_INFLIGHT
+            )
+            if shared is None and not overflow:
                 shared = Future()
                 inflight[key] = shared
+        if overflow:
+            # No global flight entry and no caching: use the exact snapped
+            # transport authority, not mutable client properties.
+            return self._get_direct(
+                path,
+                params=params_snapshot,
+                timeout=timeout,
+                base_url=base_url,
+                api_key=api_key,
+            )
+        assert shared is not None
 
         if not leader:
             try:
