@@ -7924,8 +7924,22 @@ async def gitea_push_verified_commit(
     expected_head_sha: str,
     allowed_files: str,
     required_checks: str,
+    reconcile_only: bool = False,
 ) -> dict[str, Any]:
-    """Verify and push one exact commit from a registered clean workspace."""
+    """Verify a candidate and push an exact commit, or reconcile without any push.
+
+    reconcile_only=True requires the exact destination head to be confirmed
+    twice; absence or drift always fails closed without remote mutation.
+    """
+    if type(reconcile_only) is not bool:
+        return tool_error(
+            tool="gitea_push_verified_commit",
+            code="INVALID_INPUT",
+            message="reconcile_only must be a boolean",
+            retryable=False,
+            details={"field": "reconcile_only", "expected": "boolean"},
+            source="gitea",
+        )
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
@@ -8058,12 +8072,150 @@ async def gitea_push_verified_commit(
                     message="Trusted delivery push to a protected or unverifiable branch is not allowed",
                     source="gitea",
                 )
+            # Read-only recovery for an earlier ambiguous push. Explicit
+            # reconcile_only forbids *all* Git writes even when the first
+            # branch read is absent or does not match the expected SHA.
+            if reconcile_only and (
+                remote_before is None
+                or _gitea_branch_head_sha(remote_before) != expected_head
+            ):
+                return tool_error(
+                    tool="gitea_push_verified_commit",
+                    code="CHECK_FAILED",
+                    message="Exact remote branch HEAD is not confirmed; no push was attempted",
+                    retryable=False,
+                    hint=(
+                        "Only repeat read-only reconciliation after an ambiguous push. "
+                        "Missing or changed HEAD does not authorize a new push."
+                    ),
+                    details={
+                        "phase": "existing_push_postcondition",
+                        "mutation_started": False,
+                        "mutation_occurred": False,
+                        "expected_head_sha": expected_head,
+                        "observed_head_sha": _gitea_branch_head_sha(remote_before),
+                        "branch": destination_branch,
+                    },
+                    source="gitea",
+                )
             username = str(user.get("login") or user.get("username") or "").strip()
             if not username:
                 return tool_error(
                     tool="gitea_push_verified_commit",
                     code="AUTH_ERROR",
                     message="Configured Gitea identity has no usable username",
+                    source="gitea",
+                )
+
+            # A late successful write can become visible after the caller's
+            # timeout. Re-attest an already-published exact SHA without
+            # issuing another Git push. A negative/changed read is NEVER
+            # evidence that an earlier ambiguous mutation did not happen.
+            if (
+                remote_before is not None
+                and _gitea_branch_head_sha(remote_before) == expected_head
+            ):
+                observed_existing = None
+                read_error_class: str | None = None
+                try:
+                    observed_existing = await _gitea_branch_or_none(
+                        client, owner, repo, destination_branch
+                    )
+                except Exception as exc:
+                    read_error_class = type(exc).__name__
+                if (
+                    observed_existing is None
+                    or observed_existing.get("protected") is not False
+                    or _gitea_branch_head_sha(observed_existing) != expected_head
+                ):
+                    details: dict[str, Any] = {
+                        "phase": "existing_push_postcondition",
+                        "mutation_started": False,
+                        "mutation_occurred": False,
+                        "expected_head_sha": expected_head,
+                        "branch": destination_branch,
+                    }
+                    if read_error_class is not None:
+                        details["read_error_class"] = read_error_class
+                    return tool_error(
+                        tool="gitea_push_verified_commit",
+                        code="CHECK_FAILED",
+                        message=(
+                            "Previously published branch HEAD became unverifiable; "
+                            "no push was attempted"
+                        ),
+                        retryable=False,
+                        hint=(
+                            "Only re-read the exact remote branch; do not interpret "
+                            "an absent or changed branch as permission to retry a push."
+                        ),
+                        details=details,
+                        source="gitea",
+                    )
+
+                # Match the normal post-push candidate recheck. A result
+                # observed on Gitea never overrides a changed local proof.
+                existing_workspace_code: str | None = None
+                try:
+                    proof_existing = await asyncio.to_thread(
+                        verify_registered_delivery_workspace,
+                        project_root=project_root,
+                        expected_base_sha=expected_base_sha,
+                        expected_head_sha=expected_head_sha,
+                        allowed_files=allowed,
+                    )
+                    if proof_existing != proof_after:
+                        existing_workspace_code = "WORKSPACE_PROOF_CHANGED"
+                except VerifiedWorkspaceError as exc:
+                    existing_workspace_code = exc.code
+                except Exception:
+                    existing_workspace_code = "WORKSPACE_VERIFICATION_FAILED"
+                if existing_workspace_code is not None:
+                    return tool_error(
+                        tool="gitea_push_verified_commit",
+                        code="WORKSPACE_CONTENDED",
+                        message=(
+                            "Remote commit is already published, but the candidate "
+                            "changed or could not be reverified"
+                        ),
+                        retryable=False,
+                        hint=(
+                            "Do not repeat the push: the remote branch already "
+                            "matches expected_head_sha. Inspect workspace integrity."
+                        ),
+                        details={
+                            "phase": "candidate_post_existing",
+                            "mutation_started": False,
+                            "mutation_occurred": False,
+                            "expected_head_sha": expected_head,
+                            "remote_observed_sha": expected_head,
+                            "branch": destination_branch,
+                            "workspace_check_code": existing_workspace_code,
+                        },
+                        source="gitea",
+                    )
+                return tool_success(
+                    "gitea_push_verified_commit",
+                    result={
+                        "project": project,
+                        "owner": owner,
+                        "repo": repo,
+                        "branch": destination_branch,
+                        "base_sha": proof_after["base_sha"],
+                        "head_sha": expected_head,
+                        "changed_files": proof_after["changed_files"],
+                        "allowed_files": proof_after["allowed_files"],
+                        "required_checks": checks,
+                        "clean": True,
+                        "scope_verified": True,
+                        "checks_verified": True,
+                        "remote_observed_sha": expected_head,
+                        "candidate_verified_after_push": True,
+                        "outcome": "already_published",
+                        "mutation_started": False,
+                        "reconciliation_attempts": 2,
+                        "verified": True,
+                    },
                     source="gitea",
                 )
 
