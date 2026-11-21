@@ -810,7 +810,7 @@ async def docker_restart(container: str, timeout: int = 10) -> dict[str, Any]:
     )
     return _confirmation_response(action)
 
-def _compose_start_schema_error(
+def _compose_schema_error(
     tool: str,
     project_dir: str | None,
     services: list[str] | None,
@@ -818,7 +818,7 @@ def _compose_start_schema_error(
     timeout_limit: int,
     bool_flags: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Fail malformed Compose up/restart args before Docker or confirmation.
+    """Fail malformed Compose args before Docker, scopes or confirmation.
 
     Values are untrusted even when annotated by the MCP schema. Do not echo
     caller-controlled services or host paths into the public error envelope.
@@ -860,7 +860,7 @@ async def docker_compose_up(
     timeout: int = 120,
 ) -> dict[str, Any]:
     """Start services in a Compose project; requires confirmation."""
-    invalid = _compose_start_schema_error(
+    invalid = _compose_schema_error(
         "docker_compose_up", project_dir, services, timeout, 900,
         {"detach": detach, "build": build},
     )
@@ -902,7 +902,7 @@ async def docker_compose_restart(
     timeout: int = 30,
 ) -> dict[str, Any]:
     """Restart services in a Compose project; requires confirmation."""
-    invalid = _compose_start_schema_error(
+    invalid = _compose_schema_error(
         "docker_compose_restart", project_dir, services, timeout, 300,
     )
     if invalid is not None:
@@ -6920,6 +6920,12 @@ async def docker_compose_down(
 ) -> dict[str, Any]:
     """Stop and remove a Compose stack. DANGEROUS: requires confirmation.
     With mcp:docker:admin scope: use volumes=True to also remove named volumes."""
+    invalid = _compose_schema_error(
+        "docker_compose_down", project_dir, None, timeout, 300,
+        {"remove_orphans": remove_orphans, "volumes": volumes},
+    )
+    if invalid is not None:
+        return invalid
     if volumes:
         scopes = _get_token_scopes()
         if "mcp:docker:admin" not in scopes:

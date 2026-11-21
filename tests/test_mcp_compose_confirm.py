@@ -301,6 +301,60 @@ class TestComposeConfirmFlow:
     @pytest.mark.parametrize(
         ("kwargs", "field"),
         [
+            ({"project_dir": 42}, "project_dir"),
+            ({"project_dir": ""}, "project_dir"),
+            ({"project_dir": "   "}, "project_dir"),
+            ({"remove_orphans": "false"}, "remove_orphans"),
+            ({"remove_orphans": 1}, "remove_orphans"),
+            ({"volumes": "false"}, "volumes"),
+            ({"volumes": 1}, "volumes"),
+            ({"timeout": "30"}, "timeout"),
+            ({"timeout": True}, "timeout"),
+            ({"timeout": 0}, "timeout"),
+            ({"timeout": -1}, "timeout"),
+            ({"timeout": 301}, "timeout"),
+        ],
+    )
+    async def test_compose_down_invalid_schema_before_client_scope_and_token(
+        self, clean_confirm_store, kwargs, field
+    ):
+        import examples.mcp_server.server as srv
+
+        with patch.object(
+            srv, "DockerClient", side_effect=AssertionError("DockerClient called")
+        ), patch.object(
+            srv, "_get_workspace_registry", side_effect=AssertionError("registry called")
+        ), patch.object(
+            srv._confirm_store, "create_action", side_effect=AssertionError("token minted")
+        ), patch(
+            "examples.mcp_server.mcp_infra.adapters.docker._get_token_scopes",
+            side_effect=AssertionError("scope read before schema validation"),
+        ):
+            result = await srv.docker_compose_down(**kwargs)
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "INVALID_INPUT"
+        assert result["error"]["details"]["field"] == field
+        assert not srv._confirm_store._actions
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("timeout", [1, 30, 300])
+    async def test_compose_down_valid_timeout_still_requires_confirmation(
+        self, clean_confirm_store, timeout
+    ):
+        import examples.mcp_server.server as srv
+
+        with patch.object(srv, "DockerClient", lambda: _AliasDockerClient()):
+            result = await srv.docker_compose_down(timeout=timeout)
+
+        assert result["ok"] is True
+        assert result["result"]["status"] == "confirmation_required"
+        assert len(srv._confirm_store._actions) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("kwargs", "field"),
+        [
             ({"project_dir": 7}, "project_dir"),
             ({"project_dir": ""}, "project_dir"),
             ({"services": "web"}, "services"),
