@@ -80,6 +80,128 @@ def _run_overlapping_health(
     return _run_overlapping_read(client.health, response)
 
 
+@pytest.mark.parametrize(
+    ("method", "payload"),
+    [
+        ("health", {"ready": True}),
+        ("list_sessions", {"sessions": []}),
+    ],
+)
+def test_cross_transport_session_independent_reads_share_only_one_inflight_call(
+    method: str, payload: dict[str, object]
+) -> None:
+    # Two independent MCP lifecycles use separate scoped clients/SIDs but
+    # exactly the same base URL and API authority. Neither endpoint depends on
+    # the selected session ID, so concurrent reads should share one request.
+    base = GatewayClient(base_url="https://gateway.invalid", api_key="same-auth")
+    first, second = base.fork_session(), base.fork_session()
+    first.session_id, second.session_id = "session-a", "session-b"
+    order = iter((first, second))
+    select_lock = threading.Lock()
+
+    def read() -> object:
+        with select_lock:
+            client = next(order)
+        return getattr(client, method)()
+
+    results, calls = _run_overlapping_read(read, _response(200, payload))
+    assert results == [payload, payload]
+    assert calls == 1
+
+    # Only the concurrent flight is shared. There is no cross-transport cache.
+    with patch("gateway_client.httpx.get", return_value=_response(200, payload)) as get:
+        assert (first.health() if method == "health" else first.list_sessions()) == payload
+        assert (second.health() if method == "health" else second.list_sessions()) == payload
+    assert get.call_count == 2
+
+
+def test_cross_transport_429_is_shared_but_bounded_and_not_cached() -> None:
+    base = GatewayClient(base_url="https://gateway.invalid", api_key="same-auth")
+    first, second = base.fork_session(), base.fork_session()
+    first.session_id, second.session_id = "different-a", "different-b"
+    order = iter((first, second))
+    select_lock = threading.Lock()
+
+    def read() -> object:
+        with select_lock:
+            client = next(order)
+        return client.health()
+
+    results, calls = _run_overlapping_read(
+        read,
+        _response(
+            429,
+            {
+                "code": "RATE_LIMIT_EXCEEDED",
+                "message": "do not return secret auth token",
+                "details": {"private": "secret", "retry_after_seconds": 9},
+            },
+        ),
+    )
+    assert calls == 1
+    for result in results:
+        assert isinstance(result, GatewayClientError)
+        assert result.status_code == 429
+        assert result.body == {
+            "code": "RATE_LIMIT_EXCEEDED",
+            "message": "Gateway rate limit response",
+            "retryable": True,
+            "details": {"retry_after_seconds": 7, "bucket_class": "ip"},
+        }
+        assert "secret" not in str(result)
+    # Separate logical clients must not share a mutable exception instance,
+    # even when the underlying 429 response was de-duplicated.
+    assert results[0] is not results[1]
+    assert isinstance(results[0], GatewayClientError)
+    assert isinstance(results[1], GatewayClientError)
+    assert isinstance(results[0].body, dict)
+    results[0].body["details"]["retry_after_seconds"] = 99
+    assert results[1].body["details"]["retry_after_seconds"] == 7
+    with patch(
+        "gateway_client.httpx.get",
+        return_value=_response(200, {"ready": True}),
+    ) as get:
+        assert first.health() == {"ready": True}
+        assert second.health() == {"ready": True}
+    assert get.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "isolator", ["api_key", "base_url", "session_bound_path", "timeout"]
+)
+def test_cross_transport_flights_do_not_cross_security_or_session_bounds(
+    isolator: str,
+) -> None:
+    first = GatewayClient(
+        base_url="https://gateway.invalid", api_key="auth-a"
+    ).fork_session()
+    second = GatewayClient(
+        base_url="https://gateway.invalid", api_key="auth-a"
+    ).fork_session()
+    first.session_id, second.session_id = "different-a", "different-b"
+    if isolator == "api_key":
+        second.api_key = "auth-b"
+    if isolator == "base_url":
+        second.base_url = "https://other-gateway.invalid"
+    order = iter((first, second))
+    select_lock = threading.Lock()
+
+    def read() -> object:
+        with select_lock:
+            client = next(order)
+        if isolator == "session_bound_path":
+            return client.job_status("job-1")
+        if isolator == "timeout":
+            return client._get("/health", timeout=10 if client is first else 20)
+        return client.health()
+
+    results, calls = _run_overlapping_read(
+        read, _response(200, {"status": "ok"})
+    )
+    assert results == [{"status": "ok"}, {"status": "ok"}]
+    assert calls == 2
+
+
 def test_scoped_health_reads_share_only_inflight_work() -> None:
     client = GatewayClient(base_url="https://gateway.invalid", api_key="same-auth").fork_session()
     response = _response(200, {"ready": True})

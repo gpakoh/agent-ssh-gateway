@@ -282,6 +282,16 @@ class GatewayClient:
     _CONNECT_GOVERNOR_LOCK = threading.Lock()
     _connect_retry_not_before = 0.0
 
+    # Share only concurrent transport-agnostic reads across MCP lifecycles.
+    # All other GETs remain scoped to the instance and its logical SSH SID.
+    # The key contains the exact URL and API authority; a completed future
+    # is always removed, so this is not a cross-session response cache.
+    _SHARED_GET_INFLIGHT_LOCK = threading.Lock()
+    _shared_get_inflight: dict[
+        tuple[str, str, str, str, tuple[tuple[str, str], ...], int],
+        Future[dict[str, Any]],
+    ] = {}
+
     def __init__(
         self,
         base_url: str | None = None,
@@ -763,18 +773,45 @@ class GatewayClient:
         api_key = self.api_key
         session_id = self.session_id
         params_snapshot = dict(coalesced_params) if coalesced_params else None
-        key = (base_url, api_key, session_id, path, coalesced_params, timeout)
-        with self._get_inflight_lock:
-            shared = self._get_inflight.get(key)
+        # /health and /api/ssh/sessions are independent of the selected SSH
+        # session. Other clients with precisely the same API authority may
+        # share their in-flight read. All session/job/submission reads retain
+        # their existing instance-local and SID-specific isolation.
+        transport_independent = (
+            bool(api_key)
+            and path in {"/health", "/api/ssh/sessions"}
+            and coalesced_params == ()
+        )
+        if transport_independent:
+            inflight_lock = GatewayClient._SHARED_GET_INFLIGHT_LOCK
+            inflight = GatewayClient._shared_get_inflight
+            flight_session_id = ""
+        else:
+            inflight_lock = self._get_inflight_lock
+            inflight = self._get_inflight
+            flight_session_id = session_id
+        key = (base_url, api_key, flight_session_id, path, coalesced_params, timeout)
+        with inflight_lock:
+            shared = inflight.get(key)
             leader = shared is None
             if shared is None:
                 shared = Future()
-                self._get_inflight[key] = shared
+                inflight[key] = shared
 
         if not leader:
             try:
                 # Independent caller deadline: do not wait forever for a leader.
                 return copy.deepcopy(shared.result(timeout=timeout))
+            except GatewayClientError as exc:
+                if transport_independent:
+                    # A process-wide flight must not hand the same mutable
+                    # exception/body object to two separate MCP lifecycles.
+                    raise GatewayClientError(
+                        str(exc),
+                        status_code=exc.status_code,
+                        body=copy.deepcopy(exc.body),
+                    ) from None
+                raise
             except FutureTimeoutError as exc:
                 raise GatewayClientError(
                     "Gateway request timed out",
@@ -793,15 +830,17 @@ class GatewayClient:
                 base_url=base_url,
                 api_key=api_key,
             )
-            shared.set_result(result)
+            # A different client must not observe post-return mutations to
+            # the leader's successful response while receiving its own copy.
+            shared.set_result(copy.deepcopy(result) if transport_independent else result)
             return result
         except BaseException as exc:
             shared.set_exception(exc)
             raise
         finally:
-            with self._get_inflight_lock:
-                if self._get_inflight.get(key) is shared:
-                    del self._get_inflight[key]
+            with inflight_lock:
+                if inflight.get(key) is shared:
+                    del inflight[key]
 
     def _get_direct(
         self,
