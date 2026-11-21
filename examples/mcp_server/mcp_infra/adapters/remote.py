@@ -7437,6 +7437,85 @@ def _validate_action_log_tail_lines(tail_lines: int) -> int:
     return tail_lines
 
 
+def _diagnose_action_runner_fetch_failure(data: dict[str, Any]) -> dict[str, Any] | None:
+    """Conservatively classify an action-source network fetch failure.
+
+    A bounded, complete, already-redacted runner log must contain an initial
+    runner header, an exact v3 upload/download-artifact clone, its matching
+    git-upload-pack fetch error, and a failed job marker. This is diagnostic
+    metadata only; it is NEVER a safe-rerun authorization.
+    """
+    logs = data.get("logs")
+    if (
+        not isinstance(logs, str)
+        or len(logs) > GITEA_ACTION_JOB_LOG_DEFAULT_MAX_BYTES
+        or data.get("truncated") is not False
+        or data.get("line_truncated") is not False
+    ):
+        return None
+    lines = logs.splitlines()
+    if not lines:
+        return None
+    timestamped = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z (.*)$")
+    runner_header = timestamped.match(lines[0])
+    if (
+        runner_header is None
+        or re.fullmatch(
+            r"runner-[A-Za-z0-9._-]+\(version:[A-Za-z0-9._-]+\) "
+            r"received task \d+ of job .+",
+            runner_header.group(1),
+        )
+        is None
+    ):
+        return None
+    messages: list[str] = []
+    for line in lines:
+        match = timestamped.match(line)
+        if match is None:
+            return None
+        messages.append(match.group(1))
+    if "Job failed" not in messages:
+        return None
+    for idx, message in enumerate(messages):
+        for action in ("upload-artifact", "download-artifact"):
+            if message != f"git clone 'https://github.com/actions/{action}' # ref=v3":
+                continue
+            error_prefix = (
+                f'##[error]Get "https://github.com/actions/{action}'
+                '/info/refs?service=git-upload-pack": '
+            )
+            for later in messages[idx + 1 :]:
+                if not later.startswith(error_prefix):
+                    continue
+                reason = later[len(error_prefix) :]
+                if "connection reset by peer" in reason:
+                    network_class = "connection_reset"
+                elif any(
+                    evidence in reason
+                    for evidence in ("i/o timeout", "context deadline exceeded", "TLS handshake timeout")
+                ):
+                    network_class = "network_timeout"
+                else:
+                    continue
+                cleanup_timeout = any(
+                    "context deadline exceeded" in value
+                    and (
+                        "failed to remove container:" in value
+                        or "Error while stop job container:" in value
+                    )
+                    for value in messages
+                )
+                return {
+                    "failure_class": "external_action_source_fetch",
+                    "action": f"actions/{action}@v3",
+                    "network_error_class": network_class,
+                    "cleanup_timeout_observed": cleanup_timeout,
+                    "evidence_scope": "bounded_redacted_log_signature",
+                    "rerun_authorized": False,
+                }
+    return None
+
+
 def _tail_action_log(data: dict[str, Any], tail_lines: int) -> dict[str, Any]:
     logs = str(data.get("logs") or "")
     lines = logs.splitlines()
@@ -7499,6 +7578,9 @@ async def gitea_get_action_job_logs(
                 max_bytes=max_bytes,
             )
             data = _tail_action_log(data, tail_lines)
+            runner_failure = _diagnose_action_runner_fetch_failure(data)
+            if runner_failure is not None:
+                data["runner_failure_diagnostic"] = runner_failure
     except Exception as exc:
         return _remote_api_error("gitea_get_action_job_logs", "gitea", exc)
     return tool_success("gitea_get_action_job_logs", result=data, source="gitea")
