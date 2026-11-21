@@ -810,6 +810,48 @@ async def docker_restart(container: str, timeout: int = 10) -> dict[str, Any]:
     )
     return _confirmation_response(action)
 
+def _compose_start_schema_error(
+    tool: str,
+    project_dir: str | None,
+    services: list[str] | None,
+    timeout: int,
+    timeout_limit: int,
+    bool_flags: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Fail malformed Compose up/restart args before Docker or confirmation.
+
+    Values are untrusted even when annotated by the MCP schema. Do not echo
+    caller-controlled services or host paths into the public error envelope.
+    """
+    invalid: tuple[str, str] | None = None
+    if project_dir is not None and (
+        type(project_dir) is not str or not project_dir.strip()
+    ):
+        invalid = ("project_dir", "non-empty string or null")
+    elif services is not None and (
+        type(services) is not list
+        or any(type(s) is not str or SERVICE_NAME_RE.fullmatch(s) is None for s in services)
+    ):
+        invalid = ("services", "list of Compose service names or null")
+    else:
+        for field, value in (bool_flags or {}).items():
+            if type(value) is not bool:
+                invalid = (field, "boolean")
+                break
+        if invalid is None and (type(timeout) is not int or not 1 <= timeout <= timeout_limit):
+            invalid = ("timeout", f"integer from 1 to {timeout_limit} seconds")
+    if invalid is None:
+        return None
+    field, expected = invalid
+    return tool_error(
+        tool=tool,
+        code="INVALID_INPUT",
+        message="Invalid Docker Compose argument",
+        details={"field": field, "expected": expected},
+        source="docker",
+    )
+
+
 async def docker_compose_up(
     project_dir: str | None = None,
     services: list[str] | None = None,
@@ -817,7 +859,13 @@ async def docker_compose_up(
     build: bool = False,
     timeout: int = 120,
 ) -> dict[str, Any]:
-    """Start services in a Docker Compose project. DANGEROUS: requires confirmation via confirm_operation(token)."""
+    """Start services in a Compose project; requires confirmation."""
+    invalid = _compose_start_schema_error(
+        "docker_compose_up", project_dir, services, timeout, 900,
+        {"detach": detach, "build": build},
+    )
+    if invalid is not None:
+        return invalid
     client = _docker_client()
     try:
         resolved_dir, label = _resolve_compose_confirmation_target(project_dir, client)
@@ -853,7 +901,12 @@ async def docker_compose_restart(
     services: list[str] | None = None,
     timeout: int = 30,
 ) -> dict[str, Any]:
-    """Restart services in a Docker Compose project. DANGEROUS: requires confirmation via confirm_operation(token)."""
+    """Restart services in a Compose project; requires confirmation."""
+    invalid = _compose_start_schema_error(
+        "docker_compose_restart", project_dir, services, timeout, 300,
+    )
+    if invalid is not None:
+        return invalid
     client = _docker_client()
     try:
         resolved_dir, label = _resolve_compose_confirmation_target(project_dir, client)

@@ -254,6 +254,51 @@ class TestComposeConfirmFlow:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
+        ("tool", "kwargs", "field"),
+        [
+            ("docker_compose_up", {"project_dir": 22}, "project_dir"),
+            ("docker_compose_restart", {"project_dir": ""}, "project_dir"),
+            ("docker_compose_up", {"services": "web"}, "services"),
+            ("docker_compose_restart", {"services": "web"}, "services"),
+            ("docker_compose_up", {"services": {"web": True}}, "services"),
+            ("docker_compose_restart", {"services": [23]}, "services"),
+            ("docker_compose_up", {"services": ["web", "private/path"]}, "services"),
+            ("docker_compose_restart", {"services": ["private/path"]}, "services"),
+            ("docker_compose_up", {"detach": "false"}, "detach"),
+            ("docker_compose_up", {"detach": 1}, "detach"),
+            ("docker_compose_up", {"build": "false"}, "build"),
+            ("docker_compose_up", {"build": 1}, "build"),
+            ("docker_compose_up", {"timeout": "120"}, "timeout"),
+            ("docker_compose_restart", {"timeout": "30"}, "timeout"),
+            ("docker_compose_up", {"timeout": True}, "timeout"),
+            ("docker_compose_restart", {"timeout": True}, "timeout"),
+            ("docker_compose_up", {"timeout": 0}, "timeout"),
+            ("docker_compose_restart", {"timeout": 301}, "timeout"),
+            ("docker_compose_up", {"timeout": 901}, "timeout"),
+        ],
+    )
+    async def test_compose_up_restart_invalid_schema_before_docker_and_confirmation(
+        self, clean_confirm_store, tool, kwargs, field
+    ):
+        import examples.mcp_server.server as srv
+
+        with patch.object(
+            srv, "DockerClient", side_effect=AssertionError("DockerClient called")
+        ), patch.object(
+            srv, "_get_workspace_registry", side_effect=AssertionError("registry called")
+        ), patch.object(
+            srv._confirm_store, "create_action", side_effect=AssertionError("token minted")
+        ):
+            result = await getattr(srv, tool)(**kwargs)
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "INVALID_INPUT"
+        assert result["error"]["details"]["field"] == field
+        assert "private/path" not in json.dumps(result)
+        assert not srv._confirm_store._actions
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
         ("kwargs", "field"),
         [
             ({"project_dir": 7}, "project_dir"),
