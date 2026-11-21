@@ -1024,16 +1024,20 @@ async def _docker_compose_restart_impl(
         timeout=timeout,
     )
 
-# Recognize only the path of an explicit failed write, on the same log line
-# as the read-only error. Arbitrary text elsewhere in Docker output must not
-# choose a recovery action (logs may contain user-controlled build output).
+# Classify only a Docker failure line, not arbitrary successful RUN/echo output.
+# Known daemon/BuildKit prefixes may precede a direct 'mkdir' syscall error.
+# Keep bounded paths on the same error line, with no path or stderr in the result.
 _COMPOSE_READONLY_WRITE = re.compile(
-    r"(?:failed to|unable to|cannot)\s+"
+    r"^[ \t]*(?:(?:error:[ \t]*(?:failed to solve:[ \t]*)?)"
+    r"|(?:error response from daemon:[ \t]*))?"
+    r"(?:failed to|unable to|cannot)[ \t]+"
     r"(?:mkdir|write|create|open|rename|copy|mount|persist)\b"
     r"[^\n]{0,240}?(?P<path>/[^\s:;\\\"']+):\s*read-only file system"
-    r"|(?:^|\n)\s*(?:mkdir|write|create|open|rename|copy|mount|persist)\b"
+    r"|^[ \t]*(?:(?:error:[ \t]*failed to solve:[ \t]*)"
+    r"|(?:error response from daemon:[ \t]*))?"
+    r"(?:mkdir|write|create|open|rename|copy|mount|persist)\b"
     r"[^\n]{0,120}?(?P<direct_path>/[^\s:;\\\"']+):\s*read-only file system",
-    re.IGNORECASE,
+    re.IGNORECASE | re.MULTILINE,
 )
 
 

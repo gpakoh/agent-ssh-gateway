@@ -405,6 +405,18 @@ class TestComposeConfirmFlow:
                 "failed to write /hidden/operator/context: read-only file system; TOKEN=SECRET_456",
                 "unclassified",
             ),
+            (
+                "ERROR: failed to solve: mkdir /var/lib/buildkit/cache: read-only file system; TOKEN=SECRET_456",
+                "builder_state",
+            ),
+            (
+                "Error response from daemon: mkdir /var/lib/docker/overlay2: read-only file system; TOKEN=SECRET_456",
+                "daemon_namespace",
+            ),
+            (
+                "STEP RUN echo failed to write /var/lib/buildkit: read-only file system; TOKEN=SECRET_456",
+                "unclassified",
+            ),
         ],
     )
     async def test_compose_build_readonly_failure_has_redacted_write_surface(
@@ -671,6 +683,46 @@ class TestAdminDoubleBarrier:
         ),
         (
             "successful mkdir /run/mcp-docker-config/buildx: read-only file system",
+            None,
+            "unclassified",
+        ),
+        (
+            "RUN echo failed to mkdir /var/lib/buildkit: read-only file system",
+            None,
+            "unclassified",
+        ),
+        (
+            "Step 3 logging failed to write /var/lib/docker/overlay2: read-only file system",
+            None,
+            "unclassified",
+        ),
+        (
+            "ERROR: failed to solve: mkdir /var/lib/buildkit/cache: read-only file system",
+            None,
+            "builder_state",
+        ),
+        (
+            "ERROR: failed to solve: mkdir /srv/approved/project/output: read-only file system",
+            "/srv/approved/project",
+            "compose_context",
+        ),
+        (
+            "Error response from daemon: mkdir /var/lib/docker/overlay2: read-only file system",
+            None,
+            "daemon_namespace",
+        ),
+        (
+            "ERROR: failed to solve: mkdir /hidden/.cache/buildkit: read-only file system",
+            None,
+            "builder_cache",
+        ),
+        (
+            "ERROR: failed to solve: mkdir /run/mcp-docker-config/buildx/instances: read-only file system",
+            None,
+            "client_buildx_home",
+        ),
+        (
+            "step says ERROR: failed to solve: mkdir /var/lib/docker: read-only file system",
             None,
             "unclassified",
         ),
