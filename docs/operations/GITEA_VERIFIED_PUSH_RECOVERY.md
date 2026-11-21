@@ -39,6 +39,29 @@ repo/ref, and Gateway request ID.
    / ref-update audit and an exact no-mutation receipt are required before
    reconsidering a new mutation in the absence of a positive HEAD.
 
+## Durable Gateway intent evidence (new mutations)
+
+Before starting the trusted Git subprocess, Gateway writes an append-required
+`mcp.gitea_verified_push_intent` audit event with a random correlation ID,
+exact owner/repository/ref, original and expected SHAs, and authenticated
+Gitea username. Tokens, Git credential headers, raw stderr, verification
+commands and host paths are **never** included. If the audit sink is
+unavailable, Gateway returns `AUDIT_UNAVAILABLE`,
+`mutation_started=false` and performs **no Git push**.
+
+When the process survives the request, a best-effort
+`mcp.gitea_verified_push_outcome` event records either
+`remote_exact_head_verified`, `local_pre_mutation_failure`, or
+`remote_postcondition_unproven`. The mutation response includes
+`audit_intent_id` to match the durable event, including on an uncertain
+postcondition. If the client loses the entire response, only an authorized
+operator may inspect Gateway audit records by exact owner/ref/SHA and the
+incident time. A missing terminal outcome or a present intent **does not
+prove the remote write failed or succeeded**. Only a positive remote HEAD or
+authoritative Gitea receive-pack/ref-update evidence can settle the mutation.
+This audit change is prospective; it cannot invent a receipt for Supervisor
+#248 or earlier ambiguous requests.
+
 The default `reconcile_only=false` retains the regular verified-push
 workflow. It also avoids a duplicate push when it independently observes the
 exact already-published HEAD twice, but **do not use default mode to recover a
