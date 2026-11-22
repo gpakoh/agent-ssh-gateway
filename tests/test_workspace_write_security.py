@@ -420,7 +420,7 @@ class TestFileWriteSecurity:
         read_result = project_file_read(
             "write-project", "readback.txt", registry=write_registry,
         )
-        assert read_result["content"] == "read me"
+        assert read_result["content"] == "read me\n"
 
     # ── Overwrite existing ────────────────────────────────────────
 
@@ -854,4 +854,4 @@ class TestWriteSharedSecurity:
         read = project_file_read(
             "write-project", "unicode.txt", registry=write_registry,
         )
-        assert read["content"] == content.strip()
+        assert read["content"] == content

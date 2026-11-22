@@ -164,7 +164,9 @@ def project_file_read(
         "type": "file",
         "size": file_size,
         "encoding": "utf-8",
-        "content": "\n".join(sliced),
+        # Preserve the original UTF-8 text when no line range was requested.
+        # Rejoining splitlines() loses terminal newlines and normalizes CRLF.
+        "content": content if start_line is None and max_lines is None else "\n".join(sliced),
         "start_line": effective_start + 1,
         "end_line": end_line,
         "truncated": truncated,

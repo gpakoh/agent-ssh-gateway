@@ -88,6 +88,61 @@ class TestProjectFileRead:
         assert out["start_line"] == 1
         assert out["end_line"] == 2
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "first\nsecond\n",
+            "first\r\nsecond\r\n",
+            "first\rsecond\r",
+            "without-final-newline",
+            "Привет\n世界\n",
+            "\n",
+            "",
+        ],
+    )
+    def test_full_file_read_preserves_exact_utf8_bytes(self, tmp_project, body):
+        from app.workspace.files import project_file_read
+
+        target = tmp_project.src / "roundtrip.txt"
+        original = body.encode("utf-8")
+        target.write_bytes(original)
+        result = project_file_read(
+            "test-project", "src/roundtrip.txt",
+            registry=_make_registry(tmp_project.root),
+        )
+
+        assert result["content"].encode("utf-8") == original
+        assert result["size"] == len(original)
+        assert result["truncated"] is False
+
+    def test_truncated_full_file_read_preserves_exact_bounded_prefix(self, tmp_project):
+        from app.workspace.files import project_file_read
+
+        target = tmp_project.src / "roundtrip.txt"
+        target.write_bytes(b"alpha\r\nbeta\r\n")
+        result = project_file_read(
+            "test-project", "src/roundtrip.txt",
+            max_bytes=7, registry=_make_registry(tmp_project.root),
+        )
+
+        assert result["content"].encode("utf-8") == b"alpha\r\n"
+        assert result["size"] == 13
+        assert result["truncated"] is True
+
+    def test_explicit_line_slice_keeps_existing_normalized_contract(self, tmp_project):
+        from app.workspace.files import project_file_read
+
+        (tmp_project.src / "roundtrip.txt").write_bytes(b"first\r\nsecond\r\nthird\r\n")
+        result = project_file_read(
+            "test-project", "src/roundtrip.txt",
+            start_line=1, max_lines=2,
+            registry=_make_registry(tmp_project.root),
+        )
+
+        assert result["content"] == "first\nsecond"
+        assert result["start_line"] == 1
+        assert result["end_line"] == 2
+
     def test_file_read_line_slice(self, tmp_project):
         from app.workspace.files import project_file_read
 
