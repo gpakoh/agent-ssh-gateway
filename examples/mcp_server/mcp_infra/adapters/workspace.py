@@ -549,6 +549,9 @@ def gateway_workspace_verify(
         Contract v1 dict with project_id, path, matches, current_hash,
         file_exists.
     """
+    invalid_path = _workspace_relative_path_error("workspace_verify", relative_path)
+    if invalid_path is not None:
+        return invalid_path
     try:
         from app.workspace.preview import project_file_verify
 
