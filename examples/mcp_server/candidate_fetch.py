@@ -223,6 +223,7 @@ def fetch_managed_candidate_base(
     from examples.mcp_server import control_plane_git as git
     from examples.mcp_server.agent_sources import (
         ManagedSourceBundleError,
+        ManagedSourcePublicationStageError,
         materialize_trusted_remote_bundle,
     )
     from examples.mcp_server.candidate_clone import CandidateCloneError, _lineage_lock
@@ -400,6 +401,29 @@ def fetch_managed_candidate_base(
         }
         if code not in allowed:
             code = "GIT_OPERATION_FAILED"
+        diagnostics: dict[str, object] = {
+            "project": project,
+            "remote": remote,
+            "branch": branch,
+            "local_ref": tracking,
+            "tracking_ref_update_attempted": update_attempted,
+            "stage": stage,
+        }
+        if stage == "source_publication" and isinstance(exc, ManagedSourcePublicationStageError):
+            next_steps = {
+                "remote_fetch": "Inspect trusted Gitea transport and exact ref availability before a large retry.",
+                "bundle_creation": "Inspect executor-private scratch capacity; do not bypass bundle integrity checks.",
+                "bundle_verification": "Inspect trusted bundle integrity; do not import or override a mismatched SHA.",
+            }
+            diagnostics.update({
+                "publication_phase": exc.phase,
+                "publication_reason": exc.reason,
+                "publication_elapsed_ms": exc.elapsed_ms,
+                "next_step": next_steps.get(
+                    exc.phase,
+                    "Inspect the named trusted publication phase without overwriting candidate refs.",
+                ),
+            })
         return tool_error(
             tool="git_fetch_ref",
             code=code,
@@ -410,13 +434,6 @@ def fetch_managed_candidate_base(
                 else "Managed candidate exact-ref import did not complete; inspect the reported stage and leases before retrying."
             ),
             retryable=code in {"HEAD_MISMATCH", "WORKSPACE_CONTENDED", "GIT_REMOTE_UNAVAILABLE"},
-            details={
-                "project": project,
-                "remote": remote,
-                "branch": branch,
-                "local_ref": tracking,
-                "tracking_ref_update_attempted": update_attempted,
-                "stage": stage,
-            },
+            details=diagnostics,
             source="gitea",
         )

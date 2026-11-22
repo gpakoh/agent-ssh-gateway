@@ -19,6 +19,7 @@ repository is confirmed via the Gitea API.  Authentication uses one-shot
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import re
@@ -26,6 +27,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -71,6 +73,49 @@ def cleanup_remote_resolution_scope() -> Iterator[None]:
 
 class ManagedSourceBundleError(RuntimeError):
     """Raised when trusted source publication cannot prove the requested SHA."""
+
+
+class ManagedSourcePublicationStageError(ManagedSourceBundleError):
+    """Expose only a bounded, credential-free phase and reason to callers."""
+
+    def __init__(self, *, phase: str, reason: str, elapsed_ms: int) -> None:
+        self.phase = phase
+        self.reason = reason
+        self.elapsed_ms = max(0, min(int(elapsed_ms), 600_000))
+        super().__init__(f"trusted remote source publication failed during {phase} ({reason})")
+
+
+def _publication_failure_reason(exc: Exception) -> str:
+    """Return a fixed diagnostic enum; never forward Git stderr or URLs."""
+    detail = str(exc).lower()
+    if isinstance(exc, subprocess.TimeoutExpired) or "timed out" in detail:
+        return "timeout"
+    if (isinstance(exc, OSError) and exc.errno == errno.ENOSPC) or "no space left" in detail:
+        return "storage_full"
+    if "not our ref" in detail or "unadvertised object" in detail:
+        return "commit_unavailable"
+    if "authentication failed" in detail or "http 401" in detail or "http 403" in detail:
+        return "authentication_failed"
+    if isinstance(exc, PermissionError) or "permission denied" in detail:
+        return "permission_denied"
+    return "failed"
+
+
+@contextmanager
+def _publication_phase(phase: str) -> Iterator[None]:
+    """Annotate failures without ever including the underlying sensitive exception."""
+    started = time.monotonic()
+    try:
+        yield
+    except ManagedSourceDigestError:
+        # Existing worker launch guards explicitly require this ValueError ABI.
+        raise
+    except (ManagedSourceBundleError, OSError, subprocess.TimeoutExpired) as exc:
+        raise ManagedSourcePublicationStageError(
+            phase=phase,
+            reason=_publication_failure_reason(exc),
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+        ) from exc
 
 
 class ManagedSourceDigestError(ManagedSourceBundleError, ValueError):
@@ -594,11 +639,18 @@ def _fetch_remote_object(
             "trusted remote fetch failed"
         ) from exc
     if result.returncode != 0:
-        detail = (result.stderr or "").strip()
-        msg = "trusted remote fetch failed"
-        if detail:
-            msg = f"{msg}: {detail}"
-        raise ManagedSourceBundleError(msg)
+        # Git stderr can embed credential-bearing URLs: preserve only a fixed
+        # classifier, never the original text in an exception or its cause.
+        detail = (result.stderr or "").lower()
+        if "not our ref" in detail or "unadvertised object" in detail:
+            raise ManagedSourceBundleError("trusted remote fetch failed: not our ref")
+        if "authentication failed" in detail or "http 401" in detail or "http 403" in detail:
+            raise ManagedSourceBundleError("trusted remote fetch failed: authentication failed")
+        if "no space left" in detail:
+            raise ManagedSourceBundleError("trusted remote fetch failed: no space left")
+        if "permission denied" in detail:
+            raise ManagedSourceBundleError("trusted remote fetch failed: permission denied")
+        raise ManagedSourceBundleError("trusted remote fetch failed")
 
 
 def materialize_trusted_remote_bundle(
@@ -606,105 +658,87 @@ def materialize_trusted_remote_bundle(
     expected: str,
     bundle_path: str | Path,
 ) -> ManagedSourcePublication:
-    """Fetch one exact commit from a trusted remote into a verified bundle.
+    """Fetch and verify an exact trusted SHA, reporting redacted failure phases.
 
-    The registered checkout is used only to prove repository identity. Git
-    objects are fetched into executor-private scratch storage, so callers can
-    materialize a fresh authoritative commit without writing the source
-    worktree, index, refs, or object database.
+    All fetched objects live in temporary bare storage; registered source Git
+    objects, worktree, refs, and index remain untouched.
     """
-    expected = str(expected or "").strip().lower()
-    if not re.fullmatch(r"[0-9a-f]{40}", expected):
-        raise ManagedSourceBundleError("trusted remote expected commit is invalid")
-    try:
-        project_root = Path(source_root).resolve(strict=True)
-    except OSError as exc:
-        raise ManagedSourceBundleError("registered source root is unavailable") from exc
+    with _publication_phase("input_validation"):
+        expected = str(expected or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{40}", expected):
+            raise ManagedSourceBundleError("trusted remote expected commit is invalid")
+    with _publication_phase("source_root"):
+        try:
+            project_root = Path(source_root).resolve(strict=True)
+        except OSError as exc:
+            raise ManagedSourceBundleError("registered source root is unavailable") from exc
     bundle_path = Path(bundle_path)
-    username, clone_url, token = _resolve_trusted_remote(project_root)
+    with _publication_phase("remote_resolution"):
+        username, clone_url, token = _resolve_trusted_remote(project_root)
 
-    temp_fd, temp_name = tempfile.mkstemp(
-        prefix=f".{expected}.", suffix=".bundle.tmp", dir=bundle_path.parent
-    )
-    os.close(temp_fd)
-    temp_bundle = Path(temp_name)
-    temp_bundle.unlink()
+    with _publication_phase("scratch_init"):
+        temp_fd, temp_name = tempfile.mkstemp(
+            prefix=f".{expected}.", suffix=".bundle.tmp", dir=bundle_path.parent
+        )
+        os.close(temp_fd)
+        temp_bundle = Path(temp_name)
+        temp_bundle.unlink()
 
     try:
         with tempfile.TemporaryDirectory(prefix="mcp-agent-remote-") as bare_dir_path:
             bare_dir = Path(bare_dir_path)
             bare = bare_dir / "source.git"
-            subprocess.run(
-                ["git", "init", "--bare", str(bare)],
-                cwd=str(bare_dir),
-                text=True,
-                capture_output=True,
-                timeout=30,
-                check=False,
-            )
-
-            _fetch_remote_object(username, clone_url, token, expected, bare)
-
-            fetched = subprocess.run(
-                ["git", f"--git-dir={bare}", "rev-parse", f"{expected}^{{commit}}"],
-                cwd=str(bare_dir),
-                text=True,
-                capture_output=True,
-                timeout=30,
-                check=False,
-            )
-            if fetched.returncode != 0:
-                raise ManagedSourceBundleError(
-                    "trusted remote did not contain the requested commit"
+            with _publication_phase("scratch_init"):
+                initialized = subprocess.run(
+                    ["git", "init", "--bare", str(bare)],
+                    cwd=str(bare_dir), text=True, capture_output=True,
+                    timeout=30, check=False,
                 )
-            resolved = fetched.stdout.strip().lower()
-            if resolved != expected:
-                raise ManagedSourceBundleError(
-                    "trusted remote resolved to an unexpected commit"
+                if initialized.returncode != 0:
+                    raise ManagedSourceBundleError("trusted source scratch init failed")
+
+            with _publication_phase("remote_fetch"):
+                _fetch_remote_object(username, clone_url, token, expected, bare)
+
+            with _publication_phase("commit_verification"):
+                fetched = subprocess.run(
+                    ["git", f"--git-dir={bare}", "rev-parse", f"{expected}^{{commit}}"],
+                    cwd=str(bare_dir), text=True, capture_output=True,
+                    timeout=30, check=False,
                 )
+                if fetched.returncode != 0:
+                    raise ManagedSourceBundleError("trusted remote did not contain the requested commit")
+                if fetched.stdout.strip().lower() != expected:
+                    raise ManagedSourceBundleError("trusted remote resolved to an unexpected commit")
 
-            subprocess.run(
-                [
-                    "git",
-                    f"--git-dir={bare}",
-                    "update-ref",
-                    "refs/heads/source",
-                    expected,
-                ],
-                cwd=str(bare_dir),
-                text=True,
-                capture_output=True,
-                timeout=10,
-                check=False,
-            )
-
-            bundle_result = subprocess.run(
-                [
-                    "git",
-                    f"--git-dir={bare}",
-                    "bundle",
-                    "create",
-                    str(temp_bundle),
-                    "refs/heads/source",
-                ],
-                cwd=str(bare_dir),
-                text=True,
-                capture_output=True,
-                timeout=_GIT_TIMEOUT_SECONDS,
-                check=False,
-            )
-            if bundle_result.returncode != 0:
-                raise ManagedSourceBundleError(
-                    "trusted remote bundle creation failed"
+            with _publication_phase("ref_update"):
+                updated = subprocess.run(
+                    ["git", f"--git-dir={bare}", "update-ref", "refs/heads/source", expected],
+                    cwd=str(bare_dir), text=True, capture_output=True,
+                    timeout=10, check=False,
                 )
+                if updated.returncode != 0:
+                    raise ManagedSourceBundleError("trusted remote staging ref update failed")
 
-        if _bundle_head(temp_bundle) != expected:
-            raise ManagedSourceBundleError("remote bundle verification failed")
+            with _publication_phase("bundle_creation"):
+                created = subprocess.run(
+                    ["git", f"--git-dir={bare}", "bundle", "create",
+                     str(temp_bundle), "refs/heads/source"],
+                    cwd=str(bare_dir), text=True, capture_output=True,
+                    timeout=_GIT_TIMEOUT_SECONDS, check=False,
+                )
+                if created.returncode != 0:
+                    raise ManagedSourceBundleError("trusted remote bundle creation failed")
 
-        _assert_bundle_usable(temp_bundle, expected, full_proof=True)
+        with _publication_phase("bundle_verification"):
+            if _bundle_head(temp_bundle) != expected:
+                raise ManagedSourceBundleError("remote bundle verification failed")
+            _assert_bundle_usable(temp_bundle, expected, full_proof=True)
 
-        os.replace(temp_bundle, bundle_path)
-        return bind_publication_bytes(bundle_path, expected)
+        with _publication_phase("artifact_install"):
+            os.replace(temp_bundle, bundle_path)
+        with _publication_phase("digest_binding"):
+            return bind_publication_bytes(bundle_path, expected)
     finally:
         temp_bundle.unlink(missing_ok=True)
 
