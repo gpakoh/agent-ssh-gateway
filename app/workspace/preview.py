@@ -21,6 +21,7 @@ from app.workspace.edit import (
     _make_diff,
     _parse_unified_diff,
     _symlink_safe_preflight,
+    _validate_deletion_patch,
 )
 from app.workspace.policy import WorkspacePolicyError
 from app.workspace.registry import WorkspaceRegistry, get_registry
@@ -240,6 +241,7 @@ def project_file_preview_patch(
     # preview must reflect a deletion (file will be gone), not an edit that
     # leaves a 1-byte newline behind.
     if _is_deletion_patch(patch):
+        _validate_deletion_patch(patch, old_content)
         diff = _make_diff(old_content, "", relative_path)
         return {
             "project_id": project_id,

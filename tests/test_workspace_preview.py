@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.workspace.edit import PatchError
 from app.workspace.models import ProjectInfo
 from app.workspace.preview import (
     project_file_preview_edit,
@@ -358,3 +359,27 @@ class TestVerify:
                 "sha256:anything",
                 registry=preview_workspace["registry"],
             )
+
+
+@pytest.mark.parametrize(
+    ("path", "bad_patch"),
+    [
+        ("README.md", "+++ /dev/null"),
+        ("README.md", "--- a/README.md\n+++ /dev/null\n@@ -1 +0,0 @@\n-wrong-content\n"),
+        ("src/main.py", "--- a/src/main.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-def main():\n"),
+        ("README.md", "--- a/README.md\n+++ /dev/null\n@@ -1 +0,0 @@\n-# Preview Project\n+other\n"),
+        ("README.md", "--- a/README.md\n+++ /dev/null\n@@ -50 +0,0 @@\n-# Preview Project\n"),
+    ],
+)
+def test_dev_null_preview_must_attest_exact_full_file(
+    preview_workspace, path: str, bad_patch: str
+) -> None:
+    target = preview_workspace["project"] / path
+    before = target.read_bytes()
+
+    with pytest.raises(PatchError):
+        project_file_preview_patch(
+            "preview-project", path, bad_patch, registry=preview_workspace["registry"]
+        )
+
+    assert target.read_bytes() == before

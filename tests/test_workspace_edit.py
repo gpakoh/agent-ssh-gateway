@@ -726,3 +726,28 @@ class TestApplyPatch:
             "    return 0\r\n"
         )
         assert "\n" not in content.replace("\r\n", "")
+
+
+@pytest.mark.parametrize(
+    ("path", "bad_patch"),
+    [
+        ("README.md", "+++ /dev/null"),
+        ("README.md", "--- a/README.md\n+++ /dev/null\n@@ -1 +0,0 @@\n-wrong-content\n"),
+        ("src/main.py", "--- a/src/main.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-def main():\n"),
+        ("README.md", "--- a/README.md\n+++ /dev/null\n@@ -1 +0,0 @@\n-# Edit Project\n+other\n"),
+        ("README.md", "--- a/README.md\n+++ /dev/null\n@@ -50 +0,0 @@\n-# Edit Project\n"),
+    ],
+)
+def test_dev_null_patch_must_attest_exact_full_file_before_deletion(
+    edit_workspace, path: str, bad_patch: str
+) -> None:
+    target = edit_workspace["project"] / path
+    before = target.read_bytes()
+
+    with pytest.raises(PatchError):
+        project_apply_patch(
+            "edit-project", path, bad_patch, registry=edit_workspace["registry"]
+        )
+
+    assert target.exists()
+    assert target.read_bytes() == before
