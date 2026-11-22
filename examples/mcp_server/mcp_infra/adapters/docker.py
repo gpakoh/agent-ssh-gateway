@@ -764,6 +764,45 @@ def _compose_read_schema_error(
     )
 
 
+def _compose_read_command_error(tool: str, exc: RuntimeError) -> dict[str, Any]:
+    """Classify known Compose config errors without exposing host paths.
+
+    Keep unrelated Docker errors unchanged; no fallback shell or privilege
+    expansion is allowed.
+    """
+    message = str(exc)
+    normalized = message.lower()
+    if "no configuration file provided: not found" in normalized:
+        return tool_error(
+            tool=tool,
+            code="INVALID_INPUT",
+            message="Docker Compose configuration not found in project_dir",
+            details={
+                "field": "project_dir",
+                "reason": "config_not_found",
+                "next_step": "Select a directory containing a Compose configuration file",
+            },
+            source="docker",
+        )
+    if normalized.startswith("docker exited 1: open ") and normalized.endswith(
+        "permission denied"
+    ):
+        return tool_error(
+            tool=tool,
+            code="DOCKER_COMMAND_FAILED",
+            message="Docker Compose configuration is unreadable by the executor",
+            details={
+                "field": "project_dir",
+                "reason": "config_unreadable",
+                "next_step": "Check the authorized Compose configuration mount and read access",
+            },
+            source="docker",
+        )
+    return tool_error(
+        tool=tool, code="DOCKER_COMMAND_FAILED", message=message, source="docker"
+    )
+
+
 async def docker_compose_ps(
     project_dir: str | None = None, limit: int = 50
 ) -> dict[str, Any]:
@@ -778,7 +817,7 @@ async def docker_compose_ps(
     except ValueError as exc:
         return tool_error(tool="docker_compose_ps", code="INVALID_INPUT", message=str(exc), source="docker")
     except RuntimeError as exc:
-        return tool_error(tool="docker_compose_ps", code="DOCKER_COMMAND_FAILED", message=str(exc), source="docker")
+        return _compose_read_command_error("docker_compose_ps", exc)
     if isinstance(rows, str):
         return tool_success("docker_compose_ps", result=rows, source="docker")
     return tool_success(
@@ -805,9 +844,7 @@ async def docker_compose_services(
             tool="docker_compose_services", code="INVALID_INPUT", message=str(exc), source="docker"
         )
     except RuntimeError as exc:
-        return tool_error(
-            tool="docker_compose_services", code="DOCKER_COMMAND_FAILED", message=str(exc), source="docker"
-        )
+        return _compose_read_command_error("docker_compose_services", exc)
     return tool_success("docker_compose_services", result=result, source="docker")
 
 async def docker_compose_logs(
@@ -839,9 +876,7 @@ async def docker_compose_logs(
             tool="docker_compose_logs", code="INVALID_INPUT", message=str(exc), source="docker"
         )
     except RuntimeError as exc:
-        return tool_error(
-            tool="docker_compose_logs", code="DOCKER_COMMAND_FAILED", message=str(exc), source="docker"
-        )
+        return _compose_read_command_error("docker_compose_logs", exc)
     return tool_success("docker_compose_logs", result=result, source="docker")
 
 async def docker_stop(container: str, timeout: int = 10) -> dict[str, Any]:
