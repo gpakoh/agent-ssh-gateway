@@ -298,3 +298,84 @@ async def test_compose_confirmation_keeps_logical_project_id() -> None:
         assert RESOLVED_ROOT not in result["summary"]
     finally:
         srv._confirm_store._actions.clear()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "client_method", "docker_error", "expected_code", "reason"),
+    [
+        (
+            tool, method,
+            "docker exited 1: no configuration file provided: not found",
+            "INVALID_INPUT", "config_not_found",
+        )
+        for tool, method in (
+            ("docker_compose_services", "compose_services"),
+            ("docker_compose_ps", "compose_ps"),
+            ("docker_compose_logs", "compose_logs"),
+        )
+    ] + [
+        (
+            tool, method,
+            "docker exited 1: open /secret/tenant/compose.yaml: permission denied",
+            "DOCKER_COMMAND_FAILED", "config_unreadable",
+        )
+        for tool, method in (
+            ("docker_compose_services", "compose_services"),
+            ("docker_compose_ps", "compose_ps"),
+            ("docker_compose_logs", "compose_logs"),
+        )
+    ],
+)
+async def test_compose_read_reports_safe_actionable_config_diagnostic(
+    tool_name: str,
+    client_method: str,
+    docker_error: str,
+    expected_code: str,
+    reason: str,
+) -> None:
+    client = _docker_client()
+    method = AsyncMock(side_effect=RuntimeError(docker_error))
+    setattr(client, client_method, method)
+
+    with (
+        patch.object(srv, "_get_workspace_registry", return_value=_unknown_project()),
+        patch.object(srv, "DockerClient", return_value=client),
+    ):
+        result = await getattr(srv, tool_name)(
+            project_dir="/allowed/compose-app"
+        )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == expected_code
+    assert result["error"]["details"]["field"] == "project_dir"
+    assert result["error"]["details"]["reason"] == reason
+    assert "/secret/tenant" not in str(result)
+    assert result["error"]["retryable"] is False
+    method.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "client_method"),
+    [
+        ("docker_compose_services", "compose_services"),
+        ("docker_compose_ps", "compose_ps"),
+        ("docker_compose_logs", "compose_logs"),
+    ],
+)
+async def test_compose_read_unrelated_docker_failures_remain_command_failed(
+    tool_name: str, client_method: str
+) -> None:
+    client = _docker_client()
+    setattr(client, client_method, AsyncMock(side_effect=RuntimeError(
+        "docker exited 1: connection refused"
+    )))
+    with (
+        patch.object(srv, "_get_workspace_registry", return_value=_unknown_project()),
+        patch.object(srv, "DockerClient", return_value=client),
+    ):
+        result = await getattr(srv, tool_name)(project_dir="/allowed/compose-app")
+    assert result["ok"] is False
+    assert result["error"]["code"] == "DOCKER_COMMAND_FAILED"
+    assert result["error"]["message"] == "docker exited 1: connection refused"
