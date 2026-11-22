@@ -648,6 +648,22 @@ def _is_deletion_patch(patch_text: str) -> bool:
 # ── Public tool ──────────────────────────────────────────────────
 
 
+def _validate_deletion_patch(patch_text: str, existing_content: str) -> None:
+    """Require a matching full-file deletion hunk before unlinking any file.
+
+    A bare `+++ /dev/null` marker cannot authorize a delete: it must
+    describe the actual file's contents, with no unremoved or added lines.
+    """
+    hunks = _parse_unified_diff(patch_text)
+    if not hunks:
+        raise PatchError("Deletion patch must contain at least one hunk")
+    if any(hunk["added"] for hunk in hunks):
+        raise PatchError("Deletion patch cannot add lines")
+    remaining = _apply_hunks(existing_content.splitlines(), hunks)
+    if remaining:
+        raise PatchError("Deletion patch must remove all existing lines")
+
+
 def project_apply_patch(
     project_id: str,
     relative_path: str,
@@ -689,6 +705,7 @@ def project_apply_patch(
 
     # A unified diff targeting /dev/null means "delete this file".
     if _is_deletion_patch(patch):
+        _validate_deletion_patch(patch, old_content)
         full.unlink()
         result: dict[str, Any] = {
             "project_id": project_id,
