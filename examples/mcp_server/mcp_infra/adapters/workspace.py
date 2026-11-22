@@ -170,6 +170,12 @@ def gateway_workspace_file_write(
             code="WORKSPACE_READONLY",
             message="Workspace is in read-only mode",
         )
+    invalid_size = _workspace_max_bytes_error("workspace_file_write", max_bytes)
+    if invalid_size is not None:
+        return invalid_size
+    invalid_path = _workspace_relative_path_error("workspace_file_write", relative_path)
+    if invalid_path is not None:
+        return invalid_path
     try:
         from app.workspace.edit import project_file_write
 
@@ -223,6 +229,21 @@ def gateway_workspace_file_edit(
             code="WORKSPACE_READONLY",
             message="Workspace is in read-only mode",
         )
+    invalid_size = _workspace_max_bytes_error("workspace_file_edit", max_bytes)
+    if invalid_size is not None:
+        return invalid_size
+    if not isinstance(old_string, str) or not old_string:
+        return tool_error(
+            tool="workspace_file_edit",
+            code="INVALID_INPUT",
+            message="old_string must be a non-empty string",
+            details={"field": "old_string"},
+            retryable=False,
+            source="gateway",
+        )
+    invalid_path = _workspace_relative_path_error("workspace_file_edit", relative_path)
+    if invalid_path is not None:
+        return invalid_path
     try:
         from app.workspace.edit import project_file_edit
 
@@ -274,6 +295,21 @@ def gateway_workspace_apply_patch(
             code="WORKSPACE_READONLY",
             message="Workspace is in read-only mode",
         )
+    invalid_size = _workspace_max_bytes_error("workspace_apply_patch", max_bytes)
+    if invalid_size is not None:
+        return invalid_size
+    invalid_path = _workspace_relative_path_error("workspace_apply_patch", relative_path)
+    if invalid_path is not None:
+        return invalid_path
+    if not isinstance(patch, str) or not patch.strip():
+        return tool_error(
+            tool="workspace_apply_patch",
+            code="INVALID_INPUT",
+            message="patch must be a non-empty unified diff",
+            details={"field": "patch"},
+            retryable=False,
+            source="gateway",
+        )
     try:
         from app.workspace.edit import project_apply_patch
 
@@ -298,8 +334,8 @@ def gateway_workspace_apply_patch(
         return _workspace_mutation_error("workspace_apply_patch", exc)
 
 
-def _preview_max_bytes_error(tool: str, max_bytes: int) -> dict[str, Any] | None:
-    """Reject a malformed preview bound before registry or filesystem work."""
+def _workspace_max_bytes_error(tool: str, max_bytes: int) -> dict[str, Any] | None:
+    """Reject a malformed workspace bound before registry or filesystem work."""
     if type(max_bytes) is int and max_bytes > 0:
         return None
     return tool_error(
@@ -312,7 +348,7 @@ def _preview_max_bytes_error(tool: str, max_bytes: int) -> dict[str, Any] | None
     )
 
 
-def _preview_relative_path_error(tool: str, relative_path: str) -> dict[str, Any] | None:
+def _workspace_relative_path_error(tool: str, relative_path: str) -> dict[str, Any] | None:
     """Reject obvious unsafe path shapes before registry access, without echoing input."""
     valid = (
         isinstance(relative_path, str)
@@ -358,10 +394,10 @@ def gateway_workspace_preview_write(
         Contract v1 dict with before_hash, after_hash, size_before,
         size_after, diff, changed, file_exists_before, encoding.
     """
-    invalid_size = _preview_max_bytes_error("workspace_preview_write", max_bytes)
+    invalid_size = _workspace_max_bytes_error("workspace_preview_write", max_bytes)
     if invalid_size is not None:
         return invalid_size
-    invalid_path = _preview_relative_path_error("workspace_preview_write", relative_path)
+    invalid_path = _workspace_relative_path_error("workspace_preview_write", relative_path)
     if invalid_path is not None:
         return invalid_path
     try:
@@ -406,7 +442,7 @@ def gateway_workspace_preview_edit(
         Contract v1 dict with before_hash, after_hash, size_before,
         size_after, diff, changed, replaced, encoding.
     """
-    invalid_size = _preview_max_bytes_error("workspace_preview_edit", max_bytes)
+    invalid_size = _workspace_max_bytes_error("workspace_preview_edit", max_bytes)
     if invalid_size is not None:
         return invalid_size
     if not isinstance(old_string, str) or not old_string:
@@ -418,7 +454,7 @@ def gateway_workspace_preview_edit(
             retryable=False,
             source="gateway",
         )
-    invalid_path = _preview_relative_path_error("workspace_preview_edit", relative_path)
+    invalid_path = _workspace_relative_path_error("workspace_preview_edit", relative_path)
     if invalid_path is not None:
         return invalid_path
     try:
@@ -462,10 +498,10 @@ def gateway_workspace_preview_patch(
         Contract v1 dict with before_hash, after_hash, size_before,
         size_after, diff, changed, applied, encoding.
     """
-    invalid_size = _preview_max_bytes_error("workspace_preview_patch", max_bytes)
+    invalid_size = _workspace_max_bytes_error("workspace_preview_patch", max_bytes)
     if invalid_size is not None:
         return invalid_size
-    invalid_path = _preview_relative_path_error("workspace_preview_patch", relative_path)
+    invalid_path = _workspace_relative_path_error("workspace_preview_patch", relative_path)
     if invalid_path is not None:
         return invalid_path
     if not isinstance(patch, str) or not patch.strip():
