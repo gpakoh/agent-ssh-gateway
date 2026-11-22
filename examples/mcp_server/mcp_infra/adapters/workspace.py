@@ -297,6 +297,20 @@ def gateway_workspace_apply_patch(
         return _workspace_mutation_error("workspace_apply_patch", exc)
 
 
+def _preview_max_bytes_error(tool: str, max_bytes: int) -> dict[str, Any] | None:
+    """Reject a malformed preview bound before registry or filesystem work."""
+    if type(max_bytes) is int and max_bytes > 0:
+        return None
+    return tool_error(
+        tool=tool,
+        code="INVALID_INPUT",
+        message="max_bytes must be a positive integer",
+        details={"field": "max_bytes", "min_value": 1},
+        retryable=False,
+        source="gateway",
+    )
+
+
 def gateway_workspace_preview_write(
     project_id: str,
     relative_path: str,
@@ -317,6 +331,9 @@ def gateway_workspace_preview_write(
         Contract v1 dict with before_hash, after_hash, size_before,
         size_after, diff, changed, file_exists_before, encoding.
     """
+    invalid_size = _preview_max_bytes_error("workspace_preview_write", max_bytes)
+    if invalid_size is not None:
+        return invalid_size
     try:
         from app.workspace.preview import project_file_preview_write
 
@@ -359,6 +376,18 @@ def gateway_workspace_preview_edit(
         Contract v1 dict with before_hash, after_hash, size_before,
         size_after, diff, changed, replaced, encoding.
     """
+    invalid_size = _preview_max_bytes_error("workspace_preview_edit", max_bytes)
+    if invalid_size is not None:
+        return invalid_size
+    if not isinstance(old_string, str) or not old_string:
+        return tool_error(
+            tool="workspace_preview_edit",
+            code="INVALID_INPUT",
+            message="old_string must be a non-empty string",
+            details={"field": "old_string"},
+            retryable=False,
+            source="gateway",
+        )
     try:
         from app.workspace.preview import project_file_preview_edit
 
@@ -400,6 +429,9 @@ def gateway_workspace_preview_patch(
         Contract v1 dict with before_hash, after_hash, size_before,
         size_after, diff, changed, applied, encoding.
     """
+    invalid_size = _preview_max_bytes_error("workspace_preview_patch", max_bytes)
+    if invalid_size is not None:
+        return invalid_size
     try:
         from app.workspace.preview import project_file_preview_patch
 
