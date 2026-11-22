@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import errno
 import os
+from pathlib import Path
 from typing import Any
 
 from tool_results import tool_error, tool_success
@@ -311,6 +312,32 @@ def _preview_max_bytes_error(tool: str, max_bytes: int) -> dict[str, Any] | None
     )
 
 
+def _preview_relative_path_error(tool: str, relative_path: str) -> dict[str, Any] | None:
+    """Reject obvious unsafe path shapes before registry access, without echoing input."""
+    valid = (
+        isinstance(relative_path, str)
+        and bool(relative_path)
+        and "\x00" not in relative_path
+    )
+    if valid:
+        path = Path(relative_path)
+        valid = (
+            not path.is_absolute()
+            and not relative_path.startswith("~")
+            and ".." not in path.parts
+        )
+    if valid:
+        return None
+    return tool_error(
+        tool=tool,
+        code="INVALID_INPUT",
+        message="relative_path must be a safe project-relative file path",
+        details={"field": "relative_path"},
+        retryable=False,
+        source="gateway",
+    )
+
+
 def gateway_workspace_preview_write(
     project_id: str,
     relative_path: str,
@@ -334,6 +361,9 @@ def gateway_workspace_preview_write(
     invalid_size = _preview_max_bytes_error("workspace_preview_write", max_bytes)
     if invalid_size is not None:
         return invalid_size
+    invalid_path = _preview_relative_path_error("workspace_preview_write", relative_path)
+    if invalid_path is not None:
+        return invalid_path
     try:
         from app.workspace.preview import project_file_preview_write
 
@@ -388,6 +418,9 @@ def gateway_workspace_preview_edit(
             retryable=False,
             source="gateway",
         )
+    invalid_path = _preview_relative_path_error("workspace_preview_edit", relative_path)
+    if invalid_path is not None:
+        return invalid_path
     try:
         from app.workspace.preview import project_file_preview_edit
 
@@ -432,6 +465,18 @@ def gateway_workspace_preview_patch(
     invalid_size = _preview_max_bytes_error("workspace_preview_patch", max_bytes)
     if invalid_size is not None:
         return invalid_size
+    invalid_path = _preview_relative_path_error("workspace_preview_patch", relative_path)
+    if invalid_path is not None:
+        return invalid_path
+    if not isinstance(patch, str) or not patch.strip():
+        return tool_error(
+            tool="workspace_preview_patch",
+            code="INVALID_INPUT",
+            message="patch must be a non-empty unified diff",
+            details={"field": "patch"},
+            retryable=False,
+            source="gateway",
+        )
     try:
         from app.workspace.preview import project_file_preview_patch
 
