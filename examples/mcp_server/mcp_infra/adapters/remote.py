@@ -2008,7 +2008,11 @@ async def gitea_list_issues(
             },
             source="gitea",
         )
-    invalid = _gitea_read_pagination_error("gitea_list_issues", "limit", limit)
+    # Confirmed-Issue scanning is capped at the client's 50-item page bound,
+    # not the generic 500-item pagination limit. Reject before token/HTTP work.
+    invalid = _gitea_read_pagination_error(
+        "gitea_list_issues", "limit", limit, max_value=gitea_client.MAX_LIMIT
+    )
     if invalid is not None:
         return invalid
     token = os.environ.get("GITEA_TOKEN", "")

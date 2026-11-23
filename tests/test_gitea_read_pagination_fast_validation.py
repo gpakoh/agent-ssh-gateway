@@ -29,7 +29,11 @@ async def test_gitea_list_limit_invalid_before_credentials(
     assert result["error"]["retryable"] is False
     assert result["error"]["details"]["field"] == "limit"
     assert result["error"]["details"]["min_value"] == 1
-    assert result["error"]["details"]["max_value"] == 500
+    # Confirmed Issues have a 50-entry scan cap; the other read lists
+    # retain the generic 500-entry pagination preflight contract.
+    assert result["error"]["details"]["max_value"] == (
+        50 if tool_name == "gitea_list_issues" else 500
+    )
 
 
 @pytest.mark.asyncio
