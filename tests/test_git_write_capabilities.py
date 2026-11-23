@@ -134,6 +134,80 @@ class _CapabilityClient:
         return dict(self.mutation_result)
 
 
+@pytest.mark.parametrize(
+    ("relation", "expected_local", "expected_remote", "can_fast_forward"),
+    [
+        ("up_to_date", 0, 0, True),
+        ("behind", 0, 1, True),
+        ("ahead", 1, 0, False),
+        ("diverged", 1, 1, False),
+    ],
+)
+def test_cached_origin_alignment_uses_real_git_ancestry_without_mutating(
+    tmp_path: Path, relation: str, expected_local: int,
+    expected_remote: int, can_fast_forward: bool,
+) -> None:
+    repo = _init_repo(tmp_path)
+    base = _git(repo, "rev-parse", "HEAD")
+    if relation in {"behind", "diverged"}:
+        _git(repo, "switch", "-c", "remote-tip")
+        (repo / "remote.txt").write_text("remote revision\n", encoding="utf-8")
+        _git(repo, "add", "remote.txt")
+        _git(repo, "commit", "-m", "remote revision")
+        remote_head = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "switch", "main")
+    else:
+        remote_head = base
+    _git(repo, "update-ref", "refs/remotes/origin/main", remote_head)
+    if relation in {"ahead", "diverged"}:
+        (repo / "local.txt").write_text("local revision\n", encoding="utf-8")
+        _git(repo, "add", "local.txt")
+        _git(repo, "commit", "-m", "local revision")
+
+    before = _repo_metadata_snapshot(repo)
+    result = probe_git_write_capabilities(_LocalScriptClient(repo), "demo")
+    assert _repo_metadata_snapshot(repo) == before
+    assert result["fully_writeable"] is True  # Permission != safe ref alignment.
+    assert result["cached_origin_alignment"] == {
+        "status": relation,
+        "tracking_ref": "refs/remotes/origin/main",
+        "local_only_commits": expected_local,
+        "tracking_only_commits": expected_remote,
+        "fast_forward_possible": can_fast_forward,
+        "authoritative_remote": False,
+    }
+
+
+@pytest.mark.parametrize("detached", [False, True])
+def test_cached_origin_alignment_missing_or_detached_is_unknown(
+    tmp_path: Path, detached: bool,
+) -> None:
+    repo = _init_repo(tmp_path)
+    if detached:
+        _git(repo, "switch", "--detach")
+    before = _repo_metadata_snapshot(repo)
+    result = probe_git_write_capabilities(_LocalScriptClient(repo), "demo")
+    assert _repo_metadata_snapshot(repo) == before
+    assert result["cached_origin_alignment"]["status"] == (
+        "detached" if detached else "missing_tracking"
+    )
+    assert result["cached_origin_alignment"]["fast_forward_possible"] is None
+    assert result["cached_origin_alignment"]["authoritative_remote"] is False
+
+
+def test_malformed_or_legacy_alignment_does_not_fake_fast_forward() -> None:
+    for suffix in [
+        "",  # Older output: never infer safe fast-forward.
+        "tracking_status=diverged\ntracking_branch=main\ntracking_local_only=no\ntracking_remote_only=2\n",
+        "tracking_status=behind\ntracking_branch=main\ntracking_local_only=2\ntracking_remote_only=2\n",
+    ]:
+        client = _CapabilityClient(_probe_stdout() + suffix)
+        result = probe_git_write_capabilities(client, "demo")
+        assert result["fully_writeable"] is True
+        assert result["cached_origin_alignment"]["status"] == "unavailable"
+        assert result["cached_origin_alignment"]["fast_forward_possible"] is None
+
+
 def test_probe_is_non_mutating_on_real_repository(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     before = _repo_metadata_snapshot(repo)

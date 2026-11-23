@@ -120,6 +120,39 @@ printf 'refs=%s\n' "$refs_ok"
 printf 'head=%s\n' "$head_ok"
 printf 'fetch_head=%s\n' "$fetch_head_ok"
 printf 'detached=%s\n' "$detached"
+
+# An index/refs lock can be writable while the current local branch cannot
+# safely fast-forward to its cached origin/<branch>. This is ONLY a read-only
+# relation to an existing local tracking ref; it says nothing about the live
+# remote's current HEAD and never changes Git's mutation authorization.
+tracking_status=missing_tracking
+tracking_local_only=
+tracking_remote_only=
+if [ "$detached" = 1 ]; then
+    tracking_status=detached
+elif git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+    tracking_status=unavailable
+    if counts=$(git rev-list --left-right --count "refs/heads/$branch...refs/remotes/origin/$branch" 2>/dev/null); then
+        if printf '%s\n' "$counts" | grep -Eq '^[0-9]+[[:space:]]+[0-9]+$'; then
+            set -- $counts
+            tracking_local_only="$1"
+            tracking_remote_only="$2"
+            if [ "$1" -eq 0 ] && [ "$2" -eq 0 ]; then
+                tracking_status=up_to_date
+            elif [ "$1" -eq 0 ]; then
+                tracking_status=behind
+            elif [ "$2" -eq 0 ]; then
+                tracking_status=ahead
+            else
+                tracking_status=diverged
+            fi
+        fi
+    fi
+fi
+printf 'tracking_status=%s\n' "$tracking_status"
+printf 'tracking_branch=%s\n' "$branch"
+printf 'tracking_local_only=%s\n' "$tracking_local_only"
+printf 'tracking_remote_only=%s\n' "$tracking_remote_only"
 """.strip()
 
 
@@ -143,6 +176,65 @@ def _parse_probe_stdout(stdout: str) -> dict[str, str]:
         key, value = line.split("=", 1)
         parsed[key.strip()] = value.strip()
     return parsed
+
+
+def _cached_origin_alignment(parsed: dict[str, str]) -> dict[str, Any]:
+    """Report cached ancestry, never remote authority or mutation permission."""
+    status = parsed.get("tracking_status")
+    branch = parsed.get("tracking_branch", "")
+    unknown: dict[str, Any] = {
+        "status": "unavailable",
+        "tracking_ref": None,
+        "local_only_commits": None,
+        "tracking_only_commits": None,
+        "fast_forward_possible": None,
+        "authoritative_remote": False,
+    }
+    if (
+        status not in {
+            "up_to_date", "behind", "ahead", "diverged",
+            "missing_tracking", "detached", "unavailable",
+        }
+        or (
+            branch != "HEAD"
+            and (
+                not _GIT_BRANCH_RE.fullmatch(branch)
+                or ".." in branch.split("/")
+            )
+        )
+    ):
+        return unknown
+
+    tracking_ref = f"refs/remotes/origin/{branch}" if branch != "HEAD" else None
+    if status not in {"up_to_date", "behind", "ahead", "diverged"}:
+        return {**unknown, "status": status, "tracking_ref": tracking_ref}
+
+    local_raw = parsed.get("tracking_local_only", "")
+    remote_raw = parsed.get("tracking_remote_only", "")
+    # Bound parsing and never interpret malformed counts as a safe FF proof.
+    if (
+        not re.fullmatch(r"[0-9]{1,12}", local_raw)
+        or not re.fullmatch(r"[0-9]{1,12}", remote_raw)
+        or tracking_ref is None
+    ):
+        return unknown
+    local_count, remote_count = int(local_raw), int(remote_raw)
+    expected_status = (
+        "up_to_date" if local_count == 0 and remote_count == 0
+        else "behind" if local_count == 0
+        else "ahead" if remote_count == 0
+        else "diverged"
+    )
+    if status != expected_status:
+        return unknown
+    return {
+        "status": status,
+        "tracking_ref": tracking_ref,
+        "local_only_commits": local_count,
+        "tracking_only_commits": remote_count,
+        "fast_forward_possible": local_count == 0,
+        "authoritative_remote": False,
+    }
 
 
 def probe_git_write_capabilities(
@@ -216,11 +308,13 @@ def probe_git_write_capabilities(
         "blocked_components": blocked,
         "fully_writeable": not blocked,
         "detached": parsed["detached"] == "1",
+        "cached_origin_alignment": _cached_origin_alignment(parsed),
         "non_mutating": True,
         "execution_plane": "ssh_project",
         "note": (
             "Capability probe is an immediate read-only preflight, not an atomic lease; "
-            "mutation tools re-run it immediately before Git and still classify runtime permission failures."
+            "mutation tools re-run it immediately before Git and still classify runtime permission failures. "
+            "Cached origin alignment is not proof of the authoritative remote SHA or permission to update a branch."
         ),
     }
 
