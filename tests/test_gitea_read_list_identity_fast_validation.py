@@ -114,3 +114,49 @@ async def test_valid_identity_forwards_without_rewriting(
         client.list_action_jobs.assert_awaited_once_with(
             "safe-owner", "safe-repo", status=None, page=1, limit=1
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_limit", [0, -1, 51, 500, 501, True, "50", None])
+@pytest.mark.parametrize("token_present", [False, True])
+async def test_issues_pagination_limit_rejected_before_token_or_http(
+    monkeypatch: pytest.MonkeyPatch, invalid_limit: object, token_present: bool,
+) -> None:
+    """Confirmed Issues accept at most 50, independent of generic Gitea pagination."""
+    if token_present:
+        monkeypatch.setenv("GITEA_TOKEN", "test-only-token")
+    else:
+        monkeypatch.delenv("GITEA_TOKEN", raising=False)
+    with patch.object(
+        remote, "_server_gitea_client",
+        side_effect=AssertionError("invalid limits must not open an HTTP client"),
+    ):
+        result = await remote.gitea_list_issues(
+            "safe-owner", "safe-repo", limit=cast(Any, invalid_limit)
+        )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INVALID_INPUT"
+    assert result["error"]["retryable"] is False
+    assert result["error"]["details"] == {
+        "field": "limit", "min_value": 1, "max_value": 50,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("valid_limit", [1, 30, 50])
+async def test_issues_pagination_boundary_remains_accepted(
+    monkeypatch: pytest.MonkeyPatch, valid_limit: int,
+) -> None:
+    monkeypatch.setenv("GITEA_TOKEN", "test-only-token")
+    client = AsyncMock()
+    client.list_issues.return_value = []
+    with patch.object(remote, "_server_gitea_client") as factory:
+        factory.return_value.return_value.__aenter__ = AsyncMock(return_value=client)
+        result = await remote.gitea_list_issues(
+            "safe-owner", "safe-repo", limit=valid_limit
+        )
+    assert result["ok"] is True
+    assert result["result"]["count"] == 0
+    client.list_issues.assert_awaited_once_with(
+        "safe-owner", "safe-repo", state="open", limit=valid_limit, page=1
+    )
