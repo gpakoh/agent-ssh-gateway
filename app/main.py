@@ -1209,11 +1209,17 @@ def _request_bucket_class(request: Request | None) -> str:
     if request is None:
         return "unknown"
     identity = getattr(request.state, "auth_identity", None)
-    operation = _rate_limit_operation_class(request)
+    # Report the configured limiter lane, not a URL suffix: unrelated routes
+    # such as /api/bulk/execute use the IP bucket even for a master token.
+    # Only these SSH routes set master_requests_setting in app/routers/ssh.py.
+    # Prefer FastAPI's matched route template when mounted under root_path;
+    # the untrusted external URL may include a reverse-proxy prefix.
+    route_path = getattr(request.scope.get("route"), "path", None)
+    path = route_path if isinstance(route_path, str) else request.url.path
     master_setting = 0
-    if operation == "connect":
+    if path == "/api/ssh/connect":
         master_setting = settings.master_connect_rate_limit_requests
-    elif operation == "execute":
+    elif path in {"/api/ssh/execute", "/api/ssh/execute-argv"}:
         master_setting = settings.master_execute_rate_limit_requests
     if (
         settings.api_auth_enabled

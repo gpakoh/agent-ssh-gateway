@@ -55,8 +55,64 @@ def test_rate_limit_bucket_class_reports_master_only_for_active_master_lane(monk
     monkeypatch.setattr(settings, "master_execute_rate_limit_requests", 900)
     assert _request_bucket_class(request) == "master"
 
+    # Master-specific rate limits are configured only on three SSH routes.
+    request.url.path = "/api/bulk/execute"
+    assert _request_bucket_class(request) == "ip"
+    request.url.path = "/api/jobs/execute"
+    assert _request_bucket_class(request) == "ip"
+    request.url.path = "/api/ssh/execute-argv"
+    assert _request_bucket_class(request) == "master"
+    request.url.path = "/proxy/api/ssh/execute"
+    assert _request_bucket_class(request) == "ip"
+    request.url.path = "/api/ssh/connect"
+    monkeypatch.setattr(settings, "master_connect_rate_limit_requests", 0)
+    assert _request_bucket_class(request) == "ip"
+    monkeypatch.setattr(settings, "master_connect_rate_limit_requests", 900)
+    assert _request_bucket_class(request) == "master"
+
     request.state.auth_identity.token_type = "agent"
     assert _request_bucket_class(request) == "ip"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "route_path", "expected_bucket"),
+    [
+        ("/api/bulk/execute", None, "ip"),
+        ("/api/ssh/execute", None, "master"),
+        ("/api/ssh/execute-argv", None, "master"),
+        ("/proxy/api/ssh/execute", "/api/ssh/execute", "master"),
+        ("/proxy/api/bulk/execute", "/api/bulk/execute", "ip"),
+    ],
+)
+async def test_rate_limit_response_reports_actual_configured_lane(
+    monkeypatch, path, route_path, expected_bucket
+):
+    """Public 429 metadata must not claim a master lane absent from the route."""
+    from types import SimpleNamespace
+
+    from slowapi.errors import RateLimitExceeded
+    from starlette.requests import Request
+
+    monkeypatch.setattr(settings, "api_auth_enabled", True)
+    monkeypatch.setattr(settings, "master_execute_rate_limit_requests", 900)
+    scope = {
+        "type": "http", "method": "POST", "scheme": "http",
+        "path": path, "headers": [], "client": ("127.0.0.1", 1234),
+        "server": ("test", 80),
+    }
+    if route_path is not None:
+        scope["route"] = SimpleNamespace(path=route_path)
+    request = Request(scope)
+    request.state.auth_identity = MagicMock(token_type="master")
+    exc = RateLimitExceeded.__new__(RateLimitExceeded)
+    exc.detail = "10 per 1 minute"
+    exc.limit = MagicMock()
+    exc.limit.limit = MagicMock(GRANULARITY=60)
+    response = await main_module.rate_limit_exceeded_handler(request, exc)
+    assert response.status_code == 429
+    assert response.headers["X-RateLimit-Bucket"] == expected_bucket
+    assert json.loads(response.body)["details"]["bucket_class"] == expected_bucket
 
 
 @pytest.fixture(autouse=True)
