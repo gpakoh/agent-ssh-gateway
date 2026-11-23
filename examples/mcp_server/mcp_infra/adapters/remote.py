@@ -477,9 +477,10 @@ async def _gitea_pr_branch_tracking(
 
 _MERGE_RECONCILE_ATTEMPTS = 3
 _MERGE_RECONCILE_DELAY_SECONDS = 0.05
-# Only when the exact reviewed PR stays open but its base SHA has moved
-# after POST. This is an additional READ-ONLY settlement window, not a
-# mutation retry; 3 normal + 6 advanced-base reads, with bounded sleeps.
+# When the reviewed base advances after POST, or an ambiguous POST
+# response still shows the exact unchanged open PR, allow a READ-ONLY
+# settlement window. Never replay the mutation: at most 3 initial + 6
+# additional PR reads, with bounded sleeps and exact identity checks.
 _MERGE_RECONCILE_ADVANCED_BASE_EXTRA_ATTEMPTS = 6
 _MERGE_RECONCILE_ADVANCED_BASE_DELAY_SECONDS = 0.35
 _ACTION_RERUN_RECONCILE_ATTEMPTS = 3
@@ -1573,6 +1574,7 @@ async def _reconcile_merge_postcondition(
     expected_head_sha: str,
     expected_base_ref: str,
     pre_mutation_base_sha: str | None = None,
+    ambiguous_mutation: bool = False,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Boundedly prove the exact head AND reviewed target after a merge POST."""
     pre_mutation_base_sha = _valid_commit_sha(pre_mutation_base_sha)
@@ -1581,6 +1583,7 @@ async def _reconcile_merge_postcondition(
     attempts = 0
     max_attempts = _MERGE_RECONCILE_ATTEMPTS
     advanced_base_grace = False
+    ambiguous_open_grace = False
     while attempts < max_attempts:
         attempts += 1
         try:
@@ -1626,12 +1629,30 @@ async def _reconcile_merge_postcondition(
                 }
                 # Identity drift while settling invalidates the extra grace:
                 # stop read-only polling and fail closed without another POST.
-                if advanced_base_grace and (
+                if (advanced_base_grace or ambiguous_open_grace) and (
                     observed_number != pull_number
                     or observed_head_sha != expected_head_sha
                     or not base_ref_matches_expected
                 ):
                     max_attempts = attempts
+                # A lost merge POST response can precede BOTH base advancement
+                # and the PR's merged flag. Only an exact, well-formed still-open
+                # PR permits extra read-only settlement; never replay the POST.
+                if (
+                    ambiguous_mutation
+                    and pre_mutation_base_sha is not None
+                    and observed_number == pull_number
+                    and observed_state == "open"
+                    and observed_merged is False
+                    and observed_head_sha == expected_head_sha
+                    and base_ref_matches_expected
+                    and observed_base_sha == pre_mutation_base_sha
+                ):
+                    ambiguous_open_grace = True
+                    max_attempts = (
+                        _MERGE_RECONCILE_ATTEMPTS
+                        + _MERGE_RECONCILE_ADVANCED_BASE_EXTRA_ATTEMPTS
+                    )
                 # Gitea can move master to our merge commit before its PR GET
                 # reflects closed+merged. Extend only a matching, still-open
                 # PR whose base has moved since the exact pre-POST snapshot.
@@ -1673,7 +1694,8 @@ async def _reconcile_merge_postcondition(
         if attempts < max_attempts:
             await asyncio.sleep(
                 _MERGE_RECONCILE_ADVANCED_BASE_DELAY_SECONDS
-                if advanced_base_grace else _MERGE_RECONCILE_DELAY_SECONDS
+                if (advanced_base_grace or ambiguous_open_grace)
+                else _MERGE_RECONCILE_DELAY_SECONDS
             )
 
     details: dict[str, Any] = {
@@ -3016,6 +3038,7 @@ async def gitea_merge_pull_request(
                 expected_head_sha=expected_head_sha,
                 expected_base_ref=base_ref,
                 pre_mutation_base_sha=actual_base_sha,
+                ambiguous_mutation=mutation_error is not None,
             )
             if merged_pr is None:
                 details: dict[str, Any] = {
