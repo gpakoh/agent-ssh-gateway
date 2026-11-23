@@ -1805,7 +1805,11 @@ async def gitea_list_commits(
     """List commits in a Gitea repository. Optionally filter by branch SHA."""
     if error := _gitea_read_repo_identity_error("gitea_list_commits", owner, repo):
         return error
-    invalid = _gitea_read_pagination_error("gitea_list_commits", "limit", limit)
+    # GiteaClient supports at most 50 commits per page. Fail before
+    # credentials/HTTP rather than misreport a silently clipped page as complete.
+    invalid = _gitea_read_pagination_error(
+        "gitea_list_commits", "limit", limit, max_value=gitea_client.MAX_LIMIT
+    )
     if invalid is not None:
         return invalid
     # Gitea accepts this optional query value as a branch, tag or commit SHA.

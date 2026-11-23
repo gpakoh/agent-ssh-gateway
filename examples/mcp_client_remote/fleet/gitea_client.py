@@ -1122,7 +1122,10 @@ class GiteaClient:
         sha: str | None = None,
         limit: int = 30,
     ) -> list[dict[str, Any]]:
-        limit = min(limit, MAX_LIMIT)
+        # Never silently clamp a requested page: callers use the original
+        # limit to determine whether more commits may be available.
+        if type(limit) is not int or not 1 <= limit <= MAX_LIMIT:
+            raise ValueError(f"limit must be an integer from 1 to {MAX_LIMIT}")
         params: dict[str, Any] = {"limit": limit}
         if sha:
             params["sha"] = sha

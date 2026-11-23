@@ -29,10 +29,10 @@ async def test_gitea_list_limit_invalid_before_credentials(
     assert result["error"]["retryable"] is False
     assert result["error"]["details"]["field"] == "limit"
     assert result["error"]["details"]["min_value"] == 1
-    # Confirmed Issues have a 50-entry scan cap; the other read lists
-    # retain the generic 500-entry pagination preflight contract.
+    # Confirmed Issues and commits share the 50-item client page cap;
+    # branches retain the generic 500-item pagination preflight contract.
     assert result["error"]["details"]["max_value"] == (
-        50 if tool_name == "gitea_list_issues" else 500
+        500 if tool_name == "gitea_list_branches" else 50
     )
 
 
@@ -149,3 +149,47 @@ async def test_commit_status_large_positive_page_keeps_existing_transport_contra
     client.list_commit_statuses.assert_awaited_once_with(
         "owner", "repo", "a" * 40, page=501, limit=30
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [51, 500])
+@pytest.mark.parametrize("token_present", [False, True])
+async def test_commit_list_above_transport_cap_fails_before_http(
+    monkeypatch: pytest.MonkeyPatch, limit: int, token_present: bool,
+) -> None:
+    """Never silently clamp a 51+ item request and claim that 50 is complete."""
+    if token_present:
+        monkeypatch.setenv("GITEA_TOKEN", "test-only-token")
+    else:
+        monkeypatch.delenv("GITEA_TOKEN", raising=False)
+    with patch.object(
+        remote, "_server_gitea_client",
+        side_effect=AssertionError("invalid list size must not open HTTP"),
+    ):
+        result = await remote.gitea_list_commits("owner", "repo", limit=limit)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INVALID_INPUT"
+    assert result["error"]["retryable"] is False
+    assert result["error"]["details"] == {
+        "field": "limit", "min_value": 1, "max_value": 50,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("limit", "count", "truncated"), [
+    (1, 0, False), (30, 2, False), (50, 49, False), (50, 50, True),
+])
+async def test_commit_list_valid_limit_reports_exact_page_completeness(
+    monkeypatch: pytest.MonkeyPatch, limit: int, count: int, truncated: bool,
+) -> None:
+    monkeypatch.setenv("GITEA_TOKEN", "test-only-token")
+    client = AsyncMock()
+    client.list_commits.return_value = [{"sha": f"{n:040x}"} for n in range(count)]
+    with patch.object(remote, "_server_gitea_client") as factory:
+        factory.return_value.return_value.__aenter__ = AsyncMock(return_value=client)
+        result = await remote.gitea_list_commits("owner", "repo", limit=limit)
+    assert result["ok"] is True
+    assert result["result"]["count"] == count
+    assert result["result"]["per_page"] == limit
+    assert result["result"]["truncated"] is truncated
+    client.list_commits.assert_awaited_once_with("owner", "repo", sha=None, limit=limit)

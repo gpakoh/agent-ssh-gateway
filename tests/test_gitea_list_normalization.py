@@ -62,6 +62,38 @@ async def test_gitea_list_action_runs_rejects_bad_page_limit_before_http(monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bad_limit", [0, -1, 51, 500, True, "50", None])
+async def test_low_level_list_commits_rejects_limits_without_clamping(
+    monkeypatch: pytest.MonkeyPatch, bad_limit: object,
+) -> None:
+    get = AsyncMock(return_value=[])
+    monkeypatch.setattr(GiteaClient, "_get", get)
+    client = GiteaClient("test-token")
+    try:
+        with pytest.raises(ValueError, match="limit must be an integer"):
+            await client.list_commits("owner", "repo", limit=bad_limit)
+    finally:
+        await client.aclose()
+    get.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_low_level_list_commits_forwards_exact_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    get = AsyncMock(return_value=[])
+    monkeypatch.setattr(GiteaClient, "_get", get)
+    client = GiteaClient("test-token")
+    try:
+        await client.list_commits("owner", "repo", sha="abc", limit=MAX_LIMIT)
+    finally:
+        await client.aclose()
+    get.assert_awaited_once_with(
+        "/repos/{owner}/{repo}/commits",
+        params={"limit": MAX_LIMIT, "sha": "abc"},
+        owner="owner", repo="repo",
+    )
+
+
+@pytest.mark.asyncio
 async def test_gitea_list_action_runs_forwards_optional_page_only_when_provided(monkeypatch):
     captured = []
 
