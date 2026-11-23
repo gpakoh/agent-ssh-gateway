@@ -1704,6 +1704,29 @@ def run_mypy(
     project: str,
     target: list[str] | str | None = None,
 ) -> dict[str, Any]:
+    if target is None:
+        # Match the repo-owned mypy targets advertised by info(project).
+        # Shell syntax and options are not valid source-path defaults.
+        recipe = _makefile_target_uv_argv(_resolve_project(project), "mypy", "mypy")
+        if recipe is not None:
+            command_index = 2
+            while command_index < len(recipe):
+                option = recipe[command_index]
+                if option == "--extra" and command_index + 1 < len(recipe):
+                    command_index += 2
+                elif option in {"--all-extras", "--frozen"}:
+                    command_index += 1
+                else:
+                    break
+            if command_index < len(recipe) and recipe[command_index] == "mypy":
+                mypy_args = recipe[command_index + 1 :]
+                if mypy_args and all(
+                    not path.startswith("-")
+                    and not Path(path).is_absolute()
+                    and ".." not in Path(path).parts
+                    for path in mypy_args
+                ):
+                    target = mypy_args
     return _run_uv_tool(client, project, "mypy", "run_mypy", target)
 
 

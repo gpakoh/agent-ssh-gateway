@@ -228,30 +228,35 @@ async def test_execute_stream_cancellation_releases_busy_counter(
     manager = _manager()
     record = _record()
     manager._sessions[record.session_id] = record
-    stdin, stdout, stderr = _command_streams(record)
-    channel_ready = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    stdin.channel.shutdown_write.side_effect = lambda: loop.call_soon_threadsafe(
-        channel_ready.set
-    )
-    stdout.channel.exit_status_ready.return_value = False
+    _stdin, stdout, stderr = _command_streams(record)
+    streaming = asyncio.Event()
+
+    def channel_is_still_running() -> bool:
+        # Signal only after execute_stream reaches its polling loop, not
+        # while shutdown_write is still running in a worker thread. The
+        # earlier signal could race with the command's startup/timeout.
+        streaming.set()
+        return False
+
+    stdout.channel.exit_status_ready.side_effect = channel_is_still_running
     stdout.channel.recv_ready.return_value = False
     stderr.channel.recv_stderr_ready.return_value = False
     monkeypatch.setattr("app.ssh_manager._emit", lambda *_args, **_kwargs: None)
 
     async def consume() -> None:
-        async for _item in manager.execute_stream(record.session_id, "sleep 30", timeout=30):
+        async for _item in manager.execute_stream(record.session_id, "sleep 30", timeout=300):
             pass
 
     task = asyncio.create_task(consume())
-    # The busy counter is acquired before the executor opens a channel.
-    # Wait until its result is consumed before asserting channel cleanup.
-    await asyncio.wait_for(channel_ready.wait(), timeout=5)
+    # Observe the actual streaming loop before cancelling; the longer remote
+    # deadline is not a test wait and avoids a loaded CI worker racing timeout.
+    await asyncio.wait_for(streaming.wait(), timeout=5)
     assert record.active_operations == 1
+    assert not task.done()
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await task
+        await asyncio.wait_for(task, timeout=5)
     assert record.active_operations == 0
     stdout.channel.close.assert_called_once()
 
