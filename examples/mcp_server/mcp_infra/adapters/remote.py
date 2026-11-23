@@ -15,10 +15,12 @@ instance.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import os
 import re
+import threading
 import uuid
 from pathlib import Path
 from typing import Any
@@ -1871,6 +1873,76 @@ async def gitea_list_commits(
     return tool_success("gitea_list_commits", result=data, source="gitea")
 
 
+# A completed Gitea status read must never be cached: CI state is mutable.
+# Coalesce only simultaneous reads of the same immutable commit/page under the
+# same Gitea authority, server credential and authenticated MCP caller.
+# The event loop is part of the key: asyncio Tasks cannot cross loop boundaries.
+_STATUS_READ_INFLIGHT_LOCK = threading.Lock()
+_STATUS_READ_INFLIGHT: dict[tuple[object, ...], asyncio.Task[list[dict[str, Any]]]] = {}
+_STATUS_READ_MAX_INFLIGHT = 64
+_STATUS_READ_FOLLOWER_TIMEOUT = 40
+
+
+async def _get_commit_statuses_direct(
+    token: str, owner: str, repo: str, sha: str, *, page: int, limit: int
+) -> list[dict[str, Any]]:
+    async with _server_gitea_client()(token) as client:
+        return await client.list_commit_statuses(owner, repo, sha, page=page, limit=limit)
+
+
+async def _get_commit_statuses_singleflight(
+    token: str, owner: str, repo: str, sha: str, *, page: int, limit: int
+) -> list[dict[str, Any]]:
+    """Bounded in-flight deduplication; no cross-auth, cross-loop or stale cache."""
+    caller = _caller_fingerprint()
+    if caller is None:
+        # No verified caller boundary: do not join reads across unknown MCP
+        # identities even when the server-side Gitea token is shared.
+        return await _get_commit_statuses_direct(
+            token, owner, repo, sha, page=page, limit=limit
+        )
+    loop = asyncio.get_running_loop()
+    key = (
+        loop,
+        gitea_client.API_BASE,
+        gitea_client.GITEA_FORWARDED_HOST,
+        hashlib.sha256(token.encode("utf-8")).digest(),
+        caller,
+        owner, repo, sha, page, limit,
+    )
+    with _STATUS_READ_INFLIGHT_LOCK:
+        task = _STATUS_READ_INFLIGHT.get(key)
+        if task is not None and task.done():
+            # A finished task is never a response cache, even if its
+            # done-callback has not been scheduled by the event loop yet.
+            del _STATUS_READ_INFLIGHT[key]
+            task = None
+        if task is None and len(_STATUS_READ_INFLIGHT) < _STATUS_READ_MAX_INFLIGHT:
+            task = loop.create_task(
+                _get_commit_statuses_direct(token, owner, repo, sha, page=page, limit=limit)
+            )
+            _STATUS_READ_INFLIGHT[key] = task
+
+            def remove_on_completion(finished: asyncio.Task[list[dict[str, Any]]]) -> None:
+                with _STATUS_READ_INFLIGHT_LOCK:
+                    if _STATUS_READ_INFLIGHT.get(key) is finished:
+                        del _STATUS_READ_INFLIGHT[key]
+
+            task.add_done_callback(remove_on_completion)
+    if task is None:
+        # New identities at saturation use a regular request, never an
+        # unbounded process-global table, and existing identities still join.
+        return await _get_commit_statuses_direct(
+            token, owner, repo, sha, page=page, limit=limit
+        )
+    # Each caller can cancel/timeout independently; neither may cancel the
+    # shared transport, including the caller which happened to create it.
+    statuses = await asyncio.wait_for(
+        asyncio.shield(task), timeout=_STATUS_READ_FOLLOWER_TIMEOUT
+    )
+    return copy.deepcopy(statuses)
+
+
 async def gitea_list_commit_statuses(
     owner: str, repo: str, sha: str, page: int = 1, limit: int = 30
 ) -> dict[str, Any]:
@@ -1894,8 +1966,15 @@ async def gitea_list_commit_statuses(
     if not token:
         return tool_error(tool=tool, code="DEPENDENCY_MISSING", message="GITEA_TOKEN not configured", source="gitea")
     try:
-        async with _server_gitea_client()(token) as client:
-            statuses = await client.list_commit_statuses(owner, repo, sha, page=page, limit=limit)
+        statuses = await _get_commit_statuses_singleflight(
+            token, owner, repo, sha, page=page, limit=limit
+        )
+    except TimeoutError:
+        return tool_error(
+            tool=tool, code="REMOTE_UNAVAILABLE",
+            message="Timed out awaiting Gitea commit statuses",
+            retryable=True, source="gitea",
+        )
     except GiteaCommitStatusResponseError as exc:
         return tool_error(tool=tool, code="REMOTE_RESPONSE_INVALID", message=str(exc), source="gitea")
     except Exception as exc:
