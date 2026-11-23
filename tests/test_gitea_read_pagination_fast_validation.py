@@ -29,11 +29,8 @@ async def test_gitea_list_limit_invalid_before_credentials(
     assert result["error"]["retryable"] is False
     assert result["error"]["details"]["field"] == "limit"
     assert result["error"]["details"]["min_value"] == 1
-    # Confirmed Issues and commits share the 50-item client page cap;
-    # branches retain the generic 500-item pagination preflight contract.
-    assert result["error"]["details"]["max_value"] == (
-        500 if tool_name == "gitea_list_branches" else 50
-    )
+    # Gitea's transport page cap is 50 for branches, commits, and Issues.
+    assert result["error"]["details"]["max_value"] == 50
 
 
 @pytest.mark.asyncio
@@ -193,3 +190,57 @@ async def test_commit_list_valid_limit_reports_exact_page_completeness(
     assert result["result"]["per_page"] == limit
     assert result["result"]["truncated"] is truncated
     client.list_commits.assert_awaited_once_with("owner", "repo", sha=None, limit=limit)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["gitea_list_branches", "gitea_list_pull_requests"])
+@pytest.mark.parametrize("limit", [51, 500])
+@pytest.mark.parametrize("has_token", [False, True])
+async def test_branch_and_pr_list_above_transport_cap_fails_without_http(
+    monkeypatch: pytest.MonkeyPatch, tool_name: str, limit: int, has_token: bool,
+) -> None:
+    if has_token:
+        monkeypatch.setenv("GITEA_TOKEN", "test-only-token")
+    else:
+        monkeypatch.delenv("GITEA_TOKEN", raising=False)
+    with patch.object(
+        remote, "_server_gitea_client",
+        side_effect=AssertionError("invalid pagination must never open HTTP"),
+    ):
+        result = await getattr(remote, tool_name)("owner", "repo", limit=limit)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INVALID_INPUT"
+    assert result["error"]["retryable"] is False
+    assert result["error"]["details"] == {
+        "field": "limit", "min_value": 1, "max_value": 50,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["gitea_list_branches", "gitea_list_pull_requests"])
+@pytest.mark.parametrize(("limit", "count", "truncated"), [
+    (1, 0, False), (30, 2, False), (50, 49, False), (50, 50, True),
+])
+async def test_branch_and_pr_list_valid_page_metadata(
+    monkeypatch: pytest.MonkeyPatch, tool_name: str,
+    limit: int, count: int, truncated: bool,
+) -> None:
+    monkeypatch.setenv("GITEA_TOKEN", "test-only-token")
+    client = AsyncMock()
+    client.list_branches.return_value = [{"name": f"branch-{i}"} for i in range(count)]
+    client.list_pull_requests.return_value = [
+        {"number": i, "title": f"PR {i}", "state": "open"} for i in range(count)
+    ]
+    with patch.object(remote, "_server_gitea_client") as factory:
+        factory.return_value.return_value.__aenter__ = AsyncMock(return_value=client)
+        result = await getattr(remote, tool_name)("owner", "repo", limit=limit)
+    assert result["ok"] is True
+    assert result["result"]["count"] == count
+    assert result["result"]["per_page"] == limit
+    assert result["result"]["truncated"] is truncated
+    if tool_name == "gitea_list_branches":
+        client.list_branches.assert_awaited_once_with("owner", "repo", limit=limit)
+    else:
+        client.list_pull_requests.assert_awaited_once_with(
+            "owner", "repo", state="open", limit=limit,
+        )

@@ -1778,7 +1778,9 @@ async def gitea_list_branches(owner: str, repo: str, limit: int = 30) -> dict[st
     """List branches in a Gitea repository."""
     if error := _gitea_read_repo_identity_error("gitea_list_branches", owner, repo):
         return error
-    invalid = _gitea_read_pagination_error("gitea_list_branches", "limit", limit)
+    invalid = _gitea_read_pagination_error(
+        "gitea_list_branches", "limit", limit, max_value=gitea_client.MAX_LIMIT
+    )
     if invalid is not None:
         return invalid
     token = os.environ.get("GITEA_TOKEN", "")
@@ -2494,13 +2496,13 @@ async def gitea_list_pull_requests(
             details={"field": "state", "allowed_values": allowed},
             source="gitea",
         )
-    if type(limit) is not int or not 1 <= limit <= 500:
+    if type(limit) is not int or not 1 <= limit <= gitea_client.MAX_LIMIT:
         return tool_error(
             tool="gitea_list_pull_requests",
             code="INVALID_INPUT",
-            message="limit must be an integer between 1 and 500",
+            message=f"limit must be an integer between 1 and {gitea_client.MAX_LIMIT}",
             retryable=False,
-            details={"field": "limit", "min_value": 1, "max_value": 500},
+            details={"field": "limit", "min_value": 1, "max_value": gitea_client.MAX_LIMIT},
             source="gitea",
         )
     token = os.environ.get("GITEA_TOKEN", "")
