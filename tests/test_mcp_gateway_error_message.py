@@ -240,6 +240,94 @@ def test_flat_rate_limit_error_gets_mcp_native_retry_hint_and_details():
     assert "schema discovery" in hint
 
 
+@pytest.mark.parametrize(
+    ("details", "has_numeric_wait"),
+    [
+        (None, False),
+        ({}, False),
+        ({"retry_after_seconds": True}, False),
+        ({"retry_after_seconds": 86401}, False),
+        ({"retry_after_seconds": 45}, True),
+    ],
+)
+def test_rate_limit_hint_requires_verified_bounded_wait(details, has_numeric_wait):
+    from examples.mcp_server.gateway_client import GatewayClientError
+    from examples.mcp_server.mcp_infra.gateway_errors import _gateway_error_hint
+
+    body = {"code": "RATE_LIMIT_EXCEEDED", "retryable": True}
+    if details is not None:
+        body["details"] = details
+    exc = GatewayClientError("throttled", status_code=429, body=body)
+
+    hint = _gateway_error_hint(exc, "RATE_LIMIT_EXCEEDED")
+    assert hint is not None
+    assert ("error.details.retry_after_seconds" in hint) is has_numeric_wait
+    assert "agent_status" in hint
+    assert "schema discovery" in hint
+    assert "PRIVATE-API-TOKEN" not in hint
+
+
+def test_nonretryable_429_does_not_advertise_a_retry_even_with_numeric_hint():
+    from examples.mcp_server.gateway_client import GatewayClientError
+    from examples.mcp_server.mcp_infra.gateway_errors import _gateway_error_hint
+
+    exc = GatewayClientError(
+        "denied",
+        status_code=429,
+        body={
+            "code": "RATE_LIMIT_EXCEEDED",
+            "retryable": False,
+            "hint": "secret=PRIVATE-API-TOKEN-NEVER-ECHO",
+            "details": {"retry_after_seconds": 20},
+        },
+    )
+    hint = _gateway_error_hint(exc, "RATE_LIMIT_EXCEEDED")
+    assert hint is not None
+    assert "do not retry" in hint.lower()
+    assert "error.details.retry_after_seconds" not in hint
+    assert "PRIVATE-API-TOKEN" not in hint
+
+
+def test_session_capacity_hint_is_not_request_rate_retry_guidance():
+    from examples.mcp_server.gateway_client import GatewayClientError
+    from examples.mcp_server.mcp_infra.gateway_errors import _gateway_error_hint
+
+    exc = GatewayClientError(
+        "session capacity full",
+        status_code=429,
+        body={
+            "code": "SESSION_LIMIT_EXCEEDED",
+            "retryable": True,
+            # A capacity estimate is not an HTTP request-rate lease.
+            "details": {"retry_after_seconds": 180, "bucket_class": "session"},
+        },
+    )
+    hint = _gateway_error_hint(exc, "SESSION_LIMIT_EXCEEDED")
+    assert hint is not None
+    assert "retry_after_seconds" not in hint
+    assert "session" in hint.lower()
+    assert "reuse" in hint.lower()
+    assert "own" in hint.lower()
+
+
+def test_capacity_tool_error_keeps_distinct_recovery_hint():
+    from examples.mcp_server.mcp_infra.adapters import gateway as adapter
+
+    def raise_capacity():
+        raise adapter.GatewayClientError(
+            "session capacity full",
+            status_code=429,
+            body={"code": "SESSION_LIMIT_EXCEEDED", "retryable": True},
+        )
+
+    result = adapter._run_gateway("connect", raise_capacity)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "SESSION_LIMIT_EXCEEDED"
+    hint = result["error"]["hint"]
+    assert "retry_after_seconds" not in hint
+    assert "reuse" in hint.lower()
+
+
 def test_run_gateway_preserves_rate_limit_guidance(monkeypatch):
     from examples.mcp_server.mcp_infra.adapters import gateway as gateway_adapter
 

@@ -164,10 +164,41 @@ def _gateway_error_hint(exc: GatewayClientError, code: str, *, tool: str | None 
                 "inspect_agent_task, preserve its identity, and do not start a replacement."
             )
         return "The job no longer exists (it may have expired); re-run the tool to start a new job, or call job_status/job_result with the id of a job returned by this run"
-    if code in _RATE_LIMIT_GATEWAY_CODES:
+    if code == "SESSION_LIMIT_EXCEEDED":
+        # Capacity is not a timed request-rate bucket. Another caller's
+        # session may expire independently of any numeric response metadata.
         return (
-            "Wait error.details.retry_after_seconds before retrying and batch/coalesce repeated polling. "
-            "For agent tasks prefer agent_status for compact polling and escalate to inspect_agent_task only when deeper diagnostics are needed; avoid repeated schema discovery during the cooldown."
+            "SSH session capacity is exhausted, not request-rate throttling. "
+            "Reuse an existing session you own if available; otherwise wait for "
+            "an owned session to close or idle cleanup to free a slot. "
+            "Do not close sessions belonging to other callers or assume a fixed retry interval."
+        )
+    if code in {"RATE_LIMITED", "RATE_LIMIT_EXCEEDED"}:
+        body = exc.body if isinstance(exc.body, dict) else {}
+        nested = body.get("detail")
+        retry_source = nested if isinstance(nested, dict) else body
+        if retry_source.get("retryable") is False:
+            return (
+                "The gateway marked this rate-limit response non-retryable; "
+                "do not retry this operation automatically. Use agent_status "
+                "for compact read-only task checks rather than repeated schema "
+                "discovery or expensive polling."
+            )
+        details = _gateway_error_details(exc) or {}
+        retry_after = details.get("retry_after_seconds")
+        if type(retry_after) is int and 1 <= retry_after <= 86400:
+            wait_hint = "Wait error.details.retry_after_seconds before retrying. "
+        else:
+            # Missing/malformed hints must never become an invented lease.
+            wait_hint = (
+                "No verified retry-after duration was provided; back off "
+                "rather than retrying in a tight loop. "
+            )
+        return (
+            wait_hint
+            + "Batch/coalesce repeated polling. For agent tasks prefer agent_status "
+            "for compact polling and escalate to inspect_agent_task only when deeper "
+            "diagnostics are needed; avoid repeated schema discovery while throttled."
         )
     if isinstance(exc.body, dict):
         detail = exc.body.get("detail")
