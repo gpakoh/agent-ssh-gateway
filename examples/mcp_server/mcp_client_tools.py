@@ -1402,6 +1402,27 @@ def _run_uv_tool(
     except ValueError as e:
         code, msg = str(e).split(":", 1) if ":" in str(e) else ("INVALID_INPUT", str(e))
         return tool_error(code=code.strip(), message=msg.strip(), tool_name=tool_name)
+
+    # An explicit .py file selector (including a pytest node ID) must exist
+    # before we attribute a linter/test error to product code. Permission or
+    # mount errors are left to the existing executor diagnostics: these are
+    # not evidence that a remote project source is absent.
+    if project_dir.is_dir():
+        for selected in targets:
+            source = selected.partition("::")[0]
+            if source.endswith(".py") and not any(char in source for char in "*?[]"):
+                try:
+                    (project_dir / source).stat()
+                except FileNotFoundError:
+                    return tool_error(
+                        code="INVALID_INPUT",
+                        message="Explicit Python source target does not exist in the registered project",
+                        retryable=False,
+                        tool_name=tool_name,
+                    )
+                except OSError:
+                    pass
+
     # Sync verifiers get a 240s shared uv budget within a 270s SSH command.
     # Async suites can use their longer externally configured job budget,
     # retaining a 30s margin for the owned process-group cleanup.

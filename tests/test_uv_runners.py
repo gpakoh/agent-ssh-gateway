@@ -220,6 +220,51 @@ def test_invalid_target_absolute():
     assert result == ["etc/passwd"]
 
 
+@pytest.mark.parametrize("tool", ["pytest", "ruff", "mypy", "compileall"])
+@pytest.mark.parametrize("target", ["missing.py", "tests/missing.py::test_case"])
+def test_explicit_missing_python_target_fails_before_ssh(tmp_path, monkeypatch, tool, target):
+    """A misspelled file selector is input failure, not a failed code check."""
+    from mcp_client_tools import _run_uv_tool
+
+    (tmp_path / "tests").mkdir()
+    monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: tmp_path)
+
+    class NoSSH:
+        def execute_raw(self, *_args, **_kwargs):
+            raise AssertionError("invalid target must not open an SSH job")
+
+    result = _run_uv_tool(NoSSH(), "project", tool, f"run_{tool}", target)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INVALID_INPUT"
+    assert result["error"]["retryable"] is False
+
+
+@pytest.mark.parametrize(
+    ("tool", "target"),
+    [
+        ("pytest", "tests/existing.py::test_case"),
+        ("ruff", "tests/existing.py"),
+        ("mypy", "tests/existing.py"),
+        ("compileall", "tests/existing.py"),
+        ("ruff", "tests/*.py"),
+        ("pytest", "tests"),
+    ],
+)
+def test_accepted_targets_still_reach_executor(tmp_path, monkeypatch, tool, target):
+    from mcp_client_tools import _run_uv_tool
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/existing.py").write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: tmp_path)
+
+    class ReachedSSH:
+        def execute_raw(self, *_args, **_kwargs):
+            raise RuntimeError("ssh-entry-reached")
+
+    with pytest.raises(RuntimeError, match="ssh-entry-reached"):
+        _run_uv_tool(ReachedSSH(), "project", tool, f"run_{tool}", target)
+
+
 def test_compileall_walk_truncation_marker_appears(tmp_path, monkeypatch, capsys):
     """Regression: the truncation marker used to be unreachable — lines were
     only appended while len(out) < _LIMIT, so len(out) > _LIMIT never held
