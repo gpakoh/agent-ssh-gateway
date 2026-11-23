@@ -985,7 +985,9 @@ class GiteaClient:
         repo: str,
         limit: int = 30,
     ) -> list[dict[str, Any]]:
-        limit = min(limit, MAX_LIMIT)
+        # A silently clipped limit makes the caller's page metadata incorrect.
+        if type(limit) is not int or not 1 <= limit <= MAX_LIMIT:
+            raise ValueError(f"limit must be an integer from 1 to {MAX_LIMIT}")
         return await self._get(
             "/repos/{owner}/{repo}/branches",
             params={"limit": limit},
@@ -1442,7 +1444,10 @@ class GiteaClient:
         limit: int = 30,
         page: int = 1,
     ) -> list[dict[str, Any]]:
-        limit = min(limit, MAX_LIMIT)
+        # Reject requests we cannot fulfill rather than reporting a clipped
+        # page as complete to consumers that requested more than MAX_LIMIT.
+        if type(limit) is not int or not 1 <= limit <= MAX_LIMIT:
+            raise ValueError(f"limit must be an integer from 1 to {MAX_LIMIT}")
         page = _validate_positive_int(page, "page")
         return await self._get(
             "/repos/{owner}/{repo}/pulls",

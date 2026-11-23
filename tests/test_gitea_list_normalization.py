@@ -94,6 +94,50 @@ async def test_low_level_list_commits_forwards_exact_boundary(monkeypatch: pytes
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["list_branches", "list_pull_requests"])
+@pytest.mark.parametrize("limit", [0, -1, 51, 500, True, "50", None])
+async def test_low_level_branch_and_pr_list_limits_never_clip(
+    monkeypatch: pytest.MonkeyPatch, method: str, limit: object,
+) -> None:
+    get = AsyncMock(return_value=[])
+    monkeypatch.setattr(GiteaClient, "_get", get)
+    client = GiteaClient("test-only-token")
+    try:
+        with pytest.raises(ValueError, match="limit must be an integer"):
+            await getattr(client, method)("owner", "repo", limit=limit)
+    finally:
+        await client.aclose()
+    get.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "endpoint", "params"),
+    [
+        ("list_branches", "/repos/{owner}/{repo}/branches", {"limit": MAX_LIMIT}),
+        (
+            "list_pull_requests", "/repos/{owner}/{repo}/pulls",
+            {"state": "open", "limit": MAX_LIMIT, "page": 1},
+        ),
+    ],
+)
+async def test_low_level_branch_and_pr_list_exact_max_limit(
+    monkeypatch: pytest.MonkeyPatch, method: str,
+    endpoint: str, params: dict[str, object],
+) -> None:
+    get = AsyncMock(return_value=[])
+    monkeypatch.setattr(GiteaClient, "_get", get)
+    client = GiteaClient("test-only-token")
+    try:
+        await getattr(client, method)("owner", "repo", limit=MAX_LIMIT)
+    finally:
+        await client.aclose()
+    get.assert_awaited_once_with(
+        endpoint, params=params, owner="owner", repo="repo",
+    )
+
+
+@pytest.mark.asyncio
 async def test_gitea_list_action_runs_forwards_optional_page_only_when_provided(monkeypatch):
     captured = []
 
