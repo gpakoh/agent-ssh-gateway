@@ -1673,6 +1673,94 @@ async def test_mcp_coord_open_recovers_recent_evidence_without_close_authority(
 
 
 @pytest.mark.asyncio
+async def test_coord_open_history_cursor_recovers_all_events_and_body_chunks(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setattr(adapter, "_registered", lambda p: core.validate_project(p))
+    client = FakeClient()
+    await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway", source_project="agent-ssh-gateway",
+        title="Navigable history", body="Evidence", request_key="nav-history-thread-123",
+    )
+    bodies = {i: f"Evidence {i}" for i in range(1, 126)}
+    bodies[125] = "first " + "x" * 34000 + " last"
+    client.comments[1] = [
+        {"id": i, "body": body, "user": {"login": "other"}}
+        for i, body in bodies.items()
+    ]
+    client.issues[0]["comments"] = len(bodies)
+    client.issues[0]["updated_at"] = "initial"
+    monkeypatch.setattr(FakeClient, "__aenter__", _fake_aenter, raising=False)
+    monkeypatch.setattr(FakeClient, "__aexit__", _fake_aexit, raising=False)
+    monkeypatch.setattr(
+        adapter, "server_attr",
+        lambda name: (lambda _: client) if name == "GiteaClient" else None,
+    )
+    first = (await adapter.coord_open("agent-ssh-gateway", 1))["result"]["thread"]
+    cursor = first["history_older_cursor"]
+    assert cursor
+    seen = []
+    pages = 0
+    page = first
+    while True:
+        pages += 1
+        assert pages < 15
+        assert page["history_scan_complete"] is True
+        assert page["history_truncated"] is True
+        assert page["coord_state"] is None
+        assert "close_state_sha256" not in page
+        assert "close_content_sha256" not in page
+        assert len(page["history"]) <= 50
+        assert sum(len(entry["body"]) for entry in page["history"]) <= 16000
+        for entry in reversed(page["history"]):
+            seen.append((entry["id"], entry.get("body_start", 0), entry["body"]))
+        cursor = page["history_older_cursor"]
+        if cursor is None:
+            break
+        result = await adapter.coord_open("agent-ssh-gateway", 1, history_cursor=cursor)
+        assert result["ok"] is True, result
+        page = result["result"]["thread"]
+    reconstructed = {}
+    for identifier, start, body in sorted(seen):
+        assert start == len(reconstructed.get(identifier, ""))
+        reconstructed[identifier] = reconstructed.get(identifier, "") + body
+    assert reconstructed == bodies
+    assert client.comment_calls == 0
+
+    # A changed comment with unchanged Issue metadata cannot reuse the cursor.
+    client.comments[1][0]["body"] = "edited"
+    result = await adapter.coord_open(
+        "agent-ssh-gateway", 1, history_cursor=first["history_older_cursor"],
+    )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INVALID_INPUT"
+    assert "cursor" in result["error"]["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_history_navigation_rejects_malformed_and_incomplete_scan(monkeypatch):
+    client = FakeClient()
+    await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway", source_project="agent-ssh-gateway",
+        title="Incomplete history", body="Evidence", request_key="nav-incomplete-123",
+    )
+    client.comments[1] = [
+        {"id": i, "body": "x", "user": {"login": "other"}} for i in range(1, 502)
+    ]
+    client.issues[0]["comments"] = 501
+    page = await core.open_thread(
+        client, "gpakoh", "agent-ssh-gateway", 1, allow_partial=True, recent_preview=True,
+    )
+    assert page["history_scan_complete"] is False
+    assert page["history_older_cursor"] is None
+    for cursor in ("", "bad", "0" * 64 + ":0:1", True):
+        with pytest.raises(ValueError, match="cursor"):
+            await core.open_thread(
+                client, "gpakoh", "agent-ssh-gateway", 1,
+                allow_partial=True, recent_preview=True, history_cursor=cursor,
+            )
+
+
+@pytest.mark.asyncio
 async def test_coord_open_short_history_retains_verified_state_and_close_lease():
     client = FakeClient()
     await core.create_thread(
