@@ -40,6 +40,50 @@ def _raising_fn(error: Exception):
     return _fn
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True])
+@pytest.mark.parametrize(
+    ("exception", "code"),
+    [
+        (CommandPolicyError("denied by allowlist"), "READONLY_COMMAND"),
+        (CommandPolicyError("agent backend is blocked"), "AGENT_BACKEND_BLOCKED"),
+        (CommandPolicyError("opencode is blocked"), "OPENCODE_BLOCKED"),
+        (CommandPolicyError("policy refused"), "POLICY_VIOLATION"),
+        (WritePermissionError("write not allowed"), "WRITE_PERMISSION_DENIED"),
+        (WriteModeError("write mode not enabled"), "WRITE_MODE_ERROR"),
+    ],
+)
+async def test_policy_denial_envelope_matches_audit(async_mode, exception, code):
+    from examples.mcp_server.mcp_infra.tool_registry import run_tool, run_tool_async
+
+    logger = _make_mock_logger()
+    calls = []
+
+    def deny():
+        calls.append("attempt")
+        raise exception
+
+    async def deny_async():
+        return deny()
+
+    with patch("examples.mcp_server.server.get_audit_logger", return_value=logger):
+        if async_mode:
+            result = await run_tool_async(
+                tool="t", title="T", fn=deny_async, success_text="ok"
+            )
+        else:
+            result = run_tool(tool="t", title="T", fn=deny, success_text="ok")
+
+    assert calls == ["attempt"]
+    assert result["ok"] is False
+    assert result["error"]["code"] == code
+    assert result["error"]["retryable"] is False
+    assert result["error"]["hint"]
+    assert "policy" in result["error"]["hint"].lower()
+    assert logger.append.call_count == 1
+    assert logger.append.call_args[0][0].error_code == code
+
+
 # ---------------------------------------------------------------------------
 # Tests: run_tool — CommandPolicyError (READONLY_COMMAND)
 # ---------------------------------------------------------------------------

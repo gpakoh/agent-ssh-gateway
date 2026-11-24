@@ -102,6 +102,13 @@ class TestToolError:
         )
         assert result["error"]["hint"] == "Run docker_ps"
 
+    def test_policy_default_hint_does_not_replace_explicit_hint(self):
+        explicit = tool_error("tool", "WRITE_PERMISSION_DENIED", "denied", hint="Review access")
+        assert explicit["error"]["hint"] == "Review access"
+        default = tool_error("tool", "WRITE_PERMISSION_DENIED", "denied")
+        assert "policy" in default["error"]["hint"].lower()
+        assert default["error"]["retryable"] is False
+
     def test_error_retryable(self):
         result = tool_error("tool", "TIMEOUT", "timed out", retryable=True)
         assert result["error"]["retryable"] is True
