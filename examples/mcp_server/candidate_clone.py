@@ -574,6 +574,81 @@ def _status_state(repo: Path) -> tuple[bool, str, int]:
     return bool(stdout.strip()), hashlib.sha256(stdout.encode()).hexdigest(), len([line for line in stdout.splitlines() if line.strip()])
 
 
+def _require_tracked_files_match_head(candidate_root: Path) -> None:
+    """Prove tracked worktree blobs against HEAD without trusting Git index stat hints.
+
+    Git's assume-unchanged/skip-worktree index flags can hide modified bytes
+    from porcelain status. Cleanup must not discard those bytes just because
+    status is empty. This is a bounded, read-only content proof; gitlinks are
+    still governed by the existing Git status and active-reference guards.
+    """
+    tree = _run_git(
+        candidate_root,
+        ["ls-tree", "-r", "-z", "--full-tree", "HEAD"],
+        operation="read tracked head tree",
+    )
+    entries = [entry for entry in tree.split("\0") if entry]
+    if len(tree) > 4_000_000 or len(entries) > 20_000:
+        raise _fail(
+            "CHECK_FAILED", "tracked candidate content proof exceeds safe bounds",
+            retryable=True, details={"reason": "tracked_proof_limit"},
+        )
+    root = candidate_root.resolve(strict=True)
+    bytes_seen = 0
+    for entry in entries:
+        if "\t" not in entry:
+            raise _fail("CHECK_FAILED", "tracked candidate tree is malformed")
+        identity, name = entry.split("\t", 1)
+        parts = identity.split(" ")
+        if len(parts) != 3:
+            raise _fail("CHECK_FAILED", "tracked candidate tree is malformed")
+        mode, kind, expected_oid = parts
+        if kind == "commit" and mode == "160000":
+            continue  # gitlink content is not a tracked blob in this tree
+        if kind != "blob" or mode not in {"100644", "100755", "120000"}:
+            raise _fail("CHECK_FAILED", "tracked candidate tree entry is unsupported")
+        if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", expected_oid):
+            raise _fail("CHECK_FAILED", "tracked candidate blob identity is invalid")
+        relative = Path(name)
+        if relative.is_absolute() or not name or ".." in relative.parts:
+            raise _fail("WORKSPACE_CONTENDED", "candidate tracked path is unsafe")
+        target = candidate_root / relative
+        try:
+            target.parent.resolve(strict=True).relative_to(root)
+            info = target.lstat()
+            if mode == "120000":
+                if not stat.S_ISLNK(info.st_mode):
+                    raise _fail("WORKSPACE_CONTENDED", "candidate tracked file type drifted", details={"reason": "tracked_blob_mismatch"})
+                data = os.fsencode(os.readlink(target))
+                raw_size = len(data)
+                blob = hashlib.sha1() if len(expected_oid) == 40 else hashlib.sha256()
+                blob.update(f"blob {raw_size}\0".encode("ascii"))
+                blob.update(data)
+            else:
+                if not stat.S_ISREG(info.st_mode) or bool(info.st_mode & stat.S_IXUSR) != (mode == "100755"):
+                    raise _fail("WORKSPACE_CONTENDED", "candidate tracked file type or mode drifted", details={"reason": "tracked_blob_mismatch"})
+                raw_size = info.st_size
+                blob = hashlib.sha1() if len(expected_oid) == 40 else hashlib.sha256()
+                blob.update(f"blob {raw_size}\0".encode("ascii"))
+                flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                with os.fdopen(os.open(target, flags), "rb") as stream:
+                    opened = os.fstat(stream.fileno())
+                    if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                        raise _fail("WORKSPACE_CONTENDED", "candidate tracked file changed during verification", retryable=True)
+                    while chunk := stream.read(1024 * 1024):
+                        blob.update(chunk)
+                    finished = os.fstat(stream.fileno())
+                if (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) != (finished.st_size, finished.st_mtime_ns, finished.st_ctime_ns):
+                    raise _fail("WORKSPACE_CONTENDED", "candidate tracked file changed during verification", retryable=True)
+            bytes_seen += raw_size
+            if bytes_seen > 512 * 1024 * 1024:
+                raise _fail("CHECK_FAILED", "tracked candidate content proof exceeds safe bounds", retryable=True, details={"reason": "tracked_proof_limit"})
+        except (OSError, ValueError) as exc:
+            raise _fail("WORKSPACE_CONTENDED", "candidate tracked file could not be safely read", retryable=True, details={"reason": "tracked_proof_unavailable"}) from exc
+        if blob.hexdigest() != expected_oid:
+            raise _fail("WORKSPACE_CONTENDED", "candidate tracked content differs from HEAD", details={"reason": "tracked_blob_mismatch"})
+
+
 def _workspace_root(config_dir: Path) -> Path:
     registry_path = config_dir / "projects.yaml"
     try:
@@ -1113,6 +1188,7 @@ def _verify_candidate_clean(
                 "dirty": dirty,
             },
         )
+    _require_tracked_files_match_head(candidate_root)
     evidence = _candidate_active_evidence_details(candidate_root)
     if evidence is not None:
         raise _fail(

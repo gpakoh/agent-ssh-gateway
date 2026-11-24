@@ -1696,6 +1696,65 @@ def test_candidate_cleanup_rejects_legacy_git_source_before_creating_transaction
     assert marker.read_text(encoding="utf-8") == "owner-controlled"
 
 
+@pytest.mark.parametrize("index_flag", ["--assume-unchanged", "--skip-worktree"])
+def test_candidate_cleanup_rejects_tracked_drift_hidden_by_index_flags(
+    registry_fixture, monkeypatch: pytest.MonkeyPatch, index_flag: str,
+) -> None:
+    """A clean porcelain result is not proof that tracked bytes match HEAD."""
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/hidden-tracked-drift"
+    archive = "archive/candidate-hidden-tracked-drift"
+    receipt = prepare_candidate_clone(
+        "source-project", branch, base, config_dir=config_dir, journal_root=journal_root
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    tracked = clone_root / "README.md"
+    original = tracked.read_bytes()
+    _git(clone_root, "update-index", index_flag, "README.md")
+    tracked.write_bytes(b"hijacked tracked content\n")
+    assert _git(clone_root, "status", "--porcelain=v1") == ""
+    _mock_cleanup_remote_probe(
+        monkeypatch, module, preserved_ref=archive, head=base, delivery_branch=branch
+    )
+    registry_before = (config_dir / "projects.yaml").read_bytes()
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id, base, branch, "source-project", archive,
+            config_dir=config_dir, journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+
+    assert exc_info.value.code == "WORKSPACE_CONTENDED"
+    assert (exc_info.value.details or {}).get("reason") == "tracked_blob_mismatch"
+    assert tracked.read_bytes() != original
+    assert (config_dir / "projects.yaml").read_bytes() == registry_before
+    assert clone_root.is_dir()
+    assert not module._cleanup_tombstone_path(journal_root, receipt.project_id)[0].exists()
+
+
+def test_candidate_tracked_blob_proof_handles_symlinks_without_following_them(
+    registry_fixture,
+) -> None:
+    """Symlink payload is the Git blob; target contents must not be dereferenced."""
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, source, config_dir, journal_root, _base = registry_fixture
+    (source / "README-link").symlink_to("README.md")
+    _git(source, "add", "README-link")
+    _git(source, "commit", "-q", "-m", "add tracked link")
+    base = _git(source, "rev-parse", "HEAD")
+    receipt = prepare_candidate_clone(
+        "source-project", "candidate/tracked-link", base,
+        config_dir=config_dir, journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    module._require_tracked_files_match_head(clone_root)
+    assert (clone_root / "README-link").is_symlink()
+
+
 def test_candidate_cleanup_removes_preserved_candidate_and_is_idempotent(
     registry_fixture,
     monkeypatch: pytest.MonkeyPatch,
