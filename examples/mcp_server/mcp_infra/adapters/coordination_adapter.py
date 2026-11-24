@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 from pathlib import Path
@@ -100,6 +101,138 @@ async def _verified_preview(
 
 
 _SUMMARY_MAX_THREADS = 50
+_RESUME_PR_LIMIT = 10
+_RESUME_RUN_LIMIT = 20
+_RESUME_READ_TIMEOUT = 8.0
+
+
+def _resume_sha(value: Any) -> str | None:
+    if isinstance(value, str) and len(value) == 40 and all(c in "0123456789abcdef" for c in value):
+        return value
+    return None
+
+
+def _resume_ref(value: Any) -> str | None:
+    if isinstance(value, str) and 0 < len(value) <= 256 and value.isprintable():
+        return value
+    return None
+
+
+async def _resume_read(client: Any, method: str, *args: Any, **kwargs: Any) -> Any:
+    # Read-only provider errors are isolated; never serialize exception bodies.
+    # asyncio cancellation still propagates to the request owner.
+    try:
+        return await asyncio.wait_for(getattr(client, method)(*args, **kwargs), _RESUME_READ_TIMEOUT)
+    except Exception:
+        return None
+
+
+async def _project_resume(client: Any, owner: str, repo: str) -> dict[str, Any]:
+    """Bounded observations from the same registered repository and read scope."""
+    result: dict[str, Any] = {
+        "repository": f"{owner}/{repo}",
+        "repo_state": "unavailable", "open_issues_count": None,
+        "default_branch": None, "default_head_sha": None, "default_head_state": "unavailable",
+        "open_prs_state": "unavailable", "open_prs": [], "open_pr_limit": _RESUME_PR_LIMIT,
+        "ci_state": "unavailable", "ci_run_limit": _RESUME_RUN_LIMIT,
+        "ci_window_truncated": None, "default_head_runs": [],
+        "atomic_snapshot": False, "authorizes_mutation": False,
+        "note": "Read-only observations, not merge/release evidence. Unmatched CI is unknown; read exact PR/run/jobs before acting. Local workspace and handoff require their own scoped tools.",
+    }
+    raw_repo = await _resume_read(client, "get_repo", owner, repo)
+    if not isinstance(raw_repo, dict):
+        return result
+    if raw_repo.get("full_name") != result["repository"]:
+        result["repo_state"] = "identity_unverified"
+        return result
+    result["repo_state"] = "observed"
+    count = raw_repo.get("open_issues_count")
+    if type(count) is int and count >= 0:
+        result["open_issues_count"] = count
+    branch = _resume_ref(raw_repo.get("default_branch"))
+    result["default_branch"] = branch
+
+    async def read_branch() -> Any:
+        if branch is None:
+            return None
+        return await _resume_read(client, "get_branch", owner, repo, branch)
+
+    raw_branch, raw_prs, raw_ci = await asyncio.gather(
+        read_branch(),
+        _resume_read(client, "list_pull_requests", owner, repo, state="open", limit=_RESUME_PR_LIMIT),
+        _resume_read(client, "list_action_runs", owner, repo, limit=_RESUME_RUN_LIMIT),
+    )
+    if isinstance(raw_branch, dict) and raw_branch.get("name") == branch:
+        commit = raw_branch.get("commit")
+        sha = _resume_sha(commit.get("id")) if isinstance(commit, dict) else None
+        if sha is not None:
+            result["default_head_sha"] = sha
+            result["default_head_state"] = "observed"
+
+    prs: list[dict[str, Any]] = []
+    if isinstance(raw_prs, list):
+        result["open_prs_state"] = "partial" if len(raw_prs) >= _RESUME_PR_LIMIT else "observed"
+        seen_prs: set[int] = set()
+        for pr in raw_prs[:_RESUME_PR_LIMIT]:
+            if not isinstance(pr, dict):
+                result["open_prs_state"] = "partial"
+                continue
+            head, base = pr.get("head"), pr.get("base")
+            number = pr.get("number")
+            if (type(number) is not int or number < 1 or number in seen_prs
+                    or pr.get("state") != "open" or not isinstance(head, dict) or not isinstance(base, dict)):
+                result["open_prs_state"] = "partial"
+                continue
+            head_sha, base_sha = _resume_sha(head.get("sha")), _resume_sha(base.get("sha"))
+            head_ref, base_ref = _resume_ref(head.get("ref")), _resume_ref(base.get("ref"))
+            if None in (head_sha, base_sha, head_ref, base_ref):
+                result["open_prs_state"] = "partial"
+                continue
+            base_repo = base.get("repo")
+            if isinstance(base_repo, dict) and base_repo.get("full_name") != result["repository"]:
+                result["open_prs_state"] = "partial"
+                continue
+            seen_prs.add(number)
+            prs.append({"number": number, "head_sha": head_sha, "head_ref": head_ref,
+                        "base_sha": base_sha, "base_ref": base_ref, "runs": []})
+    result["open_prs"] = prs
+
+    if not isinstance(raw_ci, dict) or not isinstance(raw_ci.get("workflow_runs"), list):
+        return result
+    runs = raw_ci["workflow_runs"]
+    result["ci_state"] = "observed"
+    total = raw_ci.get("total_count")
+    if type(total) is int and total >= len(runs):
+        result["ci_window_truncated"] = total > min(len(runs), _RESUME_RUN_LIMIT)
+    elif len(runs) >= _RESUME_RUN_LIMIT:
+        result["ci_window_truncated"] = True
+    if len(runs) > _RESUME_RUN_LIMIT:
+        result["ci_state"] = "partial"
+    seen_runs: set[int] = set()
+    for run in runs[:_RESUME_RUN_LIMIT]:
+        if not isinstance(run, dict):
+            result["ci_state"] = "partial"
+            continue
+        repository = run.get("repository")
+        run_id, attempt = run.get("id"), run.get("run_attempt")
+        sha = _resume_sha(run.get("head_sha"))
+        status, conclusion, event = run.get("status"), run.get("conclusion"), run.get("event")
+        if (not isinstance(repository, dict) or repository.get("full_name") != result["repository"]
+                or type(run_id) is not int or run_id < 1 or run_id in seen_runs
+                or type(attempt) is not int or attempt < 1 or sha is None
+                or not isinstance(status, str) or len(status) > 32 or not status.isprintable()
+                or (conclusion is not None and (not isinstance(conclusion, str) or len(conclusion) > 32 or not conclusion.isprintable()))):
+            result["ci_state"] = "partial"
+            continue
+        seen_runs.add(run_id)
+        receipt = {"id": run_id, "head_sha": sha, "run_attempt": attempt, "status": status, "conclusion": conclusion}
+        if event == "push" and sha == result["default_head_sha"] and run.get("head_branch") == branch:
+            result["default_head_runs"].append(receipt)
+        elif event == "pull_request":
+            for pr in prs:
+                if pr["head_sha"] == sha:
+                    pr["runs"].append(receipt)
+    return result
 
 
 async def _verified_global_summary(
@@ -204,10 +337,13 @@ async def coord_board(
                 client, owner, repo, all_threads, limit, offset
             )
             columns = board_from_threads(enriched)
-            summary = (
-                await _verified_global_summary(client, owner, repo, all_threads, scan_truncated)
-                if include_summary else None
-            )
+            if include_summary:
+                summary, resume = await asyncio.gather(
+                    _verified_global_summary(client, owner, repo, all_threads, scan_truncated),
+                    _project_resume(client, owner, repo),
+                )
+            else:
+                summary, resume = None, None
     except Exception as exc:
         return _fail(tool, exc)
     next_offset = offset + examined if offset + examined < len(all_threads) else None
@@ -224,7 +360,7 @@ async def coord_board(
             "source_scan_truncated": scan_truncated,
             "examined_thread_count": examined,
             "incomplete_thread_numbers": incomplete_thread_numbers,
-            **({"summary": summary} if include_summary else {}),
+            **({"summary": summary, "resume": resume} if include_summary else {}),
             "note": "Gitea Issues is authoritative; resolved does not automatically close an Issue",
         }, source="gitea",
     )

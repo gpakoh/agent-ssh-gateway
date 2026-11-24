@@ -762,6 +762,98 @@ async def test_opt_in_summary_counts_every_verified_state_without_changing_page(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["healthy", "failed_runs", "wrong_repo", "malformed_pr", "full_page", "wrong_run_repo"])
+async def test_board_resume_snapshot_is_bounded_exact_and_optional(monkeypatch, scenario):
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setattr(adapter, "_registered", lambda p: core.validate_project(p))
+    client = FakeClient()
+    await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway", source_project="agent-ssh-gateway",
+        title="Resume", body="Evidence", request_key="resume-snapshot-thread-123",
+    )
+    repo_name = "gpakoh/agent-ssh-gateway"
+    master_sha = "a" * 40
+    feature_sha = "b" * 40
+    client.get_repo = AsyncMock(return_value={
+        "full_name": "other/repo" if scenario == "wrong_repo" else repo_name,
+        "default_branch": "master", "open_issues_count": 48,
+        "owner": {"email": "secret@example.invalid"},
+    })
+    client.get_branch = AsyncMock(return_value={
+        "name": "master", "commit": {"id": master_sha}, "protected": True,
+    })
+    pr = {"number": 12, "state": "open", "head": {"sha": feature_sha, "ref": "fix/a"},
+          "base": {"sha": master_sha, "ref": "master"}, "body": "PRIVATE BODY"}
+    prs = [{**pr, "number": i + 12} for i in range(10)] if scenario == "full_page" else [pr]
+    if scenario == "malformed_pr":
+        prs.append({"number": 13, "state": "open", "head": {"sha": "invalid"}})
+    client.list_pull_requests = AsyncMock(return_value=prs)
+    runs = [
+        {"id": 101, "head_sha": master_sha, "head_branch": "master", "event": "push",
+         "status": "completed", "conclusion": "success", "run_attempt": 1,
+         "repository": {"full_name": repo_name}},
+        {"id": 102, "head_sha": feature_sha, "event": "pull_request",
+         "status": "in_progress", "conclusion": None, "run_attempt": 1,
+         "repository": {"full_name": "other/repo" if scenario == "wrong_run_repo" else repo_name}},
+        {"id": 103, "head_sha": "c" * 40, "event": "pull_request",
+         "status": "completed", "conclusion": "success", "run_attempt": 1,
+         "repository": {"full_name": repo_name}},
+    ]
+    client.list_action_runs = AsyncMock(return_value={"workflow_runs": runs, "total_count": 500})
+    if scenario == "failed_runs":
+        client.list_action_runs.side_effect = OSError("SECRET PROVIDER ERROR")
+    monkeypatch.setattr(FakeClient, "__aenter__", _fake_aenter, raising=False)
+    monkeypatch.setattr(FakeClient, "__aexit__", _fake_aexit, raising=False)
+    monkeypatch.setattr(
+        adapter, "server_attr",
+        lambda name: (lambda _: client) if name == "GiteaClient" else None,
+    )
+    ordinary = await adapter.coord_board("agent-ssh-gateway", limit=1)
+    assert ordinary["ok"] is True
+    assert "resume" not in ordinary["result"]
+    client.get_repo.assert_not_awaited()
+    client.list_pull_requests.assert_not_awaited()
+    result = await adapter.coord_board("agent-ssh-gateway", limit=1, include_summary=True)
+    assert result["ok"] is True, result
+    data = result["result"]
+    assert data["count"] == 1
+    resume = data["resume"]
+    assert resume["authorizes_mutation"] is False
+    assert resume["atomic_snapshot"] is False
+    assert "secret@example" not in str(resume)
+    assert "PRIVATE BODY" not in str(resume)
+    assert "SECRET PROVIDER" not in str(resume)
+    if scenario == "wrong_repo":
+        assert resume["repo_state"] == "identity_unverified"
+        assert resume["open_issues_count"] is None
+        assert resume["default_head_sha"] is None
+        client.get_branch.assert_not_awaited()
+        client.list_pull_requests.assert_not_awaited()
+        client.list_action_runs.assert_not_awaited()
+        return
+    assert resume["repo_state"] == "observed"
+    assert resume["open_issues_count"] == 48
+    assert resume["default_head_sha"] == master_sha
+    assert resume["default_branch"] == "master"
+    client.get_branch.assert_awaited_once_with("gpakoh", "agent-ssh-gateway", "master")
+    client.list_pull_requests.assert_awaited_once_with("gpakoh", "agent-ssh-gateway", state="open", limit=10)
+    client.list_action_runs.assert_awaited_once_with("gpakoh", "agent-ssh-gateway", limit=20)
+    assert resume["open_prs_state"] == ("partial" if scenario in {"full_page", "malformed_pr"} else "observed")
+    assert resume["open_prs"][0]["head_sha"] == feature_sha
+    assert len(resume["open_prs"]) == (10 if scenario == "full_page" else 1)
+    if scenario == "failed_runs":
+        assert resume["ci_state"] == "unavailable"
+        assert resume["default_head_runs"] == []
+        assert resume["open_prs"][0]["runs"] == []
+    else:
+        assert resume["ci_state"] == ("partial" if scenario == "wrong_run_repo" else "observed")
+        assert resume["ci_window_truncated"] is True
+        assert [r["id"] for r in resume["default_head_runs"]] == [101]
+        assert [r["id"] for r in resume["open_prs"][0]["runs"]] == ([] if scenario == "wrong_run_repo" else [102])
+    assert client.comment_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_opt_in_summary_preserves_unknown_state_as_lower_bound(monkeypatch):
     monkeypatch.setenv("GITEA_TOKEN", "fake")
     monkeypatch.setattr(adapter, "_registered", lambda p: core.validate_project(p))
