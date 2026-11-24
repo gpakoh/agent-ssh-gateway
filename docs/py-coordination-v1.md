@@ -59,6 +59,23 @@ Gitea read-only окна и выдаёт `summary.state_counts` по четыр�
 даёт lease на запись и не исправляет/закрывает неполную историю.
 Постраничные `count`/`count_exact` при этом остаются **постраничными**.
 
+`coord_board(include_summary=true)` дополнительно возвращает `resume`: компактное
+наблюдение текущего зарегистрированного Gitea-репозитория, без новых MCP-tools
+или scopes. Четыре дополнительных ограниченных чтения: метаданные репозитория
+(его `open_issues_count`, не счётчик Kanban), точная default-ветка/HEAD, до 10
+открытых PR и до 20 недавних Actions runs. Последние три читаются параллельно;
+каждый read имеет deadline 8 секунд. Обычная доска и `coord_inbox` не выполняют
+эти чтения. `repo_state`, `default_head_state`, `open_prs_state`, `ci_state`,
+`ci_window_truncated` показывают доступность и пределы. Неизвестное значение
+равно `null`, ошибка не раскрывает тело provider response. Список `runs` в PR —
+совпадение наблюдаемого repo + event + head SHA, а не подтверждение отдельного
+PR или всех его CI jobs; одинаковый SHA может соответствовать нескольким PR.
+Отсутствие совпадения не означает отсутствие CI. `default_head_runs` —
+наблюдаемые push-runs точного default HEAD и ref. Снимок не атомарен, не
+авторизует merge, deployment или закрытие Issue. Перед мутацией перечитать
+точные PR/branch/run/jobs. Локальные candidates/working tree и handoff остаются
+за `info`/`read_handoff` с отдельными scopes. Нет общего нового state store.
+
 Ни offset, ни частичный read не предоставляют разрешения на запись/закрытие.
 Gitea endpoint `/issues/{index}/comments` документирует `since/before`,
 но **не поддерживает доказуемую постраничность** через `page/limit`.
