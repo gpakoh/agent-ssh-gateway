@@ -1282,12 +1282,18 @@ async def ssh_exception_handler(request, exc: SSHManagerError):
 @app.exception_handler(RateLimitExceeded)
 async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
     """Return structured retry metadata for operator-safe backoff."""
+    # The unit's GRANULARITY is not the configured window. For example,
+    # 7 per 30 seconds and 2 per 2 hours must not both advertise 60s.
+    # A full window is a conservative retry delay when the current bucket's
+    # precise reset timestamp is not exposed by SlowAPI's exception.
     retry_after = 60
     try:
         item = exc.limit.limit
-        retry_after = max(int(getattr(item, "GRANULARITY", 60)), 1)
+        window_seconds = item.get_expiry()
+        if type(window_seconds) is int and window_seconds > 0:
+            retry_after = window_seconds
     except Exception:
-        pass
+        pass  # Legacy or malformed limit: retain bounded default backoff.
     bucket_class = _request_bucket_class(request)
     bucket_id = rate_limit_bucket_id(request, bucket_class=bucket_class) if request is not None else None
     body = _err(
