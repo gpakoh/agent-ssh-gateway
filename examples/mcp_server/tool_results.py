@@ -26,6 +26,11 @@ ERROR_CODES = {
     "SESSION_NOT_FOUND",
     "AUTH_ERROR",
     "POLICY_VIOLATION",
+    "READONLY_COMMAND",
+    "WRITE_PERMISSION_DENIED",
+    "WRITE_MODE_ERROR",
+    "AGENT_BACKEND_BLOCKED",
+    "OPENCODE_BLOCKED",
     "RATE_LIMITED",
     "RATE_LIMIT_EXCEEDED",
     "SESSION_LIMIT_EXCEEDED",
@@ -198,6 +203,17 @@ ERROR_CODES = {
     "PARENT_MISSING",
 }
 
+# Fixed guidance for the existing local policy classifications. No raw
+# exception details, permissions changes, or alternative execution paths.
+_POLICY_RECOVERY_HINTS = {
+    "POLICY_VIOLATION": "Policy refused the operation; review the permitted tool contract and ask the operator to review the policy if needed. Do not bypass the denial.",
+    "READONLY_COMMAND": "Command policy refused the operation; inspect the read-only tool contract or ask the operator to review the policy. Do not retry through another execution path.",
+    "WRITE_PERMISSION_DENIED": "Write policy refused the operation; inspect registered workspace permissions and ask the operator to review the required access. Do not bypass the denial.",
+    "WRITE_MODE_ERROR": "Write-mode policy refused the operation; ask the operator to review the authorized access profile. Do not switch execution paths to evade the restriction.",
+    "AGENT_BACKEND_BLOCKED": "Agent backend policy refused the operation; ask the operator to review the approved backend contract. Do not bypass the denial.",
+    "OPENCODE_BLOCKED": "OpenCode policy refused the operation; ask the operator to review the approved execution contract. Do not bypass the denial.",
+}
+
 SAFE_SOURCE_VALUES = {
     "gateway",
     "docker",
@@ -319,6 +335,8 @@ def tool_error(
         "message": redacted_message,
         "retryable": bool(retryable),
     }
+    if hint is None:
+        hint = _POLICY_RECOVERY_HINTS.get(code)
     if hint is not None:
         error["hint"] = str(hint)
     if details is not None:
