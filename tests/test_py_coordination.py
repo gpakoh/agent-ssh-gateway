@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -952,6 +953,110 @@ async def test_opt_in_summary_caps_work_and_never_claims_exact_large_totals(monk
     assert data["summary"]["source_scan_truncated"] is True
     assert data["summary"]["count_exact"] is False
     assert data["summary"]["state_counts"]["accepted"]["count_exact"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reader_name", ["coord_board", "coord_inbox"])
+async def test_summary_deadline_preserves_completed_counts_and_resume(monkeypatch, reader_name):
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setattr(adapter, "_registered", lambda p: core.validate_project(p))
+    monkeypatch.setattr(adapter, "_SUMMARY_READ_TIMEOUT", 0.1, raising=False)
+    client = FakeClient()
+    monkeypatch.setattr(FakeClient, "__aenter__", _fake_aenter, raising=False)
+    monkeypatch.setattr(FakeClient, "__aexit__", _fake_aexit, raising=False)
+    monkeypatch.setattr(
+        adapter, "server_attr",
+        lambda name: (lambda _: client) if name == "GiteaClient" else None,
+    )
+    rows = [
+        {"number": i, "title": f"Issue {i}", "state": "open",
+         "url": f"https://gitea.example/issues/{i}",
+         "source_project": "agent-ssh-gateway", "request_key": f"deadline-{i}-123",
+         "updated_at": "2026-11-03T09:00:00Z"}
+        for i in range(1, 5)
+    ]
+    monkeypatch.setattr(adapter, "list_threads_preview", AsyncMock(return_value=(rows, False)))
+    cancelled = asyncio.Event()
+    calls = []
+
+    async def verify(_client, _owner, _repo, number):
+        calls.append(number)
+        if number == 2:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+        return "accepted", False
+
+    monkeypatch.setattr(adapter, "preview_thread_state", verify)
+    resume = {"repo_state": "observed", "open_issues_count": 48}
+    monkeypatch.setattr(adapter, "_project_resume", AsyncMock(return_value=resume))
+    reader = getattr(adapter, reader_name)
+    result = await asyncio.wait_for(reader(
+        "agent-ssh-gateway", limit=1, include_summary=True
+    ), timeout=2)
+    assert result["ok"] is True, result
+    data = result["result"]
+    summary = data["summary"]
+    assert summary["state_counts"]["accepted"]["count"] == 1
+    assert summary["count_exact"] is False
+    assert summary["observed_thread_count"] == 4
+    assert summary["examined_thread_count"] == 2
+    assert summary["verified_thread_count"] == 1
+    assert summary["unexamined_thread_count"] == 2
+    assert summary["unverified_thread_numbers"] == [2]
+    assert summary["scan_deadline_reached"] is True
+    assert summary["timed_out_thread_number"] == 2
+    assert calls == [1, 1, 2]
+    assert cancelled.is_set()
+    if reader_name == "coord_board":
+        assert data["resume"] == resume
+    else:
+        assert "resume" not in data
+
+
+@pytest.mark.asyncio
+async def test_summary_provider_failure_preserves_other_verified_counts(monkeypatch):
+    async def verify(_client, _owner, _repo, number):
+        if number == 2:
+            raise OSError("PRIVATE PROVIDER ERROR")
+        return "accepted", False
+
+    monkeypatch.setattr(adapter, "preview_thread_state", verify)
+    data = await adapter._verified_global_summary(
+        FakeClient(), "gpakoh", "agent-ssh-gateway",
+        [{"number": i} for i in range(1, 4)], False,
+    )
+    assert data["verified_thread_count"] == 2
+    assert data["examined_thread_count"] == 3
+    assert data["unverified_thread_numbers"] == [2]
+    assert data["probe_error_thread_numbers"] == [2]
+    assert data["scan_deadline_reached"] is False
+    assert data["count_exact"] is False
+    assert "PRIVATE" not in str(data)
+
+
+@pytest.mark.asyncio
+async def test_summary_caller_cancellation_is_not_partial_success(monkeypatch):
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def verify(*_args):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(adapter, "preview_thread_state", verify)
+    task = asyncio.create_task(adapter._verified_global_summary(
+        FakeClient(), "gpakoh", "agent-ssh-gateway", [{"number": 1}], False,
+    ))
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cancelled.is_set()
 
 
 @pytest.mark.asyncio
