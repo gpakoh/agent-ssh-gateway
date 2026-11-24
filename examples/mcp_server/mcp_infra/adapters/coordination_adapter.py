@@ -396,14 +396,17 @@ async def coord_board(
     )
 
 
-async def coord_open(project: str, issue_number: int) -> dict[str, Any]:
-    """Read recent bounded Gitea evidence; partial display never grants a close lease."""
+async def coord_open(
+    project: str, issue_number: int, history_cursor: str | None = None,
+) -> dict[str, Any]:
+    """Read recent evidence or follow history_older_cursor; partial pages never grant a close lease."""
     tool = "coord_open"
     try:
         owner, repo = await _connection(tool, project, write=False)
         async with server_attr("GiteaClient")(os.environ["GITEA_TOKEN"]) as client:
             thread = await open_thread(
-                client, owner, repo, issue_number, allow_partial=True, recent_preview=True
+                client, owner, repo, issue_number, allow_partial=True, recent_preview=True,
+                history_cursor=history_cursor,
             )
     except Exception as exc:
         return _fail(tool, exc)

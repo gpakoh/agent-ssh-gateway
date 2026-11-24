@@ -340,9 +340,38 @@ async def preview_thread_state(
     return state, False
 
 
+def _history_window(
+    history: list[dict[str, Any]], index: int, end: int,
+) -> tuple[list[dict[str, Any]], tuple[int, int] | None]:
+    """Walk older observed comments without skipping oversized body prefixes."""
+    tail: list[dict[str, Any]] = []
+    budget = 16000
+    while index >= 0 and len(tail) < 50:
+        entry = history[index]
+        body = entry["body"]
+        if end > budget and tail:
+            break
+        start = max(0, end - budget)
+        if start or end != len(body):
+            tail.append({
+                **entry, "body": body[start:end], "body_truncated": True,
+                "body_start": start, "body_end": end, "body_total_chars": len(body),
+            })
+        else:
+            tail.append(entry)
+        budget -= end - start
+        if start:
+            end = start
+            break
+        index -= 1
+        if index >= 0:
+            end = len(history[index]["body"])
+    return list(reversed(tail)), (index, end) if index >= 0 else None
+
+
 async def open_thread(
     client: Any, owner: str, repo: str, number: int, *, allow_partial: bool = False,
-    recent_preview: bool = False,
+    recent_preview: bool = False, history_cursor: str | None = None,
 ) -> dict[str, Any]:
     """Read an exact thread; allow a bounded, explicitly incomplete read-only preview.
 
@@ -354,6 +383,13 @@ async def open_thread(
     """
     if isinstance(number, bool) or not isinstance(number, int) or number < 1:
         raise ValueError("issue_number must be positive")
+    cursor_match = None
+    if history_cursor is not None:
+        if not allow_partial or not recent_preview or not isinstance(history_cursor, str):
+            raise ValueError("invalid history cursor")
+        cursor_match = re.fullmatch(r"([0-9a-f]{64}):([0-9]{1,3}):([0-9]{1,10})", history_cursor)
+        if cursor_match is None:
+            raise ValueError("invalid history cursor")
     issue = await client.get_issue(owner, repo, number)
     item = _issue(issue)
     if item is None:
@@ -422,23 +458,36 @@ async def open_thread(
         if not truncated:
             item["history_latest_event_id"] = last_id
         original_count = len(history)
-        # Preserve the established small-thread full-review contract. Long or
-        # incomplete scans return a suffix, not an arbitrarily old prefix.
-        if truncated or item["history_pages_scanned"] > 2:
-            budget = 16000
-            tail: list[dict[str, Any]] = []
-            body_truncated = False
-            for entry in reversed(history[-50:]):
-                body = entry["body"]
-                if len(body) > budget:
-                    if not tail:
-                        tail.append({**entry, "body": body[-budget:], "body_truncated": True})
-                        body_truncated = True
-                    break
-                tail.append(entry)
-                budget -= len(body)
-            history = list(reversed(tail))
-            if len(history) != original_count or body_truncated:
+        # Only a complete observed scan may anchor a continuation. Bind the
+        # cursor to repository, issue metadata, writer identity and raw comments
+        # (including edits not reflected in the issue's updated_at timestamp).
+        snapshot = None
+        if not truncated:
+            snapshot = hashlib.sha256(json.dumps(
+                [owner, repo, number, initial_version, trusted_login, comments],
+                sort_keys=True, separators=(",", ":"),
+            ).encode()).hexdigest()
+        item["history_older_cursor"] = None
+        if cursor_match is not None:
+            if snapshot is None or cursor_match[1] != snapshot:
+                raise ValueError("history cursor is stale or scan is incomplete; reopen issue")
+            index, end = int(cursor_match[2]), int(cursor_match[3])
+            if index >= original_count or end > len(history[index]["body"]) or (
+                end == 0 and history[index]["body"]
+            ):
+                raise ValueError("invalid history cursor position")
+        else:
+            index = original_count - 1
+            end = len(history[index]["body"]) if index >= 0 else 0
+        # Preserve established small-thread full review. Explicit navigation
+        # is always read-only, even if the selected window fits in one page.
+        if cursor_match is not None or truncated or item["history_pages_scanned"] > 2:
+            history, older = _history_window(history, index, end)
+            if older is not None and snapshot is not None:
+                item["history_older_cursor"] = f"{snapshot}:{older[0]}:{older[1]}"
+            if cursor_match is not None or len(history) != original_count or any(
+                entry.get("body_truncated") for entry in history
+            ):
                 if not truncated:
                     item["history_incomplete_reason"] = "bounded_history_display"
                 truncated = True
