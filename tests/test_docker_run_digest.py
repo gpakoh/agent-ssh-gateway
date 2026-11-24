@@ -91,7 +91,10 @@ async def test_docker_client_passes_exact_digest_as_one_argv_element():
     argv = run.await_args.args[0]
     assert argv[-3:] == [DIGEST, "echo", "ok"]
     assert Path(argv[0]).name == "docker"
-    assert argv[1:3] == ["run", "--rm"]
+    assert argv[1:-3] == [
+        "run", "--rm", "--init", "--memory", "4g", "--memory-swap", "4g",
+        "--cpus", "2.0", "--pids-limit", "256", "--name", "digest-smoke",
+    ]
 
 
 @pytest.mark.asyncio
