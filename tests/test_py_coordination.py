@@ -1391,6 +1391,91 @@ async def test_lowlevel_timeline_uses_documented_page_endpoint_only(monkeypatch)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["complete", "count_mismatch", "drift", "bounded", "oversized"])
+async def test_mcp_coord_open_recovers_recent_evidence_without_close_authority(
+    monkeypatch, scenario,
+):
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setattr(adapter, "_registered", lambda p: core.validate_project(p))
+    client = FakeClient()
+    await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway",
+        source_project="agent-ssh-gateway", title="Long handoff",
+        body="Evidence", request_key="recent-history-thread-123",
+    )
+    total = 501 if scenario == "bounded" else 125
+    client.comments[1] = [
+        {"id": i, "body": f"Evidence {i}", "user": {"login": "other"}}
+        for i in range(1, total + 1)
+    ]
+    client.comments[1][-1]["body"] = (
+        core._header(kind="event", key="recent-history-accept-123", state="accepted")
+        + "\nLatest handoff"
+    )
+    client.comments[1][-1]["user"] = {"login": "gpakoh"}
+    if scenario == "oversized":
+        client.comments[1][-1]["body"] += "x" * 20000 + " LAST CHECKPOINT"
+    client.issues[0]["comments"] = total + (scenario == "count_mismatch")
+    client.issues[0]["updated_at"] = "initial"
+    original_get = client.get_issue
+    issue_reads = 0
+
+    async def get_issue(owner, repo, number):
+        nonlocal issue_reads
+        issue_reads += 1
+        issue = dict(await original_get(owner, repo, number))
+        if scenario == "drift" and issue_reads > 1:
+            issue["updated_at"] = "changed"
+        return issue
+
+    async def enter(self):
+        return self
+
+    async def leave(self, *args):
+        return None
+
+    client.get_issue = get_issue
+    monkeypatch.setattr(FakeClient, "__aenter__", enter, raising=False)
+    monkeypatch.setattr(FakeClient, "__aexit__", leave, raising=False)
+    monkeypatch.setattr(
+        adapter, "server_attr",
+        lambda name: (lambda _: client) if name == "GiteaClient" else None,
+    )
+    response = await adapter.coord_open("agent-ssh-gateway", 1)
+    assert response["ok"] is True, response
+    detail = response["result"]["thread"]
+    complete = scenario in {"complete", "oversized"}
+    expected_last = 500 if scenario == "bounded" else total
+    assert detail["history_scan_complete"] is complete
+    assert detail["history_last_scanned_event_id"] == expected_last
+    assert detail["history"][-1]["id"] == expected_last
+    assert 1 <= len(detail["history"]) <= 50
+    assert detail["history_display_omitted_count"] == expected_last - len(detail["history"])
+    assert detail["history_truncated"] is True
+    assert detail["coord_state"] is None
+    assert "close_state_sha256" not in detail
+    assert "close_content_sha256" not in detail
+    assert detail["history_pages_scanned"] == (10 if scenario == "bounded" else 3)
+    assert detail["history_incomplete_reason"] == {
+        "complete": "bounded_history_display",
+        "count_mismatch": "comment_count_mismatch",
+        "drift": "issue_changed_during_scan",
+        "bounded": "bounded_comment_window",
+        "oversized": "bounded_history_display",
+    }[scenario]
+    if complete:
+        assert detail["history_latest_event_id"] == total
+        assert detail["history"][-1]["state"] == "accepted"
+    else:
+        assert "history_latest_event_id" not in detail
+    if scenario == "oversized":
+        assert detail["history"][-1]["body"].endswith(" LAST CHECKPOINT")
+        assert detail["history"][-1]["body_truncated"] is True
+        assert len(detail["history"][-1]["body"]) <= 16000
+    assert client.comment_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_coord_open_short_history_retains_verified_state_and_close_lease():
     client = FakeClient()
     await core.create_thread(

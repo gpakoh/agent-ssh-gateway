@@ -341,9 +341,13 @@ async def preview_thread_state(
 
 
 async def open_thread(
-    client: Any, owner: str, repo: str, number: int, *, allow_partial: bool = False
+    client: Any, owner: str, repo: str, number: int, *, allow_partial: bool = False,
+    recent_preview: bool = False,
 ) -> dict[str, Any]:
     """Read an exact thread; allow a bounded, explicitly incomplete read-only preview.
+
+    MCP recent_preview scans at most ten pages and compacts long discussions.
+    It never grants a close lease when any discussion evidence is omitted.
 
     Mutations and close receipts MUST use the default exhaustive scan. A partial
     preview cannot attest the latest coordination state or produce close leases.
@@ -355,13 +359,29 @@ async def open_thread(
     if item is None:
         raise ValueError("issue is not a Py Coordination thread")
     verified_no_comments = type(issue.get("comments")) is int and issue["comments"] == 0
+    if recent_preview and not allow_partial:
+        raise ValueError("recent preview is read-only")
     if allow_partial:
+        # Keep a snapshot rather than relying on a mutable provider object.
+        version_fields = ("id", "number", "title", "body", "state", "updated_at", "comments")
+        initial_version = tuple(issue.get(key) for key in version_fields)
         comments, truncated, incomplete_reason, pages_read = await _timeline_comment_pages(
             lambda page: client.list_issue_timeline(
                 owner, repo, number, limit=_PAGE_SIZE, page=page
             ),
+            max_pages=_MAX_PAGES if recent_preview else 2,
             verified_no_comments=verified_no_comments,
         )
+        if recent_preview and not truncated:
+            count = issue.get("comments")
+            if type(count) is int and count != len(comments):
+                truncated = True
+                incomplete_reason = "comment_count_mismatch"
+            else:
+                current = await client.get_issue(owner, repo, number)
+                if tuple(current.get(key) for key in version_fields) != initial_version:
+                    truncated = True
+                    incomplete_reason = "issue_changed_during_scan"
         item["history_incomplete_reason"] = incomplete_reason
         item["history_pages_scanned"] = pages_read
     else:
@@ -395,6 +415,34 @@ async def open_thread(
                 "author": author,
             }
         )
+    if recent_preview:
+        item["history_scan_complete"] = not truncated
+        last_id = history[-1]["id"] if history else None
+        item["history_last_scanned_event_id"] = last_id
+        if not truncated:
+            item["history_latest_event_id"] = last_id
+        original_count = len(history)
+        # Preserve the established small-thread full-review contract. Long or
+        # incomplete scans return a suffix, not an arbitrarily old prefix.
+        if truncated or item["history_pages_scanned"] > 2:
+            budget = 16000
+            tail: list[dict[str, Any]] = []
+            body_truncated = False
+            for entry in reversed(history[-50:]):
+                body = entry["body"]
+                if len(body) > budget:
+                    if not tail:
+                        tail.append({**entry, "body": body[-budget:], "body_truncated": True})
+                        body_truncated = True
+                    break
+                tail.append(entry)
+                budget -= len(body)
+            history = list(reversed(tail))
+            if len(history) != original_count or body_truncated:
+                if not truncated:
+                    item["history_incomplete_reason"] = "bounded_history_display"
+                truncated = True
+        item["history_display_omitted_count"] = original_count - len(history)
     item["history"] = history
     item["history_truncated"] = truncated
     item["coord_state"] = (

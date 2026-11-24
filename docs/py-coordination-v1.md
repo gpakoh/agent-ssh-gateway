@@ -68,20 +68,27 @@ Gitea endpoint `/issues/{index}/comments` документирует `since/befo
 `label`, `close`, `review`), и только затем в журнал допускаются события
 с точным `type="comment"`, валидными ID, автором и текстом. Служебный event
 с поддельным coordination-маркером не может изменить состояние.
-`coord_open` и браузерный `/api/coordination/thread` читают не более
-**100 исходных timeline-событий** (две страницы). Если история длиннее либо
-страницы повторяются/пересекаются, возвращаются только доказанно
-наблюдавшиеся текстовые комментарии и `history_truncated=true`;
-итоговый `coord_state=null` означает **неизвестно**.
-Для read-only ответа `coord_open` дополнительно выдаёт
-`history_pages_scanned` и `history_incomplete_reason`:
-`non_progressing_comment_cursor` (повтор без новых ID),
-`overlapping_comment_pages` (частичное пересечение),
-`non_monotonic_comment_cursor` (сбой порядка),
-`unverifiable_timeline_event` (некорректный ID, тип или текст комментария) либо
-`bounded_comment_window` (две полные страницы, продолжение не проверено).
-Если причина отсутствует (`null`), история полна только в пределах
-проверенного короткого ответа. Нельзя считать длину страницы **после
+Браузерный `/api/coordination/thread` читает не более **100 исходных
+timeline-событий** (две страницы). MCP `coord_open` сканирует до **500**
+исходных событий (десять страниц), сохраняя полную выдачу короткой истории.
+При длинном или неполном сканировании возвращается свежий наблюдавшийся
+суффикс: до 50 комментариев и 16000 символов текста; слишком длинный
+последний комментарий явно помечается `body_truncated=true`. Это не
+автоматическая авторизация закрытия. `history_scan_complete` отличает
+полноту сканирования от сокращённого отображения; `history_display_omitted_count`
+считает не показанные наблюдавшиеся комментарии, а не неизвестный остаток.
+`history_last_scanned_event_id` — последний наблюдавшийся комментарий;
+`history_latest_event_id` присутствует только при полном проверенном сканировании.
+При пропуске истории `history_truncated=true`, `coord_state=null`, без close lease.
+`history_pages_scanned` и `history_incomplete_reason` объясняют границу:
+`non_progressing_comment_cursor`, `overlapping_comment_pages`,
+`non_monotonic_comment_cursor`, `unverifiable_timeline_event`,
+`bounded_comment_window`, `unverifiable_null_timeline_page`,
+`comment_count_mismatch`, `issue_changed_during_scan` или `bounded_history_display`.
+Полнота сканирования MCP проверяется также сверкой доступного счётчика
+комментариев и повторным чтением версии Issue. При неполном сканировании
+последний наблюдавшийся комментарий не считается последним в Issue.
+Если причина отсутствует (`null`), возвращена проверенная полная история. Нельзя считать длину страницы **после
 фильтрации** признаком конца; также нельзя использовать Gitea поле
 `comments=50` как доказательство конца истории.
 Отсутствуют `close_state_sha256` и `close_content_sha256`: неполное чтение
