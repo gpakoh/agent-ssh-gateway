@@ -115,6 +115,68 @@ async def test_rate_limit_response_reports_actual_configured_lane(
     assert json.loads(response.body)["details"]["bucket_class"] == expected_bucket
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("limit_text", "expected_seconds"),
+    [
+        ("7 per 30 second", 30),
+        ("10 per 1 minute", 60),
+        ("2 per 2 hour", 7200),
+    ],
+)
+async def test_rate_limit_retry_after_uses_full_configured_window(
+    limit_text, expected_seconds
+):
+    """Retry-After must never truncate a multi-unit window to its granularity."""
+    from types import SimpleNamespace
+
+    from limits import parse
+    from slowapi.errors import RateLimitExceeded
+    from starlette.requests import Request
+
+    item = parse(limit_text)
+    assert item.get_expiry() == expected_seconds
+    request = Request({
+        "type": "http", "method": "POST", "scheme": "http",
+        "path": "/api/jobs/run", "headers": [],
+        "client": ("127.0.0.1", 1234), "server": ("test", 80),
+    })
+    exc = RateLimitExceeded.__new__(RateLimitExceeded)
+    exc.detail = limit_text
+    exc.limit = SimpleNamespace(limit=item)
+
+    response = await main_module.rate_limit_exceeded_handler(request, exc)
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == str(expected_seconds)
+    assert json.loads(response.body)["details"]["retry_after_seconds"] == expected_seconds
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_expiry", [None, 0, -1, True, "not-a-window"])
+async def test_rate_limit_retry_after_invalid_window_falls_back(invalid_expiry):
+    """Malformed limiter metadata must not break HTTP 429 serialization."""
+    from types import SimpleNamespace
+
+    from slowapi.errors import RateLimitExceeded
+    from starlette.requests import Request
+
+    request = Request({
+        "type": "http", "method": "POST", "scheme": "http",
+        "path": "/api/jobs/run", "headers": [],
+        "client": ("127.0.0.1", 1234), "server": ("test", 80),
+    })
+    exc = RateLimitExceeded.__new__(RateLimitExceeded)
+    exc.detail = "unknown rate window"
+    exc.limit = SimpleNamespace(
+        limit=SimpleNamespace(get_expiry=lambda: invalid_expiry)
+    )
+    response = await main_module.rate_limit_exceeded_handler(request, exc)
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "60"
+    assert json.loads(response.body)["details"]["retry_after_seconds"] == 60
+
+
 @pytest.fixture(autouse=True)
 def _reset_rate_limiter():
     """Clear shared rate-limit storage before each test to avoid cross-test leaks."""

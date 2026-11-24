@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import Request
+from limits import parse
 
 from app.main import rate_limit_exceeded_handler
 from app.security import rate_limit_bucket_id
@@ -66,7 +67,7 @@ def test_route_template_reuses_bucket_diagnostic_for_dynamic_path_ids():
 @pytest.mark.asyncio
 async def test_http_429_exposes_only_opaque_identity_and_existing_backoff():
     request = _request()
-    limit = SimpleNamespace(limit=SimpleNamespace(GRANULARITY=45))
+    limit = SimpleNamespace(limit=parse("3 per 45 seconds"))
     exceeded = SimpleNamespace(limit=limit, detail="3 per 45 seconds")
     result = await rate_limit_exceeded_handler(request, exceeded)
     body = json.loads(result.body)
@@ -87,7 +88,7 @@ async def test_http_429_exposes_only_opaque_identity_and_existing_backoff():
 async def test_without_request_avoids_inventing_bucket_identity():
     """Synthetic/diagnostic 429s have no proven client/IP bucket."""
     exceeded = SimpleNamespace(
-        limit=SimpleNamespace(limit=SimpleNamespace(GRANULARITY=30)),
+        limit=SimpleNamespace(limit=parse("3 per 30 seconds")),
         detail="3 per 30 seconds",
     )
     response = await rate_limit_exceeded_handler(None, exceeded)
