@@ -101,6 +101,7 @@ async def _verified_preview(
 
 
 _SUMMARY_MAX_THREADS = 50
+_SUMMARY_READ_TIMEOUT = 8.0  # Total optional summary budget, not per issue.
 _RESUME_PR_LIMIT = 10
 _RESUME_RUN_LIMIT = 20
 _RESUME_READ_TIMEOUT = 8.0
@@ -247,13 +248,39 @@ async def _verified_global_summary(
     """
     counts = {"open": 0, "accepted": 0, "waiting_review": 0, "resolved": 0}
     unknown: list[int] = []
-    examined = min(len(all_threads), _SUMMARY_MAX_THREADS)
-    for item in all_threads[:examined]:
-        state, incomplete = await preview_thread_state(client, owner, repo, item["number"])
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _SUMMARY_READ_TIMEOUT
+    examined = 0
+    deadline_reached = False
+    timed_out_thread = None
+    probe_errors: list[int] = []
+    for item in all_threads[:_SUMMARY_MAX_THREADS]:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            deadline_reached = True
+            break
+        number = item["number"]
+        examined += 1
+        try:
+            state, incomplete = await asyncio.wait_for(
+                preview_thread_state(client, owner, repo, number), timeout=remaining,
+            )
+            if state is not None and state not in counts:
+                raise ValueError("invalid coordination state in verified summary")
+        except TimeoutError:
+            unknown.append(number)
+            timed_out_thread = number
+            deadline_reached = True
+            break
+        except Exception:
+            # A read-only projection must not lose earlier verified evidence
+            # or the independent resume result because one provider read fails.
+            # Caller cancellation (BaseException) still propagates.
+            unknown.append(number)
+            probe_errors.append(number)
+            continue
         if incomplete or state is None:
-            unknown.append(item["number"])
-        elif state not in counts:
-            raise ValueError("invalid coordination state in verified summary")
+            unknown.append(number)
         else:
             counts[state] += 1
     exact = (
@@ -272,6 +299,9 @@ async def _verified_global_summary(
         "examined_thread_count": examined,
         "unexamined_thread_count": len(all_threads) - examined,
         "unverified_thread_numbers": unknown,
+        "scan_deadline_reached": deadline_reached,
+        "timed_out_thread_number": timed_out_thread,
+        "probe_error_thread_numbers": probe_errors,
         "source_scan_truncated": source_scan_truncated,
         "note": "Non-atomic read-only observation; counts are lower bounds if not exact",
     }
