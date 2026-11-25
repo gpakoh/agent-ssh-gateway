@@ -2106,3 +2106,43 @@ async def test_adapter_write_denies_missing_repo_permission(monkeypatch):
     assert result["ok"] is False
     assert result["error"]["code"] == "AUTH_ERROR"
     fake.create_coord_issue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_per_thread_budget_keeps_preview_and_summary_progress(monkeypatch):
+    monkeypatch.setattr(adapter, "_PREVIEW_READ_TIMEOUT", 0.5)
+    monkeypatch.setattr(adapter, "_SUMMARY_READ_TIMEOUT", 0.5)
+    monkeypatch.setattr(adapter, "_THREAD_READ_TIMEOUT", 0.02, raising=False)
+    rows = [{"number": i} for i in range(1, 6)]
+    cancelled = []
+
+    async def verify(_client, _owner, _repo, number):
+        if number in (1, 3):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.append(number)
+        return "accepted", False
+
+    monkeypatch.setattr(adapter, "preview_thread_state", verify)
+    verified, incomplete, examined, deadline, last_timeout = await adapter._verified_preview(
+        FakeClient(), "gpakoh", "agent-ssh-gateway", rows, 2,
+    )
+    assert [row["number"] for row in verified] == [2, 4]
+    assert incomplete == [1, 3]
+    assert examined == 4
+    assert deadline is False
+    assert last_timeout == 3
+    assert cancelled == [1, 3]
+    summary = await adapter._verified_global_summary(
+        FakeClient(), "gpakoh", "agent-ssh-gateway", rows, False,
+    )
+    assert summary["verified_thread_count"] == 3
+    assert summary["examined_thread_count"] == 5
+    assert summary["unexamined_thread_count"] == 0
+    assert summary["unverified_thread_numbers"] == [1, 3]
+    assert summary["timed_out_thread_numbers"] == [1, 3]
+    assert summary["timed_out_thread_number"] == 3
+    assert summary["scan_deadline_reached"] is False
+    assert summary["count_exact"] is False
+    assert cancelled == [1, 3, 1, 3]
