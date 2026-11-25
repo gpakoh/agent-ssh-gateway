@@ -1864,6 +1864,76 @@ async def test_history_navigation_rejects_malformed_and_incomplete_scan(monkeypa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("count", "body_chars", "compact"),
+    [(1, 16000, False), (1, 16001, True), (8, 2100, True),
+     (50, 320, False), (51, 10, True), (54, 1200, True)],
+)
+async def test_coord_open_applies_display_budget_to_short_timeline(
+    count, body_chars, compact,
+):
+    client = FakeClient()
+    await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway",
+        source_project="agent-ssh-gateway", title="Short timeline",
+        body="Evidence", request_key="short-display-budget-123",
+    )
+    bodies = {i: "x" * body_chars for i in range(1, count + 1)}
+    client.comments[1] = [
+        {"id": i, "body": body, "user": {"login": "other"}}
+        for i, body in bodies.items()
+    ]
+    client.issues[0]["comments"] = count
+    page = await core.open_thread(
+        client, "gpakoh", "agent-ssh-gateway", 1,
+        allow_partial=True, recent_preview=True,
+    )
+    assert page["history_pages_scanned"] <= 2
+    assert page["history_scan_complete"] is True
+    assert page["history_latest_event_id"] == count
+    assert len(page["history"]) <= 50
+    assert sum(len(entry["body"]) for entry in page["history"]) <= 16000
+    assert page["history_truncated"] is compact
+    assert bool(page["history_older_cursor"]) is compact
+    assert ("close_content_sha256" in page) is not compact
+    assert ("close_state_sha256" in page) is not compact
+    if compact:
+        assert page["coord_state"] is None
+        assert page["history_incomplete_reason"] == "bounded_history_display"
+    else:
+        assert page["coord_state"] == "open"
+
+    seen = []
+    while True:
+        seen.extend(
+            (entry["id"], entry.get("body_start", 0), entry["body"])
+            for entry in page["history"]
+        )
+        cursor = page["history_older_cursor"]
+        if cursor is None:
+            break
+        page = await core.open_thread(
+            client, "gpakoh", "agent-ssh-gateway", 1,
+            allow_partial=True, recent_preview=True, history_cursor=cursor,
+        )
+        assert page["coord_state"] is None
+        assert "close_state_sha256" not in page
+        assert len(page["history"]) <= 50
+        assert sum(len(entry["body"]) for entry in page["history"]) <= 16000
+    reconstructed = {}
+    for identifier, start, body in sorted(seen):
+        assert start == len(reconstructed.get(identifier, ""))
+        reconstructed[identifier] = reconstructed.get(identifier, "") + body
+    assert reconstructed == bodies
+
+    full = await core.open_thread(client, "gpakoh", "agent-ssh-gateway", 1)
+    assert full["history_truncated"] is False
+    assert len(full["history"]) == count
+    assert "close_state_sha256" in full
+    assert "close_content_sha256" in full
+
+
+@pytest.mark.asyncio
 async def test_coord_open_short_history_retains_verified_state_and_close_lease():
     client = FakeClient()
     await core.create_thread(
