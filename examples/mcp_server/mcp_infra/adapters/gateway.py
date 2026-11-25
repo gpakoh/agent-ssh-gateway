@@ -1661,7 +1661,7 @@ def gateway_write_handoff_plan(
 
 
 def gateway_show_handoff_status(project: str) -> dict[str, Any]:
-    """Show .ai-bridge file listing for a project."""
+    """Observe fixed handoff metadata in the registered host workspace."""
     return run_tool(
         tool="show_handoff_status",
         title="handoff status",
