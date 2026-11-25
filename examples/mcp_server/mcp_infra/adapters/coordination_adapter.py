@@ -72,10 +72,13 @@ async def _connection(tool: str, project: str, *, write: bool) -> tuple[str, str
     return owner, repo
 
 
+_PREVIEW_READ_TIMEOUT = 8.0  # Shared budget for the page's provider probes.
+
+
 async def _verified_preview(
     client: Any, owner: str, repo: str, all_threads: list[dict[str, Any]], limit: int,
     offset: int = 0,
-) -> tuple[list[dict[str, Any]], list[int], int]:
+) -> tuple[list[dict[str, Any]], list[int], int, bool, int | None]:
     """Backfill unreadable threads from a capped lookahead, never invent states.
 
     A long/unreadable first thread should not prevent the next healthy thread
@@ -86,14 +89,28 @@ async def _verified_preview(
     verified: list[dict[str, Any]] = []
     incomplete_numbers: list[int] = []
     examined = 0
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _PREVIEW_READ_TIMEOUT
+    deadline_reached = False
+    timed_out_thread = None
     for item in all_threads[offset : offset + 2 * limit]:
         if len(verified) == limit:
             break
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            deadline_reached = True
+            break
         examined += 1
         try:
-            state, incomplete = await preview_thread_state(
-                client, owner, repo, item["number"]
+            state, incomplete = await asyncio.wait_for(
+                preview_thread_state(client, owner, repo, item["number"]),
+                timeout=remaining,
             )
+        except TimeoutError:
+            timed_out_thread = item["number"]
+            incomplete_numbers.append(timed_out_thread)
+            deadline_reached = True
+            break
         except Exception:
             # Preserve verified read-only results when one provider read fails.
             # Caller cancellation (BaseException) still propagates.
@@ -103,7 +120,7 @@ async def _verified_preview(
             incomplete_numbers.append(item["number"])
             continue
         verified.append({**item, "coord_state": state})
-    return verified, incomplete_numbers, examined
+    return verified, incomplete_numbers, examined, deadline_reached, timed_out_thread
 
 
 _SUMMARY_MAX_THREADS = 50
@@ -328,7 +345,7 @@ async def coord_inbox(
         owner, repo = await _connection(tool, project, write=False)
         async with server_attr("GiteaClient")(os.environ["GITEA_TOKEN"]) as client:
             all_threads, scan_truncated = await list_threads_preview(client, owner, repo)
-            threads, incomplete_thread_numbers, examined = await _verified_preview(
+            threads, incomplete_thread_numbers, examined, deadline_reached, timed_out_thread = await _verified_preview(
                 client, owner, repo, all_threads, limit, offset
             )
             summary = (
@@ -338,7 +355,10 @@ async def coord_inbox(
     except Exception as exc:
         return _fail(tool, exc)
     next_offset = offset + examined if offset + examined < len(all_threads) else None
-    truncated = scan_truncated or offset > 0 or next_offset is not None or bool(incomplete_thread_numbers)
+    truncated = (
+        scan_truncated or offset > 0 or next_offset is not None
+        or bool(incomplete_thread_numbers) or deadline_reached
+    )
     return tool_success(
         tool,
         result={
@@ -348,6 +368,8 @@ async def coord_inbox(
             "source_scan_truncated": scan_truncated,
             "examined_thread_count": examined,
             "incomplete_thread_numbers": incomplete_thread_numbers,
+            "preview_deadline_reached": deadline_reached,
+            "preview_timed_out_thread_number": timed_out_thread,
             **({"summary": summary} if include_summary else {}),
         },
         source="gitea",
@@ -369,7 +391,7 @@ async def coord_board(
         owner, repo = await _connection(tool, project, write=False)
         async with server_attr("GiteaClient")(os.environ["GITEA_TOKEN"]) as client:
             all_threads, scan_truncated = await list_threads_preview(client, owner, repo)
-            enriched, incomplete_thread_numbers, examined = await _verified_preview(
+            enriched, incomplete_thread_numbers, examined, deadline_reached, timed_out_thread = await _verified_preview(
                 client, owner, repo, all_threads, limit, offset
             )
             columns = board_from_threads(enriched)
@@ -383,7 +405,10 @@ async def coord_board(
     except Exception as exc:
         return _fail(tool, exc)
     next_offset = offset + examined if offset + examined < len(all_threads) else None
-    truncated = scan_truncated or offset > 0 or next_offset is not None or bool(incomplete_thread_numbers)
+    truncated = (
+        scan_truncated or offset > 0 or next_offset is not None
+        or bool(incomplete_thread_numbers) or deadline_reached
+    )
     # Counts are exact only after every thread/state was verified. Otherwise
     # they are lower bounds across the observed sample, not global Kanban totals.
     for column in columns:
@@ -396,6 +421,8 @@ async def coord_board(
             "source_scan_truncated": scan_truncated,
             "examined_thread_count": examined,
             "incomplete_thread_numbers": incomplete_thread_numbers,
+            "preview_deadline_reached": deadline_reached,
+            "preview_timed_out_thread_number": timed_out_thread,
             **({"summary": summary, "resume": resume} if include_summary else {}),
             "note": "Gitea Issues is authoritative; resolved does not automatically close an Issue",
         }, source="gitea",

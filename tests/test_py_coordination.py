@@ -1066,6 +1066,47 @@ async def test_preview_provider_failure_preserves_other_verified_threads(monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reader_name", ["coord_board", "coord_inbox"])
+async def test_preview_deadline_preserves_rows_and_next_page(monkeypatch, reader_name):
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setattr(adapter, "_registered", lambda p: core.validate_project(p))
+    client = FakeClient()
+    for number in range(1, 4):
+        await core.create_thread(
+            client, "gpakoh", "agent-ssh-gateway",
+            source_project="agent-ssh-gateway", title=f"Issue {number}",
+            body="Evidence", request_key=f"preview-deadline-{number}",
+        )
+    monkeypatch.setattr(FakeClient, "__aenter__", _fake_aenter, raising=False)
+    monkeypatch.setattr(FakeClient, "__aexit__", _fake_aexit, raising=False)
+    monkeypatch.setattr(adapter, "server_attr", lambda name: (lambda _: client) if name == "GiteaClient" else None)
+    monkeypatch.setattr(adapter, "_PREVIEW_READ_TIMEOUT", 0.02, raising=False)
+    checked = []
+
+    async def verify(_client, _owner, _repo, number):
+        checked.append(number)
+        if number == 2:
+            await asyncio.sleep(0.1)
+        return "open", False
+
+    monkeypatch.setattr(adapter, "preview_thread_state", verify)
+    reader = getattr(adapter, reader_name)
+    first = (await reader("agent-ssh-gateway", limit=3))["result"]
+    assert first["count"] == 1
+    assert first["count_exact"] is False
+    assert first["incomplete_thread_numbers"] == [2]
+    assert first["preview_deadline_reached"] is True
+    assert first["preview_timed_out_thread_number"] == 2
+    assert first["next_offset"] == 2
+    assert checked == [1, 2]
+    second = (await reader("agent-ssh-gateway", limit=3, offset=2))["result"]
+    assert second["count"] == 1 and second["next_offset"] is None
+    assert second["preview_deadline_reached"] is False
+    assert second["preview_timed_out_thread_number"] is None
+    assert checked == [1, 2, 3]
+
+
+@pytest.mark.asyncio
 async def test_preview_caller_cancellation_propagates(monkeypatch):
     async def cancelled(*_args):
         raise asyncio.CancelledError
