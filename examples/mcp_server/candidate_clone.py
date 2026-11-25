@@ -761,6 +761,129 @@ def _read_metadata(candidate_root: Path) -> dict[str, Any]:
     return data
 
 
+_RESUME_CANDIDATE_SCAN_LIMIT = 64
+_RESUME_CANDIDATE_DISPLAY_LIMIT = 12
+_RESUME_METADATA_MAX_BYTES = 64 * 1024
+
+
+def _resume_candidate_lineage(
+    registry: Any, candidates_root: Path, project_id: str,
+) -> dict[str, Any] | None:
+    """Read a bounded creation record; never treat it as current Git evidence."""
+    try:
+        if not project_id.startswith("candidate-") or not _PROJECT_ID_RE.fullmatch(project_id):
+            return None
+        registered = registry.project_info(project_id)
+        candidate_root = candidates_root / project_id
+        if (
+            registered.get("project_id") != project_id
+            or registered.get("type") != "candidate-clone"
+            or registered.get("root") != str(candidate_root)
+        ):
+            return None
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        with contextlib.ExitStack() as stack:
+            fd = os.open(candidates_root, directory_flags)
+            stack.callback(os.close, fd)
+            candidate_fd = os.open(project_id, directory_flags, dir_fd=fd)
+            stack.callback(os.close, candidate_fd)
+            git_fd = os.open(".git", directory_flags, dir_fd=candidate_fd)
+            stack.callback(os.close, git_fd)
+            record_fd = os.open(_METADATA_FILENAME, file_flags, dir_fd=git_fd)
+            stack.callback(os.close, record_fd)
+            before = os.fstat(record_fd)
+            if (
+                not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or not 0 < before.st_size <= _RESUME_METADATA_MAX_BYTES
+            ):
+                return None
+            data = bytearray()
+            while len(data) <= _RESUME_METADATA_MAX_BYTES:
+                part = os.read(record_fd, min(65536, _RESUME_METADATA_MAX_BYTES + 1 - len(data)))
+                if not part:
+                    break
+                data.extend(part)
+            after = os.fstat(record_fd)
+            if (
+                len(data) != before.st_size or before.st_size != after.st_size
+                or before.st_mtime_ns != after.st_mtime_ns or before.st_ctime_ns != after.st_ctime_ns
+            ):
+                return None
+        record = json.loads(data)
+        if not isinstance(record, dict) or type(record.get("version")) is not int or record["version"] != 1:
+            return None
+        source = record.get("source_project")
+        branch = record.get("branch")
+        base = record.get("base_sha")
+        if (
+            not isinstance(source, str) or not source or len(source) > 128
+            or not isinstance(branch, str) or _validate_branch(branch) != branch
+            or not isinstance(base, str) or re.fullmatch(r"[a-f0-9]{40}", base) is None
+            or record.get("project_id") != project_id
+            or record.get("root") != f"{_CANDIDATE_CLONES_DIRNAME}/{project_id}"
+            or _project_id(source, branch, base) != project_id
+        ):
+            return None
+        source_info = registry.project_info(source)
+        if (
+            source_info.get("project_id") != source
+            or source_info.get("type") in {"candidate-clone", "coordination-only"}
+            or not isinstance(source_info.get("root"), str)
+        ):
+            return None
+        return {
+            "project_id": project_id, "source_project": source,
+            "recorded_branch": branch, "creation_base_sha": base,
+        }
+    except (CandidateCloneError, OSError, ValueError, TypeError, RecursionError, WorkspacePolicyError):
+        return None
+
+
+def candidate_resume_projection(
+    *, registry: Any, project: str, config_dir: Path,
+) -> dict[str, Any]:
+    """Bounded, source-scoped read-only inventory of visible registered candidates."""
+    common: dict[str, Any] = {
+        "state": "unavailable", "atomic_snapshot": False,
+        "authorizes_mutation": False,
+        "note": "Creation records only; inspect info(candidate) for current local Git state. "
+                "Not a delivery, activity or cleanup lease; unavailable/unregistered roots are not inventoried.",
+    }
+    metadata = registry.project_info(project)
+    candidates_root = _candidate_clones_root(_workspace_root(config_dir))
+    if metadata.get("type") == "candidate-clone":
+        lineage = _resume_candidate_lineage(registry, candidates_root, project)
+        return {**common, "state": "observed" if lineage else "unavailable", "lineage": lineage}
+
+    registered = [
+        row for row in registry.list_projects()
+        if isinstance(row, dict) and row.get("type") == "candidate-clone"
+    ]
+    matches: list[dict[str, Any]] = []
+    unknown = 0
+    for row in registered[:_RESUME_CANDIDATE_SCAN_LIMIT]:
+        project_id = row.get("project_id")
+        lineage = (
+            _resume_candidate_lineage(registry, candidates_root, project_id)
+            if isinstance(project_id, str) else None
+        )
+        if lineage is None:
+            unknown += 1
+        elif lineage["source_project"] == project:
+            matches.append(lineage)
+    scan_truncated = len(registered) > _RESUME_CANDIDATE_SCAN_LIMIT
+    exact = not scan_truncated and unknown == 0
+    return {
+        **common, "state": "observed" if exact else "partial",
+        "coverage": "visible_registered_candidates_only",
+        "count": len(matches), "count_exact": exact,
+        "registered_candidates": matches[:_RESUME_CANDIDATE_DISPLAY_LIMIT],
+        "scan_truncated": scan_truncated,
+        "display_truncated": len(matches) > _RESUME_CANDIDATE_DISPLAY_LIMIT,
+    }
+
+
 def _cleanup_tombstone_path(journal_root: Path, project_id: str) -> tuple[Path, str]:
     tombstone_id = hashlib.sha256(f"candidate-cleanup\0{project_id}".encode()).hexdigest()
     return journal_root / "candidate-cleanup" / f"{tombstone_id}.json", tombstone_id
