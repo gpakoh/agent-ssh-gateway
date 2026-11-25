@@ -1016,6 +1016,68 @@ async def test_summary_deadline_preserves_completed_counts_and_resume(monkeypatc
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reader_name", ["coord_board", "coord_inbox"])
+async def test_preview_provider_failure_preserves_other_verified_threads(monkeypatch, reader_name):
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setattr(adapter, "_registered", lambda p: core.validate_project(p))
+    client = FakeClient()
+    for number in range(1, 4):
+        await core.create_thread(
+            client, "gpakoh", "agent-ssh-gateway",
+            source_project="agent-ssh-gateway", title=f"Issue {number}",
+            body="Evidence", request_key=f"preview-provider-failure-{number}",
+        )
+    await core.write_event(
+        client, "gpakoh", "agent-ssh-gateway", 3,
+        text="Acknowledged", state="accepted", request_key="preview-provider-accepted",
+    )
+    original_get_issue = client.get_issue
+
+    async def get_issue(owner, repo, number):
+        if number == 2:
+            raise OSError("PRIVATE PROVIDER ERROR")
+        return await original_get_issue(owner, repo, number)
+
+    client.get_issue = get_issue
+    monkeypatch.setattr(FakeClient, "__aenter__", _fake_aenter, raising=False)
+    monkeypatch.setattr(FakeClient, "__aexit__", _fake_aexit, raising=False)
+    monkeypatch.setattr(
+        adapter, "server_attr",
+        lambda name: (lambda _: client) if name == "GiteaClient" else None,
+    )
+    response = await getattr(adapter, reader_name)("agent-ssh-gateway", limit=3)
+    assert response["ok"] is True, response
+    data = response["result"]
+    assert data["count"] == 2
+    assert data["count_exact"] is False
+    assert data["truncated"] is True
+    assert data["examined_thread_count"] == 3
+    assert data["incomplete_thread_numbers"] == [2]
+    assert data["next_offset"] is None
+    if reader_name == "coord_board":
+        assert [col["count"] for col in data["columns"]] == [1, 1, 0, 0]
+        assert all(col["count_exact"] is False for col in data["columns"])
+        assert [card["number"] for col in data["columns"] for card in col["cards"]] == [1, 3]
+    else:
+        assert {row["number"]: row["coord_state"] for row in data["threads"]} == {
+            1: "open", 3: "accepted",
+        }
+    assert "PRIVATE PROVIDER ERROR" not in str(response)
+
+
+@pytest.mark.asyncio
+async def test_preview_caller_cancellation_propagates(monkeypatch):
+    async def cancelled(*_args):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(adapter, "preview_thread_state", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        await adapter._verified_preview(
+            FakeClient(), "gpakoh", "agent-ssh-gateway", [{"number": 1}], 1,
+        )
+
+
+@pytest.mark.asyncio
 async def test_summary_provider_failure_preserves_other_verified_counts(monkeypatch):
     async def verify(_client, _owner, _repo, number):
         if number == 2:

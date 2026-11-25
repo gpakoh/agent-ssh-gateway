@@ -90,9 +90,15 @@ async def _verified_preview(
         if len(verified) == limit:
             break
         examined += 1
-        state, incomplete = await preview_thread_state(
-            client, owner, repo, item["number"]
-        )
+        try:
+            state, incomplete = await preview_thread_state(
+                client, owner, repo, item["number"]
+            )
+        except Exception:
+            # Preserve verified read-only results when one provider read fails.
+            # Caller cancellation (BaseException) still propagates.
+            incomplete_numbers.append(item["number"])
+            continue
         if incomplete or state is None:
             incomplete_numbers.append(item["number"])
             continue
