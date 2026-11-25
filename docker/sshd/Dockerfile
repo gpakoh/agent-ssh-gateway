@@ -2,7 +2,7 @@ FROM alpine:3.22.7
 
 ARG OPENCODE_VERSION=1.18.16
 ARG UV_VERSION=0.12.5
-ARG NODEJS_APK_VERSION=22.23.4-r0
+ARG NODEJS_APK_VERSION=22.23.5-r0
 ARG NPM_APK_VERSION=11.6.4-r0
 
 # python3: the generated agent script (agent_tools.py) runs python3 heredocs
