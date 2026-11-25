@@ -340,13 +340,17 @@ async def preview_thread_state(
     return state, False
 
 
+_HISTORY_DISPLAY_MAX_ENTRIES = 50
+_HISTORY_DISPLAY_MAX_CHARS = 16000
+
+
 def _history_window(
     history: list[dict[str, Any]], index: int, end: int,
 ) -> tuple[list[dict[str, Any]], tuple[int, int] | None]:
     """Walk older observed comments without skipping oversized body prefixes."""
     tail: list[dict[str, Any]] = []
-    budget = 16000
-    while index >= 0 and len(tail) < 50:
+    budget = _HISTORY_DISPLAY_MAX_CHARS
+    while index >= 0 and len(tail) < _HISTORY_DISPLAY_MAX_ENTRIES:
         entry = history[index]
         body = entry["body"]
         if end > budget and tail:
@@ -479,9 +483,16 @@ async def open_thread(
         else:
             index = original_count - 1
             end = len(history[index]["body"]) if index >= 0 else 0
-        # Preserve established small-thread full review. Explicit navigation
+        # Preserve full review only when it fits the display budget. Explicit navigation
         # is always read-only, even if the selected window fits in one page.
-        if cursor_match is not None or truncated or item["history_pages_scanned"] > 2:
+        exceeds_display_budget = (
+            original_count > _HISTORY_DISPLAY_MAX_ENTRIES
+            or sum(len(entry["body"]) for entry in history) > _HISTORY_DISPLAY_MAX_CHARS
+        )
+        if (
+            cursor_match is not None or truncated or item["history_pages_scanned"] > 2
+            or exceeds_display_budget
+        ):
             history, older = _history_window(history, index, end)
             if older is not None and snapshot is not None:
                 item["history_older_cursor"] = f"{snapshot}:{older[0]}:{older[1]}"
