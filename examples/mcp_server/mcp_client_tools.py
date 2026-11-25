@@ -1933,15 +1933,95 @@ def show_handoff_status(
     client: GatewayClient,
     project: str,
 ) -> dict[str, Any]:
-    result = run_project_command(client, project, "ls -la .ai-bridge/")
-    if result.get("exit_code") != 0:
-        return build_command_result(
-            outcome="passed",
-            exit_code=0,
-            stdout="(no .ai-bridge directory)",
-            stderr="",
-        )
-    return result
+    """Observe fixed handoff metadata in the registered host workspace.
+
+    The handoff writer uses this same host namespace, not the SSH session
+    filesystem. Presence and timestamps do not establish revision freshness.
+    """
+    import stat
+
+    _ = client
+    root = _resolve_project(_validate_project(project))
+    status: dict[str, Any] = {
+        "state": "unavailable",
+        "observation_plane": "registered_host_workspace",
+        "atomic_snapshot": False,
+        "authorizes_mutation": False,
+        "freshness": "unknown",
+        "files": {},
+        "note": "Metadata only; no contents or task revision verified. "
+                "Use read_handoff and exact Issue/PR evidence before acting.",
+    }
+
+    def result(state: str) -> dict[str, Any]:
+        status["state"] = state
+        if state == "absent":
+            status["freshness"] = "not_applicable"
+            stdout = "(no .ai-bridge directory)"
+        elif state == "unavailable":
+            stdout = "Handoff directory status unavailable"
+        else:
+            stdout = "\n".join(
+                f"{name}: {entry['state']}" for name, entry in status["files"].items()
+            )
+        return {
+            **build_command_result(
+                outcome="error" if state == "unavailable" else "passed",
+                exit_code=1 if state == "unavailable" else 0,
+                stdout=stdout,
+                cwd=".",
+            ),
+            "handoff_status": status,
+        }
+
+    # Never follow a symlinked handoff directory or enumerate arbitrary entries.
+    # Only a missing child of an opened, registered root is evidence of absence.
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        root_fd = os.open(root, flags)
+    except OSError:
+        return result("unavailable")
+    try:
+        try:
+            bridge_fd = os.open(".ai-bridge", flags, dir_fd=root_fd)
+        except FileNotFoundError:
+            return result("absent")
+        except OSError:
+            return result("unavailable")
+        try:
+            files: dict[str, dict[str, Any]] = {}
+            for name, filename in (
+                ("current_plan", "current-plan.md"),
+                ("agent_status", "agent-status.md"),
+                ("implementation_diff", "implementation-diff.patch"),
+            ):
+                try:
+                    observed = os.stat(filename, dir_fd=bridge_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    files[name] = {"state": "absent"}
+                except OSError:
+                    files[name] = {"state": "unavailable"}
+                else:
+                    if not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1:
+                        files[name] = {"state": "unsafe"}
+                    else:
+                        files[name] = {
+                            "state": "present",
+                            "size_bytes": observed.st_size,
+                            "mtime_ns": observed.st_mtime_ns,
+                        }
+            status["files"] = files
+            plan_state = files["current_plan"]["state"]
+            if plan_state == "present":
+                status["freshness"] = "unbound"
+            elif plan_state == "absent":
+                status["freshness"] = "not_applicable"
+            complete = all(entry["state"] in {"present", "absent"} for entry in files.values())
+            return result("observed" if complete else "partial")
+        finally:
+            os.close(bridge_fd)
+    finally:
+        os.close(root_fd)
 
 
 # ── Shell escape helper ─────────────────────────────────────────
