@@ -1632,7 +1632,7 @@ def gateway_commit_head(project: str) -> dict[str, Any]:
 
 
 def gateway_read_handoff(project: str) -> dict[str, Any]:
-    """Read .ai-bridge handoff files for a project."""
+    """Read bounded current-plan.md evidence in the registered host workspace."""
     return run_tool(
         tool="read_handoff",
         title="read handoff",

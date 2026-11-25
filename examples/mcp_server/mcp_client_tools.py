@@ -1801,15 +1801,117 @@ def read_handoff(
     client: GatewayClient,
     project: str,
 ) -> dict[str, Any]:
-    result = run_project_command(client, project, "cat .ai-bridge/current-plan.md")
-    if result.get("exit_code") != 0:
-        stderr = result.get("stderr", "")
-        if "No such file" in stderr or "does not exist" in stderr:
-            return build_command_result(
-                outcome="passed", exit_code=0, stdout="(no handoff plan)", stderr=""
-            )
-        return result
-    return result
+    """Read bounded, fixed handoff bytes in the registered host workspace."""
+    import stat
+
+    _ = client
+    root = _resolve_project(_validate_project(project))
+    max_bytes = 65536
+    evidence: dict[str, Any] = {
+        "state": "unavailable",
+        "observation_plane": "registered_host_workspace",
+        "atomic_snapshot": False,
+        "authorizes_mutation": False,
+        "freshness": "unknown",
+        "max_bytes": max_bytes,
+        "note": "Content evidence only; compare exact Issue/PR revision before acting.",
+    }
+
+    def result(state: str, stdout: str = "") -> dict[str, Any]:
+        evidence["state"] = state
+        if state == "absent":
+            evidence["freshness"] = "not_applicable"
+            stdout = "(no handoff plan)"
+        elif state == "observed":
+            evidence["freshness"] = "unbound"
+        success = state in {"absent", "observed"}
+        return {
+            **build_command_result(
+                outcome="passed" if success else "failed",
+                exit_code=0 if success else 1,
+                stdout=stdout,
+                stderr="" if success else f"Handoff read: {state}",
+                cwd=".",
+            ),
+            "handoff_read": evidence,
+        }
+
+    def fingerprint(info: os.stat_result) -> tuple[int, ...]:
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
+                info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        root_fd = os.open(root, flags)
+    except OSError:
+        return result("unavailable")
+    try:
+        try:
+            bridge_fd = os.open(".ai-bridge", flags, dir_fd=root_fd)
+        except FileNotFoundError:
+            return result("absent")
+        except OSError:
+            return result("unavailable")
+        try:
+            filename = "current-plan.md"
+            try:
+                initial = os.stat(filename, dir_fd=bridge_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return result("absent")
+            except OSError:
+                return result("unavailable")
+            if not stat.S_ISREG(initial.st_mode) or initial.st_nlink != 1:
+                return result("unsafe")
+            if initial.st_size > max_bytes:
+                return result("oversize")
+            try:
+                fd = os.open(
+                    filename,
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                    dir_fd=bridge_fd,
+                )
+            except OSError:
+                return result("unavailable")
+            try:
+                before = os.fstat(fd)
+                if fingerprint(before) != fingerprint(initial):
+                    return result("unstable")
+                chunks = bytearray()
+                while len(chunks) <= max_bytes:
+                    chunk = os.read(fd, min(16384, max_bytes + 1 - len(chunks)))
+                    if not chunk:
+                        break
+                    chunks.extend(chunk)
+                if len(chunks) > max_bytes:
+                    return result("oversize")
+                after = os.fstat(fd)
+                named = os.stat(filename, dir_fd=bridge_fd, follow_symlinks=False)
+                bridge_now = os.stat(".ai-bridge", dir_fd=root_fd, follow_symlinks=False)
+                bridge_open = os.fstat(bridge_fd)
+                if (
+                    fingerprint(before) != fingerprint(after)
+                    or fingerprint(after) != fingerprint(named)
+                    or (bridge_now.st_dev, bridge_now.st_ino)
+                    != (bridge_open.st_dev, bridge_open.st_ino)
+                    or len(chunks) != after.st_size
+                ):
+                    return result("unstable")
+                try:
+                    decoded = chunks.decode("utf-8")
+                except UnicodeDecodeError:
+                    return result("invalid_utf8")
+                evidence["raw_sha256"] = hashlib.sha256(chunks).hexdigest()
+                evidence["size_bytes"] = len(chunks)
+                evidence["mtime_ns"] = after.st_mtime_ns
+                return result("observed", _redact_project_root(decoded, str(root)))
+            except OSError:
+                return result("unavailable")
+            finally:
+                os.close(fd)
+        finally:
+            os.close(bridge_fd)
+    finally:
+        os.close(root_fd)
 
 
 def _handoff_write_registry(registry: Any | None = None):

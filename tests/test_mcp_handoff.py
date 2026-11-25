@@ -232,3 +232,130 @@ class TestProjectHandoffStatus:
         assert result["handoff_status"]["state"] == "unavailable"
         assert "PRIVATE_FAILURE_DETAILS" not in str(result)
         assert "no .ai-bridge" not in result["stdout"]
+
+
+class TestProjectHandoffRead:
+    @staticmethod
+    def _tools(monkeypatch, root):
+        monkeypatch.syspath_prepend(str(EXAMPLE_DIR))
+        tools = importlib.import_module("mcp_client_tools")
+        monkeypatch.setattr(tools, "_resolve_project", lambda _project: root)
+        monkeypatch.setattr(tools, "run_project_command", lambda *_args: {
+            "outcome": "passed", "exit_code": 0, "stdout": "LEGACY_CAT", "stderr": "",
+        })
+        return tools
+
+    def test_absence_and_exact_utf8_evidence(self, tmp_path, monkeypatch):
+        import hashlib
+
+        tools = self._tools(monkeypatch, tmp_path)
+        result = tools.read_handoff(None, "example")
+        assert result["stdout"] == "(no handoff plan)"
+        assert result["handoff_read"]["state"] == "absent"
+        bridge = tmp_path / ".ai-bridge"
+        bridge.mkdir()
+        raw = "Plan: π\n".encode()
+        (bridge / "current-plan.md").write_bytes(raw)
+        result = tools.read_handoff(None, "example")
+        assert result["stdout"] == raw.decode()
+        evidence = result["handoff_read"]
+        assert evidence["state"] == "observed"
+        assert evidence["raw_sha256"] == hashlib.sha256(raw).hexdigest()
+        assert evidence["size_bytes"] == len(raw)
+        assert evidence["freshness"] == "unbound"
+        assert evidence["authorizes_mutation"] is False
+        assert evidence["atomic_snapshot"] is False
+
+    @pytest.mark.parametrize("kind", ["symlink", "hardlink", "directory", "fifo",
+                                      "oversize", "invalid_utf8", "symlink_parent"])
+    def test_unsafe_plan_has_no_contents(self, tmp_path, monkeypatch, kind):
+        import os
+
+        tools = self._tools(monkeypatch, tmp_path)
+        bridge = tmp_path / ".ai-bridge"
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        secret = outside / "current-plan.md"
+        secret.write_text("PRIVATE_PLAN")
+        if kind == "symlink_parent":
+            bridge.symlink_to(outside, target_is_directory=True)
+        else:
+            bridge.mkdir()
+            plan = bridge / "current-plan.md"
+            if kind == "symlink":
+                plan.symlink_to(secret)
+            elif kind == "hardlink":
+                plan.hardlink_to(secret)
+            elif kind == "directory":
+                plan.mkdir()
+            elif kind == "fifo":
+                os.mkfifo(plan)
+            elif kind == "oversize":
+                plan.write_bytes(b"PRIVATE_PLAN" * 65536)
+            else:
+                plan.write_bytes(b"PRIVATE_PLAN\xff")
+        result = tools.read_handoff(None, "example")
+        assert result["exit_code"] != 0
+        assert result["handoff_read"]["state"] != "absent"
+        assert "PRIVATE_PLAN" not in str(result)
+        assert str(tmp_path) not in str(result)
+
+    def test_permission_error_is_not_missing(self, tmp_path, monkeypatch):
+        tools = self._tools(monkeypatch, tmp_path)
+        original_open = tools.os.open
+
+        def fail_bridge(path, *args, **kwargs):
+            if path == ".ai-bridge":
+                raise PermissionError("PRIVATE_DETAILS")
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(tools.os, "open", fail_bridge)
+        result = tools.read_handoff(None, "example")
+        assert result["exit_code"] != 0
+        assert result["handoff_read"]["state"] == "unavailable"
+        assert "PRIVATE_DETAILS" not in str(result)
+
+
+    def test_byte_limit_and_redacted_root(self, tmp_path, monkeypatch):
+        import hashlib
+
+        tools = self._tools(monkeypatch, tmp_path)
+        bridge = tmp_path / ".ai-bridge"
+        bridge.mkdir()
+        plan = bridge / "current-plan.md"
+        raw = str(tmp_path).encode() + b"/note\n"
+        raw += b"x" * (65536 - len(raw))
+        plan.write_bytes(raw)
+        result = tools.read_handoff(None, "example")
+        assert result["handoff_read"]["state"] == "observed"
+        assert result["handoff_read"]["size_bytes"] == 65536
+        assert result["handoff_read"]["raw_sha256"] == hashlib.sha256(raw).hexdigest()
+        assert result["stdout"].startswith("./note\n")
+        assert str(tmp_path) not in str(result)
+        plan.write_bytes(raw + b"x")
+        result = tools.read_handoff(None, "example")
+        assert result["handoff_read"]["state"] == "oversize"
+        assert result["stdout"] == ""
+
+    def test_replaced_plan_during_read_is_not_returned(self, tmp_path, monkeypatch):
+        tools = self._tools(monkeypatch, tmp_path)
+        bridge = tmp_path / ".ai-bridge"
+        bridge.mkdir()
+        plan = bridge / "current-plan.md"
+        plan.write_bytes(b"ORIGINAL_PRIVATE")
+        replacement = bridge / "replacement"
+        replacement.write_bytes(b"REPLACED_PRIVATE")
+        original_read = tools.os.read
+
+        def replace_after_read(fd, count):
+            chunk = original_read(fd, count)
+            if chunk == b"ORIGINAL_PRIVATE":
+                replacement.replace(plan)
+            return chunk
+
+        monkeypatch.setattr(tools.os, "read", replace_after_read)
+        result = tools.read_handoff(None, "example")
+        assert result["handoff_read"]["state"] == "unstable"
+        assert result["exit_code"] != 0
+        assert "PRIVATE" not in str(result)
+        assert "raw_sha256" not in result["handoff_read"]
