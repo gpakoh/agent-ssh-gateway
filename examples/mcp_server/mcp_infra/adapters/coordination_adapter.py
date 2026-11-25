@@ -73,6 +73,7 @@ async def _connection(tool: str, project: str, *, write: bool) -> tuple[str, str
 
 
 _PREVIEW_READ_TIMEOUT = 8.0  # Shared budget for the page's provider probes.
+_THREAD_READ_TIMEOUT = 3.0  # A single slow thread must not consume the whole page.
 
 
 async def _verified_preview(
@@ -104,13 +105,15 @@ async def _verified_preview(
         try:
             state, incomplete = await asyncio.wait_for(
                 preview_thread_state(client, owner, repo, item["number"]),
-                timeout=remaining,
+                timeout=min(remaining, _THREAD_READ_TIMEOUT),
             )
         except TimeoutError:
             timed_out_thread = item["number"]
             incomplete_numbers.append(timed_out_thread)
-            deadline_reached = True
-            break
+            if loop.time() >= deadline:
+                deadline_reached = True
+                break
+            continue
         except Exception:
             # Preserve verified read-only results when one provider read fails.
             # Caller cancellation (BaseException) still propagates.
@@ -276,6 +279,7 @@ async def _verified_global_summary(
     examined = 0
     deadline_reached = False
     timed_out_thread = None
+    timed_out_numbers: list[int] = []
     probe_errors: list[int] = []
     for item in all_threads[:_SUMMARY_MAX_THREADS]:
         remaining = deadline - loop.time()
@@ -286,15 +290,19 @@ async def _verified_global_summary(
         examined += 1
         try:
             state, incomplete = await asyncio.wait_for(
-                preview_thread_state(client, owner, repo, number), timeout=remaining,
+                preview_thread_state(client, owner, repo, number),
+                timeout=min(remaining, _THREAD_READ_TIMEOUT),
             )
             if state is not None and state not in counts:
                 raise ValueError("invalid coordination state in verified summary")
         except TimeoutError:
             unknown.append(number)
             timed_out_thread = number
-            deadline_reached = True
-            break
+            timed_out_numbers.append(number)
+            if loop.time() >= deadline:
+                deadline_reached = True
+                break
+            continue
         except Exception:
             # A read-only projection must not lose earlier verified evidence
             # or the independent resume result because one provider read fails.
@@ -324,6 +332,7 @@ async def _verified_global_summary(
         "unverified_thread_numbers": unknown,
         "scan_deadline_reached": deadline_reached,
         "timed_out_thread_number": timed_out_thread,
+        "timed_out_thread_numbers": timed_out_numbers,
         "probe_error_thread_numbers": probe_errors,
         "source_scan_truncated": source_scan_truncated,
         "note": "Non-atomic read-only observation; counts are lower bounds if not exact",
