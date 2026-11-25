@@ -150,7 +150,10 @@ class TestProjectHandoffStatus:
 
     @staticmethod
     def _tools(monkeypatch, root):
-        tools = _import(monkeypatch, "mcp_client_tools")
+        # Preserve module identity: other collected tests import functions
+        # from this module and patch its globals by module name.
+        monkeypatch.syspath_prepend(str(EXAMPLE_DIR))
+        tools = importlib.import_module("mcp_client_tools")
         monkeypatch.setattr(tools, "_resolve_project", lambda _project: root)
         # The old ls path would fail with permission denied, then claim absence.
         monkeypatch.setattr(tools, "run_project_command", lambda *_args: {
