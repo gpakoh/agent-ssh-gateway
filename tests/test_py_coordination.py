@@ -940,7 +940,7 @@ async def test_opt_in_summary_caps_work_and_never_claims_exact_large_totals(monk
         assert summary["count_exact"] is False
         assert summary["state_counts"]["accepted"]["count"] == 50
         assert max(checked) <= 50
-        assert len(checked) <= 51  # One ordinary preview + 50 summary probes.
+        assert len(checked) == 50  # Preview observation is reused in the summary.
 
     async def capped_scan(_client, _owner, _repo):
         threads, _ = await large_scan(_client, _owner, _repo)
@@ -1007,7 +1007,7 @@ async def test_summary_deadline_preserves_completed_counts_and_resume(monkeypatc
     assert summary["unverified_thread_numbers"] == [2]
     assert summary["scan_deadline_reached"] is True
     assert summary["timed_out_thread_number"] == 2
-    assert calls == [1, 1, 2]
+    assert calls == [1, 2]
     assert cancelled.is_set()
     if reader_name == "coord_board":
         assert data["resume"] == resume
@@ -2146,3 +2146,61 @@ async def test_per_thread_budget_keeps_preview_and_summary_progress(monkeypatch)
     assert summary["scan_deadline_reached"] is False
     assert summary["count_exact"] is False
     assert cancelled == [1, 3, 1, 3]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reader_name", ["coord_board", "coord_inbox"])
+@pytest.mark.parametrize("offset", [0, 1])
+async def test_summary_reuses_request_preview_without_repeating_failed_probes(
+    monkeypatch, reader_name, offset,
+):
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setattr(adapter, "_registered", lambda p: core.validate_project(p))
+    monkeypatch.setattr(adapter, "_THREAD_READ_TIMEOUT", 0.02)
+    monkeypatch.setattr(adapter, "_PREVIEW_READ_TIMEOUT", 0.5)
+    monkeypatch.setattr(adapter, "_SUMMARY_READ_TIMEOUT", 0.5)
+    client = FakeClient()
+    monkeypatch.setattr(FakeClient, "__aenter__", _fake_aenter, raising=False)
+    monkeypatch.setattr(FakeClient, "__aexit__", _fake_aexit, raising=False)
+    monkeypatch.setattr(
+        adapter, "server_attr",
+        lambda name: (lambda _: client) if name == "GiteaClient" else None,
+    )
+    rows = [
+        {"number": i, "title": f"Issue {i}", "state": "open",
+         "url": f"https://gitea.example/issues/{i}",
+         "source_project": "agent-ssh-gateway",
+         "request_key": f"reuse-thread-{i}-123",
+         "updated_at": "2026-11-03T09:00:00Z"}
+        for i in range(1, 7)
+    ]
+    monkeypatch.setattr(adapter, "list_threads_preview", AsyncMock(return_value=(rows, False)))
+    monkeypatch.setattr(adapter, "_project_resume", AsyncMock(return_value={"repo_state": "observed"}))
+    calls = []
+
+    async def verify(_client, _owner, _repo, number):
+        calls.append(number)
+        if number == 1:
+            await asyncio.Event().wait()
+        if number == 2:
+            raise RuntimeError("provider failure")
+        if number == 3:
+            return None, True
+        return "accepted", False
+
+    monkeypatch.setattr(adapter, "preview_thread_state", verify)
+    reader = getattr(adapter, reader_name)
+    for _ in range(2):
+        calls.clear()
+        result = await reader("agent-ssh-gateway", limit=2, offset=offset, include_summary=True)
+        assert result["ok"] is True, result
+        data = result["result"]
+        summary = data["summary"]
+        assert sorted(calls) == [1, 2, 3, 4, 5, 6]
+        assert summary["examined_thread_count"] == 6
+        assert summary["verified_thread_count"] == 3
+        assert summary["unverified_thread_numbers"] == [1, 2, 3]
+        assert summary["timed_out_thread_numbers"] == [1]
+        assert summary["probe_error_thread_numbers"] == [2]
+        assert summary["count_exact"] is False
+        assert summary["reused_preview_thread_count"] == data["examined_thread_count"]
