@@ -1441,9 +1441,9 @@ async def candidate_discard_untracked_file(
             "correlation_id": uuid.uuid4().hex,
         }
         audit_written = False
+        owner_loop = asyncio.get_running_loop()
 
-        def _reference_guard() -> None:
-            nonlocal audit_written
+        async def _prove_no_references() -> None:
             try:
                 _username, clone_url, token = _resolve_trusted_remote(source_root)
                 _host, owner, repo = _parse_gitea_remote(clone_url)
@@ -1454,15 +1454,55 @@ async def candidate_discard_untracked_file(
                     retryable=True,
                 ) from exc
 
-            asyncio.run(
-                _assert_no_open_candidate_pr_reference(
-                    token=token,
-                    owner=owner,
-                    repo=repo,
-                    expected_branch=expected_branch,
-                    expected_head_sha=expected_head_sha,
-                )
+            await _assert_no_open_candidate_pr_reference(
+                token=token,
+                owner=owner,
+                repo=repo,
+                expected_branch=expected_branch,
+                expected_head_sha=expected_head_sha,
             )
+            if relative_path == ".ai-bridge/current-plan.md":
+                # A legacy plan alone does not prove a terminal task. Require
+                # the same authoritative zero-fleet proof as terminal archival,
+                # but do not require source delivery before pre-delivery cleanup.
+                fleet = await get_fleet_runtime()
+                if fleet is None:
+                    raise CandidateCloneError(
+                        "CHECK_FAILED", "fleet state unavailable; legacy plan archival refused",
+                        retryable=True,
+                    )
+                snapshot = await fleet.fleet_status(
+                    job_status_fn=lambda job: server_attr("get_gateway_client")().job_status(job)
+                )
+                counts, leases = snapshot.get("counts"), snapshot.get("leases")
+                if (
+                    not isinstance(counts, dict)
+                    or not counts
+                    or any(type(v) is not int or v != 0 for v in counts.values())
+                    or not isinstance(leases, list)
+                    or leases
+                ):
+                    raise CandidateCloneError(
+                        "WORKSPACE_CONTENDED",
+                        "active or unverified fleet task/lease prevents legacy plan archival",
+                        details={"reference_check": "fleet_idle_state"},
+                    )
+
+        def _reference_guard() -> None:
+            nonlocal audit_written
+            proof = asyncio.run_coroutine_threadsafe(_prove_no_references(), owner_loop)
+            try:
+                proof.result(timeout=60)
+            except CandidateCloneError:
+                proof.cancel()
+                raise
+            except Exception as exc:
+                proof.cancel()
+                raise CandidateCloneError(
+                    "CHECK_FAILED", "candidate references cannot be verified",
+                    retryable=True,
+                    details={"error_class": type(exc).__name__},
+                ) from exc
             if not audit_written:
                 try:
                     server_attr("get_audit_logger")().append_required(
