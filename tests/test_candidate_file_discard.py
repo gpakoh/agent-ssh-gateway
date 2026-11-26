@@ -90,6 +90,94 @@ def test_discard_rejects_bad_target_path(registry_fixture, monkeypatch, relative
     assert path.read_bytes() == b"abandoned scratch\n"
 
 
+def _setup_legacy_plan(registry_fixture, monkeypatch):
+    root, scratch, params = _setup(registry_fixture, monkeypatch)
+    bridge = root / ".ai-bridge"
+    bridge.mkdir()
+    path = bridge / "current-plan.md"
+    scratch.rename(path)
+    params["relative_path"] = ".ai-bridge/current-plan.md"
+    return root, path, params
+
+
+def test_discard_exact_idle_legacy_plan_before_delivery(registry_fixture, monkeypatch):
+    from tests.test_candidate_clone import _git
+
+    root, plan, params = _setup_legacy_plan(registry_fixture, monkeypatch)
+    (plan.parent / "tasks").mkdir()
+    (plan.parent / "archive").mkdir()
+    before = plan.read_bytes()
+    head = _git(root, "rev-parse", "HEAD")
+    calls = []
+    params["reference_guard"] = lambda: calls.append(True)
+    receipt = discard_untracked_candidate_file(**params)
+    assert calls == [True, True]
+    assert receipt["discarded"]
+    assert not plan.exists()
+    assert _git(root, "status", "--porcelain") == ""
+    assert _git(root, "rev-parse", "HEAD") == head
+    archive = params["journal_root"] / "candidate-file-archive" / (receipt["archive_id"] + ".blob")
+    assert archive.read_bytes() == before
+
+
+@pytest.mark.parametrize("fault", [
+    "hash", "size", "task", "archive", "status", "ignored_extra",
+    "symlink", "hardlink", "tracked", "hidden_tracked", "other_source",
+])
+def test_legacy_plan_exception_preserves_other_evidence(registry_fixture, monkeypatch, fault):
+    from tests.test_candidate_clone import _git
+
+    root, plan, params = _setup_legacy_plan(registry_fixture, monkeypatch)
+    before = plan.read_bytes()
+    if fault == "hash":
+        params["expected_sha256"] = "0" * 64
+    elif fault == "size":
+        params["expected_size"] += 1
+    elif fault == "task":
+        (plan.parent / "tasks" / "active").mkdir(parents=True)
+    elif fault == "archive":
+        (plan.parent / "archive" / "historic").mkdir(parents=True)
+    elif fault == "status":
+        (plan.parent / "agent-status.md").write_text("unfinished", encoding="utf-8")
+    elif fault == "ignored_extra":
+        (root / ".git" / "info" / "exclude").write_text(".ai-bridge/ignored.md\n", encoding="utf-8")
+        (plan.parent / "ignored.md").write_text("preserve", encoding="utf-8")
+    elif fault == "symlink":
+        plan.rename(plan.parent / "real-plan")
+        plan.symlink_to(plan.parent / "real-plan")
+    elif fault == "hardlink":
+        os.link(plan, root / ".git" / "hardlink")
+    elif fault == "tracked":
+        _git(root, "add", ".ai-bridge/current-plan.md")
+    elif fault == "hidden_tracked":
+        _git(root, "update-index", "--assume-unchanged", "README.md")
+        (root / "README.md").write_text("preserve", encoding="utf-8")
+    else:
+        (root / "unfinished.py").write_text("preserve", encoding="utf-8")
+    with pytest.raises(CandidateCloneError):
+        discard_untracked_candidate_file(**params)
+    assert plan.read_bytes() == before
+    assert not list((params["journal_root"] / "candidate-file-archive").glob("*.blob"))
+
+
+def test_legacy_plan_rechecks_idle_evidence_after_archive(registry_fixture, monkeypatch):
+    _, plan, params = _setup_legacy_plan(registry_fixture, monkeypatch)
+    before = plan.read_bytes()
+    calls = []
+
+    def guard():
+        calls.append(True)
+        if len(calls) == 2:
+            (plan.parent / "tasks" / "late").mkdir(parents=True)
+
+    params["reference_guard"] = guard
+    with pytest.raises(CandidateCloneError):
+        discard_untracked_candidate_file(**params)
+    assert plan.read_bytes() == before
+    assert calls == [True, True]
+    assert (plan.parent / "tasks" / "late").is_dir()
+
+
 def test_discard_refuses_unsafe_archive_directory_without_deleting_file(
     registry_fixture, monkeypatch, tmp_path
 ):
