@@ -22,6 +22,7 @@ import os
 import re
 import threading
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -8170,12 +8171,85 @@ async def gitea_push_verified_commit(
     allowed_files: str,
     required_checks: str,
     reconcile_only: bool = False,
+    operation_key: str | None = None,
+    receipt_only: bool = False,
 ) -> dict[str, Any]:
-    """Verify a candidate and push an exact commit, or reconcile without any push.
+    """Verify and publish an exact commit; optionally persist a single-use receipt.
 
-    reconcile_only=True requires the exact destination head to be confirmed
-    twice; absence or drift always fails closed without remote mutation.
+    With operation_key, the caller-bound request is journalled before verification.
+    Reuse the same key and exact request with receipt_only=True to read its
+    recorded observation without running verification or Git. Missing or
+    unfinished receipts never authorize replay. Ordinary unkeyed reconciliation
+    still uses reconcile_only=True and requires two exact remote HEAD reads.
     """
+    tool = "gitea_push_verified_commit"
+    args = (
+        project, owner, repo, destination_branch, expected_base_sha,
+        expected_head_sha, allowed_files, required_checks, reconcile_only,
+    )
+    if type(receipt_only) is not bool:
+        return tool_error(
+            tool=tool, code="INVALID_INPUT",
+            message="receipt_only must be a boolean",
+            source="gitea",
+        )
+    if operation_key is None and not receipt_only:
+        return await _gitea_push_verified_commit_impl(*args)
+    if operation_key is None or reconcile_only is not False:
+        return tool_error(
+            tool=tool, code="INVALID_INPUT",
+            message="Receipt mode requires operation_key and is separate from reconcile_only",
+            source="gitea",
+        )
+    from app.gitea_verified_push_journal import PushJournalError, verified_push_with_receipt
+
+    fingerprint = _caller_fingerprint()
+    if not fingerprint:
+        return tool_error(
+            tool=tool, code="AUTH_ERROR", message="Authenticated caller is required",
+            source="gitea",
+        )
+
+    async def invoke(before_dispatch: Callable[[str], None]) -> dict[str, Any]:
+        return await _gitea_push_verified_commit_impl(*args, before_dispatch=before_dispatch)
+
+    try:
+        result = await verified_push_with_receipt(
+            root=Path(os.environ.get("MCP_AUDIT_LOG_PATH", "logs/mcp_audit.jsonl")).parent
+            / "verified-push",
+            operation_key=operation_key,
+            actor=hashlib.sha256(fingerprint.encode()).hexdigest(),
+            contract=[
+                project, owner, repo, destination_branch, expected_base_sha, expected_head_sha,
+                _contract_lines(allowed_files),
+                [line.strip() for line in str(required_checks or "").splitlines() if line.strip()],
+            ],
+            expected_head_sha=expected_head_sha,
+            receipt_only=receipt_only,
+            invoke=invoke,
+        )
+    except PushJournalError as exc:
+        return tool_error(
+            tool=tool, code=exc.code, message=str(exc), details=exc.details,
+            retryable=False, source="gitea",
+        )
+    return tool_success(tool, result=result, source="gitea") if receipt_only else result
+
+
+async def _gitea_push_verified_commit_impl(
+    project: str,
+    owner: str,
+    repo: str,
+    destination_branch: str,
+    expected_base_sha: str,
+    expected_head_sha: str,
+    allowed_files: str,
+    required_checks: str,
+    reconcile_only: bool = False,
+    *,
+    before_dispatch: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Existing exact verification, authorization and transport implementation."""
     if type(reconcile_only) is not bool:
         return tool_error(
             tool="gitea_push_verified_commit",
@@ -8506,6 +8580,29 @@ async def gitea_push_verified_commit(
                     },
                     source="gitea",
                 )
+            if before_dispatch is not None:
+                try:
+                    before_dispatch(audit_intent_id)
+                except Exception:
+                    persisted = _record_verified_push_outcome(
+                        audit_metadata, "local_pre_mutation_failure"
+                    )
+                    return tool_error(
+                        tool="gitea_push_verified_commit",
+                        code="RECEIPT_UNAVAILABLE",
+                        message="Required operation receipt unavailable; no Git push was started",
+                        retryable=False,
+                        details={
+                            "phase": "push_receipt_preflight",
+                            "mutation_started": False,
+                            "mutation_occurred": False,
+                            "audit_intent_id": audit_intent_id,
+                            "audit_outcome_persisted": persisted,
+                            "expected_head_sha": expected_head,
+                            "branch": destination_branch,
+                        },
+                        source="gitea",
+                    )
             mutation_error: BaseException | None = None
             pre_mutation_error: ManagedGitError | None = None
             mutation_dispatched = True
