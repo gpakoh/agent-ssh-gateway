@@ -459,8 +459,21 @@ async def open_thread(
         item["history_scan_complete"] = not truncated
         last_id = history[-1]["id"] if history else None
         item["history_last_scanned_event_id"] = last_id
+        trusted = next((entry for entry in reversed(history) if entry["request_key"] is not None), None)
+        item["history_last_scanned_trusted_event_id"] = trusted["id"] if trusted else None
         if not truncated:
             item["history_latest_event_id"] = last_id
+            item["history_latest_trusted_event_id"] = trusted["id"] if trusted else None
+            item["history_latest_trusted_event"] = (
+                {
+                    "id": trusted["id"],
+                    "state": trusted["state"],
+                    "request_key": trusted["request_key"],
+                    "created_at": trusted["created_at"],
+                    "authorizes_mutation": False,
+                }
+                if trusted else None
+            )
         original_count = len(history)
         # Only a complete observed scan may anchor a continuation. Bind the
         # cursor to repository, issue metadata, writer identity and raw comments
@@ -503,6 +516,20 @@ async def open_thread(
                     item["history_incomplete_reason"] = "bounded_history_display"
                 truncated = True
         item["history_display_omitted_count"] = original_count - len(history)
+        # A trusted handoff can sit outside the bounded display window behind
+        # ordinary comments. Preserve a short, explicitly truncated tail only
+        # when the complete observed scan established its latest identity.
+        # Never duplicate a fully displayed body or grant a close lease.
+        if item["history_scan_complete"] and trusted is not None and not any(
+            entry["id"] == trusted["id"] and not entry.get("body_truncated")
+            for entry in history
+        ):
+            body = trusted["body"]
+            item["history_latest_trusted_event"].update({
+                "body_preview": body[-2000:],
+                "body_preview_truncated": len(body) > 2000,
+                "body_total_chars": len(body),
+            })
     item["history"] = history
     item["history_truncated"] = truncated
     item["coord_state"] = (
