@@ -2316,3 +2316,163 @@ async def test_known_comment_count_mismatch_cannot_authorize_or_attest(mode):
                 text="Potential duplicate", request_key="short-timeline-message-123", state="message",
             )
     assert client.comment_calls == 0
+
+
+async def _review_fixture():
+    client = FakeClient()
+    await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway", source_project="agent-ssh-gateway",
+        title="Long resolved review", body="Evidence", request_key="long-review-thread-123",
+    )
+    client.comments[1] = [
+        {"id": i, "body": f"comment {i}", "user": {"login": "other"}}
+        for i in range(1, 66)
+    ]
+    client.comments[1][0]["body"] = "old prefix " + "x" * 33000 + " old suffix"
+    for index, state in [(1, "accepted"), (2, "waiting_review"), (64, "resolved")]:
+        client.comments[1][index].update(
+            body=core._header(kind="event", key=f"long-review-event-{index}-123", state=state)
+            + "\n" + state,
+            user={"login": "gpakoh"},
+        )
+    client.issues[0]["comments"] = len(client.comments[1])
+    return client
+
+
+@pytest.mark.asyncio
+async def test_sequential_review_receipt_matches_strict_close_digest():
+    client = await _review_fixture()
+    args = (client, "gpakoh", "agent-ssh-gateway", 1)
+    strict = await core.open_thread(*args)
+    cursor = "review"
+    key = b"test-review-key" * 3
+    pieces = {}
+    page_count = 0
+    while cursor:
+        page = await core.open_thread(
+            *args, allow_partial=True, recent_preview=True,
+            history_cursor=cursor, review_key=key,
+        )
+        assert page["history_scan_complete"] is True
+        assert page["history_truncated"] is True
+        assert "close_state_sha256" not in page
+        assert "close_content_sha256" not in page
+        assert page["coord_state"] is None
+        assert len(page["history"]) <= 50
+        assert sum(len(row["body"]) for row in page["history"]) <= 16000
+        for row in page["history"]:
+            start = row.get("body_start", 0)
+            pieces.setdefault(row["id"], []).append((start, row["body"]))
+        cursor = page["history_review_cursor"]
+        page_count += 1
+        assert page_count <= 10
+        if cursor:
+            assert page["history_review_complete"] is False
+            assert "review_close_state_sha256" not in page
+        else:
+            assert page["history_review_complete"] is True
+            assert page["review_close_state_sha256"] == strict["close_state_sha256"]
+            assert page["review_resolution_event_id"] == 65
+    assert page_count >= 4
+    assert {i: "".join(s for _, s in sorted(parts)) for i, parts in pieces.items()} == {
+        row["id"]: row["body"] for row in strict["history"]
+    }
+    assert client.comment_calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["tamper", "other_caller", "edit", "normal_cursor", "incomplete"])
+async def test_sequential_review_refuses_unproven_continuation(scenario):
+    client = await _review_fixture()
+    args = (client, "gpakoh", "agent-ssh-gateway", 1)
+    key = b"test-review-key" * 3
+    page = await core.open_thread(
+        *args, allow_partial=True, recent_preview=True, history_cursor="review", review_key=key,
+    )
+    cursor = page["history_review_cursor"]
+    if scenario == "tamper":
+        cursor = cursor[:-1] + ("0" if cursor[-1] != "0" else "1")
+    elif scenario == "other_caller":
+        key = b"other-review-key" * 3
+    elif scenario == "edit":
+        client.comments[1][0]["body"] += " changed without issue version bump"
+    elif scenario == "normal_cursor":
+        cursor = "review:" + page["history_older_cursor"] + ":" + "0" * 64
+    else:
+        client.issues[0]["comments"] += 1
+    with pytest.raises(ValueError, match="review|cursor"):
+        await core.open_thread(
+            *args, allow_partial=True, recent_preview=True,
+            history_cursor=cursor, review_key=key,
+        )
+    assert client.comment_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_sequential_review_requires_caller_key_and_resolved_state():
+    client = await _review_fixture()
+    args = (client, "gpakoh", "agent-ssh-gateway", 1)
+    with pytest.raises(ValueError, match="review"):
+        await core.open_thread(*args, allow_partial=True, recent_preview=True, history_cursor="review")
+    client.comments[1][-1]["user"] = {"login": "other"}
+    cursor = "review"
+    for _ in range(10):
+        page = await core.open_thread(
+            *args, allow_partial=True, recent_preview=True, history_cursor=cursor,
+            review_key=b"test-review-key" * 3,
+        )
+        assert "review_close_state_sha256" not in page
+        cursor = page["history_review_cursor"]
+        if not cursor:
+            assert page["history_review_complete"] is True
+            assert page["review_coord_state"] == "waiting_review"
+            break
+    else:
+        pytest.fail("review cursor failed to terminate")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [None, 66])
+async def test_sequential_review_requires_complete_known_count(count):
+    client = await _review_fixture()
+    client.issues[0]["comments"] = count
+    with pytest.raises(ValueError, match="review"):
+        await core.open_thread(
+            client, "gpakoh", "agent-ssh-gateway", 1,
+            allow_partial=True, recent_preview=True, history_cursor="review",
+            review_key=b"test-review-key" * 3,
+        )
+
+
+@pytest.mark.asyncio
+async def test_mcp_review_cursor_bound_to_authenticated_caller_and_process(monkeypatch):
+    client = await _review_fixture()
+
+    class Context:
+        async def __aenter__(self):
+            return client
+
+        async def __aexit__(self, *args):
+            pass
+
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setattr(adapter, "_connection", AsyncMock(return_value=("gpakoh", "agent-ssh-gateway")))
+    monkeypatch.setattr(adapter, "server_attr", lambda _: lambda _token: Context())
+    monkeypatch.setattr(adapter, "_principal", lambda: "0123456789abcdef")
+    first = await adapter.coord_open("agent-ssh-gateway", 1, history_cursor="review")
+    assert first["ok"] is True, first
+    cursor = first["result"]["thread"]["history_review_cursor"]
+    assert cursor.startswith("review:")
+    monkeypatch.setattr(adapter, "_principal", lambda: None)
+    denied = await adapter.coord_open("agent-ssh-gateway", 1, history_cursor=cursor)
+    assert denied["ok"] is False
+    monkeypatch.setattr(adapter, "_principal", lambda: "fedcba9876543210")
+    denied = await adapter.coord_open("agent-ssh-gateway", 1, history_cursor=cursor)
+    assert denied["ok"] is False
+    monkeypatch.setattr(adapter, "_principal", lambda: "0123456789abcdef")
+    resumed = await adapter.coord_open("agent-ssh-gateway", 1, history_cursor=cursor)
+    assert resumed["ok"] is True, resumed
+    monkeypatch.setattr(adapter, "_REVIEW_SECRET", b"new-process-key" * 3)
+    denied = await adapter.coord_open("agent-ssh-gateway", 1, history_cursor=cursor)
+    assert denied["ok"] is False
+    assert client.comment_calls == 0
