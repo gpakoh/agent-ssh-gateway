@@ -501,6 +501,9 @@ def test_verifier_exit_codes_have_operator_actionable_codes(
         ("metadata_invalid", "metadata_invalid"),
         ("uv_missing", "uv_missing"),
         ("uv_sync", "uv_sync"),
+        ("requirements_invalid", "requirements_invalid"),
+        ("requirements_venv", "requirements_venv"),
+        ("requirements_sync", "requirements_sync"),
         ("uv_sync%2fother", None),
         ("uv_sync\nMCP_VERIFY_ENV_STAGE=metadata_invalid", None),
     ],
@@ -1496,3 +1499,79 @@ def test_workspace_verifier_forwards_receipt_unchanged(
     assert receipt["verifier_image"] == _image_ref()
     assert receipt["check_count"] == 1
     assert receipt["checks"][0]["command"] == "true"
+
+
+@pytest.mark.parametrize("mode", ["success", "requirements_only", "install_failure", "symlink", "locked"])
+def test_root_requirements_bootstrap_in_disposable_verifier(tmp_path: Path, mode: str) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"], check=True)
+    if mode != "requirements_only":
+        (repo / "pyproject.toml").write_text('[project]\nname="requirements-probe"\nversion="0.1"\n')
+    (repo / "requirements.txt").write_text("pytest==9.1.1\n")
+    (repo / "requirements-dev.txt").write_text("ruff==0.11.9\n")
+    if mode == "symlink":
+        (repo / "requirements-dev.txt").unlink()
+        (repo / "requirements-dev.txt").symlink_to("requirements.txt")
+    if mode == "locked":
+        (repo / "uv.lock").write_text("version = 1\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base"], check=True)
+    sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "uv-calls"
+    fake_uv = bin_dir / "uv"
+    fake_uv.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> {shlex.quote(str(calls))}\n"
+        'if [ "$1" = venv ]; then\n'
+        '  for last do :; done\n'
+        '  mkdir -p "$last/bin"\n'
+        '  ln -s "$(command -v python3)" "$last/bin/python3"\n'
+        '  exit 0\n'
+        'fi\n'
+        'if [ "$1 $2" = "pip install" ]; then\n'
+        + ('  echo "Authorization: Bearer private-install-secret" >&2; exit 7\n'
+           if mode == "install_failure" else
+           '  test "$3" = --python || exit 9\n'
+           '  target=$(dirname "$4")\n'
+           '  printf "#!/bin/sh\\nexit 0\\n" > "$target/requirements-probe"\n'
+           '  chmod +x "$target/requirements-probe"\n'
+           '  exit 0\n')
+        + 'fi\nexit 9\n',
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o755)
+    check = "true" if mode == "locked" else "requirements-probe"
+    script = build_candidate_verifier_script(
+        staging_root=repo, expected_sha=sha, required_checks=[check],
+    ).replace("SOURCE=/candidate-src", f"SOURCE={shlex.quote(str(repo))}", 1)
+    env = {**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", "")}
+    result = subprocess.run(
+        ["sh"], input=script, text=True, capture_output=True, timeout=30, env=env,
+    )
+    assert "private-install-secret" not in result.stdout + result.stderr
+    if mode in {"success", "requirements_only"}:
+        assert result.returncode == 0, result.stdout + result.stderr
+        invocations = calls.read_text().splitlines()
+        assert len(invocations) == 3
+        assert invocations[0].startswith("venv ")
+        assert invocations[1].endswith("/requirements.txt")
+        assert invocations[2].endswith("/requirements-dev.txt")
+        assert "MCP_CHECK_RECEIPT_V1:" in result.stdout
+    elif mode == "locked":
+        assert result.returncode == 0
+        assert not calls.exists()
+    else:
+        assert result.returncode == 82
+        assert result.stdout.strip() == "MCP_VERIFY_ENV_STAGE=" + (
+            "requirements_sync" if mode == "install_failure" else "requirements_invalid"
+        )
+        if mode == "symlink":
+            assert not calls.exists()
+    assert subprocess.check_output(
+        ["git", "-C", str(repo), "status", "--porcelain"], text=True
+    ) == ""
