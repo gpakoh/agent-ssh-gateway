@@ -505,12 +505,22 @@ class GiteaClient:
     async def list_pull_request_workflow_runs(
         self, owner: str, repo: str, workflow_id: str
     ) -> dict[str, Any]:
-        """Bounded workflow-specific PR runs for exact CI-merge attestation.
+        """Compatibility entry point for the existing PR evidence contract."""
+        return await self.list_ci_workflow_runs(
+            owner, repo, workflow_id, event="pull_request"
+        )
 
-        Unlike the public dispatch tracker this explicitly selects the
-        pull_request event. The workflow ID comes from the provider's own
-        workflow catalog and the endpoint binds each returned run to it.
+    async def list_ci_workflow_runs(
+        self, owner: str, repo: str, workflow_id: str, *, event: str
+    ) -> dict[str, Any]:
+        """Bounded workflow/event-specific read for exact CI-merge attestation.
+
+        Only the two supported merge evidence triggers are admitted. The
+        workflow ID comes from the provider catalog; no arbitrary endpoint
+        or dispatch input is accepted.
         """
+        if event not in {"pull_request", "push"}:
+            raise ValueError("unsupported Gitea CI evidence event")
         if (
             not isinstance(workflow_id, str)
             or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*\.ya?ml", workflow_id)
@@ -519,7 +529,7 @@ class GiteaClient:
             raise ValueError("invalid Gitea workflow ID")
         data = await self._get(
             "/repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs",
-            params={"page": 1, "limit": 50, "event": "pull_request"},
+            params={"page": 1, "limit": 50, "event": event},
             owner=owner, repo=repo, workflow_id=workflow_id,
         )
         if not isinstance(data, dict):
