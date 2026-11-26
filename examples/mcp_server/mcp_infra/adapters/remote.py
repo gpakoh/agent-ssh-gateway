@@ -8024,14 +8024,14 @@ _GITEA_VERIFIED_PUSH_RECONCILE_ATTEMPTS = 3
 _GITEA_VERIFIED_PUSH_RECONCILE_DELAY_SECONDS = 0.05
 
 
-def _record_verified_push_outcome(metadata: dict[str, Any], outcome: str) -> None:
-    """Best-effort terminal audit; missing evidence never permits replay.
+def _record_verified_push_outcome(metadata: dict[str, Any], outcome: str) -> bool:
+    """Attempt durable terminal audit without falsifying the remote effect.
 
-    The required durable intent is appended before Git transport starts.
-    An absent outcome means investigation is needed, not that no push occurred.
+    Return True only when the required append confirms persistence. A failed
+    append leaves the receipt unproven; it never permits replay of a push.
     """
     try:
-        _get_gitea_audit_logger().append(
+        _get_gitea_audit_logger().append_required(
             McpAuditEvent(
                 event_type="mcp.gitea_verified_push_outcome",
                 tool="gitea_push_verified_commit",
@@ -8042,7 +8042,8 @@ def _record_verified_push_outcome(metadata: dict[str, Any], outcome: str) -> Non
             )
         )
     except Exception:
-        pass  # The original verified/unknown outcome must not be falsified.
+        return False  # The original verified/unknown outcome must not be falsified.
+    return True
 
 
 def _unproven_verified_push_dispatch(
@@ -8050,7 +8051,7 @@ def _unproven_verified_push_dispatch(
 ) -> dict[str, Any]:
     # This is only reached after a push task was scheduled. An unrelated
     # verification exception is NOT a pre-mutation retry certificate.
-    _record_verified_push_outcome(audit_metadata, "remote_postcondition_unproven")
+    audit_outcome_persisted = _record_verified_push_outcome(audit_metadata, "remote_postcondition_unproven")
     return tool_error(
         tool="gitea_push_verified_commit",
         code="MUTATION_OUTCOME_UNKNOWN",
@@ -8065,6 +8066,7 @@ def _unproven_verified_push_dispatch(
             "mutation_started": True,
             "mutation_occurred": None,
             "audit_intent_id": audit_metadata["correlation_id"],
+            "audit_outcome_persisted": audit_outcome_persisted,
             "expected_head_sha": audit_metadata["expected_head_sha"],
             "branch": audit_metadata["destination_ref"].removeprefix("refs/heads/"),
             "failure_class": type(exc).__name__,
@@ -8543,7 +8545,7 @@ async def gitea_push_verified_commit(
                 mutation_error = exc
 
             if pre_mutation_error is not None:
-                _record_verified_push_outcome(audit_metadata, "local_pre_mutation_failure")
+                audit_outcome_persisted = _record_verified_push_outcome(audit_metadata, "local_pre_mutation_failure")
                 return tool_error(
                     tool="gitea_push_verified_commit",
                     code="GIT_PUSH_FAILED",
@@ -8555,6 +8557,7 @@ async def gitea_push_verified_commit(
                         "mutation_started": False,
                         "mutation_occurred": False,
                         "audit_intent_id": audit_intent_id,
+                        "audit_outcome_persisted": audit_outcome_persisted,
                         "expected_head_sha": expected_head,
                         "branch": destination_branch,
                     },
@@ -8572,9 +8575,10 @@ async def gitea_push_verified_commit(
                 )
             )
             if reconciliation_outcome != "success" or remote_branch is None:
-                _record_verified_push_outcome(audit_metadata, "remote_postcondition_unproven")
+                audit_outcome_persisted = _record_verified_push_outcome(audit_metadata, "remote_postcondition_unproven")
                 details = {
                     "audit_intent_id": audit_intent_id,
+                    "audit_outcome_persisted": audit_outcome_persisted,
                     "phase": "push_postcondition",
                     "mutation_started": True,
                     "mutation_occurred": None,
@@ -8622,7 +8626,7 @@ async def gitea_push_verified_commit(
     commit = (remote_branch or {}).get("commit") or {}
     observed_sha = str(commit.get("id") or commit.get("sha") or "").lower() or None
     if observed_sha != expected_head:
-        _record_verified_push_outcome(audit_metadata, "remote_postcondition_unproven")
+        audit_outcome_persisted = _record_verified_push_outcome(audit_metadata, "remote_postcondition_unproven")
         return tool_error(
             tool="gitea_push_verified_commit",
             code="MUTATION_OUTCOME_UNKNOWN",
@@ -8640,6 +8644,7 @@ async def gitea_push_verified_commit(
                 "mutation_started": True,
                 "mutation_occurred": None,
                 "audit_intent_id": audit_intent_id,
+                "audit_outcome_persisted": audit_outcome_persisted,
                 "expected_head_sha": expected_head,
                 "observed_head_sha": observed_sha,
                 "branch": destination_branch,
@@ -8665,7 +8670,7 @@ async def gitea_push_verified_commit(
     except Exception:
         post_push_workspace_code = "WORKSPACE_VERIFICATION_FAILED"
     if post_push_workspace_code is not None:
-        _record_verified_push_outcome(audit_metadata, "remote_exact_head_verified")
+        audit_outcome_persisted = _record_verified_push_outcome(audit_metadata, "remote_exact_head_verified")
         return tool_error(
             tool="gitea_push_verified_commit",
             code="WORKSPACE_CONTENDED",
@@ -8680,6 +8685,7 @@ async def gitea_push_verified_commit(
                 "mutation_started": True,
                 "mutation_occurred": True,
                 "audit_intent_id": audit_intent_id,
+                "audit_outcome_persisted": audit_outcome_persisted,
                 "expected_head_sha": expected_head,
                 "remote_observed_sha": observed_sha,
                 "branch": destination_branch,
@@ -8687,7 +8693,7 @@ async def gitea_push_verified_commit(
             },
             source="gitea",
         )
-    _record_verified_push_outcome(audit_metadata, "remote_exact_head_verified")
+    audit_outcome_persisted = _record_verified_push_outcome(audit_metadata, "remote_exact_head_verified")
     return tool_success(
         "gitea_push_verified_commit",
         result={
@@ -8706,6 +8712,7 @@ async def gitea_push_verified_commit(
             "remote_observed_sha": observed_sha,
             "candidate_verified_after_push": True,
             "audit_intent_id": audit_intent_id,
+            "audit_outcome_persisted": audit_outcome_persisted,
             "outcome": (
                 "completed_after_ambiguous_response"
                 if mutation_error is not None

@@ -922,6 +922,7 @@ async def test_verified_push_reports_candidate_drift_after_remote_publication(
     assert isinstance(audit_intent_id, str) and len(audit_intent_id) == 32
     assert details == {
         "phase": "candidate_post_push",
+        "audit_outcome_persisted": True,
         "mutation_started": True,
         "mutation_occurred": True,
         "expected_head_sha": SHA,
@@ -1948,3 +1949,84 @@ async def test_adapter_trusted_receipt_yields_derived_checks_verified_true(
     assert result["ok"] is True
     assert result["result"]["verified"] is True
     assert result["result"]["checks_verified"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("durable", [True, False])
+@pytest.mark.parametrize("scenario", ["published", "unknown", "preflight"])
+async def test_verified_push_terminal_audit_durability_is_independent_of_remote_effect(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, durable: bool, scenario: str
+) -> None:
+    attempts: list[Any] = []
+    best_effort: list[Any] = []
+    pushes = 0
+
+    class OutcomeClient(_FakeGiteaClient):
+        async def get_branch(self, owner: str, repo: str, branch: str) -> dict[str, Any]:
+            return {
+                "name": branch,
+                "protected": False,
+                "commit": {"id": SHA if pushes and scenario == "published" else "1" * 40},
+            }
+
+    class OutcomeAudit:
+        def append_required(self, event: Any) -> None:
+            attempts.append(event)
+            if len(attempts) == 2 and not durable:
+                raise remote.AuditWriteError("private fsync failure")
+
+        def append(self, event: Any) -> None:
+            best_effort.append(event)
+
+    def push(**_kwargs: Any) -> None:
+        nonlocal pushes
+        assert len(attempts) == 1
+        pushes += 1
+        if scenario == "unknown":
+            raise managed_git.ManagedGitMutationError("ambiguous transport")
+        if scenario == "preflight":
+            raise managed_git.ManagedGitError("local precondition")
+
+    _install_verified_push_reconciliation_mocks(
+        monkeypatch, tmp_path, OutcomeClient, push
+    )
+    monkeypatch.setattr(remote, "_get_gitea_audit_logger", OutcomeAudit)
+    result = await remote.gitea_push_verified_commit(
+        project="gpt-browser-bridge-hardening",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_base_sha="0" * 40,
+        expected_head_sha=SHA,
+        allowed_files="app/**",
+        required_checks="pytest -q",
+    )
+
+    assert pushes == 1
+    assert best_effort == []
+    assert [event.event_type for event in attempts] == [
+        "mcp.gitea_verified_push_intent", "mcp.gitea_verified_push_outcome",
+    ]
+    assert attempts[0].metadata["correlation_id"] == attempts[1].metadata["correlation_id"]
+    assert attempts[1].metadata["outcome"] == {
+        "published": "remote_exact_head_verified",
+        "unknown": "remote_postcondition_unproven",
+        "preflight": "local_pre_mutation_failure",
+    }[scenario]
+    if scenario == "published":
+        assert result["ok"] is True
+        details = result["result"]
+        assert details["verified"] is True
+        assert details["remote_observed_sha"] == SHA
+    else:
+        assert result["ok"] is False
+        error = result["error"]
+        details = error["details"]
+        assert error["code"] == (
+            "MUTATION_OUTCOME_UNKNOWN" if scenario == "unknown" else "GIT_PUSH_FAILED"
+        )
+        assert error["retryable"] is (scenario == "preflight")
+        assert details["mutation_occurred"] is (None if scenario == "unknown" else False)
+    assert details["audit_intent_id"] == attempts[0].metadata["correlation_id"]
+    assert details["audit_outcome_persisted"] is durable
+    assert "private fsync failure" not in str(result)
