@@ -2030,3 +2030,265 @@ async def test_verified_push_terminal_audit_durability_is_independent_of_remote_
     assert details["audit_intent_id"] == attempts[0].metadata["correlation_id"]
     assert details["audit_outcome_persisted"] is durable
     assert "private fsync failure" not in str(result)
+
+
+def _keyed_push_args() -> dict[str, Any]:
+    return {
+        "project": "gpt-browser-bridge-hardening",
+        "owner": "gpakoh",
+        "repo": "gpt-browser-bridge",
+        "destination_branch": "hardening/runtime-deploy",
+        "expected_base_sha": "0" * 40,
+        "expected_head_sha": SHA,
+        "allowed_files": "app/**",
+        "required_checks": "pytest -q",
+        "operation_key": "delivery-973-test",
+    }
+
+
+@pytest.mark.asyncio
+async def test_keyed_verified_push_can_read_durable_receipt_without_replay(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pushes = 0
+    verifications = 0
+    args = _keyed_push_args()
+
+    class JournalClient(_FakeGiteaClient):
+        async def get_branch(self, owner: str, repo: str, branch: str) -> dict[str, Any]:
+            return {
+                "name": branch, "protected": False,
+                "commit": {"id": SHA if pushes else "1" * 40},
+            }
+
+    def record() -> dict[str, Any]:
+        files = list((tmp_path / "verified-push").glob("*.json"))
+        assert len(files) == 1
+        return json.loads(files[0].read_text(encoding="utf-8"))
+
+    def verify(**_kwargs: Any) -> None:
+        nonlocal verifications
+        verifications += 1
+        assert record()["phase"] == "started"
+
+    def push(**_kwargs: Any) -> None:
+        nonlocal pushes
+        assert record()["phase"] == "dispatching"
+        assert len(record()["audit_intent_id"]) == 32
+        pushes += 1
+
+    _install_verified_push_reconciliation_mocks(monkeypatch, tmp_path, JournalClient, push)
+    monkeypatch.setenv("MCP_AUDIT_LOG_PATH", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setattr(remote, "_caller_fingerprint", lambda: "caller-a")
+    monkeypatch.setattr(remote, "verify_workspace_via_docker", verify)
+    first = await remote.gitea_push_verified_commit(**args)
+    assert first["ok"] is True
+    assert first["result"]["operation_receipt_persisted"] is True
+    assert record()["phase"] == "terminal"
+    assert "pytest -q" not in str(record())
+    assert "caller-a" not in str(record())
+    assert "managed-token" not in str(record())
+
+    status = await remote.gitea_push_verified_commit(**args, receipt_only=True)
+    assert status["ok"] is True
+    assert status["result"]["state"] == "terminal"
+    assert status["result"]["remote_observed_sha"] == SHA
+    assert status["result"]["audit_outcome_persisted"] is True
+    assert status["result"]["authorizes_mutation"] is False
+    duplicate = await remote.gitea_push_verified_commit(**args)
+    assert duplicate["error"]["code"] == "OPERATION_KEY_ALREADY_USED"
+    assert duplicate["error"]["retryable"] is False
+    assert pushes == verifications == 1
+
+    conflict = await remote.gitea_push_verified_commit(
+        **{**args, "required_checks": "pytest -q tests"}, receipt_only=True
+    )
+    assert conflict["error"]["code"] == "OPERATION_KEY_CONFLICT"
+    monkeypatch.setattr(remote, "_caller_fingerprint", lambda: "caller-b")
+    denied = await remote.gitea_push_verified_commit(**args, receipt_only=True)
+    assert denied["error"]["code"] == "AUTH_ERROR"
+    assert pushes == verifications == 1
+
+
+@pytest.mark.asyncio
+async def test_keyed_verified_push_missing_receipt_is_not_retry_authority(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("MCP_AUDIT_LOG_PATH", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setattr(remote, "_caller_fingerprint", lambda: "caller-a")
+    result = await remote.gitea_push_verified_commit(**_keyed_push_args(), receipt_only=True)
+    assert result["ok"] is True
+    assert result["result"]["state"] == "not_found"
+    assert result["result"]["authorizes_mutation"] is False
+    assert not (tmp_path / "verified-push").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["started", "dispatching", "terminal"])
+async def test_keyed_push_journal_write_failure_preserves_mutation_boundary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, phase: str
+) -> None:
+    from app import gitea_verified_push_journal as journal
+
+    pushes = 0
+    checks = 0
+    real_save = journal.save_receipt
+
+    class JournalClient(_FakeGiteaClient):
+        async def get_branch(self, owner: str, repo: str, branch: str) -> dict[str, Any]:
+            return {
+                "name": branch, "protected": False,
+                "commit": {"id": SHA if pushes else "1" * 40},
+            }
+
+    def push(**_kwargs: Any) -> None:
+        nonlocal pushes
+        pushes += 1
+
+    def verify(**_kwargs: Any) -> None:
+        nonlocal checks
+        checks += 1
+
+    def fail_save(path: Path, record: dict[str, Any]) -> None:
+        if record["phase"] == phase:
+            raise OSError("private journal filesystem failure")
+        real_save(path, record)
+
+    _install_verified_push_reconciliation_mocks(monkeypatch, tmp_path, JournalClient, push)
+    monkeypatch.setenv("MCP_AUDIT_LOG_PATH", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setattr(remote, "_caller_fingerprint", lambda: "caller-a")
+    monkeypatch.setattr(remote, "verify_workspace_via_docker", verify)
+    monkeypatch.setattr(journal, "save_receipt", fail_save)
+    result = await remote.gitea_push_verified_commit(**_keyed_push_args())
+    assert "private journal filesystem failure" not in str(result)
+    status = await remote.gitea_push_verified_commit(**_keyed_push_args(), receipt_only=True)
+    assert status["result"]["replay_allowed"] is False
+    if phase == "started":
+        assert result["error"]["code"] == "RECEIPT_UNAVAILABLE"
+        assert checks == pushes == 0
+        assert status["result"]["state"] == "not_found"
+    elif phase == "dispatching":
+        assert result["error"]["code"] == "RECEIPT_UNAVAILABLE"
+        assert result["error"]["details"]["mutation_started"] is False
+        assert checks == 1 and pushes == 0
+        assert status["result"]["state"] == "terminal"
+        assert status["result"]["mutation_started"] is False
+        assert status["result"]["audit_intent_id"] == result["error"]["details"]["audit_intent_id"]
+    else:
+        assert result["ok"] is True
+        assert result["result"]["operation_receipt_persisted"] is False
+        assert result["result"]["audit_outcome_persisted"] is True
+        assert result["result"]["remote_observed_sha"] == SHA
+        assert checks == pushes == 1
+        assert status["result"]["state"] == "dispatching"
+        duplicate = await remote.gitea_push_verified_commit(**_keyed_push_args())
+        assert duplicate["error"]["code"] == "OPERATION_KEY_ALREADY_USED"
+        assert checks == pushes == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dispatching", [False, True])
+async def test_keyed_push_busy_and_cancelled_receipt_never_replays(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dispatching: bool
+) -> None:
+    import asyncio
+    from collections.abc import Callable
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def hold(*_args: Any, before_dispatch: Callable[[str], None]) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if dispatching:
+            before_dispatch("a" * 32)
+        entered.set()
+        await release.wait()
+        raise AssertionError("cancelled test invocation must not finish")
+
+    monkeypatch.setenv("MCP_AUDIT_LOG_PATH", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setattr(remote, "_caller_fingerprint", lambda: "caller-a")
+    monkeypatch.setattr(remote, "_gitea_push_verified_commit_impl", hold)
+    task = asyncio.create_task(remote.gitea_push_verified_commit(**_keyed_push_args()))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        expected_phase = "dispatching" if dispatching else "started"
+        status = await remote.gitea_push_verified_commit(**_keyed_push_args(), receipt_only=True)
+        assert status["result"]["state"] == expected_phase
+        assert status["result"]["terminal_observation"] is False
+        busy = await remote.gitea_push_verified_commit(**_keyed_push_args())
+        assert busy["error"]["code"] == "OPERATION_BUSY"
+        assert busy["error"]["retryable"] is False
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    status = await remote.gitea_push_verified_commit(**_keyed_push_args(), receipt_only=True)
+    assert status["result"]["state"] == expected_phase
+    assert status["result"]["replay_allowed"] is False
+    duplicate = await remote.gitea_push_verified_commit(**_keyed_push_args())
+    assert duplicate["error"]["code"] == "OPERATION_KEY_ALREADY_USED"
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_keyed_push_unsafe_receipt_refused_without_running_verifier(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from app.gitea_workflow_dispatch import digest
+
+    monkeypatch.setenv("MCP_AUDIT_LOG_PATH", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setattr(remote, "_caller_fingerprint", lambda: "caller-a")
+    root = tmp_path / "verified-push"
+    root.mkdir(mode=0o700)
+    path = root / (digest(_keyed_push_args()["operation_key"]) + ".json")
+    other = tmp_path / "unrelated"
+    other.write_text("private file", encoding="utf-8")
+    path.symlink_to(other)
+    for receipt_only in (True, False):
+        result = await remote.gitea_push_verified_commit(
+            **_keyed_push_args(), receipt_only=receipt_only
+        )
+        assert result["error"]["code"] == "RECEIPT_UNAVAILABLE"
+        assert result["error"]["retryable"] is False
+        assert "private file" not in str(result)
+        assert path.is_symlink()
+
+
+@pytest.mark.asyncio
+async def test_keyed_push_unknown_terminal_receipt_is_not_success_or_retry_lease(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pushes = 0
+
+    class OldHeadClient(_FakeGiteaClient):
+        async def get_branch(self, owner: str, repo: str, branch: str) -> dict[str, Any]:
+            return {"name": branch, "protected": False, "commit": {"id": "1" * 40}}
+
+    def push(**_kwargs: Any) -> None:
+        nonlocal pushes
+        pushes += 1
+        raise managed_git.ManagedGitMutationError("ambiguous transport")
+
+    _install_verified_push_reconciliation_mocks(monkeypatch, tmp_path, OldHeadClient, push)
+    monkeypatch.setenv("MCP_AUDIT_LOG_PATH", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setattr(remote, "_caller_fingerprint", lambda: "caller-a")
+    args = _keyed_push_args()
+    result = await remote.gitea_push_verified_commit(**args)
+    assert result["error"]["code"] == "MUTATION_OUTCOME_UNKNOWN"
+    assert result["error"]["details"]["operation_receipt_persisted"] is True
+    status = await remote.gitea_push_verified_commit(**args, receipt_only=True)
+    view = status["result"]
+    assert view["state"] == "terminal"
+    assert view["ok"] is False
+    assert view["error_code"] == "MUTATION_OUTCOME_UNKNOWN"
+    assert view["mutation_started"] is True
+    assert view["mutation_occurred"] is None
+    assert view["remote_observed_sha"] is None
+    assert view["current_remote_state_verified"] is False
+    assert view["replay_allowed"] is False
+    assert (await remote.gitea_push_verified_commit(**args))["error"]["code"] == (
+        "OPERATION_KEY_ALREADY_USED"
+    )
+    assert pushes == 1

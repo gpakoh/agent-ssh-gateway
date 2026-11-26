@@ -59,14 +59,66 @@ write does not undo a verified publication, convert unknown into a retry
 lease, or change an independently proven pre-transport failure. A successful
 terminal append records the observation, not an atomic receive-pack receipt.
 
-If the client loses the entire response, only an authorized operator may
-inspect Gateway audit records by exact owner/ref/SHA and incident time. A
-missing terminal outcome or a present intent **does not prove the remote
-write failed or succeeded**. Only a positive remote HEAD or authoritative
-Gitea receive-pack/ref-update evidence can settle the mutation. This does
-not provide a caller-queryable operation journal or recover a lost response.
-This audit change is prospective; it cannot invent a receipt for Supervisor
-#248 or earlier ambiguous requests.
+For an unkeyed request whose entire response is lost, only an authorized
+operator may inspect Gateway audit records by exact owner/ref/SHA and incident
+time. Missing terminal evidence or a present intent **does not prove the
+remote write failed or succeeded**. This audit evidence is prospective; it
+cannot invent a receipt for Supervisor #248 or earlier ambiguous requests.
+
+## Opt-in operation receipt
+
+On a new reviewed mutation, preserve a unique caller-chosen `operation_key`
+(8–128 characters, letters/digits and `_.:-`, beginning with a letter or
+digit) together with the exact delivery contract. Pass the key to
+`gitea_push_verified_commit`. The key is bound to the authenticated caller
+and a hash of the normalized project, repo, branch, base/head SHAs, allowed
+files and required checks. The existing verification and durable intent
+guard still apply. Raw checks, tokens and paths are not written to the
+operation receipt.
+
+The private journal under the configured audit directory fsyncs a
+single-use record before verification, and advances it to `dispatching`
+with the audit intent ID before the Git subprocess is scheduled. Its
+per-key lock prevents a concurrent duplicate invocation. A used key
+cannot start another push, even after cancellation or process restart.
+
+After an ambiguous response, call the same tool with the **same key and
+exact contract**, `receipt_only=true` and `reconcile_only=false` (default).
+This mode performs no verifier or remote Git/API operation. It returns
+the following observed receipt states:
+
+- `not_found`: no record in this configured journal, not proof of no push.
+- `started`: verification-phase record, no terminal observation.
+- `dispatching`: pre-transport intent was recorded, actual remote effect
+  remains unknown without terminal evidence.
+- `terminal`: the saved typed result, including the audit intent ID,
+  exact observed head if any, and audit outcome persistence flag.
+
+The receipt is historical, not a fresh remote-ref attestation:
+`current_remote_state_verified=false`, `authorizes_mutation=false` and
+`replay_allowed=false` apply to every state. Do not infer safe-negative
+evidence from any missing or unfinished receipt. A terminal result can
+itself contain an unknown remote effect. Confirm publication through the
+independent exact-ref procedure above (omit the operation key for the
+explicit `reconcile_only=true` call).
+
+An ordinary keyed response reports `operation_receipt_persisted=true`
+only after the terminal record append/replace and fsync succeed. A failed
+terminal write is reported separately and never reverses the observed
+remote outcome. A later read observes the available journal record; it
+cannot prove that a previously failed fsync succeeded. The same-key
+mutation is refused with `OPERATION_KEY_ALREADY_USED` or `OPERATION_BUSY`;
+a changed contract with `OPERATION_KEY_CONFLICT`; a different caller
+with `AUTH_ERROR`; invalid or unavailable journal evidence with
+`RECEIPT_UNAVAILABLE`. None is a retry lease. Do not choose a new key to
+bypass an ambiguous operation or delete its receipt.
+
+Keep journal records as recovery evidence; there is no automatic expiry
+or receipt-deletion operation. This is a caller-bound observation journal,
+not an atomic Gitea receive-pack transaction. Legacy unkeyed requests
+remain compatible and have no caller-keyed recovery record. Client schema
+refresh may be necessary to expose `operation_key`, `receipt_only` and
+`reconcile_only` before using these modes.
 
 The default `reconcile_only=false` retains the regular verified-push
 workflow. It also avoids a duplicate push when it independently observes the
