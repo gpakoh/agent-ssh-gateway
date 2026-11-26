@@ -305,6 +305,7 @@ def _verify_subset(
     base_sha: str,
     *,
     allow_empty_site_audit_staging: bool = False,
+    allow_retained_git_metadata: bool = False,
 ) -> int:
     manifest = _tree_manifest(reference_repo, base_sha)
     verified = 0
@@ -317,6 +318,12 @@ def _verify_subset(
             raise _fail("WORKSPACE_CONTENDED", "candidate orphan tree could not be scanned", retryable=True) from exc
         for entry in entries:
             rel = f"{prefix}/{entry.name}" if prefix else entry.name
+            if allow_retained_git_metadata and rel == ".git":
+                # Only the managed cleanup recovery caller may opt in, after
+                # independently proving the exact retained Git metadata.
+                if not entry.is_dir(follow_symlinks=False):
+                    raise _fail("WORKSPACE_CONTENDED", "retained candidate Git metadata is unsafe")
+                continue
             expected = manifest.get(rel)
             if expected is None:
                 if allow_empty_site_audit_staging and rel in _SITE_AUDIT_GENERATED_DIRS:
