@@ -3537,6 +3537,102 @@ def test_candidate_cleanup_recovers_after_unregister_before_delete(
     assert not clone_root.exists()
 
 
+@pytest.mark.parametrize(
+    "change",
+    [
+        "none", "new-file", "modified", "hidden-modified", "staged",
+        "extra-ref", "unreachable", "ignored", "active", "permission",
+    ],
+)
+def test_abandon_unmodified_resumes_only_delivered_partial_tree(
+    registry_fixture, monkeypatch: pytest.MonkeyPatch, change: str,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, source, config_dir, journal_root, _base = registry_fixture
+    (source / "keep.txt").write_text("retained\n", encoding="utf-8")
+    (source / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+    _git(source, "add", "keep.txt", ".gitignore")
+    _git(source, "commit", "-m", "additional tracked files")
+    base = _git(source, "rev-parse", "HEAD")
+    branch = "fix/partial-unmodified-recovery"
+    receipt = prepare_candidate_clone(
+        "source-project", branch, base,
+        config_dir=config_dir, journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    _mock_cleanup_remote_probe(
+        monkeypatch, module, preserved_ref="archive/candidate-unused",
+        head=base, delivery_branch=branch,
+    )
+    original_rmtree = module.shutil.rmtree
+
+    def interrupt(path: Path) -> None:
+        assert path == clone_root
+        (path / "README.md").unlink()
+        raise OSError("simulated partial removal with Git directory retained")
+
+    def cleanup():
+        return candidate_cleanup(
+            receipt.project_id, base, branch, "source-project", None,
+            config_dir=config_dir, journal_root=journal_root,
+            reference_guard=_idle_guard, abandon_unmodified=True,
+        )
+
+    monkeypatch.setattr(module.shutil, "rmtree", interrupt)
+    with pytest.raises(CandidateCloneError) as interrupted:
+        cleanup()
+    assert interrupted.value.code == "TOOL_EXECUTION_FAILED"
+    assert (clone_root / ".git").is_dir()
+    assert not (clone_root / "README.md").exists()
+    tombstone, _ = module._cleanup_tombstone_path(journal_root, receipt.project_id)
+    assert module._read_cleanup_tombstone(tombstone)["phase"] == "registry_removed"
+    monkeypatch.setattr(module.shutil, "rmtree", original_rmtree)
+
+    if change == "new-file":
+        (clone_root / "new.txt").write_text("unique\n", encoding="utf-8")
+    elif change == "modified":
+        (clone_root / "keep.txt").write_text("unique\n", encoding="utf-8")
+    elif change == "hidden-modified":
+        _git(clone_root, "update-index", "--assume-unchanged", "keep.txt")
+        (clone_root / "keep.txt").write_text("unique\n", encoding="utf-8")
+    elif change == "staged":
+        _git(clone_root, "add", "-u")
+    elif change == "extra-ref":
+        _git(clone_root, "branch", "keep-extra")
+    elif change == "unreachable":
+        unique = workspace / "unique-object.txt"
+        unique.write_text("unique object\n", encoding="utf-8")
+        _git(clone_root, "hash-object", "-w", str(unique))
+    elif change == "ignored":
+        (clone_root / "ignored.txt").write_text("unique\n", encoding="utf-8")
+    elif change == "active":
+        monkeypatch.setattr(
+            module, "_candidate_active_evidence_details", lambda _root: {"active": True},
+        )
+    elif change == "permission":
+        original_access = os.access
+
+        def deny_protected(path, mode, **kwargs):
+            if Path(path) == clone_root / ".git" / "objects" and mode & os.W_OK:
+                return False
+            return original_access(path, mode, **kwargs)
+
+        monkeypatch.setattr(module.os, "access", deny_protected)
+    if change == "none":
+        recovered = cleanup()
+        assert recovered.directory_removed is True
+        assert not clone_root.exists()
+        assert module._read_cleanup_tombstone(tombstone)["phase"] == "complete"
+    else:
+        before = tombstone.read_bytes()
+        with pytest.raises(CandidateCloneError) as refused:
+            cleanup()
+        assert refused.value.code == "WORKSPACE_CONTENDED"
+        assert clone_root.is_dir()
+        assert tombstone.read_bytes() == before
+
+
 def test_candidate_cleanup_recovers_registry_removed_then_stops_new_dirty(
     registry_fixture,
     monkeypatch: pytest.MonkeyPatch,
