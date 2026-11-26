@@ -13,7 +13,7 @@ from examples.mcp_server.candidate_clone import (
     prepare_candidate_clone,
 )
 from examples.mcp_server.legacy_candidate_handoff import archive_terminal_legacy_handoff
-from tests.test_candidate_clone import _mock_cleanup_remote_probe
+from tests.test_candidate_clone import _git, _mock_cleanup_remote_probe
 
 pytest_plugins = ("tests.test_candidate_clone",)
 
@@ -30,7 +30,6 @@ def _prepared(registry_fixture, monkeypatch):
     bridge.mkdir()
     (bridge / "current-plan.md").write_bytes(b"# Historic task\nKeep this plan.\n")
     (bridge / "agent-status.md").write_bytes(b"Historic status and research.\n")
-    monkeypatch.setattr(core, "_status_state", lambda _root: (False, "0" * 64, 0))
     _mock_cleanup_remote_probe(
         monkeypatch, core, preserved_ref=preserved, head=head, delivery_branch=branch
     )
@@ -60,7 +59,9 @@ def test_verified_legacy_handoff_archive_preserves_both_files_and_allows_cleanup
 ):
     parts = _prepared(registry_fixture, monkeypatch)
     clone, receipt, config_dir, journal_root, head, branch, preserved = parts
+    assert _git(clone, "status", "--porcelain=v1") == "?? .ai-bridge/"
     result = _archive(parts)
+    assert _git(clone, "status", "--porcelain=v1") == ""
     assert result["outcome"] == "archived"
     assert (
         result["plan_sha256"] == hashlib.sha256(b"# Historic task\nKeep this plan.\n").hexdigest()
@@ -194,3 +195,47 @@ def test_terminal_guard_denied_after_durable_archive_preserves_source(
     assert list((journal_root / "candidate-cleanup").glob("*.legacy-handoff.json"))
     assert _archive(parts)["outcome"] == "archived"
     assert not (clone / ".ai-bridge" / "current-plan.md").exists()
+
+
+@pytest.mark.parametrize("fault", [
+    "untracked_source", "tracked_edit", "staged_edit", "hidden_tracked_edit",
+    "tracked_handoff", "extra_bridge_file",
+])
+def test_archive_preserves_work_outside_exact_untracked_handoff(
+    registry_fixture, monkeypatch, fault
+):
+    parts = _prepared(registry_fixture, monkeypatch)
+    clone = parts[0]
+    plan = clone / ".ai-bridge" / "current-plan.md"
+    before = plan.read_bytes()
+    if fault == "untracked_source":
+        (clone / "new-source.py").write_text("preserve new code\n", encoding="utf-8")
+    elif fault == "tracked_edit":
+        (clone / "README.md").write_text("preserve edit\n", encoding="utf-8")
+    elif fault == "staged_edit":
+        (clone / "README.md").write_text("preserve staged edit\n", encoding="utf-8")
+        _git(clone, "add", "README.md")
+    elif fault == "hidden_tracked_edit":
+        _git(clone, "update-index", "--assume-unchanged", "README.md")
+        (clone / "README.md").write_text("preserve hidden edit\n", encoding="utf-8")
+    elif fault == "tracked_handoff":
+        _git(clone, "add", ".ai-bridge/current-plan.md")
+    else:
+        (clone / ".ai-bridge" / "other.md").write_text("preserve other work\n", encoding="utf-8")
+    with pytest.raises(CandidateCloneError):
+        _archive(parts)
+    assert plan.read_bytes() == before
+    assert not list((parts[3] / "candidate-cleanup").glob("*.legacy-handoff.json"))
+
+
+def test_untracked_plan_only_archives_and_leaves_clean_candidate(
+    registry_fixture, monkeypatch
+):
+    parts = _prepared(registry_fixture, monkeypatch)
+    clone = parts[0]
+    (clone / ".ai-bridge" / "agent-status.md").unlink()
+    assert _git(clone, "status", "--porcelain=v1") == "?? .ai-bridge/"
+    result = _archive(parts)
+    assert result["outcome"] == "archived"
+    assert result["archived_status_sha256"] == hashlib.sha256(b"").hexdigest()
+    assert _git(clone, "status", "--porcelain=v1") == ""
