@@ -394,6 +394,7 @@ TOOL_NAMES_BY_MODE["mcp_client_write"] = (
     "candidate_cleanup",
     "candidate_archive_terminal_legacy_handoff",
     "candidate_discard_untracked_file",
+    "candidate_discard_untracked_files",
     "candidate_cleanup_abort_legacy_prepared",
     "candidate_orphan_finalize",
     "fleet_status",

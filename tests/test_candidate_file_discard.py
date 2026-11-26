@@ -340,3 +340,190 @@ def test_discard_zero_progress_archive_write_fails_closed(registry_fixture, monk
     assert injected
     assert exc_info.value.code == "AUDIT_UNAVAILABLE"
     assert path.read_bytes() == b"abandoned scratch\n"
+
+
+def _setup_batch(registry_fixture, monkeypatch, *, second_content=b"b" * (4 * 1024 * 1024 + 123)):
+    from examples.mcp_server.candidate_file_discard import _git_bytes
+
+    root, path, single = _setup(registry_fixture, monkeypatch)
+    other = root / "archive.tgz"
+    other.write_bytes(second_content)
+    files = [
+        {
+            "relative_path": file.name,
+            "expected_sha256": hashlib.sha256(file.read_bytes()).hexdigest(),
+            "expected_size": file.stat().st_size,
+        }
+        for file in (path, other)
+    ]
+    params = {
+        key: value for key, value in single.items()
+        if key not in {"relative_path", "expected_size", "expected_sha256"}
+    }
+    params.update(
+        files=files,
+        expected_index_sha256=hashlib.sha256(_git_bytes(root, ["ls-files", "--stage", "-z"])).hexdigest(),
+        expected_status_sha256=hashlib.sha256(_git_bytes(root, ["status", "--porcelain=v1"])).hexdigest(),
+    )
+    return root, path, other, params
+
+
+def test_batch_archives_all_before_any_rename_and_preserves_index(registry_fixture, monkeypatch):
+    from examples.mcp_server import candidate_file_discard as module
+    from tests.test_candidate_clone import _git
+
+    root, first, second, params = _setup_batch(registry_fixture, monkeypatch)
+    expected = {f.name: f.read_bytes() for f in (first, second)}
+    guard_calls = []
+    params["reference_guard"] = lambda: guard_calls.append(True)
+    original_rename = module.os.rename
+    seen = []
+
+    def rename(src, dst, *args, **kwargs):
+        if src in expected:
+            archives = params["journal_root"] / "candidate-file-archive"
+            contents = [p.read_bytes() for p in archives.glob("*.blob")]
+            assert all(data in contents for data in expected.values())
+            seen.append(src)
+        return original_rename(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "rename", rename)
+    receipt = module.discard_untracked_candidate_files(**params)
+    assert receipt["discarded"] is True
+    assert sorted(receipt["removed"]) == sorted(expected)
+    assert sorted(seen) == sorted(expected)
+    assert guard_calls == [True, True, True]
+    assert _git(root, "status", "--porcelain") == ""
+    assert _git(root, "rev-parse", "HEAD") == params["expected_head_sha"]
+    assert hashlib.sha256(module._git_bytes(root, ["ls-files", "--stage", "-z"])).hexdigest() == params["expected_index_sha256"]
+    archive_root = params["journal_root"] / "candidate-file-archive"
+    for record in receipt["files"]:
+        assert (archive_root / (record["archive_id"] + ".blob")).read_bytes() == expected[record["path"]]
+    assert (archive_root / (receipt["operation_id"] + ".blob")).is_file()
+    completed_id = hashlib.sha256((receipt["operation_id"] + ":completed").encode()).hexdigest()
+    assert (archive_root / (completed_id + ".blob")).is_file()
+
+
+@pytest.mark.parametrize("fault", [
+    "extra", "tracked", "hidden-tracked", "duplicate", "wrong-index",
+    "wrong-status", "wrong-hash", "symlink", "hardlink", "oversize", "legacy",
+])
+def test_batch_denies_unreviewed_or_unsafe_entries(registry_fixture, monkeypatch, tmp_path, fault):
+    from examples.mcp_server.candidate_file_discard import discard_untracked_candidate_files
+    from tests.test_candidate_clone import _git
+
+    root, first, second, params = _setup_batch(registry_fixture, monkeypatch, second_content=b"second")
+    if fault == "extra":
+        (root / "valuable.txt").write_bytes(b"preserve")
+    elif fault == "tracked":
+        (root / "README.md").write_bytes(b"preserve")
+    elif fault == "hidden-tracked":
+        _git(root, "update-index", "--assume-unchanged", "README.md")
+        (root / "README.md").write_bytes(b"preserve")
+    elif fault == "duplicate":
+        params["files"][1] = params["files"][0].copy()
+    elif fault == "wrong-index":
+        params["expected_index_sha256"] = "0" * 64
+    elif fault == "wrong-status":
+        params["expected_status_sha256"] = "0" * 64
+    elif fault == "wrong-hash":
+        params["files"][1]["expected_sha256"] = "0" * 64
+    elif fault == "symlink":
+        outside = tmp_path / "outside-file"
+        outside.write_bytes(b"second")
+        second.unlink()
+        second.symlink_to(outside)
+    elif fault == "hardlink":
+        os.link(second, tmp_path / "preserve-link")
+    elif fault == "oversize":
+        params["files"][1]["expected_size"] = 8 * 1024 * 1024 + 1
+    else:
+        params["files"][1]["relative_path"] = ".ai-bridge/current-plan.md"
+    with pytest.raises(CandidateCloneError):
+        discard_untracked_candidate_files(**params)
+    assert first.read_bytes() == b"abandoned scratch\n"
+    assert second.read_bytes() == b"second"
+    assert not list((params["journal_root"] / "candidate-file-archive").glob("*.blob"))
+
+
+def test_batch_second_archive_failure_preserves_all_originals(registry_fixture, monkeypatch):
+    from examples.mcp_server import candidate_file_discard as module
+
+    _, first, second, params = _setup_batch(registry_fixture, monkeypatch, second_content=b"second")
+    archive = module._archive
+    calls = []
+
+    def failing_archive(*args, **kwargs):
+        calls.append(args[1])
+        if len(calls) == 3:
+            raise CandidateCloneError("AUDIT_UNAVAILABLE", "injected archive failure")
+        return archive(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_archive", failing_archive)
+    with pytest.raises(CandidateCloneError) as error:
+        module.discard_untracked_candidate_files(**params)
+    assert error.value.retryable is False
+    assert error.value.details["removed"] == []
+    assert error.value.details["outcome"] == "partial_or_unknown"
+    assert first.read_bytes() == b"abandoned scratch\n"
+    assert second.read_bytes() == b"second"
+
+
+@pytest.mark.parametrize("deny_at", [1, 2, 3])
+def test_batch_late_reference_restores_originals(registry_fixture, monkeypatch, deny_at):
+    from examples.mcp_server import candidate_file_discard as module
+
+    _, first, second, params = _setup_batch(registry_fixture, monkeypatch, second_content=b"second")
+    calls = []
+
+    def guard():
+        calls.append(True)
+        if len(calls) == deny_at:
+            raise CandidateCloneError("WORKSPACE_CONTENDED", "active reference")
+
+    params["reference_guard"] = guard
+    with pytest.raises(CandidateCloneError):
+        module.discard_untracked_candidate_files(**params)
+    assert first.read_bytes() == b"abandoned scratch\n"
+    assert second.read_bytes() == b"second"
+    assert not list(first.parent.glob(".mcp-discard-*"))
+    assert len(calls) == deny_at
+
+
+def test_batch_unlink_failure_has_partial_receipt_and_retains_archive(registry_fixture, monkeypatch):
+    from examples.mcp_server import candidate_file_discard as module
+
+    _, first, second, params = _setup_batch(registry_fixture, monkeypatch, second_content=b"second")
+    unlink = module.os.unlink
+    calls = []
+
+    def failing_unlink(path, *args, **kwargs):
+        if isinstance(path, str) and path.startswith(".mcp-discard-"):
+            calls.append(path)
+            if len(calls) == 2:
+                raise OSError("injected second removal failure")
+        return unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "unlink", failing_unlink)
+    with pytest.raises(CandidateCloneError) as error:
+        module.discard_untracked_candidate_files(**params)
+    assert error.value.details["outcome"] == "partial_or_unknown"
+    assert error.value.details["removed"] == [second.name]
+    assert not second.exists()
+    assert first.read_bytes() == b"abandoned scratch\n"
+    archive_root = params["journal_root"] / "candidate-file-archive"
+    assert any(p.read_bytes() == b"second" for p in archive_root.glob("*.blob"))
+    assert any(p.read_bytes() == b"abandoned scratch\n" for p in archive_root.glob("*.blob"))
+
+
+def test_batch_replay_preserves_recreated_exact_files(registry_fixture, monkeypatch):
+    from examples.mcp_server import candidate_file_discard as module
+
+    _, first, second, params = _setup_batch(registry_fixture, monkeypatch, second_content=b"second")
+    assert module.discard_untracked_candidate_files(**params)["discarded"]
+    first.write_bytes(b"abandoned scratch\n")
+    second.write_bytes(b"second")
+    with pytest.raises(CandidateCloneError, match="archive already exists"):
+        module.discard_untracked_candidate_files(**params)
+    assert first.read_bytes() == b"abandoned scratch\n"
+    assert second.read_bytes() == b"second"

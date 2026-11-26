@@ -257,7 +257,7 @@ class TestChatGPTSafeMode:
 
     @pytest.mark.parametrize(
         "name",
-        ["candidate_cleanup", "candidate_discard_untracked_file", "candidate_orphan_finalize"],
+        ["candidate_cleanup", "candidate_discard_untracked_file", "candidate_discard_untracked_files", "candidate_orphan_finalize"],
     )
     def test_candidate_cleanup_tools_write_mode_only_and_admin_repo_scoped(
         self, monkeypatch: pytest.MonkeyPatch, name: str

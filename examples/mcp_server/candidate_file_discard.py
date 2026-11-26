@@ -9,6 +9,7 @@ removed, and all existing candidate cleanup/reference guards still apply.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -105,7 +106,10 @@ def _require_plan_only_layout(parent_fd: int) -> None:
             _deny("legacy handoff contains additional or unsafe evidence")
 
 
-def _read_exact_file(parent_fd: int, name: str, expected_sha: str, expected_size: int) -> tuple[bytes, os.stat_result]:
+def _read_exact_file(
+    parent_fd: int, name: str, expected_sha: str, expected_size: int, *,
+    max_bytes: int = _MAX_BYTES,
+) -> tuple[bytes, os.stat_result]:
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     if not nofollow:
         _deny("no-follow filesystem operations are not supported", code="POLICY_DENIED")
@@ -123,12 +127,12 @@ def _read_exact_file(parent_fd: int, name: str, expected_sha: str, expected_size
             or before.st_uid != os.geteuid()
             or before.st_nlink != 1
             or before.st_size != expected_size
-            or before.st_size > _MAX_BYTES
+            or before.st_size > max_bytes
         ):
             _deny("untracked file type, ownership, links or size mismatched")
         data = bytearray()
-        while len(data) <= _MAX_BYTES:
-            chunk = os.read(fd, min(65536, _MAX_BYTES + 1 - len(data)))
+        while len(data) <= max_bytes:
+            chunk = os.read(fd, min(65536, max_bytes + 1 - len(data)))
             if not chunk:
                 break
             data.extend(chunk)
@@ -162,7 +166,9 @@ def _open_parent(candidate_root: Path, segments: tuple[str, ...]) -> int:
         raise clone.CandidateCloneError("WORKSPACE_CONTENDED", "untracked file parent is unsafe") from exc
 
 
-def _archive(journal_root: Path, archive_id: str, data: bytes) -> None:
+def _archive(
+    journal_root: Path, archive_id: str, data: bytes, *, max_bytes: int = _MAX_BYTES,
+) -> None:
     """Persist exact bytes and their directory entry before destructive action."""
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
     try:
@@ -215,8 +221,8 @@ def _archive(journal_root: Path, archive_id: str, data: bytes) -> None:
                 if not stat.S_ISREG(found.st_mode) or found.st_nlink != 1 or found.st_uid != os.geteuid() or found.st_mode & 0o077 or found.st_size != len(data):
                     _deny("candidate archive identity mismatched", code="AUDIT_UNAVAILABLE")
                 actual = bytearray()
-                while len(actual) <= _MAX_BYTES:
-                    part = os.read(check_fd, min(65536, _MAX_BYTES + 1 - len(actual)))
+                while len(actual) <= max_bytes:
+                    part = os.read(check_fd, min(65536, max_bytes + 1 - len(actual)))
                     if not part:
                         break
                     actual.extend(part)
@@ -362,3 +368,239 @@ def discard_untracked_candidate_file(
         "archived_sha256": expected_sha256,
         "archived_size": expected_size,
     }
+
+
+# The single-file API retains its original limit and semantics. A batch is a
+# separately bounded operation with a durable plan and archive-all barrier.
+_BATCH_MAX_FILES = 8
+_BATCH_MAX_FILE_BYTES = 8 * 1024 * 1024
+_BATCH_MAX_TOTAL_BYTES = 16 * 1024 * 1024
+
+
+def _git_bytes(root: Path, args: list[str]) -> bytes:
+    try:
+        result = subprocess.run(
+            clone._git_command(root, args), cwd=root, capture_output=True,
+            timeout=30, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise clone.CandidateCloneError("CHECK_FAILED", "candidate Git observation unavailable") from exc
+    if result.returncode != 0:
+        _deny("candidate Git observation unavailable")
+    return result.stdout
+
+
+def _batch_state(
+    root: Path, branch: str, head: str, index_sha: str,
+    paths: list[str], *, status_sha: str | None = None,
+) -> None:
+    if clone._run_git(root, ["rev-parse", "--abbrev-ref", "HEAD"], operation="candidate branch") != branch:
+        _deny("candidate branch changed")
+    if clone._run_git(root, ["rev-parse", "HEAD"], operation="candidate HEAD") != head:
+        _deny("candidate HEAD changed")
+    index = _git_bytes(root, ["ls-files", "--stage", "-z"])
+    if hashlib.sha256(index).hexdigest() != index_sha:
+        _deny("candidate index changed")
+    status = _git_bytes(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"])
+    expected = sorted(b"?? " + path.encode("ascii") for path in paths)
+    if sorted(status.split(b"\x00")[:-1]) != expected or (status and not status.endswith(b"\x00")):
+        _deny("candidate status is not the exact requested untracked set")
+    if status_sha is not None:
+        visible = _git_bytes(root, ["status", "--porcelain=v1"])
+        if hashlib.sha256(visible).hexdigest() != status_sha:
+            _deny("candidate status fingerprint changed")
+    clone._require_tracked_files_match_head(root)
+
+
+def _batch_specs(files: list[dict[str, Any]]) -> list[tuple[str, str, int, tuple[str, ...]]]:
+    if not isinstance(files, list) or not 2 <= len(files) <= _BATCH_MAX_FILES:
+        _deny("batch requires 2..8 exact files", code="INVALID_INPUT")
+    specs = []
+    for item in files:
+        if not isinstance(item, dict) or set(item) != {"relative_path", "expected_sha256", "expected_size"}:
+            _deny("each batch file requires exact path, SHA256 and size", code="INVALID_INPUT")
+        path, digest, size = item["relative_path"], item["expected_sha256"], item["expected_size"]
+        parts = _checked_path(path)
+        if path == _LEGACY_PLAN:
+            _deny("legacy handoff is single-file only", code="INVALID_INPUT")
+        if not isinstance(digest, str) or not _HEX_SHA256.fullmatch(digest):
+            _deny("invalid batch file SHA256", code="INVALID_INPUT")
+        if type(size) is not int or not 0 <= size <= _BATCH_MAX_FILE_BYTES:
+            _deny("batch file size exceeds 8MiB", code="INVALID_INPUT")
+        specs.append((path, digest, size, parts))
+    if len({item[0] for item in specs}) != len(specs) or sum(item[2] for item in specs) > _BATCH_MAX_TOTAL_BYTES:
+        _deny("duplicate batch path or total size exceeds 16MiB", code="INVALID_INPUT")
+    return sorted(specs)
+
+
+def discard_untracked_candidate_files(
+    project_id: str,
+    expected_source_project: str,
+    expected_branch: str,
+    expected_head_sha: str,
+    expected_index_sha256: str,
+    expected_status_sha256: str,
+    files: list[dict[str, Any]],
+    *,
+    config_dir: Path,
+    journal_root: Path,
+    reference_guard: Callable[[], None],
+) -> dict[str, Any]:
+    """Archive the entire exact untracked set before quarantining any entry.
+
+    This is not an atomic multi-file delete. The persistent plan identifies
+    every archive and quarantine path, including after a process crash.
+    An ambiguous/partial result must be reconciled, never replayed.
+    """
+    specs = _batch_specs(files)
+    if not isinstance(project_id, str) or not clone._PROJECT_ID_RE.fullmatch(project_id):
+        _deny("invalid managed candidate project_id", code="INVALID_INPUT")
+    branch = clone._validate_branch(expected_branch)
+    if not isinstance(expected_source_project, str) or not expected_source_project.strip():
+        _deny("expected_source_project must be supplied", code="INVALID_INPUT")
+    if not isinstance(expected_head_sha, str) or not _FULL_HEAD.fullmatch(expected_head_sha):
+        _deny("invalid expected HEAD", code="INVALID_INPUT")
+    if any(not isinstance(value, str) or not _HEX_SHA256.fullmatch(value) for value in (
+        expected_index_sha256, expected_status_sha256,
+    )):
+        _deny("exact index and status SHA256 are required", code="INVALID_INPUT")
+    if not callable(reference_guard):
+        _deny("reference_guard is required", code="INVALID_INPUT")
+
+    config_dir, journal_root = config_dir.resolve(), journal_root.resolve()
+    workspace = clone._workspace_root(config_dir)
+    root = clone._candidate_clones_root(workspace) / project_id
+    paths = [item[0] for item in specs]
+    identity = {
+        "project_id": project_id, "source_project": expected_source_project,
+        "branch": branch, "head": expected_head_sha,
+        "index_sha256": expected_index_sha256, "status_sha256": expected_status_sha256,
+        "files": [{"path": p, "sha256": h, "size": n} for p, h, n, _ in specs],
+    }
+    operation_id = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    with clone._lineage_lock(workspace, expected_source_project, branch):
+        with project_registry_mutation_lock(journal_root):
+            def verify_identity() -> None:
+                if not clone._registry_has_candidate(
+                    config_dir, project_id, expected_root=f".mcp-candidate-clones/{project_id}",
+                ):
+                    _deny("managed candidate is not registered")
+                clone._validate_candidate_root(root, root.parent)
+                clone._reject_symlinked_git_dir(root)
+                metadata = clone._read_metadata(root)
+                if any(metadata.get(k) != v for k, v in {
+                    "project_id": project_id, "source_project": expected_source_project,
+                    "branch": branch, "root": f".mcp-candidate-clones/{project_id}",
+                }.items()):
+                    _deny("candidate metadata identity mismatched")
+                if clone._candidate_active_evidence_details(root) is not None:
+                    _deny("candidate has active task or delivery evidence")
+                clone._require_no_inbound_candidate_dependencies(root.parent, root)
+                _batch_state(root, branch, expected_head_sha, expected_index_sha256, paths,
+                             status_sha=expected_status_sha256)
+
+            verify_identity()
+            reference_guard()
+            records: list[dict[str, Any]] = []
+            moved: list[dict[str, Any]] = []
+            removed: list[str] = []
+            planned = False
+            try:
+                for path, digest, size, parts in specs:
+                    fd = _open_parent(root, parts)
+                    try:
+                        data, st = _read_exact_file(fd, parts[-1], digest, size, max_bytes=_BATCH_MAX_FILE_BYTES)
+                        record = {
+                            "path": path, "name": parts[-1], "sha256": digest, "size": size,
+                            "fd": fd, "data": data, "stat": st,
+                            "archive_id": hashlib.sha256(("\x00".join((
+                                project_id, branch, expected_head_sha, path, digest,
+                            ))).encode()).hexdigest(),
+                            "quarantine": ".mcp-discard-" + secrets.token_hex(16),
+                        }
+                        records.append(record)
+                    except Exception:
+                        os.close(fd)
+                        raise
+                plan = {
+                    **identity, "operation_id": operation_id, "phase": "prepared",
+                    "entries": [{k: r[k] for k in (
+                        "path", "sha256", "size", "archive_id", "quarantine",
+                    )} for r in records],
+                }
+                # Exclusive persistent plan denies replay even if a file has
+                # been recreated byte-identically after a partial operation.
+                _archive(journal_root, operation_id, json.dumps(plan, sort_keys=True).encode())
+                planned = True
+                for r in records:
+                    _archive(journal_root, r["archive_id"], r["data"], max_bytes=_BATCH_MAX_FILE_BYTES)
+                # No original entry has been moved or removed before here.
+                verify_identity()
+                reference_guard()
+                verify_identity()
+                for r in records:
+                    data, st = _read_exact_file(r["fd"], r["name"], r["sha256"], r["size"], max_bytes=_BATCH_MAX_FILE_BYTES)
+                    if data != r["data"] or (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_ctime_ns) != (
+                        r["stat"].st_dev, r["stat"].st_ino, r["stat"].st_mtime_ns, r["stat"].st_ctime_ns,
+                    ):
+                        _deny("batch file changed before quarantine")
+                    os.rename(r["name"], r["quarantine"], src_dir_fd=r["fd"], dst_dir_fd=r["fd"])
+                    moved.append(r)
+                    os.fsync(r["fd"])
+                # Recheck every quarantined inode before any final unlink.
+                def verify_quarantine(r: dict[str, Any]) -> None:
+                    _, st = _read_exact_file(r["fd"], r["quarantine"], r["sha256"], r["size"], max_bytes=_BATCH_MAX_FILE_BYTES)
+                    if (st.st_dev, st.st_ino, st.st_mtime_ns) != (
+                        r["stat"].st_dev, r["stat"].st_ino, r["stat"].st_mtime_ns,
+                    ):
+                        _deny("batch file changed during quarantine")
+                    try:
+                        os.stat(r["name"], dir_fd=r["fd"], follow_symlinks=False)
+                    except FileNotFoundError:
+                        return
+                    _deny("batch original pathname was recreated")
+
+                for r in moved:
+                    verify_quarantine(r)
+                reference_guard()
+                quarantined_paths = [str(Path(r["path"]).with_name(r["quarantine"])) for r in moved]
+                _batch_state(root, branch, expected_head_sha, expected_index_sha256, quarantined_paths)
+                for r in moved:
+                    verify_quarantine(r)
+                    os.unlink(r["quarantine"], dir_fd=r["fd"])
+                    removed.append(r["path"])
+                    os.fsync(r["fd"])
+                _batch_state(root, branch, expected_head_sha, expected_index_sha256, [])
+                receipt = {
+                    "project_id": project_id, "head": expected_head_sha,
+                    "operation_id": operation_id, "discarded": True,
+                    "files": plan["entries"], "removed": removed,
+                }
+                receipt_id = hashlib.sha256((operation_id + ":completed").encode()).hexdigest()
+                _archive(journal_root, receipt_id, json.dumps(receipt, sort_keys=True).encode())
+                return receipt
+            except Exception as exc:
+                # Restore only when the original name is absent, atomically
+                # without replacing a concurrent writer's newly created file.
+                # Never discard unknown or changed quarantined data.
+                for r in reversed(moved):
+                    if r["path"] in removed:
+                        continue
+                    try:
+                        os.link(r["quarantine"], r["name"], src_dir_fd=r["fd"], dst_dir_fd=r["fd"], follow_symlinks=False)
+                        os.unlink(r["quarantine"], dir_fd=r["fd"])
+                        os.fsync(r["fd"])
+                    except OSError:
+                        pass
+                if planned:
+                    raise clone.CandidateCloneError(
+                        "WORKSPACE_CONTENDED", "batch discard incomplete; reconcile durable plan before retry",
+                        retryable=False, details={"operation_id": operation_id, "removed": removed,
+                                                 "outcome": "partial_or_unknown"},
+                    ) from exc
+                if isinstance(exc, clone.CandidateCloneError):
+                    raise
+                raise clone.CandidateCloneError("WORKSPACE_CONTENDED", "batch discard preflight failed") from exc
+            finally:
+                for r in records:
+                    os.close(r["fd"])

@@ -51,3 +51,42 @@ write-only registration.
 A server tool registry update alone does not guarantee an older MCP client
 can call the new action. Refresh the client tools/list and separately obtain
 live tool and archive acceptance after successful CI, merge and deployment.
+
+
+## Exact untracked batch (#1012)
+
+The separate `candidate_discard_untracked_files` action accepts 2–8 files
+(up to 8 MiB each, 16 MiB combined). The original single-file action, including
+its 1 MiB limit and legacy handoff exception, is unchanged. The new action is
+write-mode only and requires BOTH `mcp:repo` and `mcp:admin`.
+
+Supply the registered candidate ID, source project, branch, full HEAD SHA,
+`expected_index_sha256` and `expected_status_sha256` from a fresh
+`info(project)`, and a list of objects with exactly `relative_path`,
+`expected_sha256`, and `expected_size`. The NUL-delimited status must match
+the full requested untracked set; duplicates, tracked changes (including
+hidden tracked edits), unsafe paths, extra untracked files, active evidence,
+inbound dependencies, and unknown or open PR references deny the operation.
+
+Under the existing lineage and registry locks, a required audit binds every
+path fingerprint, size and digest. An exclusive durable operation plan records
+the exact candidate/index/status lease, all archive IDs and quarantine names.
+Every file is archived and verified, including directory fsync, before any
+original entry is moved. The operation rechecks identity and references, then
+quarantines and verifies the entire set before the first final removal.
+Quarantine and archive operations do not constitute a multi-file atomic
+transaction. The final status, index and HEAD are rechecked and a durable
+completion receipt is written before reporting success.
+
+On interruption or failure after the plan is prepared, the error includes
+`operation_id`, observed removed paths, and `partial_or_unknown`. Recover
+only under operator authority from the persistent plan, archive bytes and
+actual path state; never replay an ambiguous operation. Restoration attempts
+never overwrite a newly created original pathname. An archive/plan collision
+refuses replay even when content is identical. Archives remain private and
+are not automatically pruned.
+
+**Scope boundary:** the open-PR prohibition remains in force for this first
+batch implementation. Exact file-only quiescence for an active PR needs a
+separately reviewed lease that excludes concurrent writers and delivery.
+Neither the batch interface nor a successful archive constitutes that lease.
