@@ -1277,6 +1277,7 @@ def test_register_all_registers_exactly_thirteen_tools(monkeypatch):
         "candidate_archive_terminal_legacy_handoff",
         "candidate_cleanup",
         "candidate_discard_untracked_file",
+        "candidate_discard_untracked_files",
         "candidate_cleanup_abort_legacy_prepared",
         "candidate_orphan_finalize",
     ]
@@ -1322,3 +1323,56 @@ def test_register_project_signature_does_not_expose_server_paths():
     assert "config_dir" not in signature.parameters
     assert "journal_root" not in signature.parameters
     assert "project_root" not in signature.parameters
+
+
+@pytest.mark.parametrize("fault", ["none", "open-pr", "audit", "late-pr"])
+async def test_candidate_batch_adapter_requires_exact_refs_and_durable_audit(
+    tmp_path, immediate_run_tool_async, monkeypatch, fault,
+):
+    client = _PullClient(
+        pages={1: [_same_repo_pr(39, ref="candidate/demo", sha="a" * 40)]}
+        if fault == "open-pr" else {}
+    )
+    audit = _AuditLogger(fail_required=fault == "audit")
+    _configure_cleanup_adapter(
+        tmp_path, monkeypatch, client=client, audit=audit, guard_calls=[]
+    )
+    files = [
+        {"relative_path": "first.tgz", "expected_sha256": "b" * 64, "expected_size": 7},
+        {"relative_path": "second.tgz", "expected_sha256": "c" * 64, "expected_size": 4658602},
+    ]
+
+    def discard(project_id, source_project, branch, head, index, status, batch, *,
+                config_dir, journal_root, reference_guard):
+        assert (project_id, source_project, branch, head) == (
+            "candidate-demo", "demo", "candidate/demo", "a" * 40,
+        )
+        assert index == "d" * 64 and status == "e" * 64 and batch == files
+        assert config_dir == tmp_path / "registry"
+        assert journal_root == tmp_path / "journals"
+        reference_guard()
+        if fault == "late-pr":
+            client.pages[1] = [_same_repo_pr(40, ref="candidate/demo", sha="f" * 40)]
+        reference_guard()
+        reference_guard()
+        return {"discarded": True, "operation_id": "f" * 64}
+
+    monkeypatch.setattr(supervisor, "_discard_untracked_candidate_files", discard)
+    result = await supervisor.candidate_discard_untracked_files(
+        "candidate-demo", "a" * 40, "candidate/demo", "demo",
+        "d" * 64, "e" * 64, files,
+    )
+    if fault == "none":
+        assert result["ok"] is True
+        assert len(audit.required) == len(audit.success) == 1
+        assert client.calls == [1, 1, 1]
+        metadata = audit.required[0].metadata
+        assert metadata["expected_index_sha256"] == "d" * 64
+        assert metadata["expected_status_sha256"] == "e" * 64
+        assert metadata["file_count"] == 2
+        assert sorted(record["expected_size"] for record in metadata["files"]) == [7, 4658602]
+        assert "first.tgz" not in repr(metadata) and "second.tgz" not in repr(metadata)
+    else:
+        assert result["ok"] is False
+        assert not audit.success
+        assert len(audit.required) == (1 if fault == "late-pr" else 0)
