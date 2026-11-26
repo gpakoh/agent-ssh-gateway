@@ -307,6 +307,12 @@ async def list_threads(client: Any, owner: str, repo: str) -> list[dict[str, Any
     return [item for row in rows if (item := _issue(row)) is not None]
 
 
+def _comment_count_mismatch(issue: dict[str, Any], comments: list[dict[str, Any]]) -> bool:
+    """Compare the independently reported ordinary-comment count when known."""
+    count = issue.get("comments")
+    return type(count) is int and count != len(comments)
+
+
 async def preview_thread_state(
     client: Any, owner: str, repo: str, number: int
 ) -> tuple[str | None, bool]:
@@ -325,7 +331,7 @@ async def preview_thread_state(
         ),
         verified_no_comments=type(issue.get("comments")) is int and issue["comments"] == 0,
     )
-    if truncated:
+    if truncated or _comment_count_mismatch(issue, comments):
         return None, True
     trusted_identity = await client.get_user()
     trusted_login = trusted_identity.get("login")
@@ -412,16 +418,14 @@ async def open_thread(
             max_pages=_MAX_PAGES if recent_preview else 2,
             verified_no_comments=verified_no_comments,
         )
+        if not truncated and _comment_count_mismatch(issue, comments):
+            truncated = True
+            incomplete_reason = "comment_count_mismatch"
         if recent_preview and not truncated:
-            count = issue.get("comments")
-            if type(count) is int and count != len(comments):
+            current = await client.get_issue(owner, repo, number)
+            if tuple(current.get(key) for key in version_fields) != initial_version:
                 truncated = True
-                incomplete_reason = "comment_count_mismatch"
-            else:
-                current = await client.get_issue(owner, repo, number)
-                if tuple(current.get(key) for key in version_fields) != initial_version:
-                    truncated = True
-                    incomplete_reason = "issue_changed_during_scan"
+                incomplete_reason = "issue_changed_during_scan"
         item["history_incomplete_reason"] = incomplete_reason
         item["history_pages_scanned"] = pages_read
     else:
@@ -434,6 +438,10 @@ async def open_thread(
             allow_partial=False,
             verified_no_comments=verified_no_comments,
         )
+        if _comment_count_mismatch(issue, comments):
+            raise CoordinationOutcomeUnknown(
+                "Gitea issue comment count does not match the complete timeline"
+            )
     trusted_identity = await client.get_user()
     trusted_login = trusted_identity.get("login")
     if not isinstance(trusted_login, str) or not trusted_login:

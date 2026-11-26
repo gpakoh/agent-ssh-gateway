@@ -2277,3 +2277,42 @@ async def test_recent_history_distinguishes_latest_trusted_event_from_comments(s
     assert event["body_preview_truncated"] is True
     assert event["body_total_chars"] == 3017
     assert event["authorizes_mutation"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["strict", "board", "partial", "write"])
+async def test_known_comment_count_mismatch_cannot_authorize_or_attest(mode):
+    client = FakeClient()
+    await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway",
+        source_project="agent-ssh-gateway", title="Incomplete timeline",
+        body="Evidence", request_key="short-timeline-thread-123",
+    )
+    client.comments[1] = [{
+        "id": 1,
+        "body": core._header(kind="event", key="short-timeline-accept-123", state="accepted")
+        + "\nObserved",
+        "user": {"login": "gpakoh"},
+    }]
+    # The missing comment could carry a prior idempotency key or a later state.
+    client.issues[0]["comments"] = 2
+    if mode == "strict":
+        with pytest.raises(core.CoordinationOutcomeUnknown, match="comment count"):
+            await core.open_thread(client, "gpakoh", "agent-ssh-gateway", 1)
+    elif mode == "board":
+        assert await core.preview_thread_state(client, "gpakoh", "agent-ssh-gateway", 1) == (None, True)
+    elif mode == "partial":
+        page = await core.open_thread(
+            client, "gpakoh", "agent-ssh-gateway", 1, allow_partial=True,
+        )
+        assert page["history_truncated"] is True
+        assert page["history_incomplete_reason"] == "comment_count_mismatch"
+        assert page["coord_state"] is None
+        assert "close_state_sha256" not in page
+    else:
+        with pytest.raises(core.CoordinationOutcomeUnknown, match="comment count"):
+            await core.write_event(
+                client, "gpakoh", "agent-ssh-gateway", 1,
+                text="Potential duplicate", request_key="short-timeline-message-123", state="message",
+            )
+    assert client.comment_calls == 0
