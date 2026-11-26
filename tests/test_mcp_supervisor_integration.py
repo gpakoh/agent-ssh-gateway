@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import hashlib
 import inspect
@@ -1196,6 +1197,57 @@ async def test_candidate_discard_adapter_blocks_open_pr_before_archive(
     assert result["ok"] is False
     assert audit.required == []
     assert audit.success == []
+
+
+@pytest.mark.parametrize("fleet_state", ["idle", "active", "unavailable", "unknown", "late"])
+async def test_candidate_discard_legacy_plan_requires_authoritative_idle_fleet(
+    tmp_path, immediate_run_tool_async, monkeypatch, fleet_state
+):
+    client = _PullClient()
+    audit = _AuditLogger()
+    _configure_cleanup_adapter(
+        tmp_path, monkeypatch, client=client, audit=audit, guard_calls=[]
+    )
+    calls = []
+
+    class Fleet:
+        async def fleet_status(self, **kwargs):
+            assert asyncio.get_running_loop() is owner_loop
+            calls.append(True)
+            if fleet_state == "unknown":
+                return {"counts": {}, "leases": []}
+            if fleet_state == "active" or (fleet_state == "late" and len(calls) == 2):
+                return {"counts": {"live": 1}, "leases": [{"state": "live"}]}
+            return {"counts": {"live": 0}, "leases": []}
+
+    owner_loop = asyncio.get_running_loop()
+
+    async def get_fleet():
+        return None if fleet_state == "unavailable" else Fleet()
+
+    monkeypatch.setattr(supervisor, "get_fleet_runtime", get_fleet)
+
+    def _discard(*_args, reference_guard, **_kwargs):
+        reference_guard()
+        reference_guard()
+        return {"discarded": True, "archive_id": "c" * 64}
+
+    monkeypatch.setattr(supervisor, "_discard_untracked_candidate_file", _discard)
+    result = await supervisor.candidate_discard_untracked_file(
+        "candidate-demo", "a" * 40, "candidate/demo", "demo",
+        ".ai-bridge/current-plan.md", "b" * 64, 9,
+    )
+    if fleet_state == "idle":
+        assert result["ok"] is True
+        assert calls == [True, True]
+        assert len(audit.required) == len(audit.success) == 1
+    else:
+        assert result["ok"] is False
+        assert result["error"]["code"] == (
+            "CHECK_FAILED" if fleet_state == "unavailable" else "WORKSPACE_CONTENDED"
+        )
+        assert len(audit.required) == (1 if fleet_state == "late" else 0)
+        assert audit.success == []
 
 
 def test_register_all_registers_exactly_thirteen_tools(monkeypatch):

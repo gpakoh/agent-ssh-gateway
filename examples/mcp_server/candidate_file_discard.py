@@ -25,6 +25,7 @@ _MAX_BYTES = 1024 * 1024
 _SAFE_SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _HEX_SHA256 = re.compile(r"[a-f0-9]{64}")
 _FULL_HEAD = re.compile(r"[a-f0-9]{40}")
+_LEGACY_PLAN = ".ai-bridge/current-plan.md"
 
 
 def _deny(message: str, *, code: str = "WORKSPACE_CONTENDED") -> None:
@@ -34,6 +35,11 @@ def _deny(message: str, *, code: str = "WORKSPACE_CONTENDED") -> None:
 def _checked_path(value: str) -> tuple[str, ...]:
     if not isinstance(value, str) or not value or len(value) > 512:
         _deny("relative_path must be a bounded relative file name", code="INVALID_INPUT")
+    # Narrow exception: the legacy plan may be archived before delivery, but
+    # arbitrary hidden paths remain forbidden. Separate evidence guards below
+    # must prove this is the sole inactive handoff file.
+    if value == _LEGACY_PLAN:
+        return (".ai-bridge", "current-plan.md")
     parts = value.split("/")
     if (
         len(parts) > 6
@@ -48,7 +54,7 @@ def _exact_status(root: Path, relative_path: str) -> None:
     """Reject all tracked/other untracked work; inspect unquoted NUL-delimited Git status."""
     try:
         result = subprocess.run(
-            clone._git_command(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
+            clone._git_command(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"]),
             cwd=root, capture_output=True, timeout=30, check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -57,6 +63,46 @@ def _exact_status(root: Path, relative_path: str) -> None:
         _deny("candidate Git status is unavailable")
     if result.stdout != b"?? " + relative_path.encode("ascii") + b"\x00":
         _deny("candidate has other changes or file is not exactly untracked")
+
+
+def _require_idle_evidence(root: Path, path: str, expected_sha: str, expected_size: int) -> None:
+    evidence = clone._candidate_active_evidence_details(root)
+    if path != _LEGACY_PLAN:
+        if evidence is not None:
+            _deny("candidate has active task or delivery evidence")
+        return
+    if (
+        evidence is None
+        or evidence.get("evidence_root_type") != "directory"
+        or evidence.get("plan_type") != "regular"
+        or evidence.get("plan_fingerprint_status") != "verified"
+        or evidence.get("plan_sha256") != expected_sha
+        or evidence.get("plan_size_bytes") != expected_size
+        or evidence.get("tasks_type") not in {"absent", "directory"}
+        or evidence.get("task_entries") != []
+        or evidence.get("task_entries_truncated") is not False
+    ):
+        _deny("legacy plan is not the exact inactive handoff evidence")
+    if clone._run_git(root, ["ls-files", "-z", "--", ".ai-bridge"], operation="verify untracked handoff"):
+        _deny("legacy handoff contains tracked evidence")
+    clone._require_tracked_files_match_head(root)
+
+
+def _require_plan_only_layout(parent_fd: int) -> None:
+    # Check even ignored entries; empty task/archive directories are harmless.
+    with os.scandir(parent_fd) as entries:
+        for entry in entries:
+            if entry.name == "current-plan.md" and entry.is_file(follow_symlinks=False):
+                continue
+            if entry.name in {"tasks", "archive"} and entry.is_dir(follow_symlinks=False):
+                child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+                try:
+                    with os.scandir(child) as children:
+                        if next(children, None) is None:
+                            continue
+                finally:
+                    os.close(child)
+            _deny("legacy handoff contains additional or unsafe evidence")
 
 
 def _read_exact_file(parent_fd: int, name: str, expected_sha: str, expected_size: int) -> tuple[bytes, os.stat_result]:
@@ -248,17 +294,21 @@ def discard_untracked_candidate_file(
                 _deny("candidate branch changed")
             if clone._run_git(candidate_root, ["rev-parse", "HEAD"], operation="candidate HEAD") != expected_head_sha:
                 _deny("candidate HEAD changed")
-            if clone._candidate_active_evidence_details(candidate_root) is not None:
-                _deny("candidate has active task or delivery evidence")
+            _require_idle_evidence(candidate_root, relative_path, expected_sha256, expected_size)
             clone._require_no_inbound_candidate_dependencies(candidate_root.parent, candidate_root)
             _exact_status(candidate_root, relative_path)
             reference_guard()  # Must verify external active PR/agent refs and durable audit.
             parent_fd = _open_parent(candidate_root, parts)
             try:
+                if relative_path == _LEGACY_PLAN:
+                    _require_plan_only_layout(parent_fd)
                 data, file_stat = _read_exact_file(parent_fd, parts[-1], expected_sha256, expected_size)
                 _archive(journal_root, archive_id, data)
                 _exact_status(candidate_root, relative_path)
                 reference_guard()
+                if relative_path == _LEGACY_PLAN:
+                    _require_idle_evidence(candidate_root, relative_path, expected_sha256, expected_size)
+                    _require_plan_only_layout(parent_fd)
                 # Rename is atomic in the same directory; never unlink the
                 # original pathname (which could have been swapped after CAS).
                 quarantine = ".mcp-discard-" + secrets.token_hex(16)
