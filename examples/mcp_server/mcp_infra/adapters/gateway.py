@@ -1176,9 +1176,31 @@ def gateway_info(project: str) -> dict[str, Any]:
             source="gateway",
             read_only=True,
         )
+
+    def _info_with_resume() -> dict[str, Any]:
+        data = info(_server_client(), project)
+        if data.get("is_git_repo") is True:
+            from app.workspace.registry import resolve_registry_root
+            from examples.mcp_server.candidate_clone import candidate_resume_projection
+
+            try:
+                data["candidate_resume"] = candidate_resume_projection(
+                    registry=_server_workspace_registry(),
+                    project=project,
+                    config_dir=resolve_registry_root(),
+                )
+            except Exception:
+                # This optional projection must not hide the primary local
+                # workspace observation or serialize internal error details.
+                data["candidate_resume"] = {
+                    "state": "unavailable", "atomic_snapshot": False,
+                    "authorizes_mutation": False,
+                }
+        return data
+
     return _run_gateway(
         tool="info",
-        fn=lambda: info(_server_client(), project),
+        fn=_info_with_resume,
     )
 
 
@@ -1610,7 +1632,7 @@ def gateway_commit_head(project: str) -> dict[str, Any]:
 
 
 def gateway_read_handoff(project: str) -> dict[str, Any]:
-    """Read .ai-bridge handoff files for a project."""
+    """Read bounded current-plan.md evidence in the registered host workspace."""
     return run_tool(
         tool="read_handoff",
         title="read handoff",
@@ -1639,7 +1661,7 @@ def gateway_write_handoff_plan(
 
 
 def gateway_show_handoff_status(project: str) -> dict[str, Any]:
-    """Show .ai-bridge file listing for a project."""
+    """Observe fixed handoff metadata in the registered host workspace."""
     return run_tool(
         tool="show_handoff_status",
         title="handoff status",

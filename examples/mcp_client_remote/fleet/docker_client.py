@@ -21,6 +21,14 @@ SUBPROCESS_TIMEOUT = 30.0
 MAX_OUTPUT_BYTES = 50 * 1024
 
 
+class DockerCommandTimeout(RuntimeError):
+    """Local Docker CLI deadline; daemon-side execution is not attested."""
+
+    def __init__(self, timeout_s: float) -> None:
+        self.timeout_s = timeout_s
+        super().__init__(f"Command timed out after {timeout_s}s")
+
+
 @dataclass
 class RunResult:
     stdout: str
@@ -240,7 +248,7 @@ class DockerClient:
         except TimeoutError:
             proc.kill()
             await proc.wait()
-            raise RuntimeError(f"Command timed out after {timeout}s: {shlex.join(argv)}") from None
+            raise DockerCommandTimeout(timeout) from None
 
         if proc.returncode != 0:
             if merge_stderr:

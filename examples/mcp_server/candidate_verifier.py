@@ -69,7 +69,10 @@ _DETAIL_OUTPUT_CHARS = 4000
 _MCP_VERIFY_EXIT_RE = re.compile(r"^MCP_VERIFY_EXIT=(\d+)$", re.MULTILINE)
 _MCP_VERIFY_CHECK_RE = re.compile(r"^MCP_VERIFY_CHECK=(\d+)$", re.MULTILINE)
 _MCP_VERIFY_ENV_STAGE_RE = re.compile(r"^MCP_VERIFY_ENV_STAGE=([a-z_]+)$", re.MULTILINE)
-_BOOTSTRAP_STAGES = frozenset({"python_missing", "metadata_invalid", "uv_missing", "uv_sync", "venv_missing"})
+_BOOTSTRAP_STAGES = frozenset({
+    "python_missing", "metadata_invalid", "uv_missing", "uv_sync", "venv_missing",
+    "requirements_invalid", "requirements_venv", "requirements_sync",
+})
 
 # Candidate-controlled output may try to echo credentials; scrub common
 # credential shapes in addition to the shared path/endpoint redaction.
@@ -812,6 +815,29 @@ def build_candidate_verifier_script(
         '    (cd "$VERIFY_ROOT/repo" && env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV uv sync --frozen --extra dev) >/dev/null 2>&1 || { echo MCP_VERIFY_ENV_STAGE=uv_sync; exit 82; }',
         '    [ -d "$VERIFY_ROOT/repo/.venv/bin" ] && [ ! -L "$VERIFY_ROOT/repo/.venv" ] && [ ! -L "$VERIFY_ROOT/repo/.venv/bin" ] || { echo MCP_VERIFY_ENV_STAGE=venv_missing; exit 82; }',
         '    MCP_CHECK_PATH="$VERIFY_ROOT/repo/.venv/bin:$MCP_TRUSTED_PATH"',
+        "  fi",
+        'elif [ "$CHECKS_PRESENT" = "1" ] && [ ! -e "$VERIFY_ROOT/repo/uv.lock" ] && [ ! -L "$VERIFY_ROOT/repo/uv.lock" ]; then',
+        # Root requirements are supported by the specialized Python verifier too.
+        # Keep a fresh environment outside the checked-out tree; never substitute
+        # this unlocked path for a failed or unsupported locked bootstrap.
+        '  HAS_REQUIREMENTS=0',
+        '  for req in requirements.txt requirements-dev.txt requirements-test.txt; do',
+        '    REQ="$VERIFY_ROOT/repo/$req"',
+        '    if [ -L "$REQ" ] || { [ -e "$REQ" ] && [ ! -f "$REQ" ]; }; then echo MCP_VERIFY_ENV_STAGE=requirements_invalid; exit 82; fi',
+        '    if [ -f "$REQ" ]; then HAS_REQUIREMENTS=1; fi',
+        '  done',
+        '  if [ "$HAS_REQUIREMENTS" = "1" ]; then',
+        '    command -v uv >/dev/null 2>&1 || { echo MCP_VERIFY_ENV_STAGE=uv_missing; exit 82; }',
+        '    REQ_ENV="$VERIFY_ROOT/requirements-venv"',
+        '    (cd "$VERIFY_ROOT" && env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV uv venv --python python3 "$REQ_ENV") >/dev/null 2>&1 || { echo MCP_VERIFY_ENV_STAGE=requirements_venv; exit 82; }',
+        '    [ -d "$REQ_ENV/bin" ] && [ ! -L "$REQ_ENV" ] && [ ! -L "$REQ_ENV/bin" ] && [ -x "$REQ_ENV/bin/python3" ] || { echo MCP_VERIFY_ENV_STAGE=venv_missing; exit 82; }',
+        '    for req in requirements.txt requirements-dev.txt requirements-test.txt; do',
+        '      REQ="$VERIFY_ROOT/repo/$req"',
+        '      if [ -f "$REQ" ]; then',
+        '        (cd "$VERIFY_ROOT/repo" && env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV uv pip install --python "$REQ_ENV/bin/python3" -r "$REQ") >/dev/null 2>&1 || { echo MCP_VERIFY_ENV_STAGE=requirements_sync; exit 82; }',
+        '      fi',
+        '    done',
+        '    MCP_CHECK_PATH="$REQ_ENV/bin:$MCP_TRUSTED_PATH"',
         "  fi",
         "fi",
     ]

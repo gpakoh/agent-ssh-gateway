@@ -7,6 +7,7 @@ thread state. Coordination markers are data, not executable instructions.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import re
 from typing import Any
@@ -307,6 +308,12 @@ async def list_threads(client: Any, owner: str, repo: str) -> list[dict[str, Any
     return [item for row in rows if (item := _issue(row)) is not None]
 
 
+def _comment_count_mismatch(issue: dict[str, Any], comments: list[dict[str, Any]]) -> bool:
+    """Compare the independently reported ordinary-comment count when known."""
+    count = issue.get("comments")
+    return type(count) is int and count != len(comments)
+
+
 async def preview_thread_state(
     client: Any, owner: str, repo: str, number: int
 ) -> tuple[str | None, bool]:
@@ -325,7 +332,7 @@ async def preview_thread_state(
         ),
         verified_no_comments=type(issue.get("comments")) is int and issue["comments"] == 0,
     )
-    if truncated:
+    if truncated or _comment_count_mismatch(issue, comments):
         return None, True
     trusted_identity = await client.get_user()
     trusted_login = trusted_identity.get("login")
@@ -340,28 +347,133 @@ async def preview_thread_state(
     return state, False
 
 
+_HISTORY_DISPLAY_MAX_ENTRIES = 50
+_HISTORY_DISPLAY_MAX_CHARS = 16000
+
+
+def _history_window(
+    history: list[dict[str, Any]], index: int, end: int,
+) -> tuple[list[dict[str, Any]], tuple[int, int] | None]:
+    """Walk older observed comments without skipping oversized body prefixes."""
+    tail: list[dict[str, Any]] = []
+    budget = _HISTORY_DISPLAY_MAX_CHARS
+    while index >= 0 and len(tail) < _HISTORY_DISPLAY_MAX_ENTRIES:
+        entry = history[index]
+        body = entry["body"]
+        if end > budget and tail:
+            break
+        start = max(0, end - budget)
+        if start or end != len(body):
+            tail.append({
+                **entry, "body": body[start:end], "body_truncated": True,
+                "body_start": start, "body_end": end, "body_total_chars": len(body),
+            })
+        else:
+            tail.append(entry)
+        budget -= end - start
+        if start:
+            end = start
+            break
+        index -= 1
+        if index >= 0:
+            end = len(history[index]["body"])
+    return list(reversed(tail)), (index, end) if index >= 0 else None
+
+
+def _close_digests(
+    issue: dict[str, Any], comments: list[dict[str, Any]],
+) -> tuple[str, str]:
+    """Exactly the same digest for exhaustive mutation and reviewed reads."""
+    content = {
+        "issue": {key: issue.get(key) for key in ("id", "number", "title", "body", "pull_request")},
+        "comments": [
+            {key: comment.get(key) for key in ("id", "body", "created_at", "updated_at")}
+            | {"author": (comment.get("user") or {}).get("login")}
+            for comment in comments
+        ],
+    }
+
+    def digest(value: Any) -> str:
+        return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    content_sha = digest(content)
+    return content_sha, digest({
+        "content": content_sha, "state": issue.get("state"),
+        "updated_at": issue.get("updated_at"),
+    })
+
+
+def _review_signature(key: bytes, position: str) -> str:
+    return hmac.new(key, ("coord-review-v1:" + position).encode("ascii"), hashlib.sha256).hexdigest()
+
+
 async def open_thread(
-    client: Any, owner: str, repo: str, number: int, *, allow_partial: bool = False
+    client: Any, owner: str, repo: str, number: int, *, allow_partial: bool = False,
+    recent_preview: bool = False, history_cursor: str | None = None,
+    review_key: bytes | None = None,
 ) -> dict[str, Any]:
     """Read an exact thread; allow a bounded, explicitly incomplete read-only preview.
 
-    Mutations and close receipts MUST use the default exhaustive scan. A partial
-    preview cannot attest the latest coordination state or produce close leases.
+    MCP recent_preview scans at most ten pages and compacts long discussions.
+    Ordinary navigation never grants a close lease for omitted evidence.
+    An explicit authenticated review chain issues a separate receipt only
+    after traversal of the entire unchanged observed snapshot. This proves
+    page issuance, not a person's comprehension or authorization.
+    Mutations always use the exhaustive default scan and exact state digest.
     """
     if isinstance(number, bool) or not isinstance(number, int) or number < 1:
         raise ValueError("issue_number must be positive")
+    cursor_match = None
+    review = isinstance(history_cursor, str) and (
+        history_cursor == "review" or history_cursor.startswith("review:")
+    )
+    if history_cursor is not None:
+        if not allow_partial or not recent_preview or not isinstance(history_cursor, str):
+            raise ValueError("invalid history cursor")
+        position = history_cursor
+        if review:
+            if review_key is None or len(review_key) < 32:
+                raise ValueError("authenticated review key unavailable")
+            if history_cursor != "review":
+                match = re.fullmatch(
+                    r"review:([0-9a-f]{64}:[0-9]{1,3}:[0-9]{1,10}):([0-9a-f]{64})",
+                    history_cursor,
+                )
+                if match is None or not hmac.compare_digest(
+                    _review_signature(review_key, match[1]), match[2]
+                ):
+                    raise ValueError("invalid review cursor")
+                position = match[1]
+        if position != "review":
+            cursor_match = re.fullmatch(r"([0-9a-f]{64}):([0-9]{1,3}):([0-9]{1,10})", position)
+            if cursor_match is None:
+                raise ValueError("invalid history cursor")
     issue = await client.get_issue(owner, repo, number)
     item = _issue(issue)
     if item is None:
         raise ValueError("issue is not a Py Coordination thread")
     verified_no_comments = type(issue.get("comments")) is int and issue["comments"] == 0
+    if recent_preview and not allow_partial:
+        raise ValueError("recent preview is read-only")
     if allow_partial:
+        # Keep a snapshot rather than relying on a mutable provider object.
+        version_fields = ("id", "number", "title", "body", "state", "updated_at", "comments")
+        initial_version = tuple(issue.get(key) for key in version_fields)
         comments, truncated, incomplete_reason, pages_read = await _timeline_comment_pages(
             lambda page: client.list_issue_timeline(
                 owner, repo, number, limit=_PAGE_SIZE, page=page
             ),
+            max_pages=_MAX_PAGES if recent_preview else 2,
             verified_no_comments=verified_no_comments,
         )
+        if not truncated and _comment_count_mismatch(issue, comments):
+            truncated = True
+            incomplete_reason = "comment_count_mismatch"
+        if recent_preview and not truncated:
+            current = await client.get_issue(owner, repo, number)
+            if tuple(current.get(key) for key in version_fields) != initial_version:
+                truncated = True
+                incomplete_reason = "issue_changed_during_scan"
         item["history_incomplete_reason"] = incomplete_reason
         item["history_pages_scanned"] = pages_read
     else:
@@ -374,6 +486,10 @@ async def open_thread(
             allow_partial=False,
             verified_no_comments=verified_no_comments,
         )
+        if _comment_count_mismatch(issue, comments):
+            raise CoordinationOutcomeUnknown(
+                "Gitea issue comment count does not match the complete timeline"
+            )
     trusted_identity = await client.get_user()
     trusted_login = trusted_identity.get("login")
     if not isinstance(trusted_login, str) or not trusted_login:
@@ -395,6 +511,107 @@ async def open_thread(
                 "author": author,
             }
         )
+    if recent_preview:
+        item["history_scan_complete"] = not truncated
+        last_id = history[-1]["id"] if history else None
+        item["history_last_scanned_event_id"] = last_id
+        trusted = next((entry for entry in reversed(history) if entry["request_key"] is not None), None)
+        item["history_last_scanned_trusted_event_id"] = trusted["id"] if trusted else None
+        if not truncated:
+            item["history_latest_event_id"] = last_id
+            item["history_latest_trusted_event_id"] = trusted["id"] if trusted else None
+            item["history_latest_trusted_event"] = (
+                {
+                    "id": trusted["id"],
+                    "state": trusted["state"],
+                    "request_key": trusted["request_key"],
+                    "created_at": trusted["created_at"],
+                    "authorizes_mutation": False,
+                }
+                if trusted else None
+            )
+        original_count = len(history)
+        # Only a complete observed scan may anchor a continuation. Bind the
+        # cursor to repository, issue metadata, writer identity and raw comments
+        # (including edits not reflected in the issue's updated_at timestamp).
+        snapshot = None
+        if not truncated:
+            snapshot = hashlib.sha256(json.dumps(
+                [owner, repo, number, initial_version, trusted_login, comments],
+                sort_keys=True, separators=(",", ":"),
+            ).encode()).hexdigest()
+        item["history_older_cursor"] = None
+        if review:
+            item["history_review_complete"] = False
+            item["history_review_cursor"] = None
+            # Review is distinct from ordinary navigation. Never begin or
+            # continue a review on an unproven snapshot.
+            if snapshot is None or type(issue.get("comments")) is not int:
+                raise ValueError("review cursor requires complete counted history scan; reopen issue")
+        if cursor_match is not None:
+            if snapshot is None or cursor_match[1] != snapshot:
+                raise ValueError("history cursor is stale or scan is incomplete; reopen issue")
+            index, end = int(cursor_match[2]), int(cursor_match[3])
+            if index >= original_count or end > len(history[index]["body"]) or (
+                end == 0 and history[index]["body"]
+            ):
+                raise ValueError("invalid history cursor position")
+        else:
+            index = original_count - 1
+            end = len(history[index]["body"]) if index >= 0 else 0
+        # Preserve full review only when it fits the display budget. Explicit navigation
+        # is always read-only, even if the selected window fits in one page.
+        exceeds_display_budget = (
+            original_count > _HISTORY_DISPLAY_MAX_ENTRIES
+            or sum(len(entry["body"]) for entry in history) > _HISTORY_DISPLAY_MAX_CHARS
+        )
+        if (
+            review or cursor_match is not None or truncated or item["history_pages_scanned"] > 2
+            or exceeds_display_budget
+        ):
+            # State-bearing evidence is taken from the complete snapshot, not
+            # from the displayed slice. Only the final signed review page
+            # may expose that separate review observation.
+            resolution = next(
+                (entry for entry in reversed(history) if entry["state"] not in (None, "message")),
+                None,
+            ) if review else None
+            history, older = _history_window(history, index, end)
+            if older is not None and snapshot is not None:
+                position = f"{snapshot}:{older[0]}:{older[1]}"
+                item["history_older_cursor"] = position
+                if review and review_key is not None:
+                    item["history_review_cursor"] = (
+                        f"review:{position}:{_review_signature(review_key, position)}"
+                    )
+            elif review and snapshot is not None:
+                item["history_review_complete"] = True
+                item["review_coord_state"] = resolution["state"] if resolution else "open"
+                if resolution is not None and resolution["state"] == "resolved" and issue.get("state") == "open":
+                    _, state_sha = _close_digests(issue, comments)
+                    item["review_close_state_sha256"] = state_sha
+                    item["review_resolution_event_id"] = resolution["id"]
+            if cursor_match is not None or len(history) != original_count or any(
+                entry.get("body_truncated") for entry in history
+            ):
+                if not truncated:
+                    item["history_incomplete_reason"] = "bounded_history_display"
+                truncated = True
+        item["history_display_omitted_count"] = original_count - len(history)
+        # A trusted handoff can sit outside the bounded display window behind
+        # ordinary comments. Preserve a short, explicitly truncated tail only
+        # when the complete observed scan established its latest identity.
+        # Never duplicate a fully displayed body or grant a close lease.
+        if item["history_scan_complete"] and trusted is not None and not any(
+            entry["id"] == trusted["id"] and not entry.get("body_truncated")
+            for entry in history
+        ):
+            body = trusted["body"]
+            item["history_latest_trusted_event"].update({
+                "body_preview": body[-2000:],
+                "body_preview_truncated": len(body) > 2000,
+                "body_total_chars": len(body),
+            })
     item["history"] = history
     item["history_truncated"] = truncated
     item["coord_state"] = (
@@ -407,25 +624,9 @@ async def open_thread(
         # No authoritative final state and NO close-state/content hashes: a
         # mutation can only use the exhaustive, fail-closed default path.
         return item
-    # An explicit close reviews this exact report and discussion. Closing changes
-    # state/updated_at, so retain a separate content digest for post-write checks.
-    content = {
-        "issue": {key: issue.get(key) for key in ("id", "number", "title", "body", "pull_request")},
-        "comments": [
-            {key: comment.get(key) for key in ("id", "body", "created_at", "updated_at")}
-            | {"author": (comment.get("user") or {}).get("login")}
-            for comment in comments
-        ],
-    }
-
-    def digest(value: Any) -> str:
-        return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-
-    item["close_content_sha256"] = digest(content)
-    item["close_state_sha256"] = digest({
-        "content": item["close_content_sha256"], "state": issue.get("state"),
-        "updated_at": issue.get("updated_at"),
-    })
+    # Closing changes state/updated_at, so retain a separate content digest
+    # for post-write checks.
+    item["close_content_sha256"], item["close_state_sha256"] = _close_digests(issue, comments)
     return item
 
 

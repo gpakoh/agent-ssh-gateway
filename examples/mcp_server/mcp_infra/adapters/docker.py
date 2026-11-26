@@ -35,6 +35,7 @@ from tool_results import tool_error, tool_success, validate_pagination
 
 from examples.mcp_client_remote.fleet.docker_client import (
     SERVICE_NAME_RE,
+    DockerCommandTimeout,
     RunResult,  # noqa: F401  (used in impl return annotations)
 )
 from examples.mcp_server.docker_confirm import ConfirmAction, ConfirmStatus
@@ -770,6 +771,24 @@ def _compose_read_command_error(tool: str, exc: RuntimeError) -> dict[str, Any]:
     Keep unrelated Docker errors unchanged; no fallback shell or privilege
     expansion is allowed.
     """
+    if isinstance(exc, DockerCommandTimeout):
+        return tool_error(
+            tool=tool,
+            code="TIMEOUT",
+            message="Docker Compose read exceeded the local CLI deadline",
+            retryable=False,
+            hint=(
+                "Inspect the configured daemon with docker_ps; request operator "
+                "reconciliation of the exact helper if its outcome is unknown. "
+                "Do not assume termination or automatically retry."
+            ),
+            details={
+                "phase": "docker_cli",
+                "timeout_s": exc.timeout_s,
+                "helper_outcome": "unknown",
+            },
+            source="docker",
+        )
     message = str(exc)
     normalized = message.lower()
     if "no configuration file provided: not found" in normalized:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -762,6 +763,98 @@ async def test_opt_in_summary_counts_every_verified_state_without_changing_page(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["healthy", "failed_runs", "wrong_repo", "malformed_pr", "full_page", "wrong_run_repo"])
+async def test_board_resume_snapshot_is_bounded_exact_and_optional(monkeypatch, scenario):
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setattr(adapter, "_registered", lambda p: core.validate_project(p))
+    client = FakeClient()
+    await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway", source_project="agent-ssh-gateway",
+        title="Resume", body="Evidence", request_key="resume-snapshot-thread-123",
+    )
+    repo_name = "gpakoh/agent-ssh-gateway"
+    master_sha = "a" * 40
+    feature_sha = "b" * 40
+    client.get_repo = AsyncMock(return_value={
+        "full_name": "other/repo" if scenario == "wrong_repo" else repo_name,
+        "default_branch": "master", "open_issues_count": 48,
+        "owner": {"email": "secret@example.invalid"},
+    })
+    client.get_branch = AsyncMock(return_value={
+        "name": "master", "commit": {"id": master_sha}, "protected": True,
+    })
+    pr = {"number": 12, "state": "open", "head": {"sha": feature_sha, "ref": "fix/a"},
+          "base": {"sha": master_sha, "ref": "master"}, "body": "PRIVATE BODY"}
+    prs = [{**pr, "number": i + 12} for i in range(10)] if scenario == "full_page" else [pr]
+    if scenario == "malformed_pr":
+        prs.append({"number": 13, "state": "open", "head": {"sha": "invalid"}})
+    client.list_pull_requests = AsyncMock(return_value=prs)
+    runs = [
+        {"id": 101, "head_sha": master_sha, "head_branch": "master", "event": "push",
+         "status": "completed", "conclusion": "success", "run_attempt": 1,
+         "repository": {"full_name": repo_name}},
+        {"id": 102, "head_sha": feature_sha, "event": "pull_request",
+         "status": "in_progress", "conclusion": None, "run_attempt": 1,
+         "repository": {"full_name": "other/repo" if scenario == "wrong_run_repo" else repo_name}},
+        {"id": 103, "head_sha": "c" * 40, "event": "pull_request",
+         "status": "completed", "conclusion": "success", "run_attempt": 1,
+         "repository": {"full_name": repo_name}},
+    ]
+    client.list_action_runs = AsyncMock(return_value={"workflow_runs": runs, "total_count": 500})
+    if scenario == "failed_runs":
+        client.list_action_runs.side_effect = OSError("SECRET PROVIDER ERROR")
+    monkeypatch.setattr(FakeClient, "__aenter__", _fake_aenter, raising=False)
+    monkeypatch.setattr(FakeClient, "__aexit__", _fake_aexit, raising=False)
+    monkeypatch.setattr(
+        adapter, "server_attr",
+        lambda name: (lambda _: client) if name == "GiteaClient" else None,
+    )
+    ordinary = await adapter.coord_board("agent-ssh-gateway", limit=1)
+    assert ordinary["ok"] is True
+    assert "resume" not in ordinary["result"]
+    client.get_repo.assert_not_awaited()
+    client.list_pull_requests.assert_not_awaited()
+    result = await adapter.coord_board("agent-ssh-gateway", limit=1, include_summary=True)
+    assert result["ok"] is True, result
+    data = result["result"]
+    assert data["count"] == 1
+    resume = data["resume"]
+    assert resume["authorizes_mutation"] is False
+    assert resume["atomic_snapshot"] is False
+    assert "secret@example" not in str(resume)
+    assert "PRIVATE BODY" not in str(resume)
+    assert "SECRET PROVIDER" not in str(resume)
+    if scenario == "wrong_repo":
+        assert resume["repo_state"] == "identity_unverified"
+        assert resume["open_issues_count"] is None
+        assert resume["default_head_sha"] is None
+        client.get_branch.assert_not_awaited()
+        client.list_pull_requests.assert_not_awaited()
+        client.list_action_runs.assert_not_awaited()
+        return
+    assert resume["repo_state"] == "observed"
+    assert resume["open_issues_count"] == 48
+    assert resume["default_head_sha"] == master_sha
+    assert resume["default_branch"] == "master"
+    client.get_branch.assert_awaited_once_with("gpakoh", "agent-ssh-gateway", "master")
+    client.list_pull_requests.assert_awaited_once_with("gpakoh", "agent-ssh-gateway", state="open", limit=10)
+    client.list_action_runs.assert_awaited_once_with("gpakoh", "agent-ssh-gateway", limit=20)
+    assert resume["open_prs_state"] == ("partial" if scenario in {"full_page", "malformed_pr"} else "observed")
+    assert resume["open_prs"][0]["head_sha"] == feature_sha
+    assert len(resume["open_prs"]) == (10 if scenario == "full_page" else 1)
+    if scenario == "failed_runs":
+        assert resume["ci_state"] == "unavailable"
+        assert resume["default_head_runs"] == []
+        assert resume["open_prs"][0]["runs"] == []
+    else:
+        assert resume["ci_state"] == ("partial" if scenario == "wrong_run_repo" else "observed")
+        assert resume["ci_window_truncated"] is True
+        assert [r["id"] for r in resume["default_head_runs"]] == [101]
+        assert [r["id"] for r in resume["open_prs"][0]["runs"]] == ([] if scenario == "wrong_run_repo" else [102])
+    assert client.comment_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_opt_in_summary_preserves_unknown_state_as_lower_bound(monkeypatch):
     monkeypatch.setenv("GITEA_TOKEN", "fake")
     monkeypatch.setattr(adapter, "_registered", lambda p: core.validate_project(p))
@@ -847,7 +940,7 @@ async def test_opt_in_summary_caps_work_and_never_claims_exact_large_totals(monk
         assert summary["count_exact"] is False
         assert summary["state_counts"]["accepted"]["count"] == 50
         assert max(checked) <= 50
-        assert len(checked) <= 51  # One ordinary preview + 50 summary probes.
+        assert len(checked) == 50  # Preview observation is reused in the summary.
 
     async def capped_scan(_client, _owner, _repo):
         threads, _ = await large_scan(_client, _owner, _repo)
@@ -860,6 +953,213 @@ async def test_opt_in_summary_caps_work_and_never_claims_exact_large_totals(monk
     assert data["summary"]["source_scan_truncated"] is True
     assert data["summary"]["count_exact"] is False
     assert data["summary"]["state_counts"]["accepted"]["count_exact"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reader_name", ["coord_board", "coord_inbox"])
+async def test_summary_deadline_preserves_completed_counts_and_resume(monkeypatch, reader_name):
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setattr(adapter, "_registered", lambda p: core.validate_project(p))
+    monkeypatch.setattr(adapter, "_SUMMARY_READ_TIMEOUT", 0.1, raising=False)
+    client = FakeClient()
+    monkeypatch.setattr(FakeClient, "__aenter__", _fake_aenter, raising=False)
+    monkeypatch.setattr(FakeClient, "__aexit__", _fake_aexit, raising=False)
+    monkeypatch.setattr(
+        adapter, "server_attr",
+        lambda name: (lambda _: client) if name == "GiteaClient" else None,
+    )
+    rows = [
+        {"number": i, "title": f"Issue {i}", "state": "open",
+         "url": f"https://gitea.example/issues/{i}",
+         "source_project": "agent-ssh-gateway", "request_key": f"deadline-{i}-123",
+         "updated_at": "2026-11-03T09:00:00Z"}
+        for i in range(1, 5)
+    ]
+    monkeypatch.setattr(adapter, "list_threads_preview", AsyncMock(return_value=(rows, False)))
+    cancelled = asyncio.Event()
+    calls = []
+
+    async def verify(_client, _owner, _repo, number):
+        calls.append(number)
+        if number == 2:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+        return "accepted", False
+
+    monkeypatch.setattr(adapter, "preview_thread_state", verify)
+    resume = {"repo_state": "observed", "open_issues_count": 48}
+    monkeypatch.setattr(adapter, "_project_resume", AsyncMock(return_value=resume))
+    reader = getattr(adapter, reader_name)
+    result = await asyncio.wait_for(reader(
+        "agent-ssh-gateway", limit=1, include_summary=True
+    ), timeout=2)
+    assert result["ok"] is True, result
+    data = result["result"]
+    summary = data["summary"]
+    assert summary["state_counts"]["accepted"]["count"] == 1
+    assert summary["count_exact"] is False
+    assert summary["observed_thread_count"] == 4
+    assert summary["examined_thread_count"] == 2
+    assert summary["verified_thread_count"] == 1
+    assert summary["unexamined_thread_count"] == 2
+    assert summary["unverified_thread_numbers"] == [2]
+    assert summary["scan_deadline_reached"] is True
+    assert summary["timed_out_thread_number"] == 2
+    assert calls == [1, 2]
+    assert cancelled.is_set()
+    if reader_name == "coord_board":
+        assert data["resume"] == resume
+    else:
+        assert "resume" not in data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reader_name", ["coord_board", "coord_inbox"])
+async def test_preview_provider_failure_preserves_other_verified_threads(monkeypatch, reader_name):
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setattr(adapter, "_registered", lambda p: core.validate_project(p))
+    client = FakeClient()
+    for number in range(1, 4):
+        await core.create_thread(
+            client, "gpakoh", "agent-ssh-gateway",
+            source_project="agent-ssh-gateway", title=f"Issue {number}",
+            body="Evidence", request_key=f"preview-provider-failure-{number}",
+        )
+    await core.write_event(
+        client, "gpakoh", "agent-ssh-gateway", 3,
+        text="Acknowledged", state="accepted", request_key="preview-provider-accepted",
+    )
+    original_get_issue = client.get_issue
+
+    async def get_issue(owner, repo, number):
+        if number == 2:
+            raise OSError("PRIVATE PROVIDER ERROR")
+        return await original_get_issue(owner, repo, number)
+
+    client.get_issue = get_issue
+    monkeypatch.setattr(FakeClient, "__aenter__", _fake_aenter, raising=False)
+    monkeypatch.setattr(FakeClient, "__aexit__", _fake_aexit, raising=False)
+    monkeypatch.setattr(
+        adapter, "server_attr",
+        lambda name: (lambda _: client) if name == "GiteaClient" else None,
+    )
+    response = await getattr(adapter, reader_name)("agent-ssh-gateway", limit=3)
+    assert response["ok"] is True, response
+    data = response["result"]
+    assert data["count"] == 2
+    assert data["count_exact"] is False
+    assert data["truncated"] is True
+    assert data["examined_thread_count"] == 3
+    assert data["incomplete_thread_numbers"] == [2]
+    assert data["next_offset"] is None
+    if reader_name == "coord_board":
+        assert [col["count"] for col in data["columns"]] == [1, 1, 0, 0]
+        assert all(col["count_exact"] is False for col in data["columns"])
+        assert [card["number"] for col in data["columns"] for card in col["cards"]] == [1, 3]
+    else:
+        assert {row["number"]: row["coord_state"] for row in data["threads"]} == {
+            1: "open", 3: "accepted",
+        }
+    assert "PRIVATE PROVIDER ERROR" not in str(response)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reader_name", ["coord_board", "coord_inbox"])
+async def test_preview_deadline_preserves_rows_and_next_page(monkeypatch, reader_name):
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setattr(adapter, "_registered", lambda p: core.validate_project(p))
+    client = FakeClient()
+    for number in range(1, 4):
+        await core.create_thread(
+            client, "gpakoh", "agent-ssh-gateway",
+            source_project="agent-ssh-gateway", title=f"Issue {number}",
+            body="Evidence", request_key=f"preview-deadline-{number}",
+        )
+    monkeypatch.setattr(FakeClient, "__aenter__", _fake_aenter, raising=False)
+    monkeypatch.setattr(FakeClient, "__aexit__", _fake_aexit, raising=False)
+    monkeypatch.setattr(adapter, "server_attr", lambda name: (lambda _: client) if name == "GiteaClient" else None)
+    monkeypatch.setattr(adapter, "_PREVIEW_READ_TIMEOUT", 0.02, raising=False)
+    checked = []
+
+    async def verify(_client, _owner, _repo, number):
+        checked.append(number)
+        if number == 2:
+            await asyncio.sleep(0.1)
+        return "open", False
+
+    monkeypatch.setattr(adapter, "preview_thread_state", verify)
+    reader = getattr(adapter, reader_name)
+    first = (await reader("agent-ssh-gateway", limit=3))["result"]
+    assert first["count"] == 1
+    assert first["count_exact"] is False
+    assert first["incomplete_thread_numbers"] == [2]
+    assert first["preview_deadline_reached"] is True
+    assert first["preview_timed_out_thread_number"] == 2
+    assert first["next_offset"] == 2
+    assert checked == [1, 2]
+    second = (await reader("agent-ssh-gateway", limit=3, offset=2))["result"]
+    assert second["count"] == 1 and second["next_offset"] is None
+    assert second["preview_deadline_reached"] is False
+    assert second["preview_timed_out_thread_number"] is None
+    assert checked == [1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_preview_caller_cancellation_propagates(monkeypatch):
+    async def cancelled(*_args):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(adapter, "preview_thread_state", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        await adapter._verified_preview(
+            FakeClient(), "gpakoh", "agent-ssh-gateway", [{"number": 1}], 1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_summary_provider_failure_preserves_other_verified_counts(monkeypatch):
+    async def verify(_client, _owner, _repo, number):
+        if number == 2:
+            raise OSError("PRIVATE PROVIDER ERROR")
+        return "accepted", False
+
+    monkeypatch.setattr(adapter, "preview_thread_state", verify)
+    data = await adapter._verified_global_summary(
+        FakeClient(), "gpakoh", "agent-ssh-gateway",
+        [{"number": i} for i in range(1, 4)], False,
+    )
+    assert data["verified_thread_count"] == 2
+    assert data["examined_thread_count"] == 3
+    assert data["unverified_thread_numbers"] == [2]
+    assert data["probe_error_thread_numbers"] == [2]
+    assert data["scan_deadline_reached"] is False
+    assert data["count_exact"] is False
+    assert "PRIVATE" not in str(data)
+
+
+@pytest.mark.asyncio
+async def test_summary_caller_cancellation_is_not_partial_success(monkeypatch):
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def verify(*_args):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(adapter, "preview_thread_state", verify)
+    task = asyncio.create_task(adapter._verified_global_summary(
+        FakeClient(), "gpakoh", "agent-ssh-gateway", [{"number": 1}], False,
+    ))
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cancelled.is_set()
 
 
 @pytest.mark.asyncio
@@ -1391,6 +1691,258 @@ async def test_lowlevel_timeline_uses_documented_page_endpoint_only(monkeypatch)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["complete", "count_mismatch", "drift", "bounded", "oversized"])
+async def test_mcp_coord_open_recovers_recent_evidence_without_close_authority(
+    monkeypatch, scenario,
+):
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setattr(adapter, "_registered", lambda p: core.validate_project(p))
+    client = FakeClient()
+    await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway",
+        source_project="agent-ssh-gateway", title="Long handoff",
+        body="Evidence", request_key="recent-history-thread-123",
+    )
+    total = 501 if scenario == "bounded" else 125
+    client.comments[1] = [
+        {"id": i, "body": f"Evidence {i}", "user": {"login": "other"}}
+        for i in range(1, total + 1)
+    ]
+    client.comments[1][-1]["body"] = (
+        core._header(kind="event", key="recent-history-accept-123", state="accepted")
+        + "\nLatest handoff"
+    )
+    client.comments[1][-1]["user"] = {"login": "gpakoh"}
+    if scenario == "oversized":
+        client.comments[1][-1]["body"] += "x" * 20000 + " LAST CHECKPOINT"
+    client.issues[0]["comments"] = total + (scenario == "count_mismatch")
+    client.issues[0]["updated_at"] = "initial"
+    original_get = client.get_issue
+    issue_reads = 0
+
+    async def get_issue(owner, repo, number):
+        nonlocal issue_reads
+        issue_reads += 1
+        issue = dict(await original_get(owner, repo, number))
+        if scenario == "drift" and issue_reads > 1:
+            issue["updated_at"] = "changed"
+        return issue
+
+    async def enter(self):
+        return self
+
+    async def leave(self, *args):
+        return None
+
+    client.get_issue = get_issue
+    monkeypatch.setattr(FakeClient, "__aenter__", enter, raising=False)
+    monkeypatch.setattr(FakeClient, "__aexit__", leave, raising=False)
+    monkeypatch.setattr(
+        adapter, "server_attr",
+        lambda name: (lambda _: client) if name == "GiteaClient" else None,
+    )
+    response = await adapter.coord_open("agent-ssh-gateway", 1)
+    assert response["ok"] is True, response
+    detail = response["result"]["thread"]
+    complete = scenario in {"complete", "oversized"}
+    expected_last = 500 if scenario == "bounded" else total
+    assert detail["history_scan_complete"] is complete
+    assert detail["history_last_scanned_event_id"] == expected_last
+    assert detail["history"][-1]["id"] == expected_last
+    assert 1 <= len(detail["history"]) <= 50
+    assert detail["history_display_omitted_count"] == expected_last - len(detail["history"])
+    assert detail["history_truncated"] is True
+    assert detail["coord_state"] is None
+    assert "close_state_sha256" not in detail
+    assert "close_content_sha256" not in detail
+    assert detail["history_pages_scanned"] == (10 if scenario == "bounded" else 3)
+    assert detail["history_incomplete_reason"] == {
+        "complete": "bounded_history_display",
+        "count_mismatch": "comment_count_mismatch",
+        "drift": "issue_changed_during_scan",
+        "bounded": "bounded_comment_window",
+        "oversized": "bounded_history_display",
+    }[scenario]
+    assert detail["history_last_scanned_trusted_event_id"] == (
+        None if scenario == "bounded" else total
+    )
+    if complete:
+        assert detail["history_latest_event_id"] == total
+        assert detail["history_latest_trusted_event_id"] == total
+        assert detail["history_latest_trusted_event"]["request_key"] == "recent-history-accept-123"
+        assert detail["history"][-1]["state"] == "accepted"
+        if scenario == "complete":
+            assert "body_preview" not in detail["history_latest_trusted_event"]
+    else:
+        assert "history_latest_event_id" not in detail
+        assert "history_latest_trusted_event_id" not in detail
+        assert "history_latest_trusted_event" not in detail
+    if scenario == "oversized":
+        assert detail["history"][-1]["body"].endswith(" LAST CHECKPOINT")
+        assert detail["history"][-1]["body_truncated"] is True
+        assert len(detail["history"][-1]["body"]) <= 16000
+    assert client.comment_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_coord_open_history_cursor_recovers_all_events_and_body_chunks(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setattr(adapter, "_registered", lambda p: core.validate_project(p))
+    client = FakeClient()
+    await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway", source_project="agent-ssh-gateway",
+        title="Navigable history", body="Evidence", request_key="nav-history-thread-123",
+    )
+    bodies = {i: f"Evidence {i}" for i in range(1, 126)}
+    bodies[125] = "first " + "x" * 34000 + " last"
+    client.comments[1] = [
+        {"id": i, "body": body, "user": {"login": "other"}}
+        for i, body in bodies.items()
+    ]
+    client.issues[0]["comments"] = len(bodies)
+    client.issues[0]["updated_at"] = "initial"
+    monkeypatch.setattr(FakeClient, "__aenter__", _fake_aenter, raising=False)
+    monkeypatch.setattr(FakeClient, "__aexit__", _fake_aexit, raising=False)
+    monkeypatch.setattr(
+        adapter, "server_attr",
+        lambda name: (lambda _: client) if name == "GiteaClient" else None,
+    )
+    first = (await adapter.coord_open("agent-ssh-gateway", 1))["result"]["thread"]
+    cursor = first["history_older_cursor"]
+    assert cursor
+    seen = []
+    pages = 0
+    page = first
+    while True:
+        pages += 1
+        assert pages < 15
+        assert page["history_scan_complete"] is True
+        assert page["history_truncated"] is True
+        assert page["coord_state"] is None
+        assert "close_state_sha256" not in page
+        assert "close_content_sha256" not in page
+        assert len(page["history"]) <= 50
+        assert sum(len(entry["body"]) for entry in page["history"]) <= 16000
+        for entry in reversed(page["history"]):
+            seen.append((entry["id"], entry.get("body_start", 0), entry["body"]))
+        cursor = page["history_older_cursor"]
+        if cursor is None:
+            break
+        result = await adapter.coord_open("agent-ssh-gateway", 1, history_cursor=cursor)
+        assert result["ok"] is True, result
+        page = result["result"]["thread"]
+    reconstructed = {}
+    for identifier, start, body in sorted(seen):
+        assert start == len(reconstructed.get(identifier, ""))
+        reconstructed[identifier] = reconstructed.get(identifier, "") + body
+    assert reconstructed == bodies
+    assert client.comment_calls == 0
+
+    # A changed comment with unchanged Issue metadata cannot reuse the cursor.
+    client.comments[1][0]["body"] = "edited"
+    result = await adapter.coord_open(
+        "agent-ssh-gateway", 1, history_cursor=first["history_older_cursor"],
+    )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INVALID_INPUT"
+    assert "cursor" in result["error"]["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_history_navigation_rejects_malformed_and_incomplete_scan(monkeypatch):
+    client = FakeClient()
+    await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway", source_project="agent-ssh-gateway",
+        title="Incomplete history", body="Evidence", request_key="nav-incomplete-123",
+    )
+    client.comments[1] = [
+        {"id": i, "body": "x", "user": {"login": "other"}} for i in range(1, 502)
+    ]
+    client.issues[0]["comments"] = 501
+    page = await core.open_thread(
+        client, "gpakoh", "agent-ssh-gateway", 1, allow_partial=True, recent_preview=True,
+    )
+    assert page["history_scan_complete"] is False
+    assert page["history_older_cursor"] is None
+    for cursor in ("", "bad", "0" * 64 + ":0:1", True):
+        with pytest.raises(ValueError, match="cursor"):
+            await core.open_thread(
+                client, "gpakoh", "agent-ssh-gateway", 1,
+                allow_partial=True, recent_preview=True, history_cursor=cursor,
+            )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("count", "body_chars", "compact"),
+    [(1, 16000, False), (1, 16001, True), (8, 2100, True),
+     (50, 320, False), (51, 10, True), (54, 1200, True)],
+)
+async def test_coord_open_applies_display_budget_to_short_timeline(
+    count, body_chars, compact,
+):
+    client = FakeClient()
+    await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway",
+        source_project="agent-ssh-gateway", title="Short timeline",
+        body="Evidence", request_key="short-display-budget-123",
+    )
+    bodies = {i: "x" * body_chars for i in range(1, count + 1)}
+    client.comments[1] = [
+        {"id": i, "body": body, "user": {"login": "other"}}
+        for i, body in bodies.items()
+    ]
+    client.issues[0]["comments"] = count
+    page = await core.open_thread(
+        client, "gpakoh", "agent-ssh-gateway", 1,
+        allow_partial=True, recent_preview=True,
+    )
+    assert page["history_pages_scanned"] <= 2
+    assert page["history_scan_complete"] is True
+    assert page["history_latest_event_id"] == count
+    assert len(page["history"]) <= 50
+    assert sum(len(entry["body"]) for entry in page["history"]) <= 16000
+    assert page["history_truncated"] is compact
+    assert bool(page["history_older_cursor"]) is compact
+    assert ("close_content_sha256" in page) is not compact
+    assert ("close_state_sha256" in page) is not compact
+    if compact:
+        assert page["coord_state"] is None
+        assert page["history_incomplete_reason"] == "bounded_history_display"
+    else:
+        assert page["coord_state"] == "open"
+
+    seen = []
+    while True:
+        seen.extend(
+            (entry["id"], entry.get("body_start", 0), entry["body"])
+            for entry in page["history"]
+        )
+        cursor = page["history_older_cursor"]
+        if cursor is None:
+            break
+        page = await core.open_thread(
+            client, "gpakoh", "agent-ssh-gateway", 1,
+            allow_partial=True, recent_preview=True, history_cursor=cursor,
+        )
+        assert page["coord_state"] is None
+        assert "close_state_sha256" not in page
+        assert len(page["history"]) <= 50
+        assert sum(len(entry["body"]) for entry in page["history"]) <= 16000
+    reconstructed = {}
+    for identifier, start, body in sorted(seen):
+        assert start == len(reconstructed.get(identifier, ""))
+        reconstructed[identifier] = reconstructed.get(identifier, "") + body
+    assert reconstructed == bodies
+
+    full = await core.open_thread(client, "gpakoh", "agent-ssh-gateway", 1)
+    assert full["history_truncated"] is False
+    assert len(full["history"]) == count
+    assert "close_state_sha256" in full
+    assert "close_content_sha256" in full
+
+
+@pytest.mark.asyncio
 async def test_coord_open_short_history_retains_verified_state_and_close_lease():
     client = FakeClient()
     await core.create_thread(
@@ -1563,3 +2115,364 @@ async def test_adapter_write_denies_missing_repo_permission(monkeypatch):
     assert result["ok"] is False
     assert result["error"]["code"] == "AUTH_ERROR"
     fake.create_coord_issue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_per_thread_budget_keeps_preview_and_summary_progress(monkeypatch):
+    monkeypatch.setattr(adapter, "_PREVIEW_READ_TIMEOUT", 0.5)
+    monkeypatch.setattr(adapter, "_SUMMARY_READ_TIMEOUT", 0.5)
+    monkeypatch.setattr(adapter, "_THREAD_READ_TIMEOUT", 0.02, raising=False)
+    rows = [{"number": i} for i in range(1, 6)]
+    cancelled = []
+
+    async def verify(_client, _owner, _repo, number):
+        if number in (1, 3):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.append(number)
+        return "accepted", False
+
+    monkeypatch.setattr(adapter, "preview_thread_state", verify)
+    verified, incomplete, examined, deadline, last_timeout = await adapter._verified_preview(
+        FakeClient(), "gpakoh", "agent-ssh-gateway", rows, 2,
+    )
+    assert [row["number"] for row in verified] == [2, 4]
+    assert incomplete == [1, 3]
+    assert examined == 4
+    assert deadline is False
+    assert last_timeout == 3
+    assert cancelled == [1, 3]
+    summary = await adapter._verified_global_summary(
+        FakeClient(), "gpakoh", "agent-ssh-gateway", rows, False,
+    )
+    assert summary["verified_thread_count"] == 3
+    assert summary["examined_thread_count"] == 5
+    assert summary["unexamined_thread_count"] == 0
+    assert summary["unverified_thread_numbers"] == [1, 3]
+    assert summary["timed_out_thread_numbers"] == [1, 3]
+    assert summary["timed_out_thread_number"] == 3
+    assert summary["scan_deadline_reached"] is False
+    assert summary["count_exact"] is False
+    assert cancelled == [1, 3, 1, 3]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reader_name", ["coord_board", "coord_inbox"])
+@pytest.mark.parametrize("offset", [0, 1])
+async def test_summary_reuses_request_preview_without_repeating_failed_probes(
+    monkeypatch, reader_name, offset,
+):
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setattr(adapter, "_registered", lambda p: core.validate_project(p))
+    monkeypatch.setattr(adapter, "_THREAD_READ_TIMEOUT", 0.02)
+    monkeypatch.setattr(adapter, "_PREVIEW_READ_TIMEOUT", 0.5)
+    monkeypatch.setattr(adapter, "_SUMMARY_READ_TIMEOUT", 0.5)
+    client = FakeClient()
+    monkeypatch.setattr(FakeClient, "__aenter__", _fake_aenter, raising=False)
+    monkeypatch.setattr(FakeClient, "__aexit__", _fake_aexit, raising=False)
+    monkeypatch.setattr(
+        adapter, "server_attr",
+        lambda name: (lambda _: client) if name == "GiteaClient" else None,
+    )
+    rows = [
+        {"number": i, "title": f"Issue {i}", "state": "open",
+         "url": f"https://gitea.example/issues/{i}",
+         "source_project": "agent-ssh-gateway",
+         "request_key": f"reuse-thread-{i}-123",
+         "updated_at": "2026-11-03T09:00:00Z"}
+        for i in range(1, 7)
+    ]
+    monkeypatch.setattr(adapter, "list_threads_preview", AsyncMock(return_value=(rows, False)))
+    monkeypatch.setattr(adapter, "_project_resume", AsyncMock(return_value={"repo_state": "observed"}))
+    calls = []
+
+    async def verify(_client, _owner, _repo, number):
+        calls.append(number)
+        if number == 1:
+            await asyncio.Event().wait()
+        if number == 2:
+            raise RuntimeError("provider failure")
+        if number == 3:
+            return None, True
+        return "accepted", False
+
+    monkeypatch.setattr(adapter, "preview_thread_state", verify)
+    reader = getattr(adapter, reader_name)
+    for _ in range(2):
+        calls.clear()
+        result = await reader("agent-ssh-gateway", limit=2, offset=offset, include_summary=True)
+        assert result["ok"] is True, result
+        data = result["result"]
+        summary = data["summary"]
+        assert sorted(calls) == [1, 2, 3, 4, 5, 6]
+        assert summary["examined_thread_count"] == 6
+        assert summary["verified_thread_count"] == 3
+        assert summary["unverified_thread_numbers"] == [1, 2, 3]
+        assert summary["timed_out_thread_numbers"] == [1]
+        assert summary["probe_error_thread_numbers"] == [2]
+        assert summary["count_exact"] is False
+        assert summary["reused_preview_thread_count"] == data["examined_thread_count"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["complete", "partial", "no_trusted"])
+async def test_recent_history_distinguishes_latest_trusted_event_from_comments(scenario):
+    client = FakeClient()
+    await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway",
+        source_project="agent-ssh-gateway", title="Trusted handoff",
+        body="Evidence", request_key="trusted-handoff-thread-123",
+    )
+    total = 501 if scenario == "partial" else 65
+    client.comments[1] = [
+        {"id": i, "body": "ordinary comment", "user": {"login": "other"}}
+        for i in range(1, total + 1)
+    ]
+    if scenario != "no_trusted":
+        client.comments[1][0].update(
+            body=core._header(kind="event", key="trusted-handoff-first-123", state="accepted")
+            + "\nFirst accepted",
+            user={"login": "gpakoh"},
+        )
+        client.comments[1][1].update(
+            body=core._header(kind="event", key="trusted-handoff-message-123", state="message")
+            + "\n" + "a" * 3000 + " FINAL CHECKPOINT",
+            user={"login": "gpakoh"},
+        )
+    client.comments[1][-1]["body"] = (
+        core._header(kind="event", key="untrusted-handoff-spoof-123", state="resolved")
+        + "\nFake resolution"
+    )
+    client.issues[0]["comments"] = total
+    page = await core.open_thread(
+        client, "gpakoh", "agent-ssh-gateway", 1,
+        allow_partial=True, recent_preview=True,
+    )
+    assert page["history_last_scanned_trusted_event_id"] == (
+        None if scenario == "no_trusted" else 2
+    )
+    assert page["coord_state"] is None
+    assert "close_state_sha256" not in page
+    assert "close_content_sha256" not in page
+    if scenario == "partial":
+        assert page["history_scan_complete"] is False
+        assert "history_latest_trusted_event" not in page
+        assert "history_latest_trusted_event_id" not in page
+        return
+    assert page["history_latest_event_id"] == total
+    assert page["history_scan_complete"] is True
+    if scenario == "no_trusted":
+        assert page["history_latest_trusted_event_id"] is None
+        assert page["history_latest_trusted_event"] is None
+        return
+    assert page["history_latest_trusted_event_id"] == 2
+    assert all(row["id"] != 2 for row in page["history"])
+    event = page["history_latest_trusted_event"]
+    assert event["id"] == 2
+    assert event["state"] == "message"
+    assert event["request_key"] == "trusted-handoff-message-123"
+    assert event["body_preview"].endswith(" FINAL CHECKPOINT")
+    assert len(event["body_preview"]) <= 2000
+    assert event["body_preview_truncated"] is True
+    assert event["body_total_chars"] == 3017
+    assert event["authorizes_mutation"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["strict", "board", "partial", "write"])
+async def test_known_comment_count_mismatch_cannot_authorize_or_attest(mode):
+    client = FakeClient()
+    await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway",
+        source_project="agent-ssh-gateway", title="Incomplete timeline",
+        body="Evidence", request_key="short-timeline-thread-123",
+    )
+    client.comments[1] = [{
+        "id": 1,
+        "body": core._header(kind="event", key="short-timeline-accept-123", state="accepted")
+        + "\nObserved",
+        "user": {"login": "gpakoh"},
+    }]
+    # The missing comment could carry a prior idempotency key or a later state.
+    client.issues[0]["comments"] = 2
+    if mode == "strict":
+        with pytest.raises(core.CoordinationOutcomeUnknown, match="comment count"):
+            await core.open_thread(client, "gpakoh", "agent-ssh-gateway", 1)
+    elif mode == "board":
+        assert await core.preview_thread_state(client, "gpakoh", "agent-ssh-gateway", 1) == (None, True)
+    elif mode == "partial":
+        page = await core.open_thread(
+            client, "gpakoh", "agent-ssh-gateway", 1, allow_partial=True,
+        )
+        assert page["history_truncated"] is True
+        assert page["history_incomplete_reason"] == "comment_count_mismatch"
+        assert page["coord_state"] is None
+        assert "close_state_sha256" not in page
+    else:
+        with pytest.raises(core.CoordinationOutcomeUnknown, match="comment count"):
+            await core.write_event(
+                client, "gpakoh", "agent-ssh-gateway", 1,
+                text="Potential duplicate", request_key="short-timeline-message-123", state="message",
+            )
+    assert client.comment_calls == 0
+
+
+async def _review_fixture():
+    client = FakeClient()
+    await core.create_thread(
+        client, "gpakoh", "agent-ssh-gateway", source_project="agent-ssh-gateway",
+        title="Long resolved review", body="Evidence", request_key="long-review-thread-123",
+    )
+    client.comments[1] = [
+        {"id": i, "body": f"comment {i}", "user": {"login": "other"}}
+        for i in range(1, 66)
+    ]
+    client.comments[1][0]["body"] = "old prefix " + "x" * 33000 + " old suffix"
+    for index, state in [(1, "accepted"), (2, "waiting_review"), (64, "resolved")]:
+        client.comments[1][index].update(
+            body=core._header(kind="event", key=f"long-review-event-{index}-123", state=state)
+            + "\n" + state,
+            user={"login": "gpakoh"},
+        )
+    client.issues[0]["comments"] = len(client.comments[1])
+    return client
+
+
+@pytest.mark.asyncio
+async def test_sequential_review_receipt_matches_strict_close_digest():
+    client = await _review_fixture()
+    args = (client, "gpakoh", "agent-ssh-gateway", 1)
+    strict = await core.open_thread(*args)
+    cursor = "review"
+    key = b"test-review-key" * 3
+    pieces = {}
+    page_count = 0
+    while cursor:
+        page = await core.open_thread(
+            *args, allow_partial=True, recent_preview=True,
+            history_cursor=cursor, review_key=key,
+        )
+        assert page["history_scan_complete"] is True
+        assert page["history_truncated"] is True
+        assert "close_state_sha256" not in page
+        assert "close_content_sha256" not in page
+        assert page["coord_state"] is None
+        assert len(page["history"]) <= 50
+        assert sum(len(row["body"]) for row in page["history"]) <= 16000
+        for row in page["history"]:
+            start = row.get("body_start", 0)
+            pieces.setdefault(row["id"], []).append((start, row["body"]))
+        cursor = page["history_review_cursor"]
+        page_count += 1
+        assert page_count <= 10
+        if cursor:
+            assert page["history_review_complete"] is False
+            assert "review_close_state_sha256" not in page
+        else:
+            assert page["history_review_complete"] is True
+            assert page["review_close_state_sha256"] == strict["close_state_sha256"]
+            assert page["review_resolution_event_id"] == 65
+    assert page_count >= 4
+    assert {i: "".join(s for _, s in sorted(parts)) for i, parts in pieces.items()} == {
+        row["id"]: row["body"] for row in strict["history"]
+    }
+    assert client.comment_calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["tamper", "other_caller", "edit", "normal_cursor", "incomplete"])
+async def test_sequential_review_refuses_unproven_continuation(scenario):
+    client = await _review_fixture()
+    args = (client, "gpakoh", "agent-ssh-gateway", 1)
+    key = b"test-review-key" * 3
+    page = await core.open_thread(
+        *args, allow_partial=True, recent_preview=True, history_cursor="review", review_key=key,
+    )
+    cursor = page["history_review_cursor"]
+    if scenario == "tamper":
+        cursor = cursor[:-1] + ("0" if cursor[-1] != "0" else "1")
+    elif scenario == "other_caller":
+        key = b"other-review-key" * 3
+    elif scenario == "edit":
+        client.comments[1][0]["body"] += " changed without issue version bump"
+    elif scenario == "normal_cursor":
+        cursor = "review:" + page["history_older_cursor"] + ":" + "0" * 64
+    else:
+        client.issues[0]["comments"] += 1
+    with pytest.raises(ValueError, match="review|cursor"):
+        await core.open_thread(
+            *args, allow_partial=True, recent_preview=True,
+            history_cursor=cursor, review_key=key,
+        )
+    assert client.comment_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_sequential_review_requires_caller_key_and_resolved_state():
+    client = await _review_fixture()
+    args = (client, "gpakoh", "agent-ssh-gateway", 1)
+    with pytest.raises(ValueError, match="review"):
+        await core.open_thread(*args, allow_partial=True, recent_preview=True, history_cursor="review")
+    client.comments[1][-1]["user"] = {"login": "other"}
+    cursor = "review"
+    for _ in range(10):
+        page = await core.open_thread(
+            *args, allow_partial=True, recent_preview=True, history_cursor=cursor,
+            review_key=b"test-review-key" * 3,
+        )
+        assert "review_close_state_sha256" not in page
+        cursor = page["history_review_cursor"]
+        if not cursor:
+            assert page["history_review_complete"] is True
+            assert page["review_coord_state"] == "waiting_review"
+            break
+    else:
+        pytest.fail("review cursor failed to terminate")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [None, 66])
+async def test_sequential_review_requires_complete_known_count(count):
+    client = await _review_fixture()
+    client.issues[0]["comments"] = count
+    with pytest.raises(ValueError, match="review"):
+        await core.open_thread(
+            client, "gpakoh", "agent-ssh-gateway", 1,
+            allow_partial=True, recent_preview=True, history_cursor="review",
+            review_key=b"test-review-key" * 3,
+        )
+
+
+@pytest.mark.asyncio
+async def test_mcp_review_cursor_bound_to_authenticated_caller_and_process(monkeypatch):
+    client = await _review_fixture()
+
+    class Context:
+        async def __aenter__(self):
+            return client
+
+        async def __aexit__(self, *args):
+            pass
+
+    monkeypatch.setenv("GITEA_TOKEN", "fake")
+    monkeypatch.setattr(adapter, "_connection", AsyncMock(return_value=("gpakoh", "agent-ssh-gateway")))
+    monkeypatch.setattr(adapter, "server_attr", lambda _: lambda _token: Context())
+    monkeypatch.setattr(adapter, "_principal", lambda: "0123456789abcdef")
+    first = await adapter.coord_open("agent-ssh-gateway", 1, history_cursor="review")
+    assert first["ok"] is True, first
+    cursor = first["result"]["thread"]["history_review_cursor"]
+    assert cursor.startswith("review:")
+    monkeypatch.setattr(adapter, "_principal", lambda: None)
+    denied = await adapter.coord_open("agent-ssh-gateway", 1, history_cursor=cursor)
+    assert denied["ok"] is False
+    monkeypatch.setattr(adapter, "_principal", lambda: "fedcba9876543210")
+    denied = await adapter.coord_open("agent-ssh-gateway", 1, history_cursor=cursor)
+    assert denied["ok"] is False
+    monkeypatch.setattr(adapter, "_principal", lambda: "0123456789abcdef")
+    resumed = await adapter.coord_open("agent-ssh-gateway", 1, history_cursor=cursor)
+    assert resumed["ok"] is True, resumed
+    monkeypatch.setattr(adapter, "_REVIEW_SECRET", b"new-process-key" * 3)
+    denied = await adapter.coord_open("agent-ssh-gateway", 1, history_cursor=cursor)
+    assert denied["ok"] is False
+    assert client.comment_calls == 0

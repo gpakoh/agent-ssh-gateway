@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import hmac
 import os
+import secrets
 from pathlib import Path
 from typing import Any
 
@@ -71,10 +74,38 @@ async def _connection(tool: str, project: str, *, write: bool) -> tuple[str, str
     return owner, repo
 
 
+_PREVIEW_READ_TIMEOUT = 8.0  # Shared budget for the page's provider probes.
+_THREAD_READ_TIMEOUT = 3.0  # A single slow thread must not consume the whole page.
+# Request-local observation, including failed reads. Never reused across calls.
+_ThreadObservation = tuple[str | None, str]
+_ThreadObservations = dict[int, _ThreadObservation]
+
+
+async def _observe_thread(
+    client: Any, owner: str, repo: str, number: int, remaining: float,
+) -> _ThreadObservation:
+    try:
+        state, incomplete = await asyncio.wait_for(
+            preview_thread_state(client, owner, repo, number),
+            timeout=min(remaining, _THREAD_READ_TIMEOUT),
+        )
+        if state is not None and state not in {"open", "accepted", "waiting_review", "resolved"}:
+            return None, "error"
+    except TimeoutError:
+        return None, "timeout"
+    except Exception:
+        # Cancellation (BaseException) still propagates.
+        return None, "error"
+    if incomplete or state is None:
+        return None, "incomplete"
+    return state, "verified"
+
+
 async def _verified_preview(
     client: Any, owner: str, repo: str, all_threads: list[dict[str, Any]], limit: int,
     offset: int = 0,
-) -> tuple[list[dict[str, Any]], list[int], int]:
+    observations: _ThreadObservations | None = None,
+) -> tuple[list[dict[str, Any]], list[int], int, bool, int | None]:
     """Backfill unreadable threads from a capped lookahead, never invent states.
 
     A long/unreadable first thread should not prevent the next healthy thread
@@ -85,26 +116,174 @@ async def _verified_preview(
     verified: list[dict[str, Any]] = []
     incomplete_numbers: list[int] = []
     examined = 0
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _PREVIEW_READ_TIMEOUT
+    deadline_reached = False
+    timed_out_thread = None
     for item in all_threads[offset : offset + 2 * limit]:
         if len(verified) == limit:
             break
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            deadline_reached = True
+            break
         examined += 1
-        state, incomplete = await preview_thread_state(
-            client, owner, repo, item["number"]
-        )
-        if incomplete or state is None:
-            incomplete_numbers.append(item["number"])
+        number = item["number"]
+        state, outcome = await _observe_thread(client, owner, repo, number, remaining)
+        if observations is not None:
+            observations[number] = (state, outcome)
+        if outcome != "verified":
+            incomplete_numbers.append(number)
+            if outcome == "timeout":
+                timed_out_thread = number
+                if loop.time() >= deadline:
+                    deadline_reached = True
+                    break
             continue
         verified.append({**item, "coord_state": state})
-    return verified, incomplete_numbers, examined
+    return verified, incomplete_numbers, examined, deadline_reached, timed_out_thread
 
 
 _SUMMARY_MAX_THREADS = 50
+_SUMMARY_READ_TIMEOUT = 8.0  # Total optional summary budget, not per issue.
+_RESUME_PR_LIMIT = 10
+_RESUME_RUN_LIMIT = 20
+_RESUME_READ_TIMEOUT = 8.0
+
+
+def _resume_sha(value: Any) -> str | None:
+    if isinstance(value, str) and len(value) == 40 and all(c in "0123456789abcdef" for c in value):
+        return value
+    return None
+
+
+def _resume_ref(value: Any) -> str | None:
+    if isinstance(value, str) and 0 < len(value) <= 256 and value.isprintable():
+        return value
+    return None
+
+
+async def _resume_read(client: Any, method: str, *args: Any, **kwargs: Any) -> Any:
+    # Read-only provider errors are isolated; never serialize exception bodies.
+    # asyncio cancellation still propagates to the request owner.
+    try:
+        return await asyncio.wait_for(getattr(client, method)(*args, **kwargs), _RESUME_READ_TIMEOUT)
+    except Exception:
+        return None
+
+
+async def _project_resume(client: Any, owner: str, repo: str) -> dict[str, Any]:
+    """Bounded observations from the same registered repository and read scope."""
+    result: dict[str, Any] = {
+        "repository": f"{owner}/{repo}",
+        "repo_state": "unavailable", "open_issues_count": None,
+        "default_branch": None, "default_head_sha": None, "default_head_state": "unavailable",
+        "open_prs_state": "unavailable", "open_prs": [], "open_pr_limit": _RESUME_PR_LIMIT,
+        "ci_state": "unavailable", "ci_run_limit": _RESUME_RUN_LIMIT,
+        "ci_window_truncated": None, "default_head_runs": [],
+        "atomic_snapshot": False, "authorizes_mutation": False,
+        "note": "Read-only observations, not merge/release evidence. Unmatched CI is unknown; read exact PR/run/jobs before acting. Local workspace and handoff require their own scoped tools.",
+    }
+    raw_repo = await _resume_read(client, "get_repo", owner, repo)
+    if not isinstance(raw_repo, dict):
+        return result
+    if raw_repo.get("full_name") != result["repository"]:
+        result["repo_state"] = "identity_unverified"
+        return result
+    result["repo_state"] = "observed"
+    count = raw_repo.get("open_issues_count")
+    if type(count) is int and count >= 0:
+        result["open_issues_count"] = count
+    branch = _resume_ref(raw_repo.get("default_branch"))
+    result["default_branch"] = branch
+
+    async def read_branch() -> Any:
+        if branch is None:
+            return None
+        return await _resume_read(client, "get_branch", owner, repo, branch)
+
+    raw_branch, raw_prs, raw_ci = await asyncio.gather(
+        read_branch(),
+        _resume_read(client, "list_pull_requests", owner, repo, state="open", limit=_RESUME_PR_LIMIT),
+        _resume_read(client, "list_action_runs", owner, repo, limit=_RESUME_RUN_LIMIT),
+    )
+    if isinstance(raw_branch, dict) and raw_branch.get("name") == branch:
+        commit = raw_branch.get("commit")
+        sha = _resume_sha(commit.get("id")) if isinstance(commit, dict) else None
+        if sha is not None:
+            result["default_head_sha"] = sha
+            result["default_head_state"] = "observed"
+
+    prs: list[dict[str, Any]] = []
+    if isinstance(raw_prs, list):
+        result["open_prs_state"] = "partial" if len(raw_prs) >= _RESUME_PR_LIMIT else "observed"
+        seen_prs: set[int] = set()
+        for pr in raw_prs[:_RESUME_PR_LIMIT]:
+            if not isinstance(pr, dict):
+                result["open_prs_state"] = "partial"
+                continue
+            head, base = pr.get("head"), pr.get("base")
+            number = pr.get("number")
+            if (type(number) is not int or number < 1 or number in seen_prs
+                    or pr.get("state") != "open" or not isinstance(head, dict) or not isinstance(base, dict)):
+                result["open_prs_state"] = "partial"
+                continue
+            head_sha, base_sha = _resume_sha(head.get("sha")), _resume_sha(base.get("sha"))
+            head_ref, base_ref = _resume_ref(head.get("ref")), _resume_ref(base.get("ref"))
+            if None in (head_sha, base_sha, head_ref, base_ref):
+                result["open_prs_state"] = "partial"
+                continue
+            base_repo = base.get("repo")
+            if isinstance(base_repo, dict) and base_repo.get("full_name") != result["repository"]:
+                result["open_prs_state"] = "partial"
+                continue
+            seen_prs.add(number)
+            prs.append({"number": number, "head_sha": head_sha, "head_ref": head_ref,
+                        "base_sha": base_sha, "base_ref": base_ref, "runs": []})
+    result["open_prs"] = prs
+
+    if not isinstance(raw_ci, dict) or not isinstance(raw_ci.get("workflow_runs"), list):
+        return result
+    runs = raw_ci["workflow_runs"]
+    result["ci_state"] = "observed"
+    total = raw_ci.get("total_count")
+    if type(total) is int and total >= len(runs):
+        result["ci_window_truncated"] = total > min(len(runs), _RESUME_RUN_LIMIT)
+    elif len(runs) >= _RESUME_RUN_LIMIT:
+        result["ci_window_truncated"] = True
+    if len(runs) > _RESUME_RUN_LIMIT:
+        result["ci_state"] = "partial"
+    seen_runs: set[int] = set()
+    for run in runs[:_RESUME_RUN_LIMIT]:
+        if not isinstance(run, dict):
+            result["ci_state"] = "partial"
+            continue
+        repository = run.get("repository")
+        run_id, attempt = run.get("id"), run.get("run_attempt")
+        sha = _resume_sha(run.get("head_sha"))
+        status, conclusion, event = run.get("status"), run.get("conclusion"), run.get("event")
+        if (not isinstance(repository, dict) or repository.get("full_name") != result["repository"]
+                or type(run_id) is not int or run_id < 1 or run_id in seen_runs
+                or type(attempt) is not int or attempt < 1 or sha is None
+                or not isinstance(status, str) or len(status) > 32 or not status.isprintable()
+                or (conclusion is not None and (not isinstance(conclusion, str) or len(conclusion) > 32 or not conclusion.isprintable()))):
+            result["ci_state"] = "partial"
+            continue
+        seen_runs.add(run_id)
+        receipt = {"id": run_id, "head_sha": sha, "run_attempt": attempt, "status": status, "conclusion": conclusion}
+        if event == "push" and sha == result["default_head_sha"] and run.get("head_branch") == branch:
+            result["default_head_runs"].append(receipt)
+        elif event == "pull_request":
+            for pr in prs:
+                if pr["head_sha"] == sha:
+                    pr["runs"].append(receipt)
+    return result
 
 
 async def _verified_global_summary(
     client: Any, owner: str, repo: str, all_threads: list[dict[str, Any]],
     source_scan_truncated: bool,
+    observations: _ThreadObservations | None = None,
 ) -> dict[str, Any]:
     """Opt-in bounded projection, never infer a state for unreadable history.
 
@@ -114,15 +293,38 @@ async def _verified_global_summary(
     """
     counts = {"open": 0, "accepted": 0, "waiting_review": 0, "resolved": 0}
     unknown: list[int] = []
-    examined = min(len(all_threads), _SUMMARY_MAX_THREADS)
-    for item in all_threads[:examined]:
-        state, incomplete = await preview_thread_state(client, owner, repo, item["number"])
-        if incomplete or state is None:
-            unknown.append(item["number"])
-        elif state not in counts:
-            raise ValueError("invalid coordination state in verified summary")
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _SUMMARY_READ_TIMEOUT
+    examined = 0
+    deadline_reached = False
+    timed_out_thread = None
+    timed_out_numbers: list[int] = []
+    probe_errors: list[int] = []
+    reused = 0
+    for item in all_threads[:_SUMMARY_MAX_THREADS]:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            deadline_reached = True
+            break
+        number = item["number"]
+        examined += 1
+        if observations is not None and number in observations:
+            state, outcome = observations[number]
+            reused += 1
         else:
+            state, outcome = await _observe_thread(client, owner, repo, number, remaining)
+        if outcome == "verified" and state is not None:
             counts[state] += 1
+        else:
+            unknown.append(number)
+            if outcome == "timeout":
+                timed_out_thread = number
+                timed_out_numbers.append(number)
+                if loop.time() >= deadline:
+                    deadline_reached = True
+                    break
+            elif outcome == "error":
+                probe_errors.append(number)
     exact = (
         not source_scan_truncated
         and examined == len(all_threads)
@@ -139,6 +341,11 @@ async def _verified_global_summary(
         "examined_thread_count": examined,
         "unexamined_thread_count": len(all_threads) - examined,
         "unverified_thread_numbers": unknown,
+        "scan_deadline_reached": deadline_reached,
+        "timed_out_thread_number": timed_out_thread,
+        "timed_out_thread_numbers": timed_out_numbers,
+        "probe_error_thread_numbers": probe_errors,
+        "reused_preview_thread_count": reused,
         "source_scan_truncated": source_scan_truncated,
         "note": "Non-atomic read-only observation; counts are lower bounds if not exact",
     }
@@ -159,17 +366,21 @@ async def coord_inbox(
         owner, repo = await _connection(tool, project, write=False)
         async with server_attr("GiteaClient")(os.environ["GITEA_TOKEN"]) as client:
             all_threads, scan_truncated = await list_threads_preview(client, owner, repo)
-            threads, incomplete_thread_numbers, examined = await _verified_preview(
-                client, owner, repo, all_threads, limit, offset
+            observations: _ThreadObservations | None = {} if include_summary else None
+            threads, incomplete_thread_numbers, examined, deadline_reached, timed_out_thread = await _verified_preview(
+                client, owner, repo, all_threads, limit, offset, observations
             )
             summary = (
-                await _verified_global_summary(client, owner, repo, all_threads, scan_truncated)
+                await _verified_global_summary(client, owner, repo, all_threads, scan_truncated, observations)
                 if include_summary else None
             )
     except Exception as exc:
         return _fail(tool, exc)
     next_offset = offset + examined if offset + examined < len(all_threads) else None
-    truncated = scan_truncated or offset > 0 or next_offset is not None or bool(incomplete_thread_numbers)
+    truncated = (
+        scan_truncated or offset > 0 or next_offset is not None
+        or bool(incomplete_thread_numbers) or deadline_reached
+    )
     return tool_success(
         tool,
         result={
@@ -179,6 +390,8 @@ async def coord_inbox(
             "source_scan_truncated": scan_truncated,
             "examined_thread_count": examined,
             "incomplete_thread_numbers": incomplete_thread_numbers,
+            "preview_deadline_reached": deadline_reached,
+            "preview_timed_out_thread_number": timed_out_thread,
             **({"summary": summary} if include_summary else {}),
         },
         source="gitea",
@@ -200,18 +413,25 @@ async def coord_board(
         owner, repo = await _connection(tool, project, write=False)
         async with server_attr("GiteaClient")(os.environ["GITEA_TOKEN"]) as client:
             all_threads, scan_truncated = await list_threads_preview(client, owner, repo)
-            enriched, incomplete_thread_numbers, examined = await _verified_preview(
-                client, owner, repo, all_threads, limit, offset
+            observations: _ThreadObservations | None = {} if include_summary else None
+            enriched, incomplete_thread_numbers, examined, deadline_reached, timed_out_thread = await _verified_preview(
+                client, owner, repo, all_threads, limit, offset, observations
             )
             columns = board_from_threads(enriched)
-            summary = (
-                await _verified_global_summary(client, owner, repo, all_threads, scan_truncated)
-                if include_summary else None
-            )
+            if include_summary:
+                summary, resume = await asyncio.gather(
+                    _verified_global_summary(client, owner, repo, all_threads, scan_truncated, observations),
+                    _project_resume(client, owner, repo),
+                )
+            else:
+                summary, resume = None, None
     except Exception as exc:
         return _fail(tool, exc)
     next_offset = offset + examined if offset + examined < len(all_threads) else None
-    truncated = scan_truncated or offset > 0 or next_offset is not None or bool(incomplete_thread_numbers)
+    truncated = (
+        scan_truncated or offset > 0 or next_offset is not None
+        or bool(incomplete_thread_numbers) or deadline_reached
+    )
     # Counts are exact only after every thread/state was verified. Otherwise
     # they are lower bounds across the observed sample, not global Kanban totals.
     for column in columns:
@@ -224,19 +444,39 @@ async def coord_board(
             "source_scan_truncated": scan_truncated,
             "examined_thread_count": examined,
             "incomplete_thread_numbers": incomplete_thread_numbers,
-            **({"summary": summary} if include_summary else {}),
+            "preview_deadline_reached": deadline_reached,
+            "preview_timed_out_thread_number": timed_out_thread,
+            **({"summary": summary, "resume": resume} if include_summary else {}),
             "note": "Gitea Issues is authoritative; resolved does not automatically close an Issue",
         }, source="gitea",
     )
 
 
-async def coord_open(project: str, issue_number: int) -> dict[str, Any]:
-    """Read bounded Gitea comments; incomplete history has no authoritative state or close lease."""
+# Process-local signing key: restart invalidates unfinished review chains.
+# Bind to the authenticated caller rather than a transient HTTP session.
+_REVIEW_SECRET = secrets.token_bytes(32)
+
+
+async def coord_open(
+    project: str, issue_number: int, history_cursor: str | None = None,
+) -> dict[str, Any]:
+    """Read recent evidence, older pages, or start a sequential review with history_cursor='review'."""
     tool = "coord_open"
     try:
         owner, repo = await _connection(tool, project, write=False)
+        review_key = None
+        if isinstance(history_cursor, str) and (
+            history_cursor == "review" or history_cursor.startswith("review:")
+        ):
+            principal = _principal()
+            if principal is None:
+                raise PermissionError("authenticated caller required for history review")
+            review_key = hmac.digest(_REVIEW_SECRET, principal.encode("ascii"), "sha256")
         async with server_attr("GiteaClient")(os.environ["GITEA_TOKEN"]) as client:
-            thread = await open_thread(client, owner, repo, issue_number, allow_partial=True)
+            thread = await open_thread(
+                client, owner, repo, issue_number, allow_partial=True, recent_preview=True,
+                history_cursor=history_cursor, review_key=review_key,
+            )
     except Exception as exc:
         return _fail(tool, exc)
     return tool_success(tool, result={"project": repo, "thread": thread}, source="gitea")
@@ -320,9 +560,10 @@ async def coord_close(
     """Explicitly close one reviewed, resolved coordination Issue.
 
     Requires repo+admin scope and an existing trusted resolved report. Read
-    coord_open.close_state_sha256, review the report/discussion, then supply
-    that exact lease and resolution_event_id. reason records the operator's
-    explicit close decision. No automatic close follows merge or resolved.
+    coord_open.close_state_sha256 (or completed sequential review receipt),
+    review the report/discussion, then supply that exact lease and
+    resolution_event_id. reason records the operator's explicit close
+    decision. No automatic close follows merge or resolved.
 
     Existing comments are retained without duplication. Attempts are journaled
     under the configured audit directory; retries after dispatch are read-only.

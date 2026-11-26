@@ -364,6 +364,51 @@ async def test_compose_read_reports_safe_actionable_config_diagnostic(
         ("docker_compose_logs", "compose_logs"),
     ],
 )
+async def test_compose_read_cli_timeout_does_not_claim_helper_termination(
+    tool_name: str, client_method: str,
+) -> None:
+    from examples.mcp_client_remote.fleet.docker_client import DockerClient
+
+    process = MagicMock()
+    process.communicate = AsyncMock(side_effect=TimeoutError())
+    process.wait = AsyncMock(return_value=-9)
+    with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=process)):
+        with pytest.raises(RuntimeError) as caught:
+            await DockerClient()._run(
+                ["docker", "run", "secret-argv-marker"], timeout=60.0,
+            )
+    process.kill.assert_called_once()
+    process.wait.assert_awaited_once()
+    client = _docker_client()
+    method = AsyncMock(side_effect=caught.value)
+    setattr(client, client_method, method)
+    with (
+        patch.object(srv, "_get_workspace_registry", return_value=_unknown_project()),
+        patch.object(srv, "DockerClient", return_value=client),
+    ):
+        result = await getattr(srv, tool_name)(project_dir="/allowed/compose-app")
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "TIMEOUT"
+    assert result["error"]["retryable"] is False
+    details = result["error"]["details"]
+    assert details["phase"] == "docker_cli"
+    assert details["timeout_s"] == 60.0
+    assert details["helper_outcome"] == "unknown"
+    assert "docker_ps" in result["error"]["hint"]
+    assert "secret-argv-marker" not in str(result)
+    method.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "client_method"),
+    [
+        ("docker_compose_services", "compose_services"),
+        ("docker_compose_ps", "compose_ps"),
+        ("docker_compose_logs", "compose_logs"),
+    ],
+)
 async def test_compose_read_unrelated_docker_failures_remain_command_failed(
     tool_name: str, client_method: str
 ) -> None:

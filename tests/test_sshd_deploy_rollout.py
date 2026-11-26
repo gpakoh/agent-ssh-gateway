@@ -25,7 +25,7 @@ def test_sshd_and_candidate_verifier_share_pinned_node22_toolchain() -> None:
         encoding="utf-8"
     )
     assert dockerfile.splitlines()[0] == "FROM alpine:3.22.7"
-    assert "ARG NODEJS_APK_VERSION=22.23.4-r0" in dockerfile
+    assert "ARG NODEJS_APK_VERSION=22.23.5-r0" in dockerfile
     assert "ARG NPM_APK_VERSION=11.6.4-r0" in dockerfile
     assert '"nodejs=${NODEJS_APK_VERSION}"' in dockerfile
     assert '"npm=${NPM_APK_VERSION}"' in dockerfile
