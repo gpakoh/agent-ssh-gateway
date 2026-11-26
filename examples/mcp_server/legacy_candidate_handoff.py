@@ -124,6 +124,46 @@ def _check_layout(fd: int) -> None:
                 _reject("legacy handoff has unclassified evidence")
 
 
+def _require_archive_git_state(
+    candidate: Path, expected_branch: str, expected_head_sha: str,
+) -> None:
+    """Allow only the two untracked handoff files this operation preserves.
+
+    Ordinary cleanup still requires a clean worktree. Never ignore a dirty
+    directory wholesale: enumerate individual NUL-delimited Git records,
+    reject any tracked handoff (including staged additions), and independently
+    verify tracked bytes against HEAD. The layout, file fingerprints and
+    terminal/durable archival guards are separate mandatory checks.
+    """
+    current_branch = clone._run_git(
+        candidate, ["rev-parse", "--abbrev-ref", "HEAD"],
+        operation="read legacy candidate branch",
+    )
+    current_head = clone._run_git(
+        candidate, ["rev-parse", "HEAD"], operation="read legacy candidate head",
+    )
+    if current_branch != expected_branch or current_head != expected_head_sha:
+        _reject("legacy candidate Git identity differs")
+    if clone._run_git(
+        candidate, ["ls-files", "-z", "--", ".ai-bridge"],
+        operation="verify legacy handoff is not tracked",
+    ):
+        _reject("legacy handoff contains tracked entries")
+    raw = clone._run_git(
+        candidate,
+        ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"],
+        operation="read exact legacy candidate status",
+    )
+    allowed = {"?? .ai-bridge/current-plan.md", "?? .ai-bridge/agent-status.md"}
+    if raw:
+        if not raw.endswith("\0"):
+            _reject("legacy candidate status is malformed")
+        entries = raw[:-1].split("\0")
+        if len(entries) != len(set(entries)) or not set(entries) <= allowed:
+            _reject("legacy candidate contains work outside the archived handoff")
+    clone._require_tracked_files_match_head(candidate)
+
+
 def _archive_identity(
     *,
     project_id: str,
@@ -157,7 +197,7 @@ def archive_terminal_legacy_handoff(
     journal_root: Path,
     terminal_guard: Callable[[], None],
 ) -> dict[str, Any]:
-    """Durably preserve two ignored files after authoritative terminal proof.
+    """Durably preserve two untracked or ignored files after terminal proof.
 
     This never changes candidate Git objects, source branches, or the registry.
     It is NOT a substitute for candidate_cleanup's separate remote CAS guards.
@@ -225,17 +265,7 @@ def archive_terminal_legacy_handoff(
             }.items():
                 if metadata.get(key) != value:
                     _reject("legacy candidate metadata identity mismatch")
-            dirty, _status_sha, _count = clone._status_state(candidate)
-            current_branch = clone._run_git(
-                candidate,
-                ["rev-parse", "--abbrev-ref", "HEAD"],
-                operation="read legacy candidate branch",
-            )
-            current_head = clone._run_git(
-                candidate, ["rev-parse", "HEAD"], operation="read legacy candidate head"
-            )
-            if dirty or current_branch != expected_branch or current_head != expected_head_sha:
-                _reject("legacy candidate Git state differs")
+            _require_archive_git_state(candidate, expected_branch, expected_head_sha)
             clone._require_no_inbound_candidate_dependencies(candidates_root, candidate)
 
             bridge = candidate / ".ai-bridge"
@@ -270,6 +300,8 @@ def archive_terminal_legacy_handoff(
                         _reject("legacy plan is absent without a terminal archive receipt")
                     terminal_guard()
                     if status is not None:
+                        _require_archive_git_state(candidate, expected_branch, expected_head_sha)
+                        _check_layout(bridge_fd)
                         dangling_data, dangling_stat = status
                         if old["status_base64"] != base64.b64encode(dangling_data).decode("ascii"):
                             _reject("legacy status differs from its durable archive")
@@ -317,15 +349,7 @@ def archive_terminal_legacy_handoff(
                 )
                 if clone._read_cleanup_tombstone(archive) != (record if old is None else old):
                     _reject("durable legacy archive changed before unlink")
-                if clone._status_state(candidate)[0]:
-                    _reject("candidate became dirty before legacy handoff unlink")
-                if (
-                    clone._run_git(
-                        candidate, ["rev-parse", "HEAD"], operation="recheck legacy head"
-                    )
-                    != expected_head_sha
-                ):
-                    _reject("candidate HEAD changed before legacy handoff unlink")
+                _require_archive_git_state(candidate, expected_branch, expected_head_sha)
                 _check_layout(bridge_fd)
                 _require_exact_entry(bridge_fd, "current-plan.md", plan_data, plan_stat)
                 if status_stat is not None:
