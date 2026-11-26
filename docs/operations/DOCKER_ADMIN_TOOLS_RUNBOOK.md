@@ -155,7 +155,9 @@ docker_run(image="alpine:3.20", command=["echo", "ok"])
 
 ### Safety notes
 
-- Container runs with `--rm` — removed automatically after exit
+- Container runs with `--rm` and `--init`: automatic removal after container exit, and an init process to reap children. A Docker CLI timeout alone does **not** prove that the container has stopped; reconcile the container state before any retry.
+- Generic disposable `docker_run` has a fixed resource ceiling at creation: 4 GiB RAM, 4 GiB memory+swap (no additional swap), 2 CPUs, and 256 PIDs. This matches the host emergency memory cap without leaving an unlimited startup window. It does not change Compose, deployment helpers, or candidate verifier budgets. Larger workloads require an existing reviewed, resource-sized execution contract; do not bypass the ceiling with raw Docker commands.
+- `docker_inspect` preserves daemon-reported `HostConfig.PidsLimit` and `State.OOMKilled` along with existing memory/CPU fields. Missing or malformed values remain unknown. These are Docker metadata, not independent attestation of kernel cgroup enforcement.
 - An allowlist entry may be an existing supported tag or an exact `repository@sha256:<64 lowercase hex>` reference, including a registry port. Matching is literal; a different digest is not allowed.
 - Container name validated against `^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`
 - argv validated against same denylist as `docker_exec`

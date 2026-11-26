@@ -168,7 +168,11 @@ async def test_client_sets_none_before_exact_image_and_argv():
     ) as run:
         await client.run(IMAGE, ["python", "--version"], isolate_network=True)
     argv = run.await_args.args[0]
-    assert argv[1:] == ["run", "--rm", "--network", "none", IMAGE, "python", "--version"]
+    assert argv[1:] == [
+        "run", "--rm", "--init", "--memory", "4g", "--memory-swap", "4g",
+        "--cpus", "2.0", "--pids-limit", "256", "--network", "none",
+        IMAGE, "python", "--version",
+    ]
 
 
 def test_oauth_compose_passes_isolated_allowlist_as_empty_by_default():

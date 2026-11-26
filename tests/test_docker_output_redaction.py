@@ -143,6 +143,31 @@ def test_state_pid_dropped():
     assert "Log" not in data["State"]["Health"]
 
 
+def test_keeps_resource_limits_and_oom_evidence_without_pid():
+    payload = {
+        "State": {"OOMKilled": True, "Pid": 12345},
+        "HostConfig": {"PidsLimit": 256, "Memory": 4294967296, "NanoCpus": 2000000000},
+    }
+    data = _client()._sanitize_inspect_output(json.dumps(payload))
+    assert data["State"] == {"OOMKilled": True}
+    assert data["HostConfig"] == payload["HostConfig"]
+
+
+def test_resource_evidence_drops_invalid_types_without_inventing_limits():
+    for value in (None, True, "256", {}, -2):
+        data = _client()._sanitize_inspect_output(json.dumps({
+            "State": {"OOMKilled": "unknown"}, "HostConfig": {"PidsLimit": value},
+        }))
+        assert "OOMKilled" not in data["State"]
+        assert "PidsLimit" not in data["HostConfig"]
+    for value in (-1, 0, 256):
+        data = _client()._sanitize_inspect_output(json.dumps({
+            "State": {"OOMKilled": False}, "HostConfig": {"PidsLimit": value},
+        }))
+        assert data["State"]["OOMKilled"] is False
+        assert data["HostConfig"]["PidsLimit"] == value
+
+
 def test_network_topology_dropped():
     """Internal IPs, MACs, network/endpoint IDs and gateways are dropped;
     only the published-port map survives."""

@@ -138,6 +138,7 @@ _INSPECT_STATE_ALLOW: frozenset[str] = frozenset(
         "Status",
         "Running",
         "ExitCode",
+        "OOMKilled",
         "Error",
         "StartedAt",
         "FinishedAt",
@@ -181,6 +182,7 @@ _INSPECT_HOSTCONFIG_ALLOW: frozenset[str] = frozenset(
         "CpusetCpus",
         "MemorySwap",
         "MemoryReservation",
+        "PidsLimit",
         "LogConfig",
         "Binds",
         "CapAdd",
@@ -672,6 +674,8 @@ class DockerClient:
             value = entry[key]
             if key == "State":
                 state = self._subset(value, _INSPECT_STATE_ALLOW)
+                if type(state.get("OOMKilled")) is not bool:
+                    state.pop("OOMKilled", None)
                 health = state.get("Health")
                 if isinstance(health, dict):
                     state["Health"] = self._subset(health, _INSPECT_HEALTH_ALLOW)
@@ -684,6 +688,9 @@ class DockerClient:
                 out["Config"] = config
             elif key == "HostConfig":
                 host_config = self._subset(value, _INSPECT_HOSTCONFIG_ALLOW)
+                pids_limit = host_config.get("PidsLimit")
+                if type(pids_limit) is not int or pids_limit < -1:
+                    host_config.pop("PidsLimit", None)
                 if "Binds" in host_config:
                     host_config["Binds"] = [REDACTED]
                 out["HostConfig"] = host_config
@@ -2209,7 +2216,15 @@ exec(compile(raw, path, "exec"), {"__name__": "__main__", "__file__": path, "__p
         if not isinstance(isolate_network, bool):
             raise ValueError("isolate_network must be a boolean")
         timeout = max(1, min(timeout, 600))
-        argv = [DOCKER_BIN, "run", "--rm"]
+        # Match the host's emergency 4 GiB ceiling at creation time rather
+        # than leaving a window of unlimited memory before the watchdog runs.
+        # These are fixed ceilings for generic disposable runs only; larger
+        # workloads use their existing reviewed verifier/Compose contracts.
+        argv = [
+            DOCKER_BIN, "run", "--rm", "--init",
+            "--memory", "4g", "--memory-swap", "4g",
+            "--cpus", "2.0", "--pids-limit", "256",
+        ]
         if isolate_network:
             argv.extend(["--network", "none"])
         if container_name:
