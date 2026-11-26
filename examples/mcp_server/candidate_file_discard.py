@@ -117,71 +117,77 @@ def _open_parent(candidate_root: Path, segments: tuple[str, ...]) -> int:
 
 
 def _archive(journal_root: Path, archive_id: str, data: bytes) -> None:
-    """Persist exact bytes under an owner-only, nofollow archive directory."""
+    """Persist exact bytes and their directory entry before destructive action."""
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
     try:
-        os.mkdir(journal_root / "candidate-file-archive", 0o700)
-    except FileExistsError:
-        pass
-    except OSError as exc:
-        raise clone.CandidateCloneError("AUDIT_UNAVAILABLE", "candidate archive unavailable") from exc
-    try:
         root_fd = os.open(journal_root, flags)
-        archive_fd = os.open("candidate-file-archive", flags, dir_fd=root_fd)
     except OSError as exc:
         raise clone.CandidateCloneError("AUDIT_UNAVAILABLE", "candidate archive unsafe") from exc
-    finally:
-        if "root_fd" in locals():
-            os.close(root_fd)
     try:
-        directory_stat = os.fstat(archive_fd)
-        if directory_stat.st_uid != os.geteuid() or directory_stat.st_mode & 0o077:
-            _deny("candidate archive permissions unsafe", code="AUDIT_UNAVAILABLE")
-        name = archive_id + ".blob"
         try:
-            fd = os.open(
-                name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
-                dir_fd=archive_fd,
+            os.mkdir("candidate-file-archive", 0o700, dir_fd=root_fd)
+        except FileExistsError:
+            pass
+        try:
+            archive_fd = os.open("candidate-file-archive", flags, dir_fd=root_fd)
+        except OSError as exc:
+            raise clone.CandidateCloneError("AUDIT_UNAVAILABLE", "candidate archive unsafe") from exc
+        try:
+            directory_stat = os.fstat(archive_fd)
+            if directory_stat.st_uid != os.geteuid() or directory_stat.st_mode & 0o077:
+                _deny("candidate archive permissions unsafe", code="AUDIT_UNAVAILABLE")
+            name = archive_id + ".blob"
+            try:
+                fd = os.open(
+                    name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
+                    dir_fd=archive_fd,
+                )
+            except FileExistsError as exc:
+                # An earlier attempt may already have removed a file. Never
+                # treat archived bytes as authority to delete a recreated file.
+                raise clone.CandidateCloneError(
+                    "WORKSPACE_CONTENDED",
+                    "candidate archive already exists; reconcile prior discard before retry",
+                ) from exc
+            try:
+                offset = 0
+                while offset < len(data):
+                    written = os.write(fd, data[offset:])
+                    if written <= 0:
+                        _deny("candidate archive write made no progress", code="AUDIT_UNAVAILABLE")
+                    offset += written
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.fsync(archive_fd)
+            # Verify the exact archive; do not block on an unexpected FIFO.
+            check_fd = os.open(
+                name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=archive_fd,
             )
-        except FileExistsError as exc:
-            # An earlier attempt may already have removed a file. Never
-            # interpret identical archived bytes as authority to delete a
-            # newly recreated file on an ambiguous replay.
-            raise clone.CandidateCloneError(
-                "WORKSPACE_CONTENDED",
-                "candidate archive already exists; reconcile prior discard before retry",
-            ) from exc
-        except OSError as exc:
-            raise clone.CandidateCloneError("AUDIT_UNAVAILABLE", "candidate archive write unavailable") from exc
-        try:
-            offset = 0
-            while offset < len(data):
-                offset += os.write(fd, data[offset:])
-            os.fsync(fd)
+            try:
+                found = os.fstat(check_fd)
+                if not stat.S_ISREG(found.st_mode) or found.st_nlink != 1 or found.st_uid != os.geteuid() or found.st_mode & 0o077 or found.st_size != len(data):
+                    _deny("candidate archive identity mismatched", code="AUDIT_UNAVAILABLE")
+                actual = bytearray()
+                while len(actual) <= _MAX_BYTES:
+                    part = os.read(check_fd, min(65536, _MAX_BYTES + 1 - len(actual)))
+                    if not part:
+                        break
+                    actual.extend(part)
+                if bytes(actual) != data:
+                    _deny("candidate archive content mismatched", code="AUDIT_UNAVAILABLE")
+            finally:
+                os.close(check_fd)
+            # fsync of the child directory does not persist its own entry in
+            # the parent. Always sync the parent, including a pre-existing
+            # archive directory left by a previous interrupted operation.
+            os.fsync(root_fd)
         finally:
-            os.close(fd)
-        os.fsync(archive_fd)
-        # Verify only the exact new archive before destructive action.
-        try:
-            check_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=archive_fd)
-        except OSError as exc:
-            raise clone.CandidateCloneError("AUDIT_UNAVAILABLE", "candidate archive read unavailable") from exc
-        try:
-            found = os.fstat(check_fd)
-            if not stat.S_ISREG(found.st_mode) or found.st_nlink != 1 or found.st_uid != os.geteuid() or found.st_mode & 0o077 or found.st_size != len(data):
-                _deny("candidate archive identity mismatched", code="AUDIT_UNAVAILABLE")
-            actual = bytearray()
-            while len(actual) <= _MAX_BYTES:
-                part = os.read(check_fd, min(65536, _MAX_BYTES + 1 - len(actual)))
-                if not part:
-                    break
-                actual.extend(part)
-            if bytes(actual) != data:
-                _deny("candidate archive content mismatched", code="AUDIT_UNAVAILABLE")
-        finally:
-            os.close(check_fd)
+            os.close(archive_fd)
+    except OSError as exc:
+        raise clone.CandidateCloneError("AUDIT_UNAVAILABLE", "candidate archive persistence unavailable") from exc
     finally:
-        os.close(archive_fd)
+        os.close(root_fd)
 
 
 def discard_untracked_candidate_file(

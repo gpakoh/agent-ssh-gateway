@@ -192,3 +192,63 @@ def test_discard_archive_collision_keeps_original_bytes(registry_fixture, monkey
     with pytest.raises(CandidateCloneError, match="archive"):
         discard_untracked_candidate_file(**params)
     assert path.read_bytes() == b"abandoned scratch\n"
+
+
+@pytest.mark.parametrize("fail_parent_sync", [False, True])
+def test_discard_syncs_archive_parent_before_original_rename(
+    registry_fixture, monkeypatch, fail_parent_sync,
+):
+    import stat
+
+    from examples.mcp_server import candidate_file_discard as module
+
+    _, path, params = _setup(registry_fixture, monkeypatch)
+    parent = params["journal_root"].stat()
+    original_fsync = module.os.fsync
+    synced = []
+
+    def sync(fd):
+        info = os.fstat(fd)
+        if stat.S_ISDIR(info.st_mode) and (info.st_dev, info.st_ino) == (parent.st_dev, parent.st_ino):
+            # The source must still exist and the exact archive must already be present.
+            assert path.read_bytes() == b"abandoned scratch\n"
+            archives = list((params["journal_root"] / "candidate-file-archive").glob("*.blob"))
+            assert len(archives) == 1
+            assert archives[0].read_bytes() == b"abandoned scratch\n"
+            synced.append(True)
+            if fail_parent_sync:
+                raise OSError("directory fsync failed")
+        return original_fsync(fd)
+
+    monkeypatch.setattr(module.os, "fsync", sync)
+    if fail_parent_sync:
+        with pytest.raises(CandidateCloneError) as exc_info:
+            discard_untracked_candidate_file(**params)
+        assert exc_info.value.code == "AUDIT_UNAVAILABLE"
+        assert path.read_bytes() == b"abandoned scratch\n"
+    else:
+        assert discard_untracked_candidate_file(**params)["discarded"]
+        assert not path.exists()
+    assert synced
+
+
+def test_discard_zero_progress_archive_write_fails_closed(registry_fixture, monkeypatch):
+    from examples.mcp_server import candidate_file_discard as module
+
+    _, path, params = _setup(registry_fixture, monkeypatch)
+    original_write = module.os.write
+    injected = False
+
+    def write(fd, data):
+        nonlocal injected
+        if not injected and bytes(data) == b"abandoned scratch\n":
+            injected = True
+            return 0
+        return original_write(fd, data)
+
+    monkeypatch.setattr(module.os, "write", write)
+    with pytest.raises(CandidateCloneError) as exc_info:
+        discard_untracked_candidate_file(**params)
+    assert injected
+    assert exc_info.value.code == "AUDIT_UNAVAILABLE"
+    assert path.read_bytes() == b"abandoned scratch\n"
