@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import os
+import secrets
 from pathlib import Path
 from typing import Any
 
@@ -450,17 +452,30 @@ async def coord_board(
     )
 
 
+# Process-local signing key: restart invalidates unfinished review chains.
+# Bind to the authenticated caller rather than a transient HTTP session.
+_REVIEW_SECRET = secrets.token_bytes(32)
+
+
 async def coord_open(
     project: str, issue_number: int, history_cursor: str | None = None,
 ) -> dict[str, Any]:
-    """Read recent evidence or follow history_older_cursor; partial pages never grant a close lease."""
+    """Read recent evidence, older pages, or start a sequential review with history_cursor='review'."""
     tool = "coord_open"
     try:
         owner, repo = await _connection(tool, project, write=False)
+        review_key = None
+        if isinstance(history_cursor, str) and (
+            history_cursor == "review" or history_cursor.startswith("review:")
+        ):
+            principal = _principal()
+            if principal is None:
+                raise PermissionError("authenticated caller required for history review")
+            review_key = hmac.digest(_REVIEW_SECRET, principal.encode("ascii"), "sha256")
         async with server_attr("GiteaClient")(os.environ["GITEA_TOKEN"]) as client:
             thread = await open_thread(
                 client, owner, repo, issue_number, allow_partial=True, recent_preview=True,
-                history_cursor=history_cursor,
+                history_cursor=history_cursor, review_key=review_key,
             )
     except Exception as exc:
         return _fail(tool, exc)
@@ -545,9 +560,10 @@ async def coord_close(
     """Explicitly close one reviewed, resolved coordination Issue.
 
     Requires repo+admin scope and an existing trusted resolved report. Read
-    coord_open.close_state_sha256, review the report/discussion, then supply
-    that exact lease and resolution_event_id. reason records the operator's
-    explicit close decision. No automatic close follows merge or resolved.
+    coord_open.close_state_sha256 (or completed sequential review receipt),
+    review the report/discussion, then supply that exact lease and
+    resolution_event_id. reason records the operator's explicit close
+    decision. No automatic close follows merge or resolved.
 
     Existing comments are retained without duplication. Attempts are journaled
     under the configured audit directory; retries after dispatch are read-only.
