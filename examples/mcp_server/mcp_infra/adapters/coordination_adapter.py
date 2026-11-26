@@ -74,11 +74,35 @@ async def _connection(tool: str, project: str, *, write: bool) -> tuple[str, str
 
 _PREVIEW_READ_TIMEOUT = 8.0  # Shared budget for the page's provider probes.
 _THREAD_READ_TIMEOUT = 3.0  # A single slow thread must not consume the whole page.
+# Request-local observation, including failed reads. Never reused across calls.
+_ThreadObservation = tuple[str | None, str]
+_ThreadObservations = dict[int, _ThreadObservation]
+
+
+async def _observe_thread(
+    client: Any, owner: str, repo: str, number: int, remaining: float,
+) -> _ThreadObservation:
+    try:
+        state, incomplete = await asyncio.wait_for(
+            preview_thread_state(client, owner, repo, number),
+            timeout=min(remaining, _THREAD_READ_TIMEOUT),
+        )
+        if state is not None and state not in {"open", "accepted", "waiting_review", "resolved"}:
+            return None, "error"
+    except TimeoutError:
+        return None, "timeout"
+    except Exception:
+        # Cancellation (BaseException) still propagates.
+        return None, "error"
+    if incomplete or state is None:
+        return None, "incomplete"
+    return state, "verified"
 
 
 async def _verified_preview(
     client: Any, owner: str, repo: str, all_threads: list[dict[str, Any]], limit: int,
     offset: int = 0,
+    observations: _ThreadObservations | None = None,
 ) -> tuple[list[dict[str, Any]], list[int], int, bool, int | None]:
     """Backfill unreadable threads from a capped lookahead, never invent states.
 
@@ -102,25 +126,17 @@ async def _verified_preview(
             deadline_reached = True
             break
         examined += 1
-        try:
-            state, incomplete = await asyncio.wait_for(
-                preview_thread_state(client, owner, repo, item["number"]),
-                timeout=min(remaining, _THREAD_READ_TIMEOUT),
-            )
-        except TimeoutError:
-            timed_out_thread = item["number"]
-            incomplete_numbers.append(timed_out_thread)
-            if loop.time() >= deadline:
-                deadline_reached = True
-                break
-            continue
-        except Exception:
-            # Preserve verified read-only results when one provider read fails.
-            # Caller cancellation (BaseException) still propagates.
-            incomplete_numbers.append(item["number"])
-            continue
-        if incomplete or state is None:
-            incomplete_numbers.append(item["number"])
+        number = item["number"]
+        state, outcome = await _observe_thread(client, owner, repo, number, remaining)
+        if observations is not None:
+            observations[number] = (state, outcome)
+        if outcome != "verified":
+            incomplete_numbers.append(number)
+            if outcome == "timeout":
+                timed_out_thread = number
+                if loop.time() >= deadline:
+                    deadline_reached = True
+                    break
             continue
         verified.append({**item, "coord_state": state})
     return verified, incomplete_numbers, examined, deadline_reached, timed_out_thread
@@ -265,6 +281,7 @@ async def _project_resume(client: Any, owner: str, repo: str) -> dict[str, Any]:
 async def _verified_global_summary(
     client: Any, owner: str, repo: str, all_threads: list[dict[str, Any]],
     source_scan_truncated: bool,
+    observations: _ThreadObservations | None = None,
 ) -> dict[str, Any]:
     """Opt-in bounded projection, never infer a state for unreadable history.
 
@@ -281,6 +298,7 @@ async def _verified_global_summary(
     timed_out_thread = None
     timed_out_numbers: list[int] = []
     probe_errors: list[int] = []
+    reused = 0
     for item in all_threads[:_SUMMARY_MAX_THREADS]:
         remaining = deadline - loop.time()
         if remaining <= 0:
@@ -288,32 +306,23 @@ async def _verified_global_summary(
             break
         number = item["number"]
         examined += 1
-        try:
-            state, incomplete = await asyncio.wait_for(
-                preview_thread_state(client, owner, repo, number),
-                timeout=min(remaining, _THREAD_READ_TIMEOUT),
-            )
-            if state is not None and state not in counts:
-                raise ValueError("invalid coordination state in verified summary")
-        except TimeoutError:
-            unknown.append(number)
-            timed_out_thread = number
-            timed_out_numbers.append(number)
-            if loop.time() >= deadline:
-                deadline_reached = True
-                break
-            continue
-        except Exception:
-            # A read-only projection must not lose earlier verified evidence
-            # or the independent resume result because one provider read fails.
-            # Caller cancellation (BaseException) still propagates.
-            unknown.append(number)
-            probe_errors.append(number)
-            continue
-        if incomplete or state is None:
-            unknown.append(number)
+        if observations is not None and number in observations:
+            state, outcome = observations[number]
+            reused += 1
         else:
+            state, outcome = await _observe_thread(client, owner, repo, number, remaining)
+        if outcome == "verified" and state is not None:
             counts[state] += 1
+        else:
+            unknown.append(number)
+            if outcome == "timeout":
+                timed_out_thread = number
+                timed_out_numbers.append(number)
+                if loop.time() >= deadline:
+                    deadline_reached = True
+                    break
+            elif outcome == "error":
+                probe_errors.append(number)
     exact = (
         not source_scan_truncated
         and examined == len(all_threads)
@@ -334,6 +343,7 @@ async def _verified_global_summary(
         "timed_out_thread_number": timed_out_thread,
         "timed_out_thread_numbers": timed_out_numbers,
         "probe_error_thread_numbers": probe_errors,
+        "reused_preview_thread_count": reused,
         "source_scan_truncated": source_scan_truncated,
         "note": "Non-atomic read-only observation; counts are lower bounds if not exact",
     }
@@ -354,11 +364,12 @@ async def coord_inbox(
         owner, repo = await _connection(tool, project, write=False)
         async with server_attr("GiteaClient")(os.environ["GITEA_TOKEN"]) as client:
             all_threads, scan_truncated = await list_threads_preview(client, owner, repo)
+            observations: _ThreadObservations | None = {} if include_summary else None
             threads, incomplete_thread_numbers, examined, deadline_reached, timed_out_thread = await _verified_preview(
-                client, owner, repo, all_threads, limit, offset
+                client, owner, repo, all_threads, limit, offset, observations
             )
             summary = (
-                await _verified_global_summary(client, owner, repo, all_threads, scan_truncated)
+                await _verified_global_summary(client, owner, repo, all_threads, scan_truncated, observations)
                 if include_summary else None
             )
     except Exception as exc:
@@ -400,13 +411,14 @@ async def coord_board(
         owner, repo = await _connection(tool, project, write=False)
         async with server_attr("GiteaClient")(os.environ["GITEA_TOKEN"]) as client:
             all_threads, scan_truncated = await list_threads_preview(client, owner, repo)
+            observations: _ThreadObservations | None = {} if include_summary else None
             enriched, incomplete_thread_numbers, examined, deadline_reached, timed_out_thread = await _verified_preview(
-                client, owner, repo, all_threads, limit, offset
+                client, owner, repo, all_threads, limit, offset, observations
             )
             columns = board_from_threads(enriched)
             if include_summary:
                 summary, resume = await asyncio.gather(
-                    _verified_global_summary(client, owner, repo, all_threads, scan_truncated),
+                    _verified_global_summary(client, owner, repo, all_threads, scan_truncated, observations),
                     _project_resume(client, owner, repo),
                 )
             else:
