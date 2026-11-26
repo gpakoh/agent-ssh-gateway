@@ -609,16 +609,87 @@ async def test_branch_protection_read_disabled_null_yields_usable_cas_snapshot(m
 
 
 @pytest.mark.asyncio
-async def test_branch_protection_read_rejects_null_if_checks_enabled(monkeypatch):
-    client = FakeGovernanceClient(
-        protection=_protection(enable_status_check=True, status_check_contexts=None)
-    )
-    _setup(monkeypatch, client)
+async def test_branch_protection_enabled_null_is_unknown_but_repairable(monkeypatch):
+    client = FakeGovernanceClient(protection=_protection(status_check_contexts=None))
+    audit = _setup(monkeypatch, client)
 
     result = await remote.gitea_get_branch_protection("owner", "repo", PROTECTION_NAME)
+    assert result["ok"] is True
+    state = result["result"]["state"]
+    assert state == {"exists": True, "protection": _protection(status_check_contexts=None)}
+    lease = result["result"]["state_sha256"]
+    assert lease != _protection_state_sha(_protection(status_check_contexts=[]))
+    assert remote._gitea_branch_ci_policy(client.protection) == "CI_POLICY_UNKNOWN"
+    assert client.protection_update_calls == []
 
+    updated = await remote.gitea_set_branch_protection(
+        "owner", "repo", PROTECTION_NAME, lease,
+        True, ["CI/CD / test (pull_request)"], 1, True, True, True,
+        "restore explicitly required CI while preserving approvals and protection",
+    )
+    assert updated["ok"] is True
+    assert updated["result"]["state"]["protection"]["status_check_contexts"] == [
+        "CI/CD / test (pull_request)"
+    ]
+    assert len(client.protection_update_calls) == 1
+    assert len(audit.required) == 1
+
+
+@pytest.mark.parametrize(
+    ("enabled", "contexts", "approvals", "outdated", "rejected", "admin_override"),
+    [
+        (False, [], 1, True, True, True),
+        (True, [], 1, True, True, True),
+        (True, ["ci"], 0, True, True, True),
+        (True, ["ci"], 1, False, True, True),
+        (True, ["ci"], 1, True, False, True),
+        (True, ["ci"], 1, True, True, False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_branch_protection_unknown_contexts_cannot_weaken_rule(
+    monkeypatch, enabled, contexts, approvals, outdated, rejected, admin_override
+):
+    client = FakeGovernanceClient(protection=_protection(status_check_contexts=None))
+    audit = _setup(monkeypatch, client)
+    lease = remote._branch_protection_state_sha256(
+        {"exists": True, "protection": client.protection}
+    )
+
+    result = await remote.gitea_set_branch_protection(
+        "owner", "repo", PROTECTION_NAME, lease,
+        enabled, contexts, approvals, outdated, rejected, admin_override,
+        "unsafe recovery must not mutate",
+    )
     assert result["ok"] is False
-    assert result["error"]["code"] == "INVALID_INPUT"
+    assert client.protection_update_calls == []
+    assert audit.required == []
+    assert client.protection == _protection(status_check_contexts=None)
+
+
+@pytest.mark.asyncio
+async def test_branch_protection_unknown_contexts_cannot_delete_rule(monkeypatch):
+    client = FakeGovernanceClient(protection=_protection(status_check_contexts=None))
+    audit = _setup(monkeypatch, client)
+    lease = remote._branch_protection_state_sha256(
+        {"exists": True, "protection": client.protection}
+    )
+    result = await remote.gitea_delete_branch_protection(
+        "owner", "repo", PROTECTION_NAME, lease, "must not delete unknown rule"
+    )
+    assert result["ok"] is False
+    assert client.protection_delete_calls == []
+    assert audit.required == []
+
+
+@pytest.mark.asyncio
+async def test_branch_protection_missing_context_field_stays_invalid(monkeypatch):
+    protection = _protection()
+    del protection["status_check_contexts"]
+    client = FakeGovernanceClient(protection=protection)
+    _setup(monkeypatch, client)
+    result = await remote.gitea_get_branch_protection("owner", "repo", PROTECTION_NAME)
+    assert result["ok"] is False
     assert client.protection_update_calls == []
 
 

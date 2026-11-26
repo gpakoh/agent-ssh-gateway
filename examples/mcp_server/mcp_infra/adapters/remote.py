@@ -576,16 +576,21 @@ def _branch_protection_snapshot(payload: Any) -> dict[str, Any]:
         raise ValueError("Gitea branch protection rule_name must be string or null")
     if branch_name is not None and not isinstance(branch_name, str):
         raise ValueError("Gitea branch protection branch_name must be string or null")
-    contexts = payload.get("status_check_contexts")
-    # Gitea reports null when required checks are explicitly disabled.
-    # Preserve strict rejection of null while checks are enabled.
+    if "status_check_contexts" not in payload:
+        raise ValueError("Gitea branch protection status_check_contexts is missing")
+    contexts = payload["status_check_contexts"]
+    # Disabled checks may be serialized as null by Gitea. Enabled checks
+    # with explicit null remain UNKNOWN, distinct from an empty context list.
+    # The snapshot is for administrative CAS only, never merge admission.
     if contexts is None and payload["enable_status_check"] is False:
         contexts = []
     return {
         "rule_name": rule_name,
         "branch_name": branch_name,
         "enable_status_check": payload["enable_status_check"],
-        "status_check_contexts": _branch_protection_contexts(contexts),
+        "status_check_contexts": (
+            None if contexts is None else _branch_protection_contexts(contexts)
+        ),
         "required_approvals": approvals,
         "block_on_outdated_branch": payload["block_on_outdated_branch"],
         "block_on_rejected_reviews": payload["block_on_rejected_reviews"],
@@ -649,6 +654,31 @@ def _branch_protection_matches(
     snapshot: dict[str, Any], desired: dict[str, Any]
 ) -> bool:
     return all(snapshot.get(field) == desired[field] for field in _GITEA_BRANCH_PROTECTION_FIELDS)
+
+
+def _unknown_branch_protection_contexts(state: dict[str, Any]) -> bool:
+    protection = state.get("protection")
+    return isinstance(protection, dict) and protection["status_check_contexts"] is None
+
+
+def _unknown_branch_protection_repair_allowed(
+    state: dict[str, Any], desired: dict[str, Any]
+) -> bool:
+    """Recover only by installing nonempty checks without weakening known guards."""
+    protection = state["protection"]
+    return (
+        desired["enable_status_check"] is True
+        and bool(desired["status_check_contexts"])
+        and desired["required_approvals"] >= protection["required_approvals"]
+        and all(
+            not protection[field] or desired[field] is True
+            for field in (
+                "block_on_outdated_branch",
+                "block_on_rejected_reviews",
+                "block_admin_merge_override",
+            )
+        )
+    )
 
 
 def _configured_workflow_count(payload: Any) -> int | None:
@@ -4470,6 +4500,16 @@ async def gitea_set_branch_protection(
                     },
                     source="gitea",
                 )
+            if _unknown_branch_protection_contexts(
+                current_state
+            ) and not _unknown_branch_protection_repair_allowed(current_state, desired):
+                return tool_error(
+                    tool=tool,
+                    code="POLICY_DENIED",
+                    message="Unknown required CI contexts may only be repaired without weakening protection",
+                    details={"mutation_occurred": False},
+                    source="gitea",
+                )
             current_protection = current_state.get("protection")
             if isinstance(current_protection, dict) and _branch_protection_matches(
                 current_protection, desired
@@ -4718,6 +4758,14 @@ async def gitea_delete_branch_protection(
                         "observed_state_sha256": current_sha256,
                         "mutation_occurred": False,
                     },
+                    source="gitea",
+                )
+            if _unknown_branch_protection_contexts(current_state):
+                return tool_error(
+                    tool=tool,
+                    code="POLICY_DENIED",
+                    message="Repair unknown required CI contexts before deleting protection",
+                    details={"mutation_occurred": False},
                     source="gitea",
                 )
             if current_state["exists"] is False:
