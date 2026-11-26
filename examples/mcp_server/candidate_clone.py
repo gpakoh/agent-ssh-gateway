@@ -1270,6 +1270,65 @@ def _reject_symlinked_git_dir(candidate_root: Path) -> None:
         raise _fail("WORKSPACE_CONTENDED", "candidate clone is not a git worktree")
 
 
+def _verify_unmodified_partial_tree(candidate_root: Path, head_sha: str, source_project: str) -> None:
+    """Prove a registry-removed worktree is only a subset of its unchanged base.
+
+    This is not a general dirty-worktree cleanup. Missing tracked paths may be
+    the result of an interrupted rmtree, but no staged or surviving changed
+    bytes, untracked entries (including ignored files), or Git links qualify.
+    The caller must already have the exact original cleanup journal and root
+    inode, and still enforce the ordinary abandonment and reference guards.
+    """
+    from examples.mcp_server.candidate_orphan_finalize import _verify_subset
+
+    # _run_git strips surrounding whitespace, so use NUL-delimited
+    # name-status records rather than porcelain's leading space.
+    changes = _run_git(
+        candidate_root,
+        ["diff", "--name-status", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", "HEAD", "--"],
+        operation="inspect partial cleanup deletions",
+    ).split("\0")
+    if (
+        len(changes) < 3 or changes[-1] != "" or len(changes) % 2 != 1
+        or any(
+            code != "D" or not name
+            for code, name in zip(changes[0:-1:2], changes[1:-1:2], strict=True)
+        )
+    ):
+        raise _fail("WORKSPACE_CONTENDED", "partial candidate cleanup is not deletion-only")
+
+    tree = _run_git(
+        candidate_root,
+        ["ls-tree", "-r", "-z", "--full-tree", head_sha],
+        operation="inspect partial cleanup base tree",
+    )
+    index = _run_git(
+        candidate_root, ["ls-files", "--stage", "-z"],
+        operation="inspect partial cleanup index",
+    )
+    if len(tree) > 4_000_000 or len(index) > 4_000_000:
+        raise _fail("CHECK_FAILED", "partial candidate index proof exceeds safe bounds")
+    expected = []
+    for entry in tree.split("\0"):
+        if not entry:
+            continue
+        identity, name = entry.split("\t", 1)
+        mode, kind, oid = identity.split(" ")
+        if kind != "blob" or mode not in {"100644", "100755", "120000"}:
+            raise _fail("WORKSPACE_CONTENDED", "partial candidate cleanup contains unsupported Git entries")
+        expected.append(f"{mode} {oid} 0\t{name}")
+    if len(expected) > 20_000 or sorted(expected) != sorted(item for item in index.split("\0") if item):
+        raise _fail("WORKSPACE_CONTENDED", "partial candidate index differs from the unchanged base")
+
+    # Reuse the delivered-subset walker, which checks surviving bytes and
+    # rejects extra paths, including ignored files and special entries.
+    _verify_subset(
+        candidate_root, candidate_root, head_sha,
+        allow_empty_site_audit_staging=(source_project == "site-audit-platform"),
+        allow_retained_git_metadata=True,
+    )
+
+
 def _verify_candidate_clean(
     candidate_root: Path,
     *,
@@ -1278,6 +1337,7 @@ def _verify_candidate_clean(
     branch: str,
     head_sha: str,
     expected_registry_root: str,
+    allow_partial_unmodified_cleanup: bool = False,
 ) -> None:
     _reject_symlinked_git_dir(candidate_root)
     metadata = _read_metadata(candidate_root)
@@ -1300,7 +1360,7 @@ def _verify_candidate_clean(
         ["rev-parse", "HEAD"],
         operation="read candidate head",
     ).lower()
-    if dirty or current_branch != branch or current_head != head_sha:
+    if (dirty and not allow_partial_unmodified_cleanup) or current_branch != branch or current_head != head_sha:
         raise _fail(
             "WORKSPACE_CONTENDED",
             "candidate git state does not match cleanup expectations",
@@ -1311,7 +1371,11 @@ def _verify_candidate_clean(
                 "dirty": dirty,
             },
         )
-    _require_tracked_files_match_head(candidate_root)
+    if dirty:
+        _require_cleanup_tree_removable(candidate_root, expected_dev=candidate_root.lstat().st_dev)
+        _verify_unmodified_partial_tree(candidate_root, head_sha, source_project)
+    else:
+        _require_tracked_files_match_head(candidate_root)
     evidence = _candidate_active_evidence_details(candidate_root)
     if evidence is not None:
         raise _fail(
@@ -3554,6 +3618,10 @@ def _cleanup_candidate_locked(
             branch=expected_branch,
             head_sha=expected_head_sha,
             expected_registry_root=expected_registry_root,
+            allow_partial_unmodified_cleanup=(
+                abandon_unmodified and phase == "registry_removed"
+                and not _registry_has_candidate(config_dir, project_id)
+            ),
         )
         _require_no_inbound_candidate_dependencies(candidates_root, candidate_root)
         if abandon_unmodified:
@@ -3629,6 +3697,10 @@ def _cleanup_candidate_locked(
                 branch=expected_branch,
                 head_sha=expected_head_sha,
                 expected_registry_root=expected_registry_root,
+                allow_partial_unmodified_cleanup=(
+                    abandon_unmodified and phase == "registry_removed"
+                    and not _registry_has_candidate(config_dir, project_id)
+                ),
             )
         _enforce_reference_guard(reference_guard)
         if not partial_cleanup_tail:
