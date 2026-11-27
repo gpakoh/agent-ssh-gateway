@@ -252,6 +252,173 @@ async def test_sync_mcp_tool_worker_is_joined_on_anyio_cancellation(
 
 
 @pytest.mark.asyncio
+async def test_batch_discard_excludes_other_real_mcp_invocations(monkeypatch):
+    """Both directions of the maintenance admission must be fail-closed."""
+    import threading
+
+    from mcp.server.fastmcp import FastMCP
+
+    from examples.mcp_server.mcp_infra import tool_registry
+
+    isolated = FastMCP("candidate-maintenance-dispatch")
+    monkeypatch.setattr(tool_registry.runtime, "get_mcp", lambda: isolated)
+    monkeypatch.setattr(tool_registry, "should_register_tool", lambda _name: True)
+    writer_entered, writer_release = threading.Event(), threading.Event()
+    batch_entered, batch_release = asyncio.Event(), asyncio.Event()
+    invoked = []
+
+    @tool_registry.register_tool("workspace_file_edit")
+    def writer() -> dict:
+        invoked.append("writer")
+        writer_entered.set()
+        return {"ok": writer_release.wait(3.0), "result": {}}
+
+    @tool_registry.register_tool("candidate_discard_untracked_files")
+    async def batch() -> dict:
+        invoked.append("batch")
+        batch_entered.set()
+        await batch_release.wait()
+        return {"ok": True, "result": {}}
+
+    @tool_registry.register_tool("gitea_push_verified_commit")
+    async def push() -> dict:
+        invoked.append("push")
+        return {"ok": True, "result": {}}
+
+    @tool_registry.register_tool("health")
+    def health() -> dict:
+        return {"ok": True, "result": {}}
+
+    pending = asyncio.create_task(isolated.call_tool("workspace_file_edit", {}))
+    try:
+        assert await asyncio.to_thread(writer_entered.wait, 2.0)
+        denied = await asyncio.wait_for(
+            isolated.call_tool("candidate_discard_untracked_files", {}), 0.8,
+        )
+        assert denied.isError is True
+        assert denied.structuredContent["error"]["code"] == "WORKSPACE_CONTENDED"
+        assert invoked == ["writer"]
+    finally:
+        writer_release.set()
+        await asyncio.wait_for(pending, 3.0)
+
+    cleanup = asyncio.create_task(isolated.call_tool("candidate_discard_untracked_files", {}))
+    try:
+        await asyncio.wait_for(batch_entered.wait(), 2.0)
+        for name in ("workspace_file_edit", "gitea_push_verified_commit", "candidate_discard_untracked_files"):
+            denied = await asyncio.wait_for(isolated.call_tool(name, {}), 0.8)
+            assert denied.isError is True
+            assert denied.structuredContent["error"]["code"] == "WORKSPACE_CONTENDED"
+        assert invoked == ["writer", "batch"]
+        assert (await isolated.call_tool("health", {})).isError is False
+    finally:
+        batch_release.set()
+        assert (await asyncio.wait_for(cleanup, 2.0)).isError is False
+    assert (await isolated.call_tool("gitea_push_verified_commit", {})).isError is False
+    assert invoked == ["writer", "batch", "push"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_sync_writer_retains_shared_admission(monkeypatch):
+    import threading
+
+    from mcp.server.fastmcp import FastMCP
+
+    from examples.mcp_server.mcp_infra import tool_registry
+
+    isolated = FastMCP("candidate-maintenance-sync-cancellation")
+    monkeypatch.setattr(tool_registry.runtime, "get_mcp", lambda: isolated)
+    monkeypatch.setattr(tool_registry, "should_register_tool", lambda _name: True)
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    @tool_registry.register_tool("workspace_apply_patch")
+    def writer() -> dict:
+        entered.set()
+        try:
+            return {"ok": release.wait(3.0), "result": {}}
+        finally:
+            finished.set()
+
+    @tool_registry.register_tool("candidate_discard_untracked_files")
+    async def batch() -> dict:
+        return {"ok": True, "result": {}}
+
+    pending = asyncio.create_task(isolated.call_tool("workspace_apply_patch", {}))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2.0)
+        pending.cancel()
+        await asyncio.sleep(0)
+        denied = await asyncio.wait_for(
+            isolated.call_tool("candidate_discard_untracked_files", {}), 0.8,
+        )
+        assert denied.isError is True
+        assert denied.structuredContent["error"]["code"] == "WORKSPACE_CONTENDED"
+        assert not finished.is_set()
+    finally:
+        release.set()
+        try:
+            await asyncio.wait_for(pending, 2.0)
+        except asyncio.CancelledError:
+            pass
+    assert await asyncio.to_thread(finished.wait, 2.0)
+    # The worker's finally block returns before its admission context exits.
+    for _ in range(50):
+        result = await isolated.call_tool("candidate_discard_untracked_files", {})
+        if not result.isError:
+            break
+        await asyncio.sleep(0.01)
+    assert result.isError is False
+
+
+@pytest.mark.asyncio
+async def test_cancelled_batch_mcp_transport_retains_admission_until_worker_finishes(monkeypatch):
+    """Cancelling the caller must not reopen the write plane while a worker lives."""
+    from mcp.server.fastmcp import FastMCP
+
+    from examples.mcp_server.mcp_infra import tool_registry
+
+    isolated = FastMCP("candidate-maintenance-cancellation")
+    monkeypatch.setattr(tool_registry.runtime, "get_mcp", lambda: isolated)
+    monkeypatch.setattr(tool_registry, "should_register_tool", lambda _name: True)
+    entered, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    invoked = []
+
+    @tool_registry.register_tool("candidate_discard_untracked_files")
+    async def batch() -> dict:
+        entered.set()
+        await release.wait()
+        finished.set()
+        return {"ok": True, "result": {}}
+
+    @tool_registry.register_tool("git_commit")
+    async def commit() -> dict:
+        invoked.append(True)
+        return {"ok": True, "result": {}}
+
+    pending = asyncio.create_task(isolated.call_tool("candidate_discard_untracked_files", {}))
+    try:
+        await asyncio.wait_for(entered.wait(), 2.0)
+        pending.cancel()
+        await asyncio.sleep(0)
+        blocked = await isolated.call_tool("git_commit", {})
+        assert blocked.isError is True
+        assert blocked.structuredContent["error"]["code"] == "WORKSPACE_CONTENDED"
+        assert not invoked
+        assert not finished.is_set()
+    finally:
+        release.set()
+        try:
+            await asyncio.wait_for(pending, 2.0)
+        except asyncio.CancelledError:
+            pass
+    await asyncio.wait_for(finished.wait(), 2.0)
+    # Give the task completion callback its event-loop turn.
+    await asyncio.sleep(0)
+    assert (await isolated.call_tool("git_commit", {})).isError is False
+    assert invoked == [True]
+
+
+@pytest.mark.asyncio
 async def test_sync_mcp_tool_does_not_starve_oauth_event_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

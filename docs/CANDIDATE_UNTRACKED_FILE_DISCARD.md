@@ -92,7 +92,18 @@ never overwrite a newly created original pathname. An archive/plan collision
 refuses replay even when content is identical. Archives remain private and
 are not automatically pruned.
 
-**Scope boundary:** the open-PR prohibition remains in force for this first
-batch implementation. Exact file-only quiescence for an active PR needs a
-separately reviewed lease that excludes concurrent writers and delivery.
-Neither the batch interface nor a successful archive constitutes that lease.
+At the real MCP dispatch boundary, batch maintenance acquires an exclusive
+process-local admission slot. Other registered invocations hold shared
+slots until their actual handler (including synchronous worker execution)
+finishes. Conflicts return retryable WORKSPACE_CONTENDED before invoking the
+handler. Health and tool/skill discovery remain available. Cancelling a
+transport does not release a running handler's slot; detached asynchronous
+handlers are retained until completion. Direct internal Python calls are
+not the protocol admission boundary.
+
+**Scope boundary:** the open-PR prohibition remains in force. The admission
+slot excludes concurrent MCP invocations in one process, not REST requests,
+other server processes, pre-existing detached jobs, external Gitea clients
+or host-side writers. Exact file-only quiescence for an active PR still needs
+a separately reviewed lease across those write planes. Neither this gate,
+the Git index interlock, nor a successful archive constitutes that lease.
