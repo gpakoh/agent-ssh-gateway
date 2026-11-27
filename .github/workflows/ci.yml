@@ -1080,7 +1080,9 @@ jobs:
     if: github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)
     name: E2E (Selenium)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Cold image acquisition has its own 600s bound before container creation.
+    # Leave headroom for runner provisioning, readiness, browser tests and cleanup.
+    timeout-minutes: 30
     # Gitea maps ubuntu-latest to nod-ci-python311, which intentionally has
     # Python tooling but no browser. The Gitea path starts a digest-pinned
     # Selenium sidecar in the existing job container's network namespace;
@@ -1265,8 +1267,6 @@ jobs:
         if: github.server_url != 'https://github.com'
         run: |
           set -euo pipefail
-          job_container="$(hostname)"
-          docker inspect "$job_container" >/dev/null
           selenium_image="ghcr.io/seleniumhq/standalone-chromium:150.0.7871.114-chromedriver-150.0.7871.114-grid-4.46.0-20260707@sha256:3400b92f1cddb2dfaaf358654e8f7d83d7be45192fb73c5f28c25faa28d36504"
           # SE_OPTS carries `--session-timeout`, the idle-session reaper. This is the
           # knob that actually caused the cascade in runs #13484/#13486: Grid's
@@ -1293,14 +1293,7 @@ jobs:
           # --cpus/--memory: the sidecar is a sibling container, so it
           # inherited none of the job's limits and could pull the whole runner
           # host's CPU into Chromium. Budget it like the job itself.
-          selenium_id="$(docker run -d \
-            --network "container:${job_container}" \
-            --shm-size=2g \
-            --cpus=2 \
-            --memory=3g \
-            -e SE_SESSION_REQUEST_TIMEOUT=600 \
-            -e SE_OPTS="--session-timeout 840" \
-            "$selenium_image")"
+          selenium_id="$(bash scripts/ci-selenium-sidecar.sh start "$selenium_image")"
           echo "E2E_SELENIUM_IMAGE=$selenium_image" >> "$GITHUB_ENV"
           echo "E2E_SELENIUM_CONTAINER=$selenium_id" >> "$GITHUB_ENV"
           echo "SELENIUM_REMOTE_URL=http://127.0.0.1:4444/wd/hub" >> "$GITHUB_ENV"
@@ -1321,7 +1314,7 @@ jobs:
           set -euo pipefail
           if [ -n "${SELENIUM_REMOTE_URL:-}" ]; then
             for attempt in 1 2; do
-              if uv run python - <<'PY'
+              if timeout -k 5 180 uv run python - <<'PY'
           import json
           import os
           import time
@@ -1336,9 +1329,9 @@ jobs:
           # Selenium Grid Standalone..." and was still not answering /status
           # 41s later. A 60x1s probe expired at 62s, both attempts failed, and
           # a perfectly healthy browser was reported as a missing toolchain
-          # (Connection refused x2). 180x1s keeps >2x headroom over the
-          # observed worst case while still fitting twice inside the job's
-          # 15-minute timeout alongside the container restarts.
+          # (Connection refused x2). A process deadline, not the count of
+          # HTTP attempts, bounds readiness wall time. Slow provisioning may
+          # still consume the job budget; never claim that a retry must fit.
           for _ in range(180):
               try:
                   with urllib.request.urlopen(status_url, timeout=2) as response:
@@ -1358,23 +1351,15 @@ jobs:
 
               echo "::warning::Selenium sidecar readiness attempt ${attempt}/2 failed"
               if [ -n "${E2E_SELENIUM_CONTAINER:-}" ]; then
-                docker inspect --format '{{json .State}}' "$E2E_SELENIUM_CONTAINER" || true
-                docker logs --tail 200 "$E2E_SELENIUM_CONTAINER" || true
+                timeout -k 5 20 docker inspect --format '{{json .State}}' "$E2E_SELENIUM_CONTAINER" || true
+                timeout -k 5 20 docker logs --tail 200 "$E2E_SELENIUM_CONTAINER" || true
               fi
               if [ "$attempt" -eq 2 ]; then
                 exit 1
               fi
 
-              docker rm -f "$E2E_SELENIUM_CONTAINER" >/dev/null 2>&1 || true
-              job_container="$(hostname)"
-              selenium_id="$(docker run -d \
-                --network "container:${job_container}" \
-                --shm-size=2g \
-                --cpus=2 \
-                --memory=3g \
-                -e SE_SESSION_REQUEST_TIMEOUT=600 \
-            -e SE_OPTS="--session-timeout 840" \
-                "$E2E_SELENIUM_IMAGE")"
+              # Do not create a sibling until exact old-container absence is proven.
+              selenium_id="$(bash scripts/ci-selenium-sidecar.sh replace "$E2E_SELENIUM_IMAGE")"
               E2E_SELENIUM_CONTAINER="$selenium_id"
               echo "E2E_SELENIUM_CONTAINER=$selenium_id" >> "$GITHUB_ENV"
             done
@@ -1418,18 +1403,7 @@ jobs:
 
       - name: Stop Selenium Chromium sidecar
         if: always() && github.server_url != 'https://github.com'
-        run: |
-          set +e
-          if [ -n "${E2E_SELENIUM_CONTAINER:-}" ]; then
-            docker stop --time 5 "$E2E_SELENIUM_CONTAINER" >/dev/null 2>&1
-            stop_status=$?
-            docker rm -f "$E2E_SELENIUM_CONTAINER" >/dev/null 2>&1
-            rm_status=$?
-            if [ "$stop_status" -ne 0 ] || [ "$rm_status" -ne 0 ]; then
-              echo "::warning::Selenium Chromium sidecar cleanup failed (docker stop=$stop_status, docker rm -f=$rm_status); teardown is non-fatal"
-            fi
-          fi
-          exit 0
+        run: bash scripts/ci-selenium-sidecar.sh finalize
 
   build-and-push:
     # Runs the build+smoke-test steps on BOTH a real push to master AND a
