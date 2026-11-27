@@ -7,10 +7,8 @@ instance is reached through runtime.get_mcp() instead of a module-level
 
 from __future__ import annotations
 
-import asyncio
 import hashlib as _hashlib
 import json
-import threading
 import time as _time
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -33,6 +31,7 @@ from .gateway_errors import (
     _gateway_error_hint,
     _gateway_error_message,
 )
+from .invocation_admission import admitted_async_call, admitted_sync_call
 
 
 def _envelope_to_call_tool_result(envelope: dict[str, Any]):
@@ -60,97 +59,6 @@ def _envelope_to_call_tool_result(envelope: dict[str, Any]):
     )
 
 
-# This interlock covers every registered MCP invocation in this process,
-# including delivery and generic command tools. It is deliberately not a
-# claim about REST, other processes, detached jobs or host-side writers.
-_EXCLUSIVE_INVOCATION = "candidate_discard_untracked_files"
-_OBSERVATION_ONLY = frozenset({"health", "tools_manifest", "gateway_catalog", "gateway_skill"})
-
-
-class _InvocationAdmission:
-    def __init__(self) -> None:
-        self._mutex = threading.Lock()
-        self._shared = 0
-        self._exclusive = False
-
-    def try_enter(self, name: str) -> Callable[[], None] | None:
-        if name in _OBSERVATION_ONLY:
-            return lambda: None
-        exclusive = name == _EXCLUSIVE_INVOCATION
-        with self._mutex:
-            if self._exclusive or (exclusive and self._shared):
-                return None
-            if exclusive:
-                self._exclusive = True
-            else:
-                self._shared += 1
-
-        def release() -> None:
-            with self._mutex:
-                if exclusive:
-                    self._exclusive = False
-                else:
-                    self._shared -= 1
-
-        return release
-
-
-_invocation_admission = _InvocationAdmission()
-_inflight_async_calls: set[asyncio.Task[Any]] = set()
-
-
-def _admission_denied(name: str) -> dict[str, Any]:
-    return tool_error(
-        tool=name, code="WORKSPACE_CONTENDED",
-        message="MCP invocation conflicts with exclusive candidate file maintenance",
-        retryable=True,
-        details={"admission": "mcp_process", "mutation_occurred": False},
-    )
-
-
-def _admitted_sync_call(name: str, call: Callable[[], Any]) -> Any:
-    # Acquire/release inside the worker, not around the awaiting transport.
-    # Even direct asyncio cancellation cannot release a living thread's lease.
-    release = _invocation_admission.try_enter(name)
-    if release is None:
-        return _admission_denied(name)
-    try:
-        return call()
-    finally:
-        release()
-
-
-async def _admitted_async_call(name: str, call: Callable[[], Awaitable[Any]]) -> Any:
-    if name in _OBSERVATION_ONLY:
-        return await call()
-    release = _invocation_admission.try_enter(name)
-    if release is None:
-        return _admission_denied(name)
-
-    async def invoke() -> Any:
-        return await call()
-
-    try:
-        task = asyncio.create_task(invoke())
-    except BaseException:
-        release()
-        raise
-    _inflight_async_calls.add(task)
-
-    def completed(done: asyncio.Task[Any]) -> None:
-        # The transport may have disappeared. Retain a strong task reference
-        # and the lease until the real invocation (including its thread work)
-        # ends. Retrieve exceptions even when no caller remains to await them.
-        try:
-            if not done.cancelled():
-                done.exception()
-        finally:
-            _inflight_async_calls.discard(done)
-            release()
-
-    task.add_done_callback(completed)
-    return await asyncio.shield(task)
-
 
 def register_tool(name: str):
     """Decorator: register MCP tool only if visible in the active mode.
@@ -175,7 +83,7 @@ def register_tool(name: str):
 
             @functools.wraps(func)
             async def async_result_wrapper(*args, **kwargs):
-                result = await _admitted_async_call(name, functools.partial(func, *args, **kwargs))
+                result = await admitted_async_call(name, functools.partial(func, *args, **kwargs))
                 if isinstance(result, dict) and "ok" in result:
                     return _envelope_to_call_tool_result(result)
                 return result
@@ -194,7 +102,7 @@ def register_tool(name: str):
             # AnyIO propagates request contextvars to the worker, preserving
             # the SDK's current MCP session and lifecycle owner.
             result = await anyio.to_thread.run_sync(
-                functools.partial(_admitted_sync_call, name, functools.partial(func, *args, **kwargs)),
+                functools.partial(admitted_sync_call, name, functools.partial(func, *args, **kwargs)),
                 abandon_on_cancel=False,
             )
             if isinstance(result, dict) and "ok" in result:
