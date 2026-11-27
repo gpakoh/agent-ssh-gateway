@@ -1312,6 +1312,10 @@ class TestE2eFailsClosedWithoutBrowserToolchain:
         assert not any("docker run -d" in s.get("run", "") for s in steps)
         helper = (ROOT / "scripts" / "ci-selenium-sidecar.sh").read_text(encoding="utf-8")
         assert helper.count("docker run -d") == 1
+        assert "docker run -d --pull=never" in helper
+        assert 'timeout -k 5 600 docker pull "$image"' in helper
+        assert helper.index("phase=preparing") < helper.index("docker pull") < helper.index("phase=starting")
+        assert wf["jobs"]["e2e"]["timeout-minutes"] * 60 >= 600 + 2 * 180 + 600 + 120
         runs = [helper]
 
         job_timeout_seconds = wf["jobs"]["e2e"]["timeout-minutes"] * 60

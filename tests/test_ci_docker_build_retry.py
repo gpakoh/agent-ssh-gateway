@@ -302,6 +302,8 @@ def test_ci_e2e_uses_digest_pinned_selenium_sidecar_and_requires_execution_proof
     assert 'bash scripts/ci-selenium-sidecar.sh start "$selenium_image"' in workflow
     assert 'bash scripts/ci-selenium-sidecar.sh replace "$E2E_SELENIUM_IMAGE"' in workflow
     assert 'docker inspect "$job_container"' in helper
+    assert 'timeout -k 5 600 docker pull "$image"' in helper
+    assert 'docker run -d --pull=never' in helper
     assert '--network "container:${job_container}"' in helper
     assert 'SELENIUM_REMOTE_URL=http://127.0.0.1:4444/wd/hub' in workflow
     assert "Put preinstalled ChromeDriver on PATH" in workflow

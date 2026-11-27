@@ -52,6 +52,18 @@ if a[0] == 'info':
     print(s['engine'])
 elif a[0] == 'inspect':
     pass
+elif a[:2] == ['image', 'inspect']:
+    sys.exit(0 if s.get('image_present', True) else 1)
+elif a[0] == 'pull':
+    assert a[1].rsplit('@sha256:', 1)[-1]
+    receipt = Path(os.environ['FAKE_RECEIPT']).read_text().strip().split('|')
+    assert receipt[:3] == ['preparing', s['engine'], '-']
+    if s.get('pull_effect', True):
+        s['image_present'] = True
+    if s.get('drift_after_pull'):
+        s['engine'] = 'different-engine'
+    save_state()
+    sys.exit(s.get('pull_rc', 0))
 elif a[:2] == ['rm', '-f']:
     assert a[2] in ('a'*64, 'b'*64)
     receipt = Path(os.environ['FAKE_RECEIPT']).read_text().strip().split('|')
@@ -76,6 +88,7 @@ elif a[0] == 'run':
     name = a[a.index('--name')+1]
     assert Path(os.environ['FAKE_RECEIPT']).read_text().strip().split('|') == ['starting', s['engine'], '-', name]
     assert '--memory=3g' in a and '--cpus=2' in a and '--shm-size=2g' in a
+    assert '--pull=never' in a and s.get('image_present', True)
     assert not s['containers']
     if s['run_effect']:
         s['containers'].append('b'*64)
@@ -395,3 +408,47 @@ def test_hanging_creation_preserves_uncertainty_and_never_replays(tmp_path, mode
     assert f.step(mode).returncode != 0
     assert f.count(["run"]) == 1
     assert f.count(["rm", "-f"]) == int(mode == "replace")
+
+@pytest.mark.parametrize("mode", ["start", "replace"])
+@pytest.mark.parametrize("cached", [True, False])
+def test_image_acquisition_is_separate_from_container_dispatch(tmp_path, mode, cached):
+    f = Fixture(tmp_path, existing=mode == "replace")
+    f.change(image_present=cached)
+    result = f.step(mode)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == NEW
+    calls = f.read()["calls"]
+    runs = [i for i, call in enumerate(calls) if call[0] == "run"]
+    pulls = [i for i, call in enumerate(calls) if call[0] == "pull"]
+    assert len(runs) == 1 and "--pull=never" in calls[runs[0]]
+    assert len(pulls) == int(not cached)
+    assert f.count(["image", "inspect"]) == 2
+    if pulls:
+        assert pulls[0] < runs[0]
+        assert calls[pulls[0]] == ["pull", IMAGE]
+    assert f.step("finalize").returncode == 0
+
+
+@pytest.mark.parametrize("mode", ["start", "replace"])
+@pytest.mark.parametrize("pull_rc,pull_effect", [(124, False), (124, True), (1, False), (0, False)])
+def test_failed_or_unproven_pull_never_dispatches_creation(tmp_path, mode, pull_rc, pull_effect):
+    f = Fixture(tmp_path, existing=mode == "replace")
+    f.change(image_present=False, pull_rc=pull_rc, pull_effect=pull_effect)
+    result = f.step(mode)
+    assert result.returncode != 0
+    assert f.receipt.read_text().startswith("preparing|engine-1|-|")
+    assert f.count(["pull"]) == 1 and f.count(["run"]) == 0
+    assert f.read()["containers"] == []
+    assert f.step("finalize").returncode == 0
+    assert f.step(mode).returncode != 0
+    assert f.count(["pull"]) == 1 and f.count(["run"]) == 0
+    assert f.count(["rm", "-f"]) == int(mode == "replace")
+
+
+def test_engine_change_during_pull_blocks_launch_and_finalization(tmp_path):
+    f = Fixture(tmp_path, existing=False)
+    f.change(image_present=False, drift_after_pull=True)
+    assert f.step("start").returncode != 0
+    assert f.receipt.read_text().startswith("preparing|engine-1|-|")
+    assert f.count(["run"]) == 0 and f.count(["rm", "-f"]) == 0
+    assert f.step("finalize").returncode != 0

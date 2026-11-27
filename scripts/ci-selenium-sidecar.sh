@@ -34,7 +34,7 @@ load_state() {
     valid_engine "$engine_id" || fail 'invalid receipt Engine'
     [[ "$name" == "$prefix-initial" || "$name" == "$prefix-replacement" ]] || fail 'invalid receipt name'
     case "$phase" in
-        starting) [[ "$id" == - ]] || fail 'invalid starting receipt' ;;
+        preparing|starting) [[ "$id" == - ]] || fail 'invalid pre-container receipt' ;;
         running|removing|removed) valid_id "$id" || fail 'invalid receipt container ID' ;;
         *) fail 'invalid receipt phase' ;;
     esac
@@ -63,14 +63,25 @@ retire() {
 }
 start() {
     local image="$1" suffix="$2" observed
+    [[ "$image" =~ @sha256:[0-9a-f]{64}$ ]] || fail 'digest-pinned image required'
     check_engine
-    timeout -k 5 20 docker inspect "$job_container" 9<&- >/dev/null || fail 'job container unavailable'
     name="$prefix-$suffix"
     id=-
+    # Image acquisition cannot create a sidecar. Record that fact before the
+    # potentially slow registry operation, and never let run pull implicitly.
+    phase=preparing
+    write_state
+    if ! timeout -k 5 20 docker image inspect "$image" 9<&- >/dev/null 2>&1; then
+        timeout -k 5 600 docker pull "$image" 9<&- >&2 || fail 'pinned image acquisition failed before container dispatch'
+    fi
+    check_engine
+    timeout -k 5 20 docker image inspect "$image" 9<&- >/dev/null || fail 'pinned image unavailable before container dispatch'
+    timeout -k 5 20 docker inspect "$job_container" 9<&- >/dev/null || fail 'job container unavailable'
+    check_engine
     phase=starting
     write_state
     # Bound the CLI wait, not the daemon outcome: a timeout leaves starting.
-    observed=$(timeout -k 5 180 docker run -d --name "$name" \
+    observed=$(timeout -k 5 180 docker run -d --pull=never --name "$name" \
         --network "container:${job_container}" \
         --shm-size=2g --cpus=2 --memory=3g \
         -e SE_SESSION_REQUEST_TIMEOUT=600 \
@@ -116,6 +127,7 @@ case "$mode" in
     finalize)
         load_state
         case "$phase" in
+            preparing) check_engine ;; # No container creation was dispatched.
             starting) fail "unresolved creation: $name" ;;
             running|removing) retire ;;
             removed) prove_absent ;;
