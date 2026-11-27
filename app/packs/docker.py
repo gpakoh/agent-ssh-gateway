@@ -3,6 +3,28 @@ from __future__ import annotations
 from app.command_policy import DestructivePattern, PatternSuggestion, Severity, SuggestionKind
 from app.packs import Pack
 
+# Cache cleanup detection follows the Docker/Buildx command path, not an
+# arbitrary later occurrence of "builder prune" in flag values or other
+# shell commands. This is a bounded informational pattern, not a shell parser.
+# Known options start with a dash; possessive repetition avoids exponential
+# backtracking on repeated short options with attached values (Python 3.11+).
+# A shell continuation removes the escaped newline, not a real argument
+# separator. Require horizontal whitespace and never cross a bare newline.
+_ARG_SPACE = r"(?:\\\n)*+[ \t]++(?:[ \t]|\\\n)*+"
+_OPTION_VALUE = r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|(?:[^\s;&|'\"`\\]|\\[^\r\n])++)"
+_DOCKER_PREFIX = (
+    r"(?<![\w-])docker(?:\.exe)?\b"
+    + r"(?:" + _ARG_SPACE + r"(?:--(?:config|context|host|log-level|tlscacert|tlscert|tlskey)"
+    + r"(?:=|" + _ARG_SPACE + r")" + _OPTION_VALUE
+    + r"|-[Hcl](?:=|" + _ARG_SPACE + r")?" + _OPTION_VALUE
+    + r"|--(?:debug|tls|tlsverify)(?:=(?:true|false))?|-D))*+" + _ARG_SPACE
+)
+_BUILDX_OPTIONS = (
+    r"(?:" + _ARG_SPACE + r"(?:--builder(?:=|" + _ARG_SPACE + r")" + _OPTION_VALUE
+    + r"|--debug(?:=(?:true|false))?|-D))*+" + _ARG_SPACE
+)
+
+
 DOCKER_PATTERNS: tuple[DestructivePattern, ...] = (
     DestructivePattern(name="system-prune",
         regex=r"docker\b.*?\bsystem\s+prune",
@@ -64,11 +86,17 @@ DOCKER_PATTERNS: tuple[DestructivePattern, ...] = (
         description="Stops/kills ALL running containers via command substitution.",
         suggestions=(PatternSuggestion("docker stop <container>", "Stop specific containers", kind=SuggestionKind.SAFER_ALTERNATIVE),)),
     DestructivePattern(name="builder-prune",
-        regex=r"docker\b.*?\bbuilder\s+prune",
+        regex=_DOCKER_PREFIX + r"builder" + _ARG_SPACE + r"prune(?![\w-])",
         reason="docker builder prune removes ALL build cache — rebuilds will be slow",
         severity=Severity.MEDIUM,
         description="Removes the entire build cache layer. All images must be rebuilt from scratch.",
         suggestions=(PatternSuggestion("docker builder ls", "List builders first", kind=SuggestionKind.PREVIEW_FIRST),)),
+    DestructivePattern(name="buildx-prune",
+        regex=_DOCKER_PREFIX + r"buildx" + _BUILDX_OPTIONS + r"prune(?![\w-])",
+        reason="docker buildx prune removes build cache from the selected builder",
+        severity=Severity.MEDIUM,
+        description="May discard shared cache and make subsequent CI builds slower.",
+        suggestions=(PatternSuggestion("docker buildx du", "Preview cache on the same builder and Docker context", kind=SuggestionKind.PREVIEW_FIRST),)),
     DestructivePattern(name="network-rm",
         regex=r"docker\b.*?\bnetwork\s+rm\b",
         reason="docker network rm can break connectivity between running containers",
