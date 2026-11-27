@@ -32,6 +32,7 @@ from app.workspace.registry import (
 )
 from examples.mcp_server.agent_sources import (
     ManagedSourceBundleError,
+    ManagedSourcePublicationStageError,
     _resolve_trusted_remote,
     _source_is_shallow,
     ensure_managed_source_bundle,
@@ -50,7 +51,10 @@ from examples.mcp_server.registered_source_clone import (
     RegisteredSourceCloneError,
     clone_registered_commit_via_bundle,
 )
-from examples.mcp_server.source_publication_policy import classify_source_failure_message
+from examples.mcp_server.source_publication_policy import (
+    SourceFailureCause,
+    classify_source_failure_message,
+)
 
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,160}$")
 _REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@+-]{0,200}$")
@@ -153,6 +157,40 @@ def _fail(
     details: dict[str, Any] | None = None,
 ) -> CandidateCloneError:
     return CandidateCloneError(code, message, retryable=retryable, details=details)
+
+
+_SOURCE_PUBLICATION_PHASES = frozenset({
+    "input_validation", "source_root", "remote_resolution", "scratch_init",
+    "remote_fetch", "commit_verification", "ref_update", "bundle_creation",
+    "bundle_verification", "artifact_install", "digest_binding",
+})
+_SOURCE_PUBLICATION_CAUSES = {
+    "timeout": SourceFailureCause.TIMEOUT,
+    "storage_full": SourceFailureCause.UNAVAILABLE,
+    "commit_unavailable": SourceFailureCause.MISSING_REF,
+    "authentication_failed": SourceFailureCause.AUTH,
+    "permission_denied": SourceFailureCause.PERMISSION,
+    "failed": SourceFailureCause.UNKNOWN,
+}
+
+
+def _source_failure_details(exc: ManagedSourceBundleError) -> dict[str, Any]:
+    """Keep validated publication evidence; never expose exception text or causes."""
+    if not isinstance(exc, ManagedSourcePublicationStageError):
+        return {"source_cause": classify_source_failure_message(str(exc)).value}
+    phase, reason, elapsed_ms = exc.phase, exc.reason, exc.elapsed_ms
+    if (
+        type(phase) is not str or phase not in _SOURCE_PUBLICATION_PHASES
+        or type(reason) is not str or reason not in _SOURCE_PUBLICATION_CAUSES
+        or type(elapsed_ms) is not int or not 0 <= elapsed_ms <= 600_000
+    ):
+        return {"source_cause": SourceFailureCause.UNKNOWN.value}
+    return {
+        "source_cause": _SOURCE_PUBLICATION_CAUSES[reason].value,
+        "source_phase": phase,
+        "source_reason": reason,
+        "source_elapsed_ms": elapsed_ms,
+    }
 
 
 def _validate_branch(branch: str) -> str:
@@ -2368,9 +2406,7 @@ def _prepare_candidate_locked(
                                     "base_ref": requested_ref,
                                     "base_sha": base_sha,
                                     "local_phase": exc.phase,
-                                    "source_cause": classify_source_failure_message(
-                                        str(remote_exc)
-                                    ).value,
+                                    **_source_failure_details(remote_exc),
                                 },
                             ) from remote_exc
                     else:
@@ -2397,7 +2433,7 @@ def _prepare_candidate_locked(
                         details={
                             "base_ref": requested_ref,
                             "base_sha": base_sha,
-                            "source_cause": classify_source_failure_message(str(exc)).value,
+                            **_source_failure_details(exc),
                         },
                     ) from exc
                 except ValueError as exc:
@@ -2441,7 +2477,7 @@ def _prepare_candidate_locked(
                             details={
                                 "base_ref": requested_ref,
                                 "base_sha": base_sha,
-                                "source_cause": classify_source_failure_message(str(exc)).value,
+                                **_source_failure_details(exc),
                             },
                         ) from exc
                 else:
