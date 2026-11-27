@@ -3490,15 +3490,43 @@ def candidate_cleanup(
 
     with _lineage_lock(workspace_root, expected_source_project, expected_branch):
         with project_registry_mutation_lock(journal_root):
+            # Bind a first-use lock marker only to an exact registered or
+            # already journaled candidate. Untrusted IDs cannot create roots.
+            registered = _registry_has_candidate(
+                config_dir, project_id, expected_root=expected_registry_root,
+            )
+            candidate_present = candidate_root.exists() or candidate_root.is_symlink()
+            allow_marker = False
+            if candidate_present:
+                root_dev, root_ino = _validate_candidate_root(candidate_root, candidates_root)
+                if registered:
+                    allow_marker = True
+                else:
+                    pending = _read_cleanup_tombstone(tombstone_path)
+                    allow_marker = (
+                        pending is not None
+                        and pending.get("phase") in {"prepared", "registry_removed"}
+                        and pending.get("root_dev") == root_dev
+                        and pending.get("root_ino") == root_ino
+                        and all(pending.get(key) == value for key, value in expected_identity.items())
+                    )
             # Use the same persistent inode as all verifier execution paths.
-            # A busy verifier must finish before its source is removed.
-            with terminal_verifier_lease(candidate_root) as verifier_lease:
+            with terminal_verifier_lease(
+                candidate_root, create_if_missing=allow_marker,
+            ) as verifier_lease:
                 if verifier_lease.state == "busy":
                     raise _fail(
                         "WORKSPACE_CONTENDED",
                         "candidate verifier still owns its environment",
                         retryable=True,
                         details={"failure_class": "verifier_busy"},
+                    )
+                if candidate_present and allow_marker and verifier_lease.state == "deferred_unsafe":
+                    raise _fail(
+                        "WORKSPACE_CONTENDED",
+                        "candidate verifier lease is unavailable",
+                        retryable=True,
+                        details={"failure_class": "verifier_lease_unavailable"},
                     )
                 receipt = _cleanup_candidate_locked(
                     project_id=project_id,
@@ -3522,7 +3550,9 @@ def candidate_cleanup(
                 # A missing root at admission may have appeared while the
                 # source transaction ran. Reobserve under lineage/registry locks.
                 if verifier_lease.state == "absent":
-                    with terminal_verifier_lease(candidate_root) as late_lease:
+                    with terminal_verifier_lease(
+                        candidate_root, create_if_missing=False,
+                    ) as late_lease:
                         cache_receipt = late_lease.reclaim(candidate_root)
                 else:
                     cache_receipt = verifier_lease.reclaim(candidate_root)

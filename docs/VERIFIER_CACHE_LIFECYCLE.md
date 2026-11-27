@@ -18,11 +18,14 @@ writing dependency state. New directories use a private umask.
 
 Normal guarded candidate_cleanup retains its Git/registry/delivery checks.
 It attempts an exact verifier lease inside the existing lineage and registry
-locks. An observed busy verifier blocks source removal. After proven terminal
-source absence it removes only the recognized .venv and tool-cache subtrees
-under that lease. A previously absent verifier root is checked again after
-the transaction. Busy or unsafe late observations defer cache reclamation
-rather than authorizing removal. The verifier root, lock inode, source
+locks. For an exact registered candidate or a bound pending cleanup journal,
+the lock marker is established even before the first verification starts.
+An observed busy or unavailable lease blocks source removal. After proven
+terminal source absence it removes only the recognized .venv and tool-cache
+subtrees under that lease. An absent configured verifier base permits no
+verifier writers; a late observation is still checked without creating a
+marker. Unsafe post-delivery cache observations defer reclamation rather than
+authorizing removal. The verifier root, lock inode, source
 metadata, unknown trees and canonical project environments are preserved.
 
 The result and success audit include verifier_cache_cleanup with state and

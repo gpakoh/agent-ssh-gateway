@@ -189,7 +189,7 @@ class VerifierCacheLease:
             return {"state": "deferred_unsafe", "removed_trees": removed}
 
 
-def _acquire(candidate_root: Path) -> VerifierCacheLease:
+def _acquire(candidate_root: Path, *, create_if_missing: bool) -> VerifierCacheLease:
     fd = None
     try:
         if (
@@ -205,13 +205,31 @@ def _acquire(candidate_root: Path) -> VerifierCacheLease:
         root = Path(verifier_project_root(str(candidate_root)))
         if root.parent != base:
             raise ValueError("verifier identity escaped root")
+        # The verifier may be starting for the first time. Establish its
+        # stable inode before deleting the source, not in a late observation.
+        # Only an admitted candidate may create a new marker.
+        create = create_if_missing and candidate_root.is_dir()
         if _stat(root) is None:
-            return VerifierCacheLease("absent")
+            if not create:
+                return VerifierCacheLease("absent")
+            try:
+                root.mkdir(mode=0o700)
+            except FileExistsError:
+                pass
         _real_owned_dir(root, device)
+        _require_no_mounts(root)
         lock = root / ".sync.lock"
-        expected = _lock_identity(lock.lstat(), device)
-        fd = os.open(lock, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
-        if expected != _lock_identity(os.fstat(fd), device):
+        previous = _stat(lock)
+        if previous is None and not create:
+            return VerifierCacheLease("deferred_unsafe")
+        if previous is not None:
+            _lock_identity(previous, device)
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+        if create:
+            flags |= os.O_CREAT
+        fd = os.open(lock, flags, 0o600)
+        expected = _lock_identity(os.fstat(fd), device)
+        if previous is not None and expected != _lock_identity(previous, device):
             raise ValueError("verifier lock changed")
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -228,8 +246,10 @@ def _acquire(candidate_root: Path) -> VerifierCacheLease:
 
 
 @contextlib.contextmanager
-def terminal_verifier_lease(candidate_root: Path) -> Iterator[VerifierCacheLease]:
-    lease = _acquire(candidate_root)
+def terminal_verifier_lease(
+    candidate_root: Path, *, create_if_missing: bool = False
+) -> Iterator[VerifierCacheLease]:
+    lease = _acquire(candidate_root, create_if_missing=create_if_missing)
     try:
         yield lease
     finally:

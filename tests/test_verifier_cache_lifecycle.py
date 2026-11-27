@@ -80,6 +80,34 @@ def test_reclaim_exact_terminal_generated_trees_preserves_lock_and_metadata(cach
         assert lease.reclaim(source) == {"state": "reclaimed", "removed_trees": 0}
 
 
+def test_first_use_lock_blocks_writer_before_source_removal(tmp_path, monkeypatch):
+    base = tmp_path / "verifier"
+    base.mkdir(mode=0o700)
+    monkeypatch.setenv("MCP_VERIFIER_ROOT", str(base))
+    monkeypatch.setattr(storage, "_trusted_base", lambda path: path.lstat().st_dev)
+    source = tmp_path / ".mcp-candidate-clones" / "candidate-first-use"
+    source.mkdir(parents=True)
+    root = Path(storage.verifier_project_root(str(source)))
+    lock = root / ".sync.lock"
+    assert not root.exists()
+    with storage.terminal_verifier_lease(source) as unadmitted:
+        assert unadmitted.state == "absent"
+    assert not root.exists()
+
+    with storage.terminal_verifier_lease(source, create_if_missing=True) as lease:
+        assert lease.state == "locked"
+        inode = lock.stat().st_ino
+        with lock.open("rb") as contender:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(contender.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        source.rmdir()
+        assert lease.reclaim(source) == {"state": "reclaimed", "removed_trees": 0}
+
+    assert lock.stat().st_ino == inode
+    with lock.open("rb") as contender:
+        fcntl.flock(contender.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
 def test_active_lock_prevents_reclaim(cache_tree):
     source, root, lock = cache_tree
     with lock.open("rb") as holder:

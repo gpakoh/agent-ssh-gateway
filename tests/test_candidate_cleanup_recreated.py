@@ -319,11 +319,17 @@ def test_terminal_cache_failure_does_not_invalidate_source_delivery_receipt(
 
     root, _retired, _path, _previous, args, kwargs = _recreated(registry_fixture, monkeypatch)
     verifier, _lock = _verifier_fixture(root, tmp_path, monkeypatch)
+    real_check = verifier_storage._require_no_mounts
+    checks = 0
     with monkeypatch.context() as patch:
-        def refuse(_root):
-            raise ValueError("mount observation unavailable")
+        def refuse_after_delivery(cache_root):
+            nonlocal checks
+            checks += 1
+            if checks > 1:
+                raise ValueError("mount observation unavailable")
+            real_check(cache_root)
 
-        patch.setattr(verifier_storage, "_require_no_mounts", refuse)
+        patch.setattr(verifier_storage, "_require_no_mounts", refuse_after_delivery)
         result = candidate_cleanup(*args, **kwargs)
     assert result.directory_removed and result.registry_removed
     assert result.verifier_cache_cleanup == {"state": "deferred_unsafe", "removed_trees": 0}
@@ -332,3 +338,35 @@ def test_terminal_cache_failure_does_not_invalidate_source_delivery_receipt(
     assert retry.already_cleaned
     assert retry.verifier_cache_cleanup == {"state": "reclaimed", "removed_trees": 1}
     assert not (verifier / ".venv").exists()
+
+
+def test_terminal_first_use_lock_exists_before_guarded_source_transaction(
+    registry_fixture, monkeypatch, tmp_path,
+):
+    from examples.mcp_server import verifier_storage
+
+    root, _retired, _path, _previous, args, kwargs = _recreated(registry_fixture, monkeypatch)
+    base = tmp_path / "verifier-first-use"
+    base.mkdir(mode=0o700)
+    monkeypatch.setenv("MCP_VERIFIER_ROOT", str(base))
+    monkeypatch.setattr(verifier_storage, "_trusted_base", lambda path: path.lstat().st_dev)
+    verifier = Path(verifier_storage.verifier_project_root(str(root)))
+    lock = verifier / ".sync.lock"
+    assert not verifier.exists()
+    original = module._cleanup_candidate_locked
+    identities = []
+
+    def guarded_transaction(**kw):
+        assert root.is_dir()
+        identities.append(lock.stat().st_ino)
+        with lock.open("rb") as contender:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(contender.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return original(**kw)
+
+    monkeypatch.setattr(module, "_cleanup_candidate_locked", guarded_transaction)
+    result = candidate_cleanup(*args, **kwargs)
+    assert result.directory_removed
+    assert not root.exists()
+    assert identities == [lock.stat().st_ino]
+    assert result.verifier_cache_cleanup == {"state": "reclaimed", "removed_trees": 0}
