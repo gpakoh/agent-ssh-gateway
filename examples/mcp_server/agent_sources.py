@@ -98,6 +98,20 @@ def _publication_failure_reason(exc: Exception) -> str:
         return "authentication_failed"
     if isinstance(exc, PermissionError) or "permission denied" in detail:
         return "permission_denied"
+    # Process launch wrappers deliberately replace OS error text. Recover only
+    # typed, explicit causes, never arbitrary nested exception messages.
+    if isinstance(exc, ManagedSourceBundleError):
+        cause = exc.__cause__
+        if isinstance(cause, OSError) and cause.errno == errno.ENOSPC:
+            return "storage_full"
+        if isinstance(cause, PermissionError):
+            return "permission_denied"
+        if (
+            detail == "trusted remote resolution failed"
+            and type(cause) is RuntimeError
+            and str(cause) == "GIT_AUTH_FAILED"
+        ):
+            return "authentication_failed"
     return "failed"
 
 
