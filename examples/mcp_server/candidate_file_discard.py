@@ -8,6 +8,7 @@ removed, and all existing candidate cleanup/reference guards still apply.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -15,7 +16,7 @@ import re
 import secrets
 import stat
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -381,13 +382,91 @@ def _git_bytes(root: Path, args: list[str]) -> bytes:
     try:
         result = subprocess.run(
             clone._git_command(root, args), cwd=root, capture_output=True,
-            timeout=30, check=False,
+            timeout=30, check=False, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise clone.CandidateCloneError("CHECK_FAILED", "candidate Git observation unavailable") from exc
     if result.returncode != 0:
         _deny("candidate Git observation unavailable")
     return result.stdout
+
+
+@contextlib.contextmanager
+def _batch_git_index_lock(root: Path, operation_id: str) -> Iterator[Callable[[], None]]:
+    """Hold Git's actual index interlock, not a parallel advisory lock.
+
+    Ordinary Git index writers must fail while archive/quarantine is in
+    progress. This does not fence direct filesystem writers or remote
+    delivery, so the existing active-reference prohibition still applies.
+    """
+    git_dir = root / ".git"
+    actual_dir = Path(os.fsdecode(_git_bytes(root, ["rev-parse", "--absolute-git-dir"])).rstrip("\n"))
+    index = Path(os.fsdecode(_git_bytes(root, ["rev-parse", "--git-path", "index"])).rstrip("\n"))
+    if not index.is_absolute():
+        index = root / index
+    if actual_dir != git_dir or index != git_dir / "index":
+        _deny("candidate Git index path is not the managed clone index")
+
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        git_fd = os.open(git_dir, flags)
+    except OSError as exc:
+        raise clone.CandidateCloneError("WORKSPACE_CONTENDED", "candidate Git directory unavailable") from exc
+    try:
+        directory = os.fstat(git_fd)
+        try:
+            index_stat = os.stat("index", dir_fd=git_fd, follow_symlinks=False)
+            if not stat.S_ISREG(index_stat.st_mode) or index_stat.st_nlink != 1:
+                _deny("candidate Git index path is unsafe")
+            lock_fd = os.open(
+                "index.lock", os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600, dir_fd=git_fd,
+            )
+        except OSError as exc:
+            raise clone.CandidateCloneError(
+                "WORKSPACE_CONTENDED", "candidate Git index lock unavailable", retryable=True,
+            ) from exc
+
+        def assert_owned() -> None:
+            try:
+                current_dir = git_dir.lstat()
+                held = os.fstat(lock_fd)
+                visible = os.stat("index.lock", dir_fd=git_fd, follow_symlinks=False)
+                if (
+                    not stat.S_ISDIR(current_dir.st_mode)
+                    or (current_dir.st_dev, current_dir.st_ino) != (directory.st_dev, directory.st_ino)
+                    or not stat.S_ISREG(visible.st_mode)
+                    or (held.st_dev, held.st_ino) != (visible.st_dev, visible.st_ino)
+                    or held.st_nlink != 1
+                    or held.st_uid != os.geteuid()
+                    or held.st_size != 0
+                ):
+                    raise OSError("index lock identity changed")
+            except OSError as exc:
+                raise clone.CandidateCloneError(
+                    "WORKSPACE_CONTENDED", "candidate Git index lock ownership lost",
+                    retryable=False, details={"operation_id": operation_id, "outcome": "partial_or_unknown"},
+                ) from exc
+
+        try:
+            assert_owned()
+            yield assert_owned
+        finally:
+            try:
+                # Never remove a pre-existing or replaced lock. An interrupted
+                # operation's own stale lock requires explicit reconciliation.
+                assert_owned()
+                try:
+                    os.unlink("index.lock", dir_fd=git_fd)
+                except OSError as exc:
+                    raise clone.CandidateCloneError(
+                        "WORKSPACE_CONTENDED", "candidate Git index lock release failed",
+                        retryable=False, details={"operation_id": operation_id, "outcome": "partial_or_unknown"},
+                    ) from exc
+            finally:
+                os.close(lock_fd)
+    finally:
+        os.close(git_fd)
 
 
 def _batch_state(
@@ -479,7 +558,7 @@ def discard_untracked_candidate_files(
     }
     operation_id = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     with clone._lineage_lock(workspace, expected_source_project, branch):
-        with project_registry_mutation_lock(journal_root):
+        with project_registry_mutation_lock(journal_root), contextlib.ExitStack() as stack:
             def verify_identity() -> None:
                 if not clone._registry_has_candidate(
                     config_dir, project_id, expected_root=f".mcp-candidate-clones/{project_id}",
@@ -500,7 +579,10 @@ def discard_untracked_candidate_files(
                              status_sha=expected_status_sha256)
 
             verify_identity()
+            assert_index_lock = stack.enter_context(_batch_git_index_lock(root, operation_id))
+            verify_identity()
             reference_guard()
+            assert_index_lock()
             records: list[dict[str, Any]] = []
             moved: list[dict[str, Any]] = []
             removed: list[str] = []
@@ -537,8 +619,10 @@ def discard_untracked_candidate_files(
                 # No original entry has been moved or removed before here.
                 verify_identity()
                 reference_guard()
+                assert_index_lock()
                 verify_identity()
                 for r in records:
+                    assert_index_lock()
                     data, st = _read_exact_file(r["fd"], r["name"], r["sha256"], r["size"], max_bytes=_BATCH_MAX_FILE_BYTES)
                     if data != r["data"] or (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_ctime_ns) != (
                         r["stat"].st_dev, r["stat"].st_ino, r["stat"].st_mtime_ns, r["stat"].st_ctime_ns,
@@ -563,13 +647,16 @@ def discard_untracked_candidate_files(
                 for r in moved:
                     verify_quarantine(r)
                 reference_guard()
+                assert_index_lock()
                 quarantined_paths = [str(Path(r["path"]).with_name(r["quarantine"])) for r in moved]
                 _batch_state(root, branch, expected_head_sha, expected_index_sha256, quarantined_paths)
                 for r in moved:
+                    assert_index_lock()
                     verify_quarantine(r)
                     os.unlink(r["quarantine"], dir_fd=r["fd"])
                     removed.append(r["path"])
                     os.fsync(r["fd"])
+                assert_index_lock()
                 _batch_state(root, branch, expected_head_sha, expected_index_sha256, [])
                 receipt = {
                     "project_id": project_id, "head": expected_head_sha,

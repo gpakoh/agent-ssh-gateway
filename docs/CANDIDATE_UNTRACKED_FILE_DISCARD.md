@@ -68,8 +68,14 @@ the full requested untracked set; duplicates, tracked changes (including
 hidden tracked edits), unsafe paths, extra untracked files, active evidence,
 inbound dependencies, and unknown or open PR references deny the operation.
 
-Under the existing lineage and registry locks, a required audit binds every
-path fingerprint, size and digest. An exclusive durable operation plan records
+Under the existing lineage and registry locks, the batch additionally holds
+Git's own exclusive `index.lock` for its real managed index. An existing lock
+or alternate index path refuses the operation before archival. Read-only Git
+observations disable optional index updates. Ordinary Git index writers are
+excluded throughout archive/quarantine/removal; the lock identity is checked
+before mutations and only the operation's own lock is removed. A lost or stale
+lock requires explicit reconciliation, never blind deletion or replay.
+A required audit binds every path fingerprint, size and digest. An exclusive durable operation plan records
 the exact candidate/index/status lease, all archive IDs and quarantine names.
 Every file is archived and verified, including directory fsync, before any
 original entry is moved. The operation rechecks identity and references, then

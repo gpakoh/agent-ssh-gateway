@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
+import subprocess
 
 import pytest
 
@@ -366,6 +368,89 @@ def _setup_batch(registry_fixture, monkeypatch, *, second_content=b"b" * (4 * 10
         expected_status_sha256=hashlib.sha256(_git_bytes(root, ["status", "--porcelain=v1"])).hexdigest(),
     )
     return root, path, other, params
+
+
+def test_batch_excludes_real_git_index_writers_until_completion(registry_fixture, monkeypatch):
+    from examples.mcp_server import candidate_file_discard as module
+
+    root, first, second, params = _setup_batch(registry_fixture, monkeypatch, second_content=b"second")
+    lock = root / ".git" / "index.lock"
+    before = (root / ".git" / "index").read_bytes()
+    seen = []
+
+    def guard():
+        # A real Git writer, not a mock: attempting to stage the two source
+        # paths or the later quarantine paths must fail throughout cleanup.
+        result = subprocess.run(
+            ["git", "add", "-A"], cwd=root, capture_output=True, timeout=10, check=False,
+        )
+        assert result.returncode != 0, "concurrent Git add was not excluded"
+        assert b"index.lock" in result.stderr
+        assert lock.is_file()
+        seen.append(True)
+
+    params["reference_guard"] = guard
+    receipt = module.discard_untracked_candidate_files(**params)
+    assert receipt["discarded"] is True
+    assert seen == [True, True, True]
+    assert not lock.exists()
+    assert not first.exists() and not second.exists()
+    assert (root / ".git" / "index").read_bytes() == before
+
+
+def test_batch_does_not_remove_existing_git_index_lock(registry_fixture, monkeypatch):
+    from examples.mcp_server import candidate_file_discard as module
+
+    root, first, second, params = _setup_batch(registry_fixture, monkeypatch, second_content=b"second")
+    lock = root / ".git" / "index.lock"
+    lock.write_bytes(b"other writer owns this")
+    with pytest.raises(CandidateCloneError, match="index lock"):
+        module.discard_untracked_candidate_files(**params)
+    assert lock.read_bytes() == b"other writer owns this"
+    assert first.read_bytes() == b"abandoned scratch\n"
+    assert second.read_bytes() == b"second"
+    assert not list((params["journal_root"] / "candidate-file-archive").glob("*.blob"))
+
+
+def test_batch_denies_alternate_git_index(registry_fixture, monkeypatch, tmp_path):
+    from examples.mcp_server import candidate_file_discard as module
+
+    root, first, second, params = _setup_batch(registry_fixture, monkeypatch, second_content=b"second")
+    alternate = tmp_path / "alternate-index"
+    shutil.copyfile(root / ".git" / "index", alternate)
+    monkeypatch.setenv("GIT_INDEX_FILE", str(alternate))
+    with pytest.raises(CandidateCloneError, match="index path"):
+        module.discard_untracked_candidate_files(**params)
+    assert first.read_bytes() == b"abandoned scratch\n"
+    assert second.read_bytes() == b"second"
+    assert not (root / ".git" / "index.lock").exists()
+    assert not list((params["journal_root"] / "candidate-file-archive").glob("*.blob"))
+
+
+def test_batch_refuses_lost_index_lock_without_unlinking_replacement(registry_fixture, monkeypatch):
+    from examples.mcp_server import candidate_file_discard as module
+
+    root, first, second, params = _setup_batch(registry_fixture, monkeypatch, second_content=b"second")
+    lock = root / ".git" / "index.lock"
+    calls = []
+
+    def guard():
+        calls.append(True)
+        if len(calls) == 2:
+            # Simulate an out-of-band lock replacement. Do not let the
+            # cleanup overwrite/unlink the other writer's lock.
+            lock.unlink()
+            lock.write_bytes(b"replacement lock")
+
+    params["reference_guard"] = guard
+    with pytest.raises(CandidateCloneError) as error:
+        module.discard_untracked_candidate_files(**params)
+    assert error.value.retryable is False
+    assert error.value.details["outcome"] == "partial_or_unknown"
+    assert lock.read_bytes() == b"replacement lock"
+    assert first.read_bytes() == b"abandoned scratch\n"
+    assert second.read_bytes() == b"second"
+    assert calls == [True, True]
 
 
 def test_batch_archives_all_before_any_rename_and_preserves_index(registry_fixture, monkeypatch):
