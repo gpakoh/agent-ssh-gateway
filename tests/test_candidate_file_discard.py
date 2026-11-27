@@ -370,6 +370,48 @@ def _setup_batch(registry_fixture, monkeypatch, *, second_content=b"b" * (4 * 10
     return root, path, other, params
 
 
+def test_batch_refuses_shared_directory_writer_before_archival(registry_fixture, monkeypatch):
+    from app.workspace.maintenance import candidate_directory_admission
+    from examples.mcp_server import candidate_file_discard as module
+
+    root, first, second, params = _setup_batch(registry_fixture, monkeypatch, second_content=b"second")
+    with candidate_directory_admission(root, exclusive=False):
+        with pytest.raises(CandidateCloneError, match="candidate maintenance") as error:
+            module.discard_untracked_candidate_files(**params)
+        assert error.value.retryable is True
+        assert first.read_bytes() == b"abandoned scratch\n"
+        assert second.read_bytes() == b"second"
+        assert not (root / ".git" / "index.lock").exists()
+        assert not list((params["journal_root"] / "candidate-file-archive").glob("*.blob"))
+    assert module.discard_untracked_candidate_files(**params)["discarded"] is True
+
+
+def test_batch_excludes_managed_file_edits_during_every_reference_check(registry_fixture, monkeypatch):
+    from app.workspace.edit import project_file_edit
+    from app.workspace.maintenance import CandidateMaintenanceContended
+    from app.workspace.models import ProjectInfo
+    from app.workspace.registry import WorkspaceRegistry
+    from examples.mcp_server import candidate_file_discard as module
+
+    root, first, second, params = _setup_batch(registry_fixture, monkeypatch, second_content=b"second")
+    registry = WorkspaceRegistry(
+        {"candidate-alias": ProjectInfo(project_id="candidate-alias", root=root,
+                                        type="candidate-clone", description="test", tags=[])},
+        [root.parent.parent], granted_scopes={"project:read", "project:write"},
+    )
+    checks = []
+
+    def guard():
+        with pytest.raises(CandidateMaintenanceContended):
+            project_file_edit("candidate-alias", "scratch.txt", "scratch", "changed", registry=registry)
+        checks.append(True)
+
+    params["reference_guard"] = guard
+    assert module.discard_untracked_candidate_files(**params)["discarded"] is True
+    assert checks == [True, True, True]
+    assert not first.exists() and not second.exists()
+
+
 def test_batch_excludes_real_git_index_writers_until_completion(registry_fixture, monkeypatch):
     from examples.mcp_server import candidate_file_discard as module
 

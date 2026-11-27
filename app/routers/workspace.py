@@ -17,6 +17,7 @@ from app.workspace.edit import (
     project_file_edit,
     project_file_write,
 )
+from app.workspace.maintenance import CandidateMaintenanceContended
 from app.workspace.policy import (
     ALL_SCOPES,
     HiddenPathError,
@@ -124,6 +125,8 @@ def _map_workspace_error(exc: Exception) -> HTTPException:
     | unknown / not found|  404 |
     +--------------------+------+
     """
+    if isinstance(exc, CandidateMaintenanceContended):
+        return HTTPException(409, detail=_err(409, str(exc), code="WORKSPACE_CONTENDED", retryable=True))
     msg = str(exc)
     lower = msg.lower()
 

@@ -9,16 +9,20 @@ write via os.replace().
 from __future__ import annotations
 
 import difflib
+import functools
 import hashlib
+import inspect
 import logging
 import os
 import re
 import stat
 import uuid
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, ParamSpec, TypeVar
 
 from app.workspace.files import _is_binary_path
+from app.workspace.maintenance import candidate_directory_admission, managed_candidate_root
 from app.workspace.policy import SymlinkEscapeError, WorkspacePolicyError
 from app.workspace.registry import WorkspaceRegistry, get_registry
 
@@ -242,9 +246,35 @@ def _make_diff(old_content: str, new_content: str, file_label: str = "") -> str:
     return "".join(diff_lines)
 
 
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _candidate_writer(func: Callable[_P, _R]) -> Callable[_P, _R]:
+    signature = inspect.signature(func)
+
+    @functools.wraps(func)
+    def admitted(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        bound = signature.bind(*args, **kwargs)
+        registry = bound.arguments.get("registry") or get_registry()
+        # Use the registered physical root, not the caller-controlled ID.
+        root = registry._policy._resolve_project_root(bound.arguments["project_id"])
+        candidate = managed_candidate_root(root)
+        if candidate is None:
+            return func(*args, **kwargs)
+        # Retain the exact registry whose root was admitted, even if the
+        # registry cache is reloaded while this request is executing.
+        bound.arguments["registry"] = registry
+        with candidate_directory_admission(candidate, exclusive=False):
+            return func(*bound.args, **bound.kwargs)
+
+    return admitted
+
+
 # ── Public tools ─────────────────────────────────────────────────
 
 
+@_candidate_writer
 def project_file_write(
     project_id: str,
     relative_path: str,
@@ -354,6 +384,7 @@ def project_file_write(
     return result
 
 
+@_candidate_writer
 def project_file_edit(
     project_id: str,
     relative_path: str,
@@ -664,6 +695,7 @@ def _validate_deletion_patch(patch_text: str, existing_content: str) -> None:
         raise PatchError("Deletion patch must remove all existing lines")
 
 
+@_candidate_writer
 def project_apply_patch(
     project_id: str,
     relative_path: str,

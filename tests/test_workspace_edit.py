@@ -54,6 +54,63 @@ def edit_workspace(tmp_path):
     return {"tmp_path": tmp_path, "project": project, "registry": registry}
 
 
+@pytest.mark.parametrize("operation", ["write", "edit", "patch"])
+def test_candidate_writer_refuses_held_directory_interlock(tmp_path, operation):
+    """A separate process holds the same candidate inode, not a mock lock."""
+    import os
+    import subprocess
+    import sys
+
+    root = tmp_path / ".mcp-candidate-clones" / "candidate-edit-test"
+    root.mkdir(parents=True)
+    target = root / "README.md"
+    target.write_text("before\n")
+    registry = WorkspaceRegistry(
+        {"alias": ProjectInfo(project_id="alias", root=root, type="candidate-clone",
+                              description="test", tags=[])},
+        [tmp_path], granted_scopes={"project:read", "project:write"},
+    )
+    def mutate():
+        if operation == "write":
+            return project_file_write("alias", "README.md", "after\n", registry=registry)
+        if operation == "edit":
+            return project_file_edit("alias", "README.md", "before", "after", registry=registry)
+        return project_apply_patch(
+            "alias", "README.md",
+            "--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-before\n+after\n",
+            registry=registry,
+        )
+
+    code = (
+        "import fcntl,os,sys;"
+        "fd=os.open(sys.argv[1],os.O_RDONLY|os.O_DIRECTORY);"
+        "fcntl.flock(fd,fcntl.LOCK_EX);"
+        "print('locked',flush=True);sys.stdin.read()"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", code, os.fspath(root)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    )
+    try:
+        import select
+
+        assert child.stdout is not None
+        assert select.select([child.stdout], [], [], 5)[0]
+        assert child.stdout.readline().strip() == "locked"
+        with pytest.raises(WorkspacePolicyError, match="candidate maintenance"):
+            mutate()
+        assert target.read_text() == "before\n"
+        assert sorted(p.name for p in root.iterdir()) == ["README.md"]
+    finally:
+        assert child.stdin is not None
+        child.stdin.close()
+        child.wait(timeout=5)
+        if child.stdout is not None:
+            child.stdout.close()
+    mutate()
+    assert target.read_text() == "after\n"
+
+
 # ── Shared helper tests ──────────────────────────────────────────
 
 

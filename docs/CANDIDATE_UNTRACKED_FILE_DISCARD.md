@@ -101,9 +101,17 @@ transport does not release a running handler's slot; detached asynchronous
 handlers are retained until completion. Direct internal Python calls are
 not the protocol admission boundary.
 
-**Scope boundary:** the open-PR prohibition remains in force. The admission
-slot excludes concurrent MCP invocations in one process, not REST requests,
-other server processes, pre-existing detached jobs, external Gitea clients
-or host-side writers. Exact file-only quiescence for an active PR still needs
-a separately reviewed lease across those write planes. Neither this gate,
-the Git index interlock, nor a successful archive constitutes that lease.
+The batch also holds an exclusive nonblocking flock on the real candidate
+directory inode. The common workspace file write/edit/patch functions hold a
+shared lock on the enclosing managed clone for their full operation. This
+covers cooperating REST and MCP file writers even across processes and
+registered aliases of the same directory, without creating a worktree lock
+file. Contention returns HTTP 409 / WORKSPACE_CONTENDED before mutation;
+normal writes resume when the file descriptor closes.
+
+**Scope boundary:** the open-PR prohibition remains in force. These gates
+exclude concurrent registered MCP invocations within one process and the
+participating file APIs across processes, not arbitrary REST endpoints, SSH
+commands, pre-existing detached jobs, external Gitea clients, or host-side
+writers. Exact file-only quiescence for an active PR still needs a reviewed
+lease across those remaining write planes.

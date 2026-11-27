@@ -107,7 +107,12 @@ def _backlog_is_on_gitea_board(project_id: str, registry: Any) -> bool:
 def _workspace_mutation_error(tool: str, exc: Exception) -> dict[str, Any]:
     """Classify workspace write failures without hiding the operator action."""
     from app.workspace.edit import ParentMissingError
+    from app.workspace.maintenance import CandidateMaintenanceContended
 
+    if isinstance(exc, CandidateMaintenanceContended):
+        return tool_error(
+            tool=tool, code="WORKSPACE_CONTENDED", message=str(exc), retryable=True, source="gateway",
+        )
     if isinstance(exc, ParentMissingError):
         return tool_error(
             tool=tool,

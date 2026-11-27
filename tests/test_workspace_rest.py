@@ -304,6 +304,36 @@ def _mock_agent_identity(scopes: tuple[str, ...] = ()):
     )
 
 
+def test_candidate_maintenance_contention_rest_and_mcp(tmp_path, monkeypatch):
+    from app.workspace.maintenance import candidate_directory_admission
+    from examples.mcp_server.mcp_infra.adapters import workspace as mcp_workspace
+
+    root = tmp_path / ".mcp-candidate-clones" / "candidate-rest-test"
+    root.mkdir(parents=True)
+    registry = _mock_registry(root)
+    monkeypatch.setattr(settings, "workspace_readonly", False)
+    monkeypatch.setattr("app.routers.workspace.get_registry", lambda: registry)
+    monkeypatch.setattr(mcp_workspace, "_server_workspace_registry", lambda: registry)
+    with candidate_directory_admission(root, exclusive=True):
+        response = _post(
+            "/api/workspace/projects/test-project/files/write",
+            json={"path": "out.txt", "content": "new content"},
+        )
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == "WORKSPACE_CONTENDED"
+        assert response.json()["detail"]["retryable"] is True
+        result = mcp_workspace.gateway_workspace_file_write("test-project", "out.txt", "new content")
+        assert result["ok"] is False
+        assert result["error"]["code"] == "WORKSPACE_CONTENDED"
+        assert result["error"]["retryable"] is True
+        assert not (root / "out.txt").exists()
+    assert _post(
+        "/api/workspace/projects/test-project/files/write",
+        json={"path": "out.txt", "content": "new content"},
+    ).status_code == 200
+    assert (root / "out.txt").read_text() == "new content"
+
+
 class TestWriteFileEndpoint:
     def test_write_success(self, write_ws):
         registry = _mock_registry(write_ws["project"])

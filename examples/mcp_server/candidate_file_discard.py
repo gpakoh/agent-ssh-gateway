@@ -20,6 +20,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
+from app.workspace.maintenance import CandidateMaintenanceContended, candidate_directory_admission
 from examples.mcp_server import candidate_clone as clone
 from examples.mcp_server.project_registry_control import project_registry_mutation_lock
 
@@ -579,6 +580,12 @@ def discard_untracked_candidate_files(
                              status_sha=expected_status_sha256)
 
             verify_identity()
+            try:
+                stack.enter_context(candidate_directory_admission(root, exclusive=True))
+            except CandidateMaintenanceContended as exc:
+                raise clone.CandidateCloneError(
+                    "WORKSPACE_CONTENDED", "candidate maintenance admission unavailable", retryable=True,
+                ) from exc
             assert_index_lock = stack.enter_context(_batch_git_index_lock(root, operation_id))
             verify_identity()
             reference_guard()
