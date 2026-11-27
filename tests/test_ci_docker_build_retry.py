@@ -290,6 +290,7 @@ def test_ci_routes_all_image_builds_through_bounded_retry_wrapper() -> None:
 
 def test_ci_e2e_uses_digest_pinned_selenium_sidecar_and_requires_execution_proof() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
+    helper = (ROOT / "scripts" / "ci-selenium-sidecar.sh").read_text(encoding="utf-8")
     image = (
         "ghcr.io/seleniumhq/standalone-chromium:"
         "150.0.7871.114-chromedriver-150.0.7871.114-grid-4.46.0-20260707"
@@ -298,13 +299,18 @@ def test_ci_e2e_uses_digest_pinned_selenium_sidecar_and_requires_execution_proof
 
     assert image in workflow
     assert "Start pinned Selenium Chromium sidecar" in workflow
-    assert 'docker inspect "$job_container"' in workflow
-    assert '--network "container:${job_container}"' in workflow
+    assert 'bash scripts/ci-selenium-sidecar.sh start "$selenium_image"' in workflow
+    assert 'bash scripts/ci-selenium-sidecar.sh replace "$E2E_SELENIUM_IMAGE"' in workflow
+    assert 'docker inspect "$job_container"' in helper
+    assert '--network "container:${job_container}"' in helper
     assert 'SELENIUM_REMOTE_URL=http://127.0.0.1:4444/wd/hub' in workflow
     assert "Put preinstalled ChromeDriver on PATH" in workflow
     assert "github.server_url == 'https://github.com'" in workflow
     assert "Stop Selenium Chromium sidecar" in workflow
-    assert 'docker rm -f "$E2E_SELENIUM_CONTAINER"' in workflow
+    assert "run: bash scripts/ci-selenium-sidecar.sh finalize" in workflow
+    assert 'docker rm -f "$id"' in helper
+    assert 'docker container ls -a --no-trunc --filter "id=$id"' in helper
+    assert 'docker rm -f "$E2E_SELENIUM_CONTAINER"' not in workflow
     assert "services:\n      selenium:" not in workflow
     assert "steps.browser_check.outputs.available" not in workflow
     assert "uv run pytest tests/test_webui_e2e.py -m e2e -q --junitxml=e2e-results.xml" in workflow

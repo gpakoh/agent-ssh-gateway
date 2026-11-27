@@ -35,9 +35,19 @@ else:
     raise AssertionError('sidecar lock descriptor leaked into Docker CLI')
 state_path = Path(os.environ['FAKE_STATE'])
 s = json.loads(state_path.read_text())
+
+
+def save_state():
+    # The timeout test can kill this process at any instruction. Never
+    # expose a partially written simulation of the Docker Engine state.
+    temporary = state_path.with_name(f'.state-{os.getpid()}')
+    temporary.write_text(json.dumps(s))
+    os.replace(temporary, state_path)
+
+
 a = sys.argv[1:]
 s['calls'].append(a)
-state_path.write_text(json.dumps(s))
+save_state()
 if a[0] == 'info':
     print(s['engine'])
 elif a[0] == 'inspect':
@@ -50,7 +60,7 @@ elif a[:2] == ['rm', '-f']:
         s['containers'].remove(a[2])
     if s.get('drift_after_rm'):
         s['engine'] = 'different-engine'
-    state_path.write_text(json.dumps(s))
+    save_state()
     sys.exit(s['rm_rc'])
 elif a[:2] == ['container', 'ls']:
     assert '--no-trunc' in a and '-a' in a
@@ -69,9 +79,10 @@ elif a[0] == 'run':
     assert not s['containers']
     if s['run_effect']:
         s['containers'].append('b'*64)
-    state_path.write_text(json.dumps(s))
+    save_state()
     if s.get('run_hangs'):
-        time.sleep(2)
+        # Deliberately exceed the shortened real timeout even on slow CI.
+        time.sleep(30)
     if s['run_rc']:
         sys.exit(s['run_rc'])
     print(s.get('run_output', 'b'*64))
@@ -117,10 +128,10 @@ class Fixture:
     def change(self, **changes):
         self.state.write_text(json.dumps(self.read() | changes))
 
-    def step(self, mode):
+    def step(self, mode, *, timeout=30):
         result = subprocess.run(
             ["bash", str(HELPER), mode, IMAGE], env=self.env,
-            capture_output=True, text=True, timeout=15, check=False,
+            capture_output=True, text=True, timeout=timeout, check=False,
         )
         # The runner's environment may not be updated after a failed step.
         # The private receipt, not the environment, is authoritative.
@@ -360,6 +371,7 @@ def test_hanging_creation_preserves_uncertainty_and_never_replays(tmp_path, mode
     f.change(run_hangs=True, run_effect=run_effect)
     # Use the platform's real timeout against a genuinely sleeping child.
     # Integer seconds and short options work with GNU and BusyBox timeout.
+    # Leave startup/atomic state publication headroom on a contended runner.
     real_timeout = shutil.which("timeout")
     assert real_timeout is not None
     f.env["REAL_TIMEOUT"] = real_timeout
@@ -369,7 +381,7 @@ def test_hanging_creation_preserves_uncertainty_and_never_replays(tmp_path, mode
         'if [[ "$4" == docker && "$5" == run ]]; then\n'
         '  [[ "$1" == -k && "$2" == 5 && "$3" == 180 ]] || exit 99\n'
         '  shift 3\n'
-        '  exec "$REAL_TIMEOUT" -k 1 1 "$@"\n'
+        '  exec "$REAL_TIMEOUT" -k 1 5 "$@"\n'
         'fi\n'
         'exec "$REAL_TIMEOUT" "$@"\n'
     )
