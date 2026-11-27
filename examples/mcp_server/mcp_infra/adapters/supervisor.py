@@ -1264,7 +1264,7 @@ async def candidate_cleanup(
             )
         audit_written = False
         correlation_id = uuid.uuid4().hex
-        audit_metadata = {
+        audit_metadata: dict[str, Any] = {
             "project_id": project_id,
             "expected_head_sha": expected_head_sha,
             "expected_branch": expected_branch,
@@ -1372,6 +1372,11 @@ async def candidate_cleanup(
                 details=exc.details,
             )
 
+        result = receipt.as_dict()
+        cache_receipt = result.get("verifier_cache_cleanup")
+        if cache_receipt is not None:
+            audit_metadata["verifier_cache_cleanup"] = cache_receipt
+
         if audit_written:
             try:
                 server_attr("get_audit_logger")().append(
@@ -1388,12 +1393,18 @@ async def candidate_cleanup(
                 pass
 
         cache_reset = _reset_project_registry_caches()
-        result = receipt.as_dict()
         result["cache_reset"] = cache_reset
+        cache_state = cache_receipt.get("state") if isinstance(cache_receipt, dict) else None
+        warnings = (
+            ["Candidate delivery is complete; verifier cache reclamation is deferred. "
+             "Reconcile the exact terminal candidate cleanup before retrying."]
+            if cache_state in {"busy", "deferred_unsafe"} else None
+        )
         return tool_success(
             tool="candidate_cleanup",
             result=result,
             success_text="Cleaned candidate clone.",
+            warnings=warnings,
         )
 
     return await run_tool_async(

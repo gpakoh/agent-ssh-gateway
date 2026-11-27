@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import shutil
@@ -253,3 +254,119 @@ def test_recreated_candidate_history_must_be_safe_before_unregister(
     assert root.is_dir()
     assert path.read_bytes() == before
     assert registry.read_bytes() == registry_before
+
+
+def _verifier_fixture(root, tmp_path, monkeypatch):
+    from examples.mcp_server import verifier_storage
+
+    base = tmp_path / "verifier-cache"
+    base.mkdir(mode=0o700)
+    monkeypatch.setenv("MCP_VERIFIER_ROOT", str(base))
+    # Temporary test roots have a world-writable /tmp ancestor. The production
+    # path must independently pass _trusted_base's private ancestry checks.
+    monkeypatch.setattr(verifier_storage, "_trusted_base", lambda path: path.lstat().st_dev)
+    verifier = Path(verifier_storage.verifier_project_root(str(root)))
+    verifier.mkdir(mode=0o700)
+    lock = verifier / ".sync.lock"
+    lock.touch(mode=0o600)
+    env = verifier / ".venv"
+    env.mkdir(mode=0o700)
+    (env / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    (env / "generated").write_text("rebuildable\n")
+    return verifier, lock
+
+
+def test_terminal_candidate_cleanup_reclaims_exact_verifier_after_delivery(
+    registry_fixture, monkeypatch, tmp_path,
+):
+    root, retired, _path, _previous, args, kwargs = _recreated(registry_fixture, monkeypatch)
+    verifier, lock = _verifier_fixture(root, tmp_path, monkeypatch)
+    inode = lock.stat().st_ino
+    result = candidate_cleanup(*args, **kwargs)
+    assert result.directory_removed and result.registry_removed
+    assert result.verifier_cache_cleanup == {"state": "reclaimed", "removed_trees": 1}
+    assert not (verifier / ".venv").exists()
+    assert lock.stat().st_ino == inode
+    assert retired.is_dir()
+    retry = candidate_cleanup(*args, **kwargs)
+    assert retry.already_cleaned
+    assert retry.verifier_cache_cleanup == {"state": "reclaimed", "removed_trees": 0}
+
+
+def test_terminal_candidate_cleanup_refuses_active_verifier_before_source_mutation(
+    registry_fixture, monkeypatch, tmp_path,
+):
+    root, _retired, path, _previous, args, kwargs = _recreated(registry_fixture, monkeypatch)
+    verifier, lock = _verifier_fixture(root, tmp_path, monkeypatch)
+    before = path.read_bytes()
+    registry = kwargs["config_dir"] / "projects.yaml"
+    registry_before = registry.read_bytes()
+    with lock.open("rb") as holder:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(CandidateCloneError) as error:
+            candidate_cleanup(*args, **kwargs)
+        assert error.value.code == "WORKSPACE_CONTENDED"
+    assert root.is_dir()
+    assert path.read_bytes() == before
+    assert registry.read_bytes() == registry_before
+    assert (verifier / ".venv" / "generated").is_file()
+
+
+def test_terminal_cache_failure_does_not_invalidate_source_delivery_receipt(
+    registry_fixture, monkeypatch, tmp_path,
+):
+    from examples.mcp_server import verifier_storage
+
+    root, _retired, _path, _previous, args, kwargs = _recreated(registry_fixture, monkeypatch)
+    verifier, _lock = _verifier_fixture(root, tmp_path, monkeypatch)
+    real_check = verifier_storage._require_no_mounts
+    checks = 0
+    with monkeypatch.context() as patch:
+        def refuse_after_delivery(cache_root):
+            nonlocal checks
+            checks += 1
+            if checks > 1:
+                raise ValueError("mount observation unavailable")
+            real_check(cache_root)
+
+        patch.setattr(verifier_storage, "_require_no_mounts", refuse_after_delivery)
+        result = candidate_cleanup(*args, **kwargs)
+    assert result.directory_removed and result.registry_removed
+    assert result.verifier_cache_cleanup == {"state": "deferred_unsafe", "removed_trees": 0}
+    assert (verifier / ".venv").is_dir()
+    retry = candidate_cleanup(*args, **kwargs)
+    assert retry.already_cleaned
+    assert retry.verifier_cache_cleanup == {"state": "reclaimed", "removed_trees": 1}
+    assert not (verifier / ".venv").exists()
+
+
+def test_terminal_first_use_lock_exists_before_guarded_source_transaction(
+    registry_fixture, monkeypatch, tmp_path,
+):
+    from examples.mcp_server import verifier_storage
+
+    root, _retired, _path, _previous, args, kwargs = _recreated(registry_fixture, monkeypatch)
+    base = tmp_path / "verifier-first-use"
+    base.mkdir(mode=0o700)
+    monkeypatch.setenv("MCP_VERIFIER_ROOT", str(base))
+    monkeypatch.setattr(verifier_storage, "_trusted_base", lambda path: path.lstat().st_dev)
+    verifier = Path(verifier_storage.verifier_project_root(str(root)))
+    lock = verifier / ".sync.lock"
+    assert not verifier.exists()
+    original = module._cleanup_candidate_locked
+    identities = []
+
+    def guarded_transaction(**kw):
+        assert root.is_dir()
+        identities.append(lock.stat().st_ino)
+        with lock.open("rb") as contender:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(contender.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return original(**kw)
+
+    monkeypatch.setattr(module, "_cleanup_candidate_locked", guarded_transaction)
+    result = candidate_cleanup(*args, **kwargs)
+    assert result.directory_removed
+    assert not root.exists()
+    assert identities == [lock.stat().st_ino]
+    assert result.verifier_cache_cleanup == {"state": "reclaimed", "removed_trees": 0}

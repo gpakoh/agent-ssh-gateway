@@ -60,7 +60,10 @@ def _commit(repo: Path, message: str) -> str:
 
 
 @pytest.fixture
-def registry_fixture(tmp_path: Path):
+def registry_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # Synthetic registry transactions must not create markers in the shared
+    # executor's real verifier volume. Lifecycle tests provision their own root.
+    monkeypatch.setenv("MCP_VERIFIER_ROOT", str(tmp_path / "unused-verifier"))
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     source = workspace / "source"
