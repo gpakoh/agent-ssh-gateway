@@ -314,6 +314,62 @@ def _comment_count_mismatch(issue: dict[str, Any], comments: list[dict[str, Any]
     return type(count) is int and count != len(comments)
 
 
+_ISSUE_VERSION_FIELDS = ("id", "number", "title", "body", "state", "updated_at", "comments")
+
+
+async def _issue_timeline_comment_pages(
+    client: Any, owner: str, repo: str, number: int, issue: dict[str, Any], *,
+    max_pages: int = 2, allow_partial: bool = True,
+) -> tuple[list[dict[str, Any]], bool, str | None, int]:
+    """Retry one unexpected null page only under unchanged Issue evidence."""
+    initial_version = tuple(issue.get(key) for key in _ISSUE_VERSION_FIELDS)
+    count = issue.get("comments")
+    issue_id = issue.get("id")
+    updated_at = issue.get("updated_at")
+    can_retry = (
+        type(count) is int and count > 0
+        and type(issue_id) is int and issue_id > 0
+        and type(issue.get("number")) is int and issue["number"] == number
+        and isinstance(updated_at, str) and bool(updated_at.strip())
+    )
+    retried = False
+
+    async def unchanged() -> bool:
+        current = await client.get_issue(owner, repo, number)
+        return isinstance(current, dict) and tuple(
+            current.get(key) for key in _ISSUE_VERSION_FIELDS
+        ) == initial_version and type(current.get("comments")) is int and (
+            type(current.get("id")) is int and type(current.get("number")) is int
+        )
+
+    async def fetch(page: int) -> Any:
+        nonlocal retried
+        rows = await client.list_issue_timeline(owner, repo, number, limit=_PAGE_SIZE, page=page)
+        if rows is not None or not can_retry or retried:
+            return rows
+        retried = True
+        if not await unchanged():
+            return None
+        return await client.list_issue_timeline(owner, repo, number, limit=_PAGE_SIZE, page=page)
+
+    result = await _timeline_comment_pages(
+        fetch, max_pages=max_pages, allow_partial=allow_partial,
+        verified_no_comments=type(count) is int and count == 0,
+    )
+    comments, truncated, _, pages_read = result
+    if retried and not truncated:
+        reason = None
+        if type(count) is not int or count != len(comments):
+            reason = "comment_count_mismatch"
+        elif not await unchanged():
+            reason = "issue_changed_during_scan"
+        if reason is not None:
+            if allow_partial:
+                return comments, True, reason, pages_read
+            raise CoordinationOutcomeUnknown(f"Recovered timeline is unverifiable ({reason})")
+    return result
+
+
 async def preview_thread_state(
     client: Any, owner: str, repo: str, number: int
 ) -> tuple[str | None, bool]:
@@ -326,11 +382,8 @@ async def preview_thread_state(
     issue = await client.get_issue(owner, repo, number)
     if _issue(issue) is None:
         raise ValueError("issue is not a Py Coordination thread")
-    comments, truncated, _reason, _pages_read = await _timeline_comment_pages(
-        lambda page: client.list_issue_timeline(
-            owner, repo, number, limit=_PAGE_SIZE, page=page
-        ),
-        verified_no_comments=type(issue.get("comments")) is int and issue["comments"] == 0,
+    comments, truncated, _reason, _pages_read = await _issue_timeline_comment_pages(
+        client, owner, repo, number, issue,
     )
     if truncated or _comment_count_mismatch(issue, comments):
         return None, True
@@ -452,39 +505,31 @@ async def open_thread(
     item = _issue(issue)
     if item is None:
         raise ValueError("issue is not a Py Coordination thread")
-    verified_no_comments = type(issue.get("comments")) is int and issue["comments"] == 0
     if recent_preview and not allow_partial:
         raise ValueError("recent preview is read-only")
     if allow_partial:
         # Keep a snapshot rather than relying on a mutable provider object.
-        version_fields = ("id", "number", "title", "body", "state", "updated_at", "comments")
-        initial_version = tuple(issue.get(key) for key in version_fields)
-        comments, truncated, incomplete_reason, pages_read = await _timeline_comment_pages(
-            lambda page: client.list_issue_timeline(
-                owner, repo, number, limit=_PAGE_SIZE, page=page
-            ),
+        initial_version = tuple(issue.get(key) for key in _ISSUE_VERSION_FIELDS)
+        comments, truncated, incomplete_reason, pages_read = await _issue_timeline_comment_pages(
+            client, owner, repo, number, issue,
             max_pages=_MAX_PAGES if recent_preview else 2,
-            verified_no_comments=verified_no_comments,
         )
         if not truncated and _comment_count_mismatch(issue, comments):
             truncated = True
             incomplete_reason = "comment_count_mismatch"
         if recent_preview and not truncated:
             current = await client.get_issue(owner, repo, number)
-            if tuple(current.get(key) for key in version_fields) != initial_version:
+            if tuple(current.get(key) for key in _ISSUE_VERSION_FIELDS) != initial_version:
                 truncated = True
                 incomplete_reason = "issue_changed_during_scan"
         item["history_incomplete_reason"] = incomplete_reason
         item["history_pages_scanned"] = pages_read
     else:
         # Mutations require ALL timeline pages, not 50 filtered comments.
-        comments, truncated, _reason, _pages_read = await _timeline_comment_pages(
-            lambda page: client.list_issue_timeline(
-                owner, repo, number, limit=_PAGE_SIZE, page=page
-            ),
+        comments, truncated, _reason, _pages_read = await _issue_timeline_comment_pages(
+            client, owner, repo, number, issue,
             max_pages=_WRITE_MAX_PAGES,
             allow_partial=False,
-            verified_no_comments=verified_no_comments,
         )
         if _comment_count_mismatch(issue, comments):
             raise CoordinationOutcomeUnknown(
