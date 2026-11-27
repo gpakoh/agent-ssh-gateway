@@ -1181,7 +1181,7 @@ class TestRunUvToolContract:
         class MissingLockClient:
             def __init__(self):
                 self._n = 0
-                self.argv_calls: list[list[str]] = []
+                self.script_calls: list[str] = []
 
             def execute_raw(self, cmd, **kw):
                 self._n += 1
@@ -1196,8 +1196,9 @@ class TestRunUvToolContract:
                     "stderr": uv_error if diagnostic_stream == "stderr" else "",
                 }
 
-            def execute_argv(self, argv, **kw):
-                self.argv_calls.append(argv)
+            def execute_project_script(self, project, script, **kw):
+                assert project == "proj"
+                self.script_calls.append(script)
                 return {
                     "exit_code": 0,
                     "stdout": "All checks passed!\n",
@@ -1209,13 +1210,13 @@ class TestRunUvToolContract:
         client = MissingLockClient()
         result = _run_uv_tool(client, "proj", "ruff", "run_ruff", target=["app"])
 
-        assert len(client.argv_calls) == 1
-        assert client.argv_calls[0][0] == "env"
-        assert client.argv_calls[0][1].startswith(
-            "RUFF_CACHE_DIR=/var/lib/mcp-agent/verifier/"
-        )
-        assert client.argv_calls[0][1].endswith("/cache/ruff")
-        assert client.argv_calls[0][2:4] == ["uvx", "--from"]
+        assert len(client.script_calls) == 1
+        script = client.script_calls[0]
+        assert "export RUFF_CACHE_DIR=/var/lib/mcp-agent/verifier/" in script
+        assert "/cache/ruff" in script
+        assert "verifier_uv uvx --from ruff" in script
+        assert script.index("flock -n 9") < script.index("verifier_uv uvx")
+        assert "flock -u 9" not in script
         assert result["ok"] is True
         assert result["result"]["stdout"] == "All checks passed!\n"
 
@@ -1254,8 +1255,8 @@ class TestRunUvToolContract:
         class MissingLockClient:
             def __init__(self):
                 self._n = 0
-                self.argv_calls: list[list[str]] = []
-                self.argv_kwargs: list[dict] = []
+                self.script_calls: list[str] = []
+                self.script_kwargs: list[dict] = []
 
             def execute_raw(self, cmd, **kw):
                 self._n += 1
@@ -1270,9 +1271,10 @@ class TestRunUvToolContract:
                     "stderr": "error: Unable to find lockfile at `uv.lock`, but `--frozen` was provided.\n",
                 }
 
-            def execute_argv(self, argv, **kw):
-                self.argv_calls.append(argv)
-                self.argv_kwargs.append(kw)
+            def execute_project_script(self, project, script, **kw):
+                assert project == "proj"
+                self.script_calls.append(script)
+                self.script_kwargs.append(kw)
                 return {
                     "exit_code": 0,
                     "stdout": "Compiling 'app/__init__.py'...\n",
@@ -1284,11 +1286,12 @@ class TestRunUvToolContract:
         client = MissingLockClient()
         result = _run_uv_tool(client, "proj", "compileall", "run_compileall", target=["app"])
 
-        assert len(client.argv_calls) == 1
-        argv = client.argv_calls[0]
-        assert "uv" in argv and "run" in argv and "--no-project" in argv
-        assert "python3" in argv
-        assert client.argv_kwargs[0].get("timeout_s") == 300
+        assert len(client.script_calls) == 1
+        script = client.script_calls[0]
+        assert "verifier_uv uv run --no-project python3" in script
+        assert script.index("flock -n 9") < script.index("verifier_uv uv run")
+        assert "flock -u 9" not in script
+        assert client.script_kwargs[0].get("timeout_s") == 300
         assert result["ok"] is True
         assert result["result"]["stdout"] == "Compiling 'app/__init__.py'...\n"
 
@@ -1306,8 +1309,8 @@ class TestRunUvToolContract:
         class _FB:
             def __init__(self):
                 self._n = 0
-                self.argv_calls: list[list[str]] = []
-                self.argv_kwargs: list[dict] = []
+                self.script_calls: list[str] = []
+                self.script_kwargs: list[dict] = []
 
             def execute_raw(self, cmd, **kw):
                 self._n += 1
@@ -1318,9 +1321,10 @@ class TestRunUvToolContract:
                     return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
                 return {"exit_code": 1, "stdout": "", "stderr": "Read-only file system (os error 30)"}
 
-            def execute_argv(self, argv, **kw):
-                self.argv_calls.append(argv)
-                self.argv_kwargs.append(kw)
+            def execute_project_script(self, project, script, **kw):
+                assert project == "proj"
+                self.script_calls.append(script)
+                self.script_kwargs.append(kw)
                 return {
                     "exit_code": 1,
                     "stdout": "***   File \"broken.py\", line 1\nSyntaxError: '(' was never closed\n",
@@ -1332,16 +1336,17 @@ class TestRunUvToolContract:
         client = _FB()
         result = _run_uv_tool(client, "proj", "compileall", "run_compileall", target=["broken.py"])
 
-        assert len(client.argv_calls) == 1
-        argv = client.argv_calls[0]
-        assert "uv" in argv and "run" in argv and "--no-project" in argv
+        assert len(client.script_calls) == 1
+        script = client.script_calls[0]
+        assert "verifier_uv uv run --no-project python3" in script
+        assert script.index("flock -n 9") < script.index("verifier_uv uv run")
+        assert "flock -u 9" not in script
         # Regression: reported live as a 504 at ~30s — a cold uv interpreter
         # cache needs more than execute_argv's bare 30s default to download
         # and extract a full CPython build before compileall even starts.
-        assert client.argv_kwargs[0].get("timeout_s") == 300
-        assert "python3" in argv
-        assert "uvx" not in argv
-        assert "--from" not in argv  # uvx's package-resolution flag never appears
+        assert client.script_kwargs[0].get("timeout_s") == 300
+        assert "verifier_uv uvx" not in script
+        assert "--from" not in script  # uvx's package-resolution flag never appears
 
         assert result["ok"] is False
         assert result["result"]["outcome"] == "failed"
@@ -1365,7 +1370,8 @@ class TestRunUvToolContract:
                     return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
                 return {"exit_code": 1, "stdout": "", "stderr": "Read-only file system (os error 30)"}
 
-            def execute_argv(self, argv, **kw):
+            def execute_project_script(self, project, script, **kw):
+                assert project == "proj"
                 return {
                     "exit_code": 0,
                     "stdout": "Compiling 'clean.py'...\n",

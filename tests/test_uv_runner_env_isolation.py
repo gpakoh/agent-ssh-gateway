@@ -128,7 +128,7 @@ def test_fallback_script_keeps_mutable_state_under_verifier_root(mcp_tools):
     assert "/tmp/.mcp-pytest-cache" not in script
     assert "cache_dir=/var/lib/mcp-agent/verifier/" in script
     assert "flock -n 9" in script
-    assert "flock -u 9" in script
+    assert "flock -u 9" not in script
 
 
 @pytest.mark.parametrize(

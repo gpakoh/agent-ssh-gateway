@@ -17,7 +17,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +55,7 @@ from examples.mcp_server.source_publication_policy import (
     SourceFailureCause,
     classify_source_failure_message,
 )
+from examples.mcp_server.verifier_storage import terminal_verifier_lease
 
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,160}$")
 _REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@+-]{0,200}$")
@@ -134,9 +135,10 @@ class CandidateCleanupReceipt:
     directory_removed: bool
     already_cleaned: bool
     tombstone_id: str
+    verifier_cache_cleanup: dict[str, int | str] | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "project_id": self.project_id,
             "source_project": self.source_project,
             "branch": self.branch,
@@ -147,6 +149,9 @@ class CandidateCleanupReceipt:
             "already_cleaned": self.already_cleaned,
             "tombstone_id": self.tombstone_id,
         }
+        if self.verifier_cache_cleanup is not None:
+            result["verifier_cache_cleanup"] = self.verifier_cache_cleanup
+        return result
 
 
 def _fail(
@@ -3485,25 +3490,43 @@ def candidate_cleanup(
 
     with _lineage_lock(workspace_root, expected_source_project, expected_branch):
         with project_registry_mutation_lock(journal_root):
-            return _cleanup_candidate_locked(
-                project_id=project_id,
-                expected_head_sha=expected_head_sha,
-                expected_branch=expected_branch,
-                expected_source_project=expected_source_project,
-                preserved_ref=preserved_ref,
-                config_dir=config_dir,
-                journal_root=journal_root,
-                source_root=source_root,
-                candidates_root=candidates_root,
-                candidate_root=candidate_root,
-                expected_registry_root=expected_registry_root,
-                expected_identity=expected_identity,
-                tombstone_path=tombstone_path,
-                tombstone_id=tombstone_id,
-                reference_guard=reference_guard,
-                delivery_guard=delivery_guard,
-                abandon_unmodified=abandon_unmodified,
-            )
+            # Use the same persistent inode as all verifier execution paths.
+            # A busy verifier must finish before its source is removed.
+            with terminal_verifier_lease(candidate_root) as verifier_lease:
+                if verifier_lease.state == "busy":
+                    raise _fail(
+                        "WORKSPACE_CONTENDED",
+                        "candidate verifier still owns its environment",
+                        retryable=True,
+                        details={"failure_class": "verifier_busy"},
+                    )
+                receipt = _cleanup_candidate_locked(
+                    project_id=project_id,
+                    expected_head_sha=expected_head_sha,
+                    expected_branch=expected_branch,
+                    expected_source_project=expected_source_project,
+                    preserved_ref=preserved_ref,
+                    config_dir=config_dir,
+                    journal_root=journal_root,
+                    source_root=source_root,
+                    candidates_root=candidates_root,
+                    candidate_root=candidate_root,
+                    expected_registry_root=expected_registry_root,
+                    expected_identity=expected_identity,
+                    tombstone_path=tombstone_path,
+                    tombstone_id=tombstone_id,
+                    reference_guard=reference_guard,
+                    delivery_guard=delivery_guard,
+                    abandon_unmodified=abandon_unmodified,
+                )
+                # A missing root at admission may have appeared while the
+                # source transaction ran. Reobserve under lineage/registry locks.
+                if verifier_lease.state == "absent":
+                    with terminal_verifier_lease(candidate_root) as late_lease:
+                        cache_receipt = late_lease.reclaim(candidate_root)
+                else:
+                    cache_receipt = verifier_lease.reclaim(candidate_root)
+                return replace(receipt, verifier_cache_cleanup=cache_receipt)
 
 
 def _cleanup_candidate_locked(
