@@ -1212,8 +1212,8 @@ class TestE2eFailsClosedWithoutBrowserToolchain:
         check = next(s for s in steps if s.get("name") == "Check browser runtime")
         run = check["run"]
 
-        budget = re.search(r"for _ in range\((\d+)\):", run)
-        assert budget, "readiness probe must declare an explicit attempt budget"
+        budget = re.search(r"timeout -k 5 (\d+) uv run python -", run)
+        assert budget, "readiness probe must declare a wall-clock process deadline"
         attempts = int(budget.group(1))
 
         # Worst observed cost of one attempt: sidecar start (~22s) plus Grid
@@ -1226,8 +1226,8 @@ class TestE2eFailsClosedWithoutBrowserToolchain:
             "as unavailable"
         )
 
-        # A second container start must also fit inside the job timeout, so
-        # the two-attempt retry loop cannot be silently truncated by it.
+        # Readiness deadlines must leave time for other steps. This is a
+        # necessary budget check, not proof of provisioning or cleanup time.
         timeout = wf["jobs"]["e2e"]["timeout-minutes"]
         assert timeout * 60 >= 2 * attempts + 120, (
             f"two full {attempts}s probes plus container restarts must fit in "
@@ -1303,16 +1303,16 @@ class TestE2eFailsClosedWithoutBrowserToolchain:
         wf = _load_workflow(CI_WORKFLOW_PATH)
         steps = wf["jobs"]["e2e"]["steps"]
 
-        runs = [
-            s["run"]
-            for s in steps
-            if "docker run -d" in s.get("run", "")
-            and "selenium" in s.get("run", "").lower()
-        ]
-        assert len(runs) == 2, (
-            "expected the initial sidecar start and its retry restart to be "
-            f"the only selenium container launches, found {len(runs)}"
-        )
+        # Both launch paths share one fenced helper. Keep the runtime resource
+        # and session assertions on its actual Docker invocation.
+        start = next(s for s in steps if s.get("name") == "Start pinned Selenium Chromium sidecar")
+        check = next(s for s in steps if s.get("name") == "Check browser runtime")
+        assert 'bash scripts/ci-selenium-sidecar.sh start "$selenium_image"' in start["run"]
+        assert 'bash scripts/ci-selenium-sidecar.sh replace "$E2E_SELENIUM_IMAGE"' in check["run"]
+        assert not any("docker run -d" in s.get("run", "") for s in steps)
+        helper = (ROOT / "scripts" / "ci-selenium-sidecar.sh").read_text(encoding="utf-8")
+        assert helper.count("docker run -d") == 1
+        runs = [helper]
 
         job_timeout_seconds = wf["jobs"]["e2e"]["timeout-minutes"] * 60
         page_load_timeout = _e2e_page_load_timeout_seconds()
@@ -1338,12 +1338,12 @@ class TestE2eFailsClosedWithoutBrowserToolchain:
 
             # The image exposes no dedicated env var for the reaper, so it has
             # to travel inside SE_OPTS, which the entrypoint appends verbatim.
-            opts_match = re.search(r'-e\s+SE_OPTS="([^"]+)"', run)
+            opts_match = re.search(r"-e\s+SE_OPTS=([\"'])([^\"']+)\1", run)
             assert opts_match, (
                 "sidecar must set SE_OPTS to carry --session-timeout; it is the "
                 "only hook the pinned entrypoint offers for the reaper"
             )
-            se_opts = opts_match.group(1)
+            se_opts = opts_match.group(2)
 
             # A repeat here is fatal: Grid answers "Can only specify option
             # --session-request-timeout once.", prints usage and exits 0, so
@@ -1395,9 +1395,10 @@ class TestE2eFailsClosedWithoutBrowserToolchain:
         assert "E2E_SELENIUM_IMAGE" in start_run
         assert "docker run -d --rm" not in start_run
         assert "for attempt in 1 2" in check_run
-        assert "docker inspect --format '{{json .State}}'" in check_run
-        assert "docker logs --tail 200" in check_run
-        assert 'docker rm -f "$E2E_SELENIUM_CONTAINER"' in check_run
+        assert "timeout -k 5 20 docker inspect --format '{{json .State}}'" in check_run
+        assert "timeout -k 5 20 docker logs --tail 200" in check_run
+        assert 'bash scripts/ci-selenium-sidecar.sh replace "$E2E_SELENIUM_IMAGE"' in check_run
+        assert "docker rm" not in check_run and "docker run" not in check_run
         assert '"$E2E_SELENIUM_IMAGE"' in check_run
         assert 'if [ "$attempt" -eq 2 ]; then' in check_run
         syntax = subprocess.run(
@@ -1464,8 +1465,10 @@ class TestE2eActuallyRunsSomewhere:
         start = next(s for s in steps if s.get("name") == "Start pinned Selenium Chromium sidecar")
         assert start["if"] == "github.server_url != 'https://github.com'"
         run = start["run"]
-        assert 'docker inspect "$job_container"' in run
-        assert '--network "container:${job_container}"' in run
+        assert 'bash scripts/ci-selenium-sidecar.sh start "$selenium_image"' in run
+        helper = (ROOT / "scripts" / "ci-selenium-sidecar.sh").read_text(encoding="utf-8")
+        assert 'docker inspect "$job_container"' in helper
+        assert '--network "container:${job_container}"' in helper
         assert "ghcr.io/seleniumhq/standalone-chromium:" in run
         assert "@sha256:3400b92f1cddb2dfaaf358654e8f7d83d7be45192fb73c5f28c25faa28d36504" in run
         assert 'SELENIUM_REMOTE_URL=http://127.0.0.1:4444/wd/hub' in run
@@ -1474,15 +1477,12 @@ class TestE2eActuallyRunsSomewhere:
         assert "always()" in cleanup["if"]
         assert "github.server_url != 'https://github.com'" in cleanup["if"]
         run = cleanup["run"]
-        assert 'docker stop --time 5 "$E2E_SELENIUM_CONTAINER"' in run
-        assert 'docker rm -f "$E2E_SELENIUM_CONTAINER"' in run
-        assert run.count('"$E2E_SELENIUM_CONTAINER"') == 2, (
-            "both stop and remove must target the exact CID variable, nothing else"
-        )
-        assert "prune" not in run
-        assert "docker ps" not in run
-        assert "::warning::" in run
-        assert "exit 0" in run
+        assert run.strip() == "bash scripts/ci-selenium-sidecar.sh finalize"
+        assert helper.count('docker rm -f "$id"') == 1
+        assert 'docker container ls -a --no-trunc --filter "id=$id"' in helper
+        assert "prune" not in helper
+        assert "docker ps" not in helper
+        assert 'starting) fail "unresolved creation:' in helper
         assert "continue-on-error" not in cleanup
 
 
